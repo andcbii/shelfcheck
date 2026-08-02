@@ -94,7 +94,7 @@ export default function Home() {
     if (!connected) { setSettingsOpen(true); return; }
     setScanning(true); setError(""); setProgress(0);
     try {
-      const library = await traktFetch<CollectionShow[]>("/sync/collection/shows?extended=full");
+      const library = await traktFetch<CollectionShow[]>("/sync/collection/shows?extended=full,images");
       setShows(library);
       const results: MissingEpisode[] = [];
       let cursor = 0;
@@ -102,7 +102,13 @@ export default function Home() {
         while (cursor < library.length) {
           const index = cursor++;
           const item = library[index];
-          const data = await traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
+          const [data, details] = await Promise.all([
+            traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`),
+            traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null),
+          ]);
+          if (details?.images?.poster?.length) {
+            item.show = { ...item.show, ...details, images: details.images };
+          }
           for (const season of data.seasons || []) {
             if (season.number === 0) continue;
             for (const episode of season.episodes || []) {

@@ -2,7 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type TraktShow = { title: string; year: number; ids: { trakt: number; slug: string } };
+type TraktShow = {
+  title: string;
+  year: number;
+  ids: { trakt: number; slug: string };
+  images?: { poster?: string[] };
+};
 type CollectionShow = { show: TraktShow };
 type ProgressEpisode = { number: number; completed: boolean };
 type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
@@ -157,7 +162,15 @@ export default function Home() {
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
         {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>Comparing show {Math.max(1, Math.ceil(shows.length * progress / 100))} of {shows.length || "…"}</p></div>}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => <article key={show.ids.trakt}>
-          <div className="show-index">{show.title.slice(0, 2).toUpperCase()}</div>
+          <div className="show-index">
+            <span>{show.title.slice(0, 2).toUpperCase()}</span>
+            {show.images?.poster?.[0] && <img
+              src={`/api/poster?src=${encodeURIComponent(show.images.poster[0])}`}
+              alt={`${show.title} poster`}
+              loading="lazy"
+              onError={(event) => { event.currentTarget.style.display = "none"; }}
+            />}
+          </div>
           <div className="show-info"><h3>{show.title} <small>{show.year}</small></h3><p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p></div>
           <div className="episode-tags">{episodes.map((ep) => <a
             key={`${ep.season}-${ep.episode}`}

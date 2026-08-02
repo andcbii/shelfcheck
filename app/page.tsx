@@ -9,6 +9,7 @@ type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
 
 const TRAKT = "https://api.trakt.tv";
+const REPORT_CACHE = "shelfcheck-report-v1";
 
 export default function Home() {
   const [clientId, setClientId] = useState("");
@@ -25,14 +26,27 @@ export default function Home() {
 
   useEffect(() => {
     const saved = localStorage.getItem("shelfcheck-trakt");
-    if (!saved) return;
     try {
-      const value = JSON.parse(saved);
-      setClientId(value.clientId || "");
-      setToken(value.token || "");
-      setConnected(Boolean(value.clientId && value.token));
-      setSettingsOpen(false);
+      if (saved) {
+        const value = JSON.parse(saved);
+        setClientId(value.clientId || "");
+        setToken(value.token || "");
+        setConnected(Boolean(value.clientId && value.token));
+        setSettingsOpen(false);
+      }
     } catch { /* ignore invalid local data */ }
+
+    try {
+      const cached = localStorage.getItem(REPORT_CACHE);
+      if (cached) {
+        const report = JSON.parse(cached);
+        if (Array.isArray(report.shows) && Array.isArray(report.missing) && typeof report.lastScan === "string") {
+          setShows(report.shows);
+          setMissing(report.missing);
+          setLastScan(report.lastScan);
+        }
+      }
+    } catch { /* ignore an invalid or outdated report cache */ }
   }, []);
 
   const headers = useMemo(() => ({
@@ -73,7 +87,7 @@ export default function Home() {
 
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
-    setScanning(true); setError(""); setProgress(0); setMissing([]);
+    setScanning(true); setError(""); setProgress(0);
     try {
       const library = await traktFetch<CollectionShow[]>("/sync/collection/shows?extended=full");
       setShows(library);
@@ -95,8 +109,10 @@ export default function Home() {
       };
       await Promise.all(Array.from({ length: Math.min(4, library.length || 1) }, worker));
       results.sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
+      const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
       setMissing(results);
-      setLastScan(new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }));
+      setLastScan(scanTime);
+      localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: library, missing: results, lastScan: scanTime }));
     } catch (e) {
       setError(e instanceof Error ? e.message : "The scan could not be completed.");
     } finally { setScanning(false); }

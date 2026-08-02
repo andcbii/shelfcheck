@@ -143,7 +143,13 @@ export default function Home() {
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => <article key={show.ids.trakt}>
           <div className="show-index">{show.title.slice(0, 2).toUpperCase()}</div>
           <div className="show-info"><h3>{show.title} <small>{show.year}</small></h3><p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p></div>
-          <div className="episode-tags">{episodes.map((ep) => <span key={`${ep.season}-${ep.episode}`}>S{String(ep.season).padStart(2,"0")}E{String(ep.episode).padStart(2,"0")}</span>)}</div>
+          <div className="episode-tags">{episodes.map((ep) => <a
+            key={`${ep.season}-${ep.episode}`}
+            href={`https://app.trakt.tv/shows/${show.ids.slug}?season=${ep.season}&view=episode&episode=${ep.episode}`}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Open ${show.title} season ${ep.season} episode ${ep.episode} on Trakt`}
+          >S{String(ep.season).padStart(2,"0")}E{String(ep.episode).padStart(2,"0")}<b aria-hidden="true">↗</b></a>)}</div>
         </article>)}</div>}
       </section>
 

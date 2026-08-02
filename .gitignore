@@ -30,6 +30,7 @@ yarn-error.log*
 pnpm-install*.log
 dev*.log
 .pnpm-store/
+shelfcheck-site.tar.gz
 
 # env files (can opt-in for committing if needed)
 .env*

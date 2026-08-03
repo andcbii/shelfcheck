@@ -191,8 +191,16 @@ export default function Home() {
         const upstream = new URL(input.toString());
         logDebug("request.start", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1 });
         const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
-        const response = isLocal
-          ? await fetchWithTimeout(upstream, {
+        const proxyRequest = () => fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
+          headers: {
+            "x-trakt-client-id": clientId,
+            "x-trakt-access-token": tokenRef.current || token,
+          },
+        });
+        let response: Response;
+        if (isLocal) {
+          try {
+            response = await fetchWithTimeout(upstream, {
               headers: {
                 Accept: "application/json",
                 "Content-Type": "application/json",
@@ -200,13 +208,14 @@ export default function Home() {
                 "trakt-api-key": clientId,
                 Authorization: `Bearer ${tokenRef.current || token}`,
               },
-            })
-          : await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
-              headers: {
-                "x-trakt-client-id": clientId,
-                "x-trakt-access-token": tokenRef.current || token,
-              },
             });
+          } catch (directError) {
+            logDebug("request.proxy-fallback", { path: `${upstream.pathname}${upstream.search}`, reason: directError instanceof Error ? directError.message : String(directError) });
+            response = await proxyRequest();
+          }
+        } else {
+          response = await proxyRequest();
+        }
         logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
         networkFailuresRef.current = 0;
         // Authentication and permission failures will not improve with retries.

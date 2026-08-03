@@ -19,6 +19,7 @@ const REPORT_CACHE = "shelfcheck-report-v1";
 const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
 const DEBUG_LOG_CACHE = "shelfcheck-debug-log-v1";
 const DEBUG_ENABLED_CACHE = "shelfcheck-debug-enabled-v1";
+const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
 
 function compactShow(show: TraktShow): TraktShow {
   return {
@@ -53,6 +54,9 @@ export default function Home() {
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
   const [debugEnabled, setDebugEnabled] = useState(false);
+  const [ignoredShows, setIgnoredShows] = useState<TraktShow[]>([]);
+  const [openShowMenu, setOpenShowMenu] = useState<number | null>(null);
+  const [ignoredManagerOpen, setIgnoredManagerOpen] = useState(false);
   const tokenRef = useRef("");
   const debugEnabledRef = useRef(false);
   const requestGateRef = useRef<Promise<void>>(Promise.resolve());
@@ -64,6 +68,10 @@ export default function Home() {
     const diagnosticsOn = localStorage.getItem(DEBUG_ENABLED_CACHE) === "true";
     setDebugEnabled(diagnosticsOn);
     debugEnabledRef.current = diagnosticsOn;
+    try {
+      const savedIgnored = JSON.parse(localStorage.getItem(IGNORED_SHOWS_CACHE) || "[]") as TraktShow[];
+      if (Array.isArray(savedIgnored)) setIgnoredShows(savedIgnored.map(compactShow));
+    } catch { /* ignore invalid ignored-show data */ }
     const saved = localStorage.getItem("shelfcheck-trakt");
     try {
       if (saved) {
@@ -133,15 +141,35 @@ export default function Home() {
     logDebug("diagnostics.cleared");
   }
 
+  const ignoredIds = useMemo(() => new Set(ignoredShows.map((show) => show.ids.trakt)), [ignoredShows]);
+  const visibleMissing = useMemo(() => missing.filter((item) => !ignoredIds.has(item.show.ids.trakt)), [missing, ignoredIds]);
+
   const grouped = useMemo(() => {
     const map = new Map<number, { show: TraktShow; episodes: MissingEpisode[] }>();
-    missing.filter((item) => item.show.title.toLowerCase().includes(query.toLowerCase())).forEach((item) => {
+    visibleMissing.filter((item) => item.show.title.toLowerCase().includes(query.toLowerCase())).forEach((item) => {
       const current = map.get(item.show.ids.trakt) || { show: item.show, episodes: [] };
       current.episodes.push(item);
       map.set(item.show.ids.trakt, current);
     });
     return [...map.values()];
-  }, [missing, query]);
+  }, [visibleMissing, query]);
+
+  function ignoreShow(show: TraktShow) {
+    setIgnoredShows((current) => {
+      const next = [...current.filter((item) => item.ids.trakt !== show.ids.trakt), compactShow(show)].sort((a, b) => a.title.localeCompare(b.title));
+      localStorage.setItem(IGNORED_SHOWS_CACHE, JSON.stringify(next));
+      return next;
+    });
+    setOpenShowMenu(null);
+  }
+
+  function restoreShow(traktId: number) {
+    setIgnoredShows((current) => {
+      const next = current.filter((show) => show.ids.trakt !== traktId);
+      localStorage.setItem(IGNORED_SHOWS_CACHE, JSON.stringify(next));
+      return next;
+    });
+  }
 
   function saveCredentials() {
     if (!clientId.trim() || !token.trim()) {
@@ -402,23 +430,30 @@ export default function Home() {
           <p className="intro">Shelfcheck compares every collected show against Trakt’s aired episode list, then gives you one clean report of what’s missing.</p>
         </div>
         <div className="scan-panel">
-          <div className="radar"><span>{scanning ? `${progress}%` : missing.length}</span><small>{scanning ? "SCANNING" : "MISSING"}</small></div>
+          <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{scanning ? "SCANNING" : "MISSING"}</small></div>
           <button className="primary" onClick={scanLibrary} disabled={scanning}>{scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${lastScan}` : "Only your collection metadata is read."}</p>
         </div>
       </section>
 
-      <section className="summary" aria-label="Scan summary">
-        <div><span>COLLECTED SHOWS</span><strong>{shows.length || "—"}</strong></div>
-        <div><span>MISSING EPISODES</span><strong>{lastScan ? missing.length : "—"}</strong></div>
-        <div><span>SHOWS WITH GAPS</span><strong>{lastScan ? grouped.length : "—"}</strong></div>
-        <div className="health"><span>COLLECTION STATUS</span><strong>{!lastScan ? "Not scanned" : missing.length ? "Needs attention" : "Complete"}</strong></div>
-      </section>
+      <div className="summary-wrap">
+        <section className="summary" aria-label="Scan summary">
+          <div><span>COLLECTED SHOWS</span><strong>{shows.length || "—"}</strong></div>
+          <div><span>MISSING EPISODES</span><strong>{lastScan ? visibleMissing.length : "—"}</strong></div>
+          <div><span>SHOWS WITH GAPS</span><strong>{lastScan ? grouped.length : "—"}</strong></div>
+          <div className="ignored-stat"><button type="button" onClick={() => setIgnoredManagerOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{ignoredShows.length}</strong></button></div>
+          <div className="health"><span>COLLECTION STATUS</span><strong>{!lastScan ? "Not scanned" : visibleMissing.length ? "Needs attention" : "Complete"}</strong></div>
+        </section>
+        {ignoredManagerOpen && <section className="ignored-manager" aria-label="Ignored shows">
+          <div><h3>Ignored shows ({ignoredShows.length})</h3><button type="button" onClick={() => setIgnoredManagerOpen(false)} aria-label="Close ignored shows">×</button></div>
+          {ignoredShows.length === 0 ? <p>No shows are ignored.</p> : ignoredShows.map((show) => <div className="ignored-row" key={show.ids.trakt}><span>{show.title}</span><button type="button" onClick={() => restoreShow(show.ids.trakt)}>Restore</button></div>)}
+        </section>}
+      </div>
 
       <section className="report">
         <div className="report-heading">
-          <div><p className="eyebrow">MISSING REPORT</p><h2>{!lastScan ? "Ready when you are" : missing.length ? `${missing.length} episodes to find` : "Your collection is complete"}</h2></div>
-          {lastScan && missing.length > 0 && <label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter shows" /></label>}
+          <div><p className="eyebrow">MISSING REPORT</p><h2>{!lastScan ? "Ready when you are" : visibleMissing.length ? `${visibleMissing.length} episodes to find` : "Your collection is complete"}</h2></div>
+          {lastScan && visibleMissing.length > 0 && <label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter shows" /></label>}
         </div>
         {error && <div className="error"><span>!</span><p><strong>Scan interrupted</strong>{error}</p></div>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
@@ -434,12 +469,14 @@ export default function Home() {
             />}
           </div>
           <div className="show-info">
-            <h3>{show.title} <small>{show.year}</small></h3>
-            <div className="show-links-row">
-              <p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p>
+            <div className="show-title-line">
+              <button className="show-name-button" type="button" onClick={() => setOpenShowMenu((current) => current === show.ids.trakt ? null : show.ids.trakt)} aria-expanded={openShowMenu === show.ids.trakt}>{show.title}</button>
+              <small>{show.year}</small>
               <a className="brand-link" href={`https://app.trakt.tv/shows/${show.ids.slug}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on Trakt`} title="View on Trakt"><img src="/trakt-logomark.svg" alt="" /></a>
               {show.ids.tmdb && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.ids.tmdb}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on The Movie Database`} title="View on TMDB"><img src="/tmdb-blue-square.svg" alt="" /></a>}
             </div>
+            {openShowMenu === show.ids.trakt && <div className="show-action-menu"><button type="button" onClick={() => ignoreShow(show)}>⊘ <span>Ignore this show</span></button></div>}
+            <div className="show-links-row"><p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p></div>
           </div>
           <div className="episode-tags">{episodes.map((ep) => <a
             key={`${ep.season}-${ep.episode}`}

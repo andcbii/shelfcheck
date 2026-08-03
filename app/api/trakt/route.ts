@@ -10,9 +10,9 @@ export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const path = requestUrl.searchParams.get("path");
   const clientId = request.headers.get("x-trakt-client-id");
-  const authorization = request.headers.get("authorization");
+  const accessToken = request.headers.get("x-trakt-access-token");
 
-  if (!path || !path.startsWith("/") || path.startsWith("//") || !clientId || !authorization) {
+  if (!path || !path.startsWith("/") || path.startsWith("//") || !clientId || !accessToken) {
     return Response.json({ error: "Missing or invalid Trakt request details." }, { status: 400 });
   }
 
@@ -26,10 +26,9 @@ export async function GET(request: Request) {
       headers: {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Shelfcheck/1.0 (Trakt collection audit)",
         "trakt-api-version": "2",
         "trakt-api-key": clientId,
-        Authorization: authorization,
+        Authorization: `Bearer ${accessToken}`,
       },
     });
 

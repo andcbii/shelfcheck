@@ -111,7 +111,7 @@ export default function Home() {
         const response = await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
           headers: {
             "x-trakt-client-id": clientId,
-            Authorization: `Bearer ${tokenRef.current || token}`,
+            "x-trakt-access-token": tokenRef.current || token,
           },
         });
         // Authentication and permission failures will not improve with retries.

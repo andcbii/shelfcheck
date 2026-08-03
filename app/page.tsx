@@ -326,7 +326,7 @@ export default function Home() {
           }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(1, queue.length || 1) }, worker));
+      await Promise.all(Array.from({ length: Math.min(3, queue.length || 1) }, worker));
       for (const item of failed) {
         if (completed.has(item.show.ids.trakt)) continue;
         await wait(3000);

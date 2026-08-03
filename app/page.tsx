@@ -151,6 +151,13 @@ export default function Home() {
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+  async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15_000);
+    try { return await fetch(input, { ...init, signal: controller.signal }); }
+    finally { window.clearTimeout(timeout); }
+  }
+
   async function traktRequest(input: string | URL): Promise<Response> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await wait(650);
@@ -166,9 +173,9 @@ export default function Home() {
         let response: Response;
 
         if (useDirectTrakt.current) {
-          response = await fetch(upstream, { headers: directHeaders });
+          response = await fetchWithTimeout(upstream, { headers: directHeaders });
         } else {
-          response = await fetch(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
+          response = await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
             headers: {
               "x-trakt-client-id": clientId,
               Authorization: `Bearer ${tokenRef.current || token}`,
@@ -177,7 +184,7 @@ export default function Home() {
 
           if (response.status === 403) {
             useDirectTrakt.current = true;
-            response = await fetch(upstream, { headers: directHeaders });
+            response = await fetchWithTimeout(upstream, { headers: directHeaders });
           }
         }
         if (response.status === 401 && refreshToken && clientSecret) {
@@ -240,7 +247,9 @@ export default function Home() {
       const library = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
       setShows(library); setTotal(library.length);
       const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
-      const activity = await traktFetch<Record<string, unknown>>("/sync/last_activities").then(JSON.stringify).catch(() => "");
+      // Collection membership is a fast, reliable change marker. The optional
+      // last-activities endpoint must never delay the start of a scan.
+      const activity = "";
       let checkpoint: ScanCheckpoint = { signature, library, completed: [], results: {}, activity };
       try {
         const saved = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null;

@@ -11,12 +11,17 @@ export async function POST(request: NextRequest) {
     payload = { client_id: body.clientId };
   } else if (body.action === "poll") {
     endpoint = "/oauth/device/token";
-    payload = { code: body.deviceCode, client_id: body.clientId };
+    payload = { code: body.deviceCode, client_id: body.clientId, client_secret: body.clientSecret };
   } else if (body.action === "refresh") {
     endpoint = "/oauth/token";
     payload = { refresh_token: body.refreshToken, client_id: body.clientId, client_secret: body.clientSecret, redirect_uri: "urn:ietf:wg:oauth:2.0:oob", grant_type: "refresh_token" };
   } else return NextResponse.json({ error: "Unsupported authentication action." }, { status: 400 });
 
-  const response = await fetch(`${TRAKT}${endpoint}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), cache: "no-store" });
+  const response = await fetch(`${TRAKT}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "trakt-api-version": "2", "trakt-api-key": body.clientId },
+    body: JSON.stringify(payload),
+    cache: "no-store",
+  });
   return NextResponse.json(await response.json().catch(() => ({})), { status: response.status });
 }

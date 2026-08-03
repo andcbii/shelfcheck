@@ -122,7 +122,7 @@ export default function Home() {
   }
 
   async function connectWithTrakt() {
-    if (!clientId.trim()) { setError("Enter your Trakt client ID first."); return; }
+    if (!clientId.trim() || !clientSecret.trim()) { setError("Enter your Trakt client ID and client secret first."); return; }
     setAuthenticating(true); setError(""); setDeviceCode(""); setVerificationUrl("");
     try {
       const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "device", clientId: clientId.trim() }) });
@@ -136,7 +136,7 @@ export default function Home() {
       const deadline = Date.now() + device.expires_in * 1000;
       while (Date.now() < deadline) {
         await wait(Math.max(device.interval, 5) * 1000);
-        const poll = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "poll", clientId: clientId.trim(), deviceCode: device.device_code }) });
+        const poll = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "poll", clientId: clientId.trim(), clientSecret: clientSecret.trim(), deviceCode: device.device_code }) });
         if (poll.ok) {
           persistCredentials(await poll.json() as TokenResponse);
           setConnected(true); setSettingsOpen(false); setDeviceCode(""); setVerificationUrl("");
@@ -397,9 +397,9 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
-          <p className="modal-copy">Enter your Trakt client ID, then authorize Shelfcheck. A client secret is optional and is used only to renew an expiring session.</p>
+          <p className="modal-copy">Enter your Trakt client ID and client secret, then authorize Shelfcheck. Trakt requires both to complete device authorization.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
-          <label>Client secret (optional)<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Used for automatic token renewal" autoComplete="off" data-lpignore="true" /></label>
+          <label>Client secret<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Your Trakt application client secret" autoComplete="off" data-lpignore="true" /></label>
           {deviceCode && <p className="field-error">Open Trakt and enter code <strong>{deviceCode}</strong>.</p>}
           {verificationUrl && <a className="primary full" href={verificationUrl} target="_blank" rel="noreferrer">Open Trakt activation <b>↗</b></a>}
           {error && <p className="field-error">{error}</p>}

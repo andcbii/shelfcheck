@@ -121,12 +121,15 @@ export default function Home() {
   }
 
   async function connectWithTrakt() {
-    if (!clientId.trim() || !clientSecret.trim()) { setError("Enter your Trakt client ID and client secret first."); return; }
+    if (!clientId.trim()) { setError("Enter your Trakt client ID first."); return; }
     setAuthenticating(true); setError(""); setDeviceCode("");
     const authWindow = window.open("about:blank", "trakt-auth", "width=700,height=760");
     try {
       const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "device", clientId: clientId.trim() }) });
-      if (!response.ok) throw new Error("Trakt could not start sign-in.");
+      if (!response.ok) {
+        const details = await response.json().catch(() => ({})) as { error?: string; error_description?: string };
+        throw new Error(details.error_description || details.error || `Trakt could not start sign-in (${response.status}). You can still connect with an access token below.`);
+      }
       const device = await response.json() as { device_code: string; user_code: string; verification_url: string; expires_in: number; interval: number };
       setDeviceCode(device.user_code);
       if (authWindow) authWindow.location.href = device.verification_url;
@@ -144,7 +147,6 @@ export default function Home() {
       }
       throw new Error("Trakt sign-in expired. Please try again.");
     } catch (e) {
-      if (authWindow && !authWindow.closed) authWindow.close();
       setError(e instanceof Error ? e.message : "Trakt sign-in could not be completed.");
     } finally { setAuthenticating(false); }
   }
@@ -396,13 +398,14 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
-          <p className="modal-copy">Enter your Trakt application credentials, then authorize Shelfcheck on Trakt. Renewable tokens are saved only in this browser.</p>
-          <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" /></label>
-          <label>Client secret<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Your Trakt application client secret" autoComplete="off" /></label>
+          <p className="modal-copy">Enter your Trakt client ID, then authorize Shelfcheck. A client secret is optional and is used only to renew an expiring session.</p>
+          <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
+          <label>Client secret (optional)<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Used for automatic token renewal" autoComplete="off" data-lpignore="true" /></label>
           {deviceCode && <p className="field-error">Enter code <strong>{deviceCode}</strong> on the Trakt page that opened.</p>}
           {error && <p className="field-error">{error}</p>}
           <button className="primary full" onClick={connectWithTrakt} disabled={authenticating}>{authenticating ? "Waiting for Trakt authorization…" : "Sign in with Trakt"} <b>→</b></button>
-          {token && <button className="help-link" onClick={saveCredentials}>Keep using the saved access token</button>}
+          <label>Or use an access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste your existing OAuth access token" autoComplete="off" data-lpignore="true" /></label>
+          <button className="help-link" onClick={saveCredentials}>Connect with access token</button>
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
         </section>
       </div>}

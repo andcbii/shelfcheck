@@ -3,7 +3,7 @@
 :root { --ink:#171b18; --paper:#f1f0e9; --acid:#d9ff43; --muted:#73776f; --line:#c9c9c0; }
 * { box-sizing: border-box; }
 html { background:var(--paper); color:var(--ink); }
-body { margin:0; font-family:var(--font-sans),Arial,sans-serif; background:linear-gradient(90deg,rgba(0,0,0,.025) 1px,transparent 1px); background-size:25% 100%; }
+body { margin:0; font-family:var(--font-sans),Arial,sans-serif; background:var(--paper); }
 button,input { font:inherit; }
 button { color:inherit; }
 .topbar { height:72px; padding:0 5vw; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--line); }

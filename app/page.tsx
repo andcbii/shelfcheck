@@ -38,8 +38,6 @@ export default function Home() {
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
   const [authenticating, setAuthenticating] = useState(false);
-  const [deviceCode, setDeviceCode] = useState("");
-  const [verificationUrl, setVerificationUrl] = useState("");
   const useDirectTrakt = useRef(false);
   const tokenRef = useRef("");
   const refreshPromise = useRef<Promise<string> | null>(null);
@@ -112,7 +110,7 @@ export default function Home() {
     if (!refreshToken || !clientSecret) throw new Error("Your Trakt session expired. Reconnect Trakt to continue.");
     if (refreshPromise.current) return refreshPromise.current;
     refreshPromise.current = (async () => {
-      const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", clientId, clientSecret, refreshToken }) });
+      const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", clientId, clientSecret, refreshToken, redirectUri: `${window.location.origin}/auth/callback` }) });
       if (!response.ok) throw new Error("Trakt could not renew your session. Reconnect Trakt to continue.");
       const tokens = await response.json() as TokenResponse;
       persistCredentials(tokens);
@@ -123,31 +121,14 @@ export default function Home() {
 
   async function connectWithTrakt() {
     if (!clientId.trim() || !clientSecret.trim()) { setError("Enter your Trakt client ID and client secret first."); return; }
-    setAuthenticating(true); setError(""); setDeviceCode(""); setVerificationUrl("");
-    try {
-      const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "device", clientId: clientId.trim() }) });
-      if (!response.ok) {
-        const details = await response.json().catch(() => ({})) as { error?: string; error_description?: string };
-        throw new Error(details.error_description || details.error || `Trakt could not start sign-in (${response.status}). You can still connect with an access token below.`);
-      }
-      const device = await response.json() as { device_code: string; user_code: string; verification_url: string; expires_in: number; interval: number };
-      setDeviceCode(device.user_code);
-      setVerificationUrl(device.verification_url);
-      const deadline = Date.now() + device.expires_in * 1000;
-      while (Date.now() < deadline) {
-        await wait(Math.max(device.interval, 5) * 1000);
-        const poll = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "poll", clientId: clientId.trim(), clientSecret: clientSecret.trim(), deviceCode: device.device_code }) });
-        if (poll.ok) {
-          persistCredentials(await poll.json() as TokenResponse);
-          setConnected(true); setSettingsOpen(false); setDeviceCode(""); setVerificationUrl("");
-          return;
-        }
-        if (![400, 404, 409, 410, 418, 429].includes(poll.status)) throw new Error("Trakt sign-in could not be completed.");
-      }
-      throw new Error("Trakt sign-in expired. Please try again.");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Trakt sign-in could not be completed.");
-    } finally { setAuthenticating(false); }
+    setAuthenticating(true); setError("");
+    const redirectUri = `${window.location.origin}/auth/callback`;
+    localStorage.setItem("shelfcheck-trakt-oauth-pending", JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim(), redirectUri }));
+    const authorize = new URL("https://trakt.tv/oauth/authorize");
+    authorize.searchParams.set("response_type", "code");
+    authorize.searchParams.set("client_id", clientId.trim());
+    authorize.searchParams.set("redirect_uri", redirectUri);
+    window.location.assign(authorize.toString());
   }
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -397,11 +378,9 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
-          <p className="modal-copy">Enter your Trakt client ID and client secret, then authorize Shelfcheck. Trakt requires both to complete device authorization.</p>
+          <p className="modal-copy">Enter your Trakt client ID and client secret. Shelfcheck will send you to Trakt and bring you back automatically after approval.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
           <label>Client secret<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Your Trakt application client secret" autoComplete="off" data-lpignore="true" /></label>
-          {deviceCode && <p className="field-error">Open Trakt and enter code <strong>{deviceCode}</strong>.</p>}
-          {verificationUrl && <a className="primary full" href={verificationUrl} target="_blank" rel="noreferrer">Open Trakt activation <b>↗</b></a>}
           {error && <p className="field-error">{error}</p>}
           <button className="primary full" onClick={connectWithTrakt} disabled={authenticating}>{authenticating ? "Waiting for Trakt authorization…" : "Sign in with Trakt"} <b>→</b></button>
           <label>Or use an access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste your existing OAuth access token" autoComplete="off" data-lpignore="true" /></label>

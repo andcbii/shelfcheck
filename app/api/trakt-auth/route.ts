@@ -6,7 +6,10 @@ export async function POST(request: NextRequest) {
   const body = await request.json() as Record<string, string>;
   let endpoint = "";
   let payload: Record<string, string> = {};
-  if (body.action === "device") {
+  if (body.action === "exchange") {
+    endpoint = "/oauth/token";
+    payload = { code: body.code, client_id: body.clientId, client_secret: body.clientSecret, redirect_uri: body.redirectUri, grant_type: "authorization_code" };
+  } else if (body.action === "device") {
     endpoint = "/oauth/device/code";
     payload = { client_id: body.clientId };
   } else if (body.action === "poll") {
@@ -14,7 +17,7 @@ export async function POST(request: NextRequest) {
     payload = { code: body.deviceCode, client_id: body.clientId, client_secret: body.clientSecret };
   } else if (body.action === "refresh") {
     endpoint = "/oauth/token";
-    payload = { refresh_token: body.refreshToken, client_id: body.clientId, client_secret: body.clientSecret, redirect_uri: "urn:ietf:wg:oauth:2.0:oob", grant_type: "refresh_token" };
+    payload = { refresh_token: body.refreshToken, client_id: body.clientId, client_secret: body.clientSecret, redirect_uri: body.redirectUri || "urn:ietf:wg:oauth:2.0:oob", grant_type: "refresh_token" };
   } else return NextResponse.json({ error: "Unsupported authentication action." }, { status: 400 });
 
   const response = await fetch(`${TRAKT}${endpoint}`, {

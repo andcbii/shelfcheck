@@ -39,6 +39,7 @@ export default function Home() {
   const [pending, setPending] = useState(0);
   const [authenticating, setAuthenticating] = useState(false);
   const [deviceCode, setDeviceCode] = useState("");
+  const [verificationUrl, setVerificationUrl] = useState("");
   const useDirectTrakt = useRef(false);
   const tokenRef = useRef("");
   const refreshPromise = useRef<Promise<string> | null>(null);
@@ -122,8 +123,7 @@ export default function Home() {
 
   async function connectWithTrakt() {
     if (!clientId.trim()) { setError("Enter your Trakt client ID first."); return; }
-    setAuthenticating(true); setError(""); setDeviceCode("");
-    const authWindow = window.open("about:blank", "trakt-auth", "width=700,height=760");
+    setAuthenticating(true); setError(""); setDeviceCode(""); setVerificationUrl("");
     try {
       const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "device", clientId: clientId.trim() }) });
       if (!response.ok) {
@@ -132,15 +132,14 @@ export default function Home() {
       }
       const device = await response.json() as { device_code: string; user_code: string; verification_url: string; expires_in: number; interval: number };
       setDeviceCode(device.user_code);
-      if (authWindow) authWindow.location.href = device.verification_url;
+      setVerificationUrl(device.verification_url);
       const deadline = Date.now() + device.expires_in * 1000;
       while (Date.now() < deadline) {
         await wait(Math.max(device.interval, 5) * 1000);
         const poll = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "poll", clientId: clientId.trim(), deviceCode: device.device_code }) });
         if (poll.ok) {
           persistCredentials(await poll.json() as TokenResponse);
-          setConnected(true); setSettingsOpen(false); setDeviceCode("");
-          if (authWindow && !authWindow.closed) authWindow.close();
+          setConnected(true); setSettingsOpen(false); setDeviceCode(""); setVerificationUrl("");
           return;
         }
         if (![400, 404, 409, 410, 418, 429].includes(poll.status)) throw new Error("Trakt sign-in could not be completed.");
@@ -401,7 +400,8 @@ export default function Home() {
           <p className="modal-copy">Enter your Trakt client ID, then authorize Shelfcheck. A client secret is optional and is used only to renew an expiring session.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
           <label>Client secret (optional)<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Used for automatic token renewal" autoComplete="off" data-lpignore="true" /></label>
-          {deviceCode && <p className="field-error">Enter code <strong>{deviceCode}</strong> on the Trakt page that opened.</p>}
+          {deviceCode && <p className="field-error">Open Trakt and enter code <strong>{deviceCode}</strong>.</p>}
+          {verificationUrl && <a className="primary full" href={verificationUrl} target="_blank" rel="noreferrer">Open Trakt activation <b>↗</b></a>}
           {error && <p className="field-error">{error}</p>}
           <button className="primary full" onClick={connectWithTrakt} disabled={authenticating}>{authenticating ? "Waiting for Trakt authorization…" : "Sign in with Trakt"} <b>→</b></button>
           <label>Or use an access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste your existing OAuth access token" autoComplete="off" data-lpignore="true" /></label>

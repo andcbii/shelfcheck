@@ -16,6 +16,77 @@ npm run dev
 npm run build
 ```
 
+## Trakt credentials (Windows PowerShell)
+
+Shelfcheck needs a Trakt **Client ID** and **OAuth access token**. The Client
+Secret is used only while creating the token and must not be entered into
+Shelfcheck, committed to Git, or shared with anyone.
+
+### 1. Create a Trakt application
+
+1. Open [Trakt API Applications](https://trakt.tv/oauth/applications).
+2. Create an application and copy its **Client ID** and **Client Secret**.
+3. Add this redirect URI:
+
+   ```text
+   urn:ietf:wg:oauth:2.0:oob
+   ```
+
+4. For local development, add this JavaScript (CORS) origin:
+
+   ```text
+   http://localhost:3000
+   ```
+
+### 2. Request a device code
+
+Open PowerShell and run:
+
+```powershell
+$clientId = Read-Host "Trakt Client ID"
+
+$device = Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://api.trakt.tv/oauth/device/code" `
+  -ContentType "application/json" `
+  -Body (@{ client_id = $clientId } | ConvertTo-Json)
+
+$device
+```
+
+PowerShell will display a `user_code`. Open
+[trakt.tv/activate](https://trakt.tv/activate), enter that code, and approve the
+application.
+
+### 3. Exchange the approved code for an access token
+
+After approving the code, run this in the same PowerShell window:
+
+```powershell
+$clientSecretSecure = Read-Host "Trakt Client Secret" -AsSecureString
+$clientSecret = [System.Net.NetworkCredential]::new("", $clientSecretSecure).Password
+
+$token = Invoke-RestMethod `
+  -Method Post `
+  -Uri "https://api.trakt.tv/oauth/device/token" `
+  -ContentType "application/json" `
+  -Body (@{
+    code          = $device.device_code
+    client_id     = $clientId
+    client_secret = $clientSecret
+  } | ConvertTo-Json)
+
+$token.access_token
+```
+
+Copy the resulting access token. In Shelfcheck settings, enter:
+
+- **Client ID:** the same Client ID used above
+- **Access token:** the value printed by `$token.access_token`
+
+The credentials are stored only in that browser's local storage. Never commit
+the Client Secret or access token to this repository.
+
 This starter does not use `wrangler.jsonc`.
 
 ## Included Shape

@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 type TraktShow = {
   title: string;
   year: number;
-  ids: { trakt: number; slug: string };
+  ids: { trakt: number; slug: string; tmdb?: number };
   images?: { poster?: string[] };
 };
 type CollectionShow = { show: TraktShow };
@@ -226,7 +226,14 @@ export default function Home() {
               onError={(event) => { event.currentTarget.style.display = "none"; }}
             />}
           </div>
-          <div className="show-info"><h3>{show.title} <small>{show.year}</small></h3><p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p></div>
+          <div className="show-info">
+            <h3>{show.title} <small>{show.year}</small></h3>
+            <div className="show-links-row">
+              <p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p>
+              <a className="brand-link trakt-brand" href={`https://app.trakt.tv/shows/${show.ids.slug}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on Trakt`} title="View on Trakt"><span>✓</span><b>trakt</b></a>
+              {show.ids.tmdb && <a className="brand-link tmdb-brand" href={`https://www.themoviedb.org/tv/${show.ids.tmdb}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on The Movie Database`} title="View on TMDB"><i /><b>TMDB</b></a>}
+            </div>
+          </div>
           <div className="episode-tags">{episodes.map((ep) => <a
             key={`${ep.season}-${ep.episode}`}
             href={`https://app.trakt.tv/shows/${show.ids.slug}?season=${ep.season}&view=episode&episode=${ep.episode}`}

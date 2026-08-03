@@ -96,6 +96,7 @@ export default function Home() {
   const nextRequestAtRef = useRef(0);
   const networkFailuresRef = useRef(0);
   const networkPauseUntilRef = useRef(0);
+  const connectionValidatedRef = useRef(false);
   const serverSyncTimerRef = useRef<number | null>(null);
   const pendingServerPatchRef = useRef<Partial<ServerState>>({});
 
@@ -341,6 +342,7 @@ export default function Home() {
   }
 
   async function traktRequest(input: string | URL): Promise<Response> {
+    const isInitialRequest = !connectionValidatedRef.current;
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await waitForRequestSlot();
       const requestStarted = Date.now();
@@ -352,6 +354,13 @@ export default function Home() {
         const response = await proxyRequest();
         logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
         networkFailuresRef.current = 0;
+        if (isInitialRequest) {
+          if (response.ok) {
+            connectionValidatedRef.current = true;
+            logDebug("request.connection-validated", { path: `${upstream.pathname}${upstream.search}`, status: response.status });
+          }
+          return response;
+        }
         if (response.status === 401) return response;
         if (response.status === 403) {
           if (attempt === 4) return response;
@@ -372,6 +381,9 @@ export default function Home() {
       } catch (requestError) {
         const upstream = new URL(input.toString());
         logDebug("request.error", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: requestError instanceof Error ? requestError.message : String(requestError) });
+        if (isInitialRequest) {
+          throw new Error("Shelfcheck could not establish the initial connection to Trakt. The scan was stopped before processing any shows.");
+        }
         if (requestError instanceof Error && requestError.message === "Failed to fetch") {
           networkFailuresRef.current += 1;
           if (networkFailuresRef.current >= 3) {
@@ -420,9 +432,16 @@ export default function Home() {
 
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
+    connectionValidatedRef.current = false;
+    networkFailuresRef.current = 0;
+    networkPauseUntilRef.current = 0;
     setScanning(true); setRateLimitPaused(false); setError(""); setProgress(0); setPending(0);
     logDebug("scan.start", { cachedShows: shows.length, pending });
     try {
+      // Gate the scan on one completed request. This prevents resumed scans
+      // from starting multiple workers before the Trakt connection is known-good.
+      logDebug("scan.connection-validating");
+      await traktFetch<CollectionShow[]>("/sync/collection/shows?limit=1");
       let savedCheckpoint: ScanCheckpoint | null = null;
       try { savedCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null; }
       catch { /* ignore invalid checkpoint data */ }

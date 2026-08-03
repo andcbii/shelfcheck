@@ -27,6 +27,7 @@ export async function GET(request: Request) {
       headers: {
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Shelfcheck/1.0.2 (+https://github.com/andcbii/shelfcheck)",
         "trakt-api-version": "2",
         "trakt-api-key": credentials.clientId,
         Authorization: `Bearer ${credentials.accessToken}`,

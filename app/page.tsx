@@ -7,12 +7,18 @@ type TraktShow = {
   year: number;
   ids: { trakt: number; slug: string; tmdb?: number };
   images?: { poster?: string[] };
+  collection?: { aired: number; completed: number };
 };
 type CollectionShow = { show: TraktShow };
 type ProgressEpisode = { number: number; completed: boolean };
 type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
 type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed: number[]; results: Record<string, MissingEpisode[]>; activity?: string };
+type ServerState = {
+  report?: { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string };
+  checkpoint?: ScanCheckpoint | null;
+  ignoredShows?: TraktShow[];
+};
 
 const TRAKT = "https://api.trakt.tv";
 const REPORT_CACHE = "shelfcheck-report-v1";
@@ -20,6 +26,7 @@ const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
 const DEBUG_LOG_CACHE = "shelfcheck-debug-log-v1";
 const DEBUG_ENABLED_CACHE = "shelfcheck-debug-enabled-v1";
 const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
+const IGNORED_SHOWS_COOKIE = "shelfcheck-ignored-shows-v1";
 
 function compactShow(show: TraktShow): TraktShow {
   return {
@@ -27,6 +34,7 @@ function compactShow(show: TraktShow): TraktShow {
     year: show.year,
     ids: show.ids,
     ...(show.images?.poster?.[0] ? { images: { poster: [show.images.poster[0]] } } : {}),
+    ...(show.collection ? { collection: show.collection } : {}),
   };
 }
 
@@ -36,6 +44,28 @@ function compactLibrary(library: CollectionShow[]): CollectionShow[] {
 
 function compactMissing(items: MissingEpisode[]): MissingEpisode[] {
   return items.map((item) => ({ ...item, show: compactShow(item.show) }));
+}
+
+function persistIgnoredShows(items: TraktShow[]) {
+  const compact = items.map((show) => ({ title: show.title, year: show.year, ids: show.ids }));
+  localStorage.setItem(IGNORED_SHOWS_CACHE, JSON.stringify(compact));
+  document.cookie = `${IGNORED_SHOWS_COOKIE}=${encodeURIComponent(JSON.stringify(compact))}; Max-Age=315360000; Path=/; SameSite=Lax`;
+}
+
+function loadIgnoredShows(): TraktShow[] {
+  const stored: TraktShow[] = [];
+  try {
+    const local = JSON.parse(localStorage.getItem(IGNORED_SHOWS_CACHE) || "[]") as TraktShow[];
+    if (Array.isArray(local)) stored.push(...local);
+  } catch { /* try the cookie backup */ }
+  try {
+    const prefix = `${IGNORED_SHOWS_COOKIE}=`;
+    const value = document.cookie.split("; ").find((cookie) => cookie.startsWith(prefix))?.slice(prefix.length);
+    const cookie = value ? JSON.parse(decodeURIComponent(value)) as TraktShow[] : [];
+    if (Array.isArray(cookie)) stored.push(...cookie);
+  } catch { /* ignore invalid cookie data */ }
+  return [...new Map(stored.filter((show) => show?.ids?.trakt).map((show) => [show.ids.trakt, compactShow(show)])).values()]
+    .sort((a, b) => a.title.localeCompare(b.title));
 }
 
 export default function Home() {
@@ -57,21 +87,26 @@ export default function Home() {
   const [ignoredShows, setIgnoredShows] = useState<TraktShow[]>([]);
   const [openShowMenu, setOpenShowMenu] = useState<number | null>(null);
   const [ignoredManagerOpen, setIgnoredManagerOpen] = useState(false);
+  const [sortField, setSortField] = useState<"title" | "percent">("title");
+  const [sortAscending, setSortAscending] = useState(true);
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const [rateLimitPaused, setRateLimitPaused] = useState(false);
   const tokenRef = useRef("");
   const debugEnabledRef = useRef(false);
   const requestGateRef = useRef<Promise<void>>(Promise.resolve());
   const nextRequestAtRef = useRef(0);
   const networkFailuresRef = useRef(0);
   const networkPauseUntilRef = useRef(0);
+  const serverSyncTimerRef = useRef<number | null>(null);
+  const pendingServerPatchRef = useRef<Partial<ServerState>>({});
 
   useEffect(() => {
     const diagnosticsOn = localStorage.getItem(DEBUG_ENABLED_CACHE) === "true";
     setDebugEnabled(diagnosticsOn);
     debugEnabledRef.current = diagnosticsOn;
-    try {
-      const savedIgnored = JSON.parse(localStorage.getItem(IGNORED_SHOWS_CACHE) || "[]") as TraktShow[];
-      if (Array.isArray(savedIgnored)) setIgnoredShows(savedIgnored.map(compactShow));
-    } catch { /* ignore invalid ignored-show data */ }
+    const savedIgnored = loadIgnoredShows();
+    setIgnoredShows(savedIgnored);
+    try { persistIgnoredShows(savedIgnored); } catch { /* persistence must not block startup */ }
     const saved = localStorage.getItem("shelfcheck-trakt");
     try {
       if (saved) {
@@ -107,7 +142,60 @@ export default function Home() {
         setPending(cachedLibrary.length - checkpoint.completed.length); setMissing(compactMissing(Object.values(checkpoint.results || {}).flat()));
       }
     } catch { /* ignore invalid checkpoint data */ }
+    void fetch("/api/state", { cache: "no-store" }).then(async (response) => {
+      if (!response.ok) return;
+      const { state } = await response.json() as { state: ServerState | null };
+      if (!state) {
+        let localReport: ServerState["report"];
+        let localCheckpoint: ScanCheckpoint | null = null;
+        try { localReport = JSON.parse(localStorage.getItem(REPORT_CACHE) || "null") || undefined; } catch { /* no local report */ }
+        try { localCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null"); } catch { /* no local checkpoint */ }
+        syncServerState({ report: localReport, checkpoint: localCheckpoint, ignoredShows: savedIgnored }, true);
+        return;
+      }
+      if (Array.isArray(state.ignoredShows)) {
+        const remoteIgnored = state.ignoredShows.map(compactShow);
+        setIgnoredShows(remoteIgnored);
+        try { persistIgnoredShows(remoteIgnored); } catch { /* retain server copy */ }
+      }
+      if (state.report?.shows && state.report?.missing && state.report.lastScan) {
+        const remoteReport = {
+          shows: compactLibrary(state.report.shows),
+          missing: compactMissing(state.report.missing),
+          lastScan: state.report.lastScan,
+        };
+        setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
+        try { localStorage.setItem(REPORT_CACHE, JSON.stringify(remoteReport)); } catch { /* retain server copy */ }
+      }
+      if (state.checkpoint?.library?.length && state.checkpoint.completed.length < state.checkpoint.library.length) {
+        const remoteCheckpoint = { ...state.checkpoint, library: compactLibrary(state.checkpoint.library) };
+        setShows(remoteCheckpoint.library); setProcessed(remoteCheckpoint.completed.length); setTotal(remoteCheckpoint.library.length);
+        setPending(remoteCheckpoint.library.length - remoteCheckpoint.completed.length);
+        setMissing(compactMissing(Object.values(remoteCheckpoint.results || {}).flat()));
+        try { localStorage.setItem(CHECKPOINT_CACHE, JSON.stringify(remoteCheckpoint)); } catch { /* retain server copy */ }
+      }
+    }).catch(() => { /* local browser copy remains available */ });
   }, []);
+
+  function syncServerState(patch: Partial<ServerState>, immediate = false) {
+    pendingServerPatchRef.current = { ...pendingServerPatchRef.current, ...patch };
+    const send = () => {
+      serverSyncTimerRef.current = null;
+      const body = pendingServerPatchRef.current;
+      pendingServerPatchRef.current = {};
+      void fetch("/api/state", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => { /* the browser copy remains available for retry */ });
+    };
+    if (immediate) {
+      if (serverSyncTimerRef.current !== null) window.clearTimeout(serverSyncTimerRef.current);
+      send();
+    } else if (serverSyncTimerRef.current === null) {
+      serverSyncTimerRef.current = window.setTimeout(send, 3000);
+    }
+  }
 
   function logDebug(event: string, details: Record<string, unknown> = {}) {
     if (!debugEnabledRef.current) return;
@@ -151,13 +239,32 @@ export default function Home() {
       current.episodes.push(item);
       map.set(item.show.ids.trakt, current);
     });
-    return [...map.values()];
-  }, [visibleMissing, query]);
+    return [...map.values()].sort((a, b) => {
+      if (sortField === "title") {
+        const result = a.show.title.localeCompare(b.show.title);
+        return sortAscending ? result : -result;
+      }
+      const aPercent = a.show.collection?.aired ? (a.show.collection.completed / a.show.collection.aired) * 100 : 0;
+      const bPercent = b.show.collection?.aired ? (b.show.collection.completed / b.show.collection.aired) * 100 : 0;
+      const result = aPercent - bPercent || a.show.title.localeCompare(b.show.title);
+      return sortAscending ? result : -result;
+    });
+  }, [visibleMissing, query, sortField, sortAscending]);
+
+  function chooseSort(field: "title" | "percent") {
+    if (field === sortField) setSortAscending((ascending) => !ascending);
+    else {
+      setSortField(field);
+      setSortAscending(field === "title");
+    }
+    setSortMenuOpen(false);
+  }
 
   function ignoreShow(show: TraktShow) {
     setIgnoredShows((current) => {
       const next = [...current.filter((item) => item.ids.trakt !== show.ids.trakt), compactShow(show)].sort((a, b) => a.title.localeCompare(b.title));
-      localStorage.setItem(IGNORED_SHOWS_CACHE, JSON.stringify(next));
+      persistIgnoredShows(next);
+      syncServerState({ ignoredShows: next }, true);
       return next;
     });
     setOpenShowMenu(null);
@@ -166,7 +273,8 @@ export default function Home() {
   function restoreShow(traktId: number) {
     setIgnoredShows((current) => {
       const next = current.filter((show) => show.ids.trakt !== traktId);
-      localStorage.setItem(IGNORED_SHOWS_CACHE, JSON.stringify(next));
+      persistIgnoredShows(next);
+      syncServerState({ ignoredShows: next }, true);
       return next;
     });
   }
@@ -188,6 +296,21 @@ export default function Home() {
   }
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  async function pauseForRateLimit() {
+    const now = Date.now();
+    if (networkPauseUntilRef.current <= now) {
+      networkPauseUntilRef.current = now + 120_000;
+      setRateLimitPaused(true);
+      logDebug("request.rate-limit-pause", { status: 403, pauseMs: 120000 });
+    }
+    const pauseUntil = networkPauseUntilRef.current;
+    await wait(Math.max(0, pauseUntil - Date.now()));
+    if (Date.now() >= networkPauseUntilRef.current) {
+      setRateLimitPaused(false);
+      logDebug("request.rate-limit-resume", { status: 403 });
+    }
+  }
 
   async function waitForRequestSlot() {
     let release!: () => void;
@@ -246,9 +369,12 @@ export default function Home() {
         }
         logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
         networkFailuresRef.current = 0;
-        // Authentication and permission failures will not improve with retries.
-        // Return them immediately so the scan can show a useful error.
-        if (response.status === 401 || response.status === 403) return response;
+        if (response.status === 401) return response;
+        if (response.status === 403) {
+          if (attempt === 4) return response;
+          await pauseForRateLimit();
+          continue;
+        }
         if (response.status === 429) {
           if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
           const retryAfter = Number(response.headers.get("Retry-After"));
@@ -311,7 +437,7 @@ export default function Home() {
 
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
-    setScanning(true); setError(""); setProgress(0); setPending(0);
+    setScanning(true); setRateLimitPaused(false); setError(""); setProgress(0); setPending(0);
     logDebug("scan.start", { cachedShows: shows.length, pending });
     try {
       let savedCheckpoint: ScanCheckpoint | null = null;
@@ -357,11 +483,15 @@ export default function Home() {
         } catch (storageError) {
           logDebug("checkpoint.storage-error", { error: storageError instanceof Error ? storageError.message : String(storageError), completed: completed.size, total: library.length });
         }
+        syncServerState({ checkpoint });
       };
       const scanOne = async (item: CollectionShow) => {
         const showStarted = Date.now();
         logDebug("show.start", { traktId: item.show.ids.trakt, title: item.show.title, completed: completed.size, total: library.length });
-        const data = await traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
+        const data = await traktFetch<{ aired?: number; completed?: number; seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
+        const aired = data.aired ?? (data.seasons || []).reduce((sum, season) => sum + (season.number === 0 ? 0 : season.episodes.length), 0);
+        const collected = data.completed ?? (data.seasons || []).reduce((sum, season) => sum + (season.number === 0 ? 0 : season.episodes.filter((episode) => episode.completed).length), 0);
+        item.show = { ...item.show, collection: { aired, completed: collected } };
         const showResults: MissingEpisode[] = [];
         for (const season of data.seasons || []) {
           if (season.number === 0) continue;
@@ -404,13 +534,15 @@ export default function Home() {
       const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
       setMissing(results);
       setLastScan(scanTime);
-      localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: compactLibrary(library), missing: compactMissing(results), lastScan: scanTime }));
+      const report = { shows: compactLibrary(library), missing: compactMissing(results), lastScan: scanTime };
+      localStorage.setItem(REPORT_CACHE, JSON.stringify(report));
       localStorage.removeItem(CHECKPOINT_CACHE);
+      syncServerState({ report, checkpoint: null }, true);
       setPending(0);
     } catch (e) {
       logDebug("scan.error", { error: e instanceof Error ? e.message : String(e), processed, total });
       setError(e instanceof Error ? e.message : "The scan could not be completed.");
-    } finally { setScanning(false); }
+    } finally { setScanning(false); setRateLimitPaused(false); }
   }
 
   return (
@@ -430,8 +562,8 @@ export default function Home() {
           <p className="intro">Shelfcheck compares every collected show against Trakt’s aired episode list, then gives you one clean report of what’s missing.</p>
         </div>
         <div className="scan-panel">
-          <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={scanLibrary} disabled={scanning}>{scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
+          <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{rateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
+          <button className="primary" onClick={scanLibrary} disabled={scanning}>{rateLimitPaused ? "Paused - Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${lastScan}` : "Only your collection metadata is read."}</p>
         </div>
       </section>
@@ -453,12 +585,26 @@ export default function Home() {
       <section className="report">
         <div className="report-heading">
           <div><p className="eyebrow">MISSING REPORT</p><h2>{!lastScan ? "Ready when you are" : visibleMissing.length ? `${visibleMissing.length} episodes to find` : "Your collection is complete"}</h2></div>
-          {lastScan && visibleMissing.length > 0 && <label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter shows" /></label>}
+          {lastScan && visibleMissing.length > 0 && <div className="report-controls">
+            <label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter shows" /></label>
+            <div className="sort-control">
+              <button type="button" className="sort-trigger" onClick={() => setSortMenuOpen((open) => !open)} aria-haspopup="menu" aria-expanded={sortMenuOpen}>
+                <span>{sortField === "title" ? "By title" : "By percent collected"}</span><b aria-label={sortAscending ? "Ascending" : "Descending"}>{sortAscending ? "▲" : "▼"}</b>
+              </button>
+              {sortMenuOpen && <div className="sort-menu" role="menu">
+                <button type="button" role="menuitem" className={sortField === "title" ? "selected" : ""} onClick={() => chooseSort("title")}><span>Title</span><b>{sortField === "title" ? (sortAscending ? "↑" : "↓") : ""}</b></button>
+                <button type="button" role="menuitem" className={sortField === "percent" ? "selected" : ""} onClick={() => chooseSort("percent")}><span>Percent collected</span><b>{sortField === "percent" ? (sortAscending ? "↑" : "↓") : ""}</b></button>
+              </div>}
+            </div>
+          </div>}
         </div>
         {error && <div className="error"><span>!</span><p><strong>Scan interrupted</strong>{error}</p></div>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
-        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>Comparing show {processed} of {total || shows.length || "…"}. Every completed show is saved automatically.</p></div>}
-        {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => <article key={show.ids.trakt}>
+        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{rateLimitPaused ? "Paused - Rate Limit. Scanning will resume automatically in two minutes." : `Comparing show ${processed} of ${total || shows.length || "…"}. Every completed show is saved automatically.`}</p></div>}
+        {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => {
+          const percentCollected = show.collection?.aired ? Math.round((show.collection.completed / show.collection.aired) * 100) : null;
+          return <article key={show.ids.trakt}>
+          <div className="collection-percent"><strong>{percentCollected === null ? "—" : `${percentCollected}%`}</strong><span>COLLECTED</span></div>
           <div className="show-index">
             <span>{show.title.slice(0, 2).toUpperCase()}</span>
             {show.images?.poster?.[0] && <img
@@ -477,22 +623,22 @@ export default function Home() {
             </div>
             {openShowMenu === show.ids.trakt && <div className="show-action-menu"><button type="button" onClick={() => ignoreShow(show)}>⊘ <span>Ignore this show</span></button></div>}
             <div className="show-links-row"><p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p></div>
-          </div>
-          <div className="episode-tags">{episodes.map((ep) => <a
+            <div className="episode-tags">{episodes.map((ep) => <a
             key={`${ep.season}-${ep.episode}`}
             href={`https://app.trakt.tv/shows/${show.ids.slug}?season=${ep.season}&view=episode&episode=${ep.episode}`}
             target="_blank"
             rel="noreferrer"
             aria-label={`Open ${show.title} season ${ep.season} episode ${ep.episode} on Trakt`}
           >S{String(ep.season).padStart(2,"0")}E{String(ep.episode).padStart(2,"0")}<b aria-hidden="true">↗</b></a>)}</div>
-        </article>)}</div>}
+          </div>
+        </article>})}</div>}
       </section>
 
       <footer><span>SHELFCHECK / TRAKT API</span><span>Your credentials stay in this browser.</span></footer>
 
-      {settingsOpen && <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && connected && setSettingsOpen(false)}>
+      {settingsOpen && <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && (connected || Boolean(lastScan)) && setSettingsOpen(false)}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-          <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected} aria-label="Close">×</button>
+          <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected && !lastScan} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
           <p className="modal-copy">Use your Trakt application client ID and access token. They are saved only in this browser and sent directly to Trakt.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>

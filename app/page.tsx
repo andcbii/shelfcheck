@@ -54,13 +54,6 @@ export default function Home() {
     } catch { /* ignore an invalid or outdated report cache */ }
   }, []);
 
-  const headers = useMemo(() => ({
-    "Content-Type": "application/json",
-    "trakt-api-version": "2",
-    "trakt-api-key": clientId,
-    Authorization: `Bearer ${token}`,
-  }), [clientId, token]);
-
   const grouped = useMemo(() => {
     const map = new Map<number, { show: TraktShow; episodes: MissingEpisode[] }>();
     missing.filter((item) => item.show.title.toLowerCase().includes(query.toLowerCase())).forEach((item) => {
@@ -88,7 +81,13 @@ export default function Home() {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await wait(650);
       try {
-        const response = await fetch(input, { headers });
+        const upstream = new URL(input.toString());
+        const response = await fetch(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
+          headers: {
+            "x-trakt-client-id": clientId,
+            Authorization: `Bearer ${token}`,
+          },
+        });
         if (response.status === 429) {
           if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
           const retryAfter = Number(response.headers.get("Retry-After"));

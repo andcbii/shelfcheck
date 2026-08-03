@@ -1,0 +1,15 @@
+services:
+  shelfcheck:
+    build: .
+    image: shelfcheck:local
+    container_name: shelfcheck
+    ports:
+      - "3000:3000"
+    volumes:
+      - shelfcheck-config:/config
+      - shelfcheck-data:/data
+    restart: unless-stopped
+
+volumes:
+  shelfcheck-config:
+  shelfcheck-data:

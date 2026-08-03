@@ -1,0 +1,12 @@
+.git
+.next
+.openai
+.pnpm-store
+.runtime
+.vinext
+.wrangler
+build
+dist
+node_modules
+*.log
+*.tar.gz

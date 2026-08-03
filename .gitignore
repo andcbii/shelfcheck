@@ -42,5 +42,6 @@ shelfcheck-site.tar.gz
 next-env.d.ts
 /dist/
 /.wrangler/
+/.runtime/
 /outputs/
 /work/

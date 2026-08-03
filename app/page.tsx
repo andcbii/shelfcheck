@@ -91,7 +91,6 @@ export default function Home() {
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [rateLimitPaused, setRateLimitPaused] = useState(false);
-  const tokenRef = useRef("");
   const debugEnabledRef = useRef(false);
   const requestGateRef = useRef<Promise<void>>(Promise.resolve());
   const nextRequestAtRef = useRef(0);
@@ -107,17 +106,12 @@ export default function Home() {
     const savedIgnored = loadIgnoredShows();
     setIgnoredShows(savedIgnored);
     try { persistIgnoredShows(savedIgnored); } catch { /* persistence must not block startup */ }
-    const saved = localStorage.getItem("shelfcheck-trakt");
-    try {
-      if (saved) {
-        const value = JSON.parse(saved);
-        setClientId(value.clientId || "");
-        setToken(value.token || "");
-        tokenRef.current = value.token || "";
-        setConnected(Boolean(value.clientId && value.token));
-        setSettingsOpen(false);
-      }
-    } catch { /* ignore invalid local data */ }
+    void fetch("/api/config", { cache: "no-store" }).then(async (response) => {
+      if (!response.ok) return;
+      const { configured } = await response.json() as { configured: boolean };
+      setConnected(configured);
+      if (configured) setSettingsOpen(false);
+    }).catch(() => { /* settings remain open when configuration cannot be read */ });
 
     try {
       const cached = localStorage.getItem(REPORT_CACHE);
@@ -279,20 +273,32 @@ export default function Home() {
     });
   }
 
-  function saveCredentials() {
+  async function saveCredentials() {
     if (!clientId.trim() || !token.trim()) {
       setError("Enter both your Trakt client ID and access token.");
       return;
     }
     const nextClientId = clientId.trim();
     const nextToken = token.trim();
-    setClientId(nextClientId);
-    setToken(nextToken);
-    tokenRef.current = nextToken;
-    localStorage.setItem("shelfcheck-trakt", JSON.stringify({ clientId: nextClientId, token: nextToken }));
-    setConnected(true);
-    setSettingsOpen(false);
-    setError("");
+    try {
+      const response = await fetch("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId: nextClientId, accessToken: nextToken }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || "Shelfcheck could not save the Trakt configuration.");
+      }
+      setClientId("");
+      setToken("");
+      localStorage.removeItem("shelfcheck-trakt");
+      setConnected(true);
+      setSettingsOpen(false);
+      setError("");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Shelfcheck could not save the Trakt configuration.");
+    }
   }
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -341,32 +347,9 @@ export default function Home() {
       try {
         const upstream = new URL(input.toString());
         logDebug("request.start", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1 });
-        const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
         const proxyRequest = () => fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
-          headers: {
-            "x-trakt-client-id": clientId,
-            "x-trakt-access-token": tokenRef.current || token,
-          },
         });
-        let response: Response;
-        if (isLocal) {
-          try {
-            response = await fetchWithTimeout(upstream, {
-              headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                "trakt-api-version": "2",
-                "trakt-api-key": clientId,
-                Authorization: `Bearer ${tokenRef.current || token}`,
-              },
-            });
-          } catch (directError) {
-            logDebug("request.proxy-fallback", { path: `${upstream.pathname}${upstream.search}`, reason: directError instanceof Error ? directError.message : String(directError) });
-            response = await proxyRequest();
-          }
-        } else {
-          response = await proxyRequest();
-        }
+        const response = await proxyRequest();
         logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
         networkFailuresRef.current = 0;
         if (response.status === 401) return response;
@@ -634,13 +617,13 @@ export default function Home() {
         </article>})}</div>}
       </section>
 
-      <footer><span>SHELFCHECK / TRAKT API</span><span>Your credentials stay in this browser.</span></footer>
+      <footer><span>SHELFCHECK / TRAKT API</span><span>Your credentials stay in your private configuration volume.</span></footer>
 
       {settingsOpen && <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && (connected || Boolean(lastScan)) && setSettingsOpen(false)}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected && !lastScan} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
-          <p className="modal-copy">Use your Trakt application client ID and access token. They are saved only in this browser and sent directly to Trakt.</p>
+          <p className="modal-copy">Use your Trakt application client ID and access token. They are stored in /config/config.yml and never returned to the browser.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
           <label>Access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Your OAuth access token" autoComplete="off" data-lpignore="true" /></label>
           {error && <p className="field-error">{error}</p>}

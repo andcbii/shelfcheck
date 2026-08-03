@@ -1,171 +1,68 @@
-# vinext-starter
+# Shelfcheck
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+Shelfcheck compares a Trakt TV collection with the aired episode list and keeps
+one personal missing-episode report. The Docker image is deliberately
+single-user: it has no accounts or login screen.
 
-## Prerequisites
+## Storage
 
-- Node.js `>=22.13.0`
+The container listens on port `3000` and uses two persistent locations:
 
-## Quick Start
+- `/config/config.yml` contains the Trakt client ID and access token. Create it
+  from `config.example.yml`, or enter credentials in the UI.
+- `/data/shelfcheck.db` is the SQLite database containing the report, scan
+  checkpoint, and ignored-show list.
+
+Both locations must be writable when credentials are managed through the UI.
+The image runs as UID/GID `1001`.
+
+## Run with Docker Compose
 
 ```bash
-npm install
-npm run dev
-npm run build
+docker compose up --build -d
 ```
 
-## Trakt credentials (Windows PowerShell)
+Open `http://localhost:3000`. Stop the app with `docker compose down`. The named
+volumes survive that command; do not add `--volumes` unless you intend to erase
+Shelfcheck's configuration and data.
 
-Shelfcheck needs a Trakt **Client ID** and **OAuth access token**. The Client
-Secret is used only while creating the token and must not be entered into
-Shelfcheck, committed to Git, or shared with anyone.
+An equivalent bind-mount example is:
 
-### 1. Create a Trakt application
-
-1. Open [Trakt API Applications](https://trakt.tv/oauth/applications).
-2. Create an application and copy its **Client ID** and **Client Secret**.
-3. Add this redirect URI:
-
-   ```text
-   urn:ietf:wg:oauth:2.0:oob
-   ```
-
-4. For local development, add this JavaScript (CORS) origin:
-
-   ```text
-   http://localhost:3000
-   ```
-
-### 2. Request a device code
-
-Open PowerShell and run:
-
-```powershell
-$clientId = Read-Host "Trakt Client ID"
-
-$device = Invoke-RestMethod `
-  -Method Post `
-  -Uri "https://api.trakt.tv/oauth/device/code" `
-  -ContentType "application/json" `
-  -Body (@{ client_id = $clientId } | ConvertTo-Json)
-
-$device
+```bash
+docker run -d --name shelfcheck \
+  -p 3000:3000 \
+  -v /your/host/config:/config \
+  -v /your/host/data:/data \
+  --restart unless-stopped \
+  shelfcheck:local
 ```
 
-PowerShell will display a `user_code`. Open
-[trakt.tv/activate](https://trakt.tv/activate), enter that code, and approve the
-application.
+This personal mode has no application authentication. Keep it on a trusted
+home network, behind a VPN, or behind an authenticated reverse proxy. Do not
+publish port 3000 directly to the public internet.
 
-### 3. Exchange the approved code for an access token
+## Local development
 
-After approving the code, run this in the same PowerShell window:
+Requires Node.js `>=22.13.0` and pnpm.
 
-```powershell
-$clientSecretSecure = Read-Host "Trakt Client Secret" -AsSecureString
-$clientSecret = [System.Net.NetworkCredential]::new("", $clientSecretSecure).Password
-
-$token = Invoke-RestMethod `
-  -Method Post `
-  -Uri "https://api.trakt.tv/oauth/device/token" `
-  -ContentType "application/json" `
-  -Body (@{
-    code          = $device.device_code
-    client_id     = $clientId
-    client_secret = $clientSecret
-  } | ConvertTo-Json)
-
-$token.access_token
+```bash
+pnpm install
+pnpm dev
 ```
 
-Copy the resulting access token. In Shelfcheck settings, enter:
+Local development stores configuration and data below `.runtime/`, which is
+ignored by Git. The production Docker build uses Next.js standalone output.
 
-- **Client ID:** the same Client ID used above
-- **Access token:** the value printed by `$token.access_token`
+## Trakt configuration
 
-The credentials are stored only in that browser's local storage. Never commit
-the Client Secret or access token to this repository.
+Create a Trakt application at `https://trakt.tv/oauth/applications`. Shelfcheck
+needs the application's client ID and an OAuth access token. It never needs the
+client secret. The file format is:
 
-This starter does not use `wrangler.jsonc`.
-
-## Included Shape
-
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
-
-## Workspace Auth Headers
-
-Signed-in visitors receive both `oai-authenticated-user-id` and `oai-authenticated-user-email`. Private Sites require every visitor to sign in; public Sites may also have anonymous visitors, for whom neither header is present.
-
-The user ID is stable for the same user on the same Site and different across Sites. Email and name are intended for display or contact purposes.
-
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const userId = requestHeaders.get("oai-authenticated-user-id");
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
+```yaml
+trakt:
+  client_id: "your-trakt-client-id"
+  access_token: "your-trakt-access-token"
 ```
 
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Treat `config.yml` as a secret and never commit it.

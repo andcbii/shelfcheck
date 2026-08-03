@@ -1,3 +1,5 @@
+import { readTraktCredentials } from "@/lib/server-config";
+
 const TRAKT_API = "https://api.trakt.tv";
 const ALLOWED_PATHS = [
   /^\/sync\/collection\/shows$/,
@@ -9,10 +11,9 @@ const ALLOWED_PATHS = [
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const path = requestUrl.searchParams.get("path");
-  const clientId = request.headers.get("x-trakt-client-id");
-  const accessToken = request.headers.get("x-trakt-access-token");
+  const credentials = await readTraktCredentials();
 
-  if (!path || !path.startsWith("/") || path.startsWith("//") || !clientId || !accessToken) {
+  if (!path || !path.startsWith("/") || path.startsWith("//") || !credentials) {
     return Response.json({ error: "Missing or invalid Trakt request details." }, { status: 400 });
   }
 
@@ -27,8 +28,8 @@ export async function GET(request: Request) {
         "Accept": "application/json",
         "Content-Type": "application/json",
         "trakt-api-version": "2",
-        "trakt-api-key": clientId,
-        Authorization: `Bearer ${accessToken}`,
+        "trakt-api-key": credentials.clientId,
+        Authorization: `Bearer ${credentials.accessToken}`,
       },
     });
 

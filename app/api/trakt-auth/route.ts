@@ -22,7 +22,13 @@ export async function POST(request: NextRequest) {
 
   const response = await fetch(`${TRAKT}${endpoint}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "trakt-api-version": "2", "trakt-api-key": body.clientId },
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "Shelfcheck/1.0 (Trakt collection audit)",
+      "trakt-api-version": "2",
+      "trakt-api-key": body.clientId,
+    },
     body: JSON.stringify(payload),
     cache: "no-store",
   });

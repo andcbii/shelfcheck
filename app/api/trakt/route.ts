@@ -24,7 +24,9 @@ export async function GET(request: Request) {
   try {
     const upstream = await fetch(upstreamUrl, {
       headers: {
+        "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Shelfcheck/1.0 (Trakt collection audit)",
         "trakt-api-version": "2",
         "trakt-api-key": clientId,
         Authorization: authorization,

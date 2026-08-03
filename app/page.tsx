@@ -249,11 +249,17 @@ export default function Home() {
       catch { /* ignore invalid checkpoint data */ }
       // Resume from browser storage immediately. A temporary failure while
       // downloading the collection must not block hundreds of known shows.
-      const library = savedCheckpoint?.library?.length
-        ? savedCheckpoint.library
-        : shows.length
-          ? shows
-          : await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+      let library: CollectionShow[];
+      if (savedCheckpoint?.library?.length && savedCheckpoint.completed.length < savedCheckpoint.library.length) {
+        library = savedCheckpoint.library;
+      } else {
+        try {
+          library = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+        } catch (libraryError) {
+          if (!shows.length) throw libraryError;
+          library = shows;
+        }
+      }
       setShows(library); setTotal(library.length);
       const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
       // Collection membership is a fast, reliable change marker. The optional

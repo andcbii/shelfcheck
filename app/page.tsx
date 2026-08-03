@@ -17,6 +17,8 @@ type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed:
 const TRAKT = "https://api.trakt.tv";
 const REPORT_CACHE = "shelfcheck-report-v1";
 const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
+const DEBUG_LOG_CACHE = "shelfcheck-debug-log-v1";
+const DEBUG_ENABLED_CACHE = "shelfcheck-debug-enabled-v1";
 
 export default function Home() {
   const [clientId, setClientId] = useState("");
@@ -33,9 +35,14 @@ export default function Home() {
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
+  const [debugEnabled, setDebugEnabled] = useState(false);
   const tokenRef = useRef("");
+  const debugEnabledRef = useRef(false);
 
   useEffect(() => {
+    const diagnosticsOn = localStorage.getItem(DEBUG_ENABLED_CACHE) === "true";
+    setDebugEnabled(diagnosticsOn);
+    debugEnabledRef.current = diagnosticsOn;
     const saved = localStorage.getItem("shelfcheck-trakt");
     try {
       if (saved) {
@@ -67,6 +74,38 @@ export default function Home() {
       }
     } catch { /* ignore invalid checkpoint data */ }
   }, []);
+
+  function logDebug(event: string, details: Record<string, unknown> = {}) {
+    if (!debugEnabledRef.current) return;
+    try {
+      const entries = JSON.parse(localStorage.getItem(DEBUG_LOG_CACHE) || "[]") as unknown[];
+      entries.push({ timestamp: new Date().toISOString(), event, ...details });
+      localStorage.setItem(DEBUG_LOG_CACHE, JSON.stringify(entries.slice(-2000)));
+    } catch { /* diagnostics must never interrupt a scan */ }
+  }
+
+  function setDiagnostics(enabled: boolean) {
+    setDebugEnabled(enabled);
+    debugEnabledRef.current = enabled;
+    localStorage.setItem(DEBUG_ENABLED_CACHE, String(enabled));
+    if (enabled) logDebug("diagnostics.enabled", { location: window.location.href });
+  }
+
+  function downloadDebugLog() {
+    const entries = JSON.parse(localStorage.getItem(DEBUG_LOG_CACHE) || "[]") as unknown[];
+    const contents = entries.map((entry) => JSON.stringify(entry)).join("\n") || JSON.stringify({ timestamp: new Date().toISOString(), event: "diagnostics.empty" });
+    const url = URL.createObjectURL(new Blob([`${contents}\n`], { type: "application/x-ndjson" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `shelfcheck-debug-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function clearDebugLog() {
+    localStorage.removeItem(DEBUG_LOG_CACHE);
+    logDebug("diagnostics.cleared");
+  }
 
   const grouped = useMemo(() => {
     const map = new Map<number, { show: TraktShow; episodes: MissingEpisode[] }>();
@@ -106,8 +145,10 @@ export default function Home() {
   async function traktRequest(input: string | URL): Promise<Response> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       await wait(650);
+      const requestStarted = Date.now();
       try {
         const upstream = new URL(input.toString());
+        logDebug("request.start", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1 });
         const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
         const response = isLocal
           ? await fetchWithTimeout(upstream, {
@@ -125,6 +166,7 @@ export default function Home() {
                 "x-trakt-access-token": tokenRef.current || token,
               },
             });
+        logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
         // Authentication and permission failures will not improve with retries.
         // Return them immediately so the scan can show a useful error.
         if (response.status === 401 || response.status === 403) return response;
@@ -140,6 +182,8 @@ export default function Home() {
         }
         return response;
       } catch (requestError) {
+        const upstream = new URL(input.toString());
+        logDebug("request.error", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: requestError instanceof Error ? requestError.message : String(requestError) });
         if (requestError instanceof Error && requestError.message.includes("rate limit")) throw requestError;
         if (attempt === 4) throw new Error("Shelfcheck could not keep a stable connection to Trakt after several retries. Your previous report is still saved.");
         await wait(1000 * 2 ** attempt);
@@ -182,6 +226,7 @@ export default function Home() {
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
     setScanning(true); setError(""); setProgress(0); setPending(0);
+    logDebug("scan.start", { cachedShows: shows.length, pending });
     try {
       let savedCheckpoint: ScanCheckpoint | null = null;
       try { savedCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null; }
@@ -200,6 +245,7 @@ export default function Home() {
         }
       }
       setShows(library); setTotal(library.length);
+      logDebug("scan.library-ready", { shows: library.length, resumed: Boolean(savedCheckpoint?.library?.length) });
       const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
       // Collection membership is a fast, reliable change marker. The optional
       // last-activities endpoint must never delay the start of a scan.
@@ -221,6 +267,8 @@ export default function Home() {
         setProgress(Math.round((completed.size / Math.max(library.length, 1)) * 100));
       };
       const scanOne = async (item: CollectionShow) => {
+        const showStarted = Date.now();
+        logDebug("show.start", { traktId: item.show.ids.trakt, title: item.show.title, completed: completed.size, total: library.length });
         const data = await traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
         const showResults: MissingEpisode[] = [];
         for (const season of data.seasons || []) {
@@ -235,12 +283,14 @@ export default function Home() {
         checkpoint.results[String(item.show.ids.trakt)] = showResults;
         completed.add(item.show.ids.trakt);
         saveCheckpoint();
+        logDebug("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, missing: showResults.length, elapsedMs: Date.now() - showStarted, completed: completed.size, total: library.length });
       };
       const worker = async () => {
         while (cursor < queue.length) {
           const item = queue[cursor++];
           try { await scanOne(item); }
           catch (scanError) {
+            logDebug("show.error", { traktId: item.show.ids.trakt, title: item.show.title, error: scanError instanceof Error ? scanError.message : String(scanError), completed: completed.size, total: library.length });
             // If even the first show is rejected, continuing would leave the
             // interface at 0 while repeating the same failure hundreds of times.
             if (completed.size === completedAtStart) throw scanError;
@@ -266,6 +316,7 @@ export default function Home() {
       localStorage.removeItem(CHECKPOINT_CACHE);
       setPending(0);
     } catch (e) {
+      logDebug("scan.error", { error: e instanceof Error ? e.message : String(e), processed, total });
       setError(e instanceof Error ? e.message : "The scan could not be completed.");
     } finally { setScanning(false); }
   }
@@ -347,6 +398,11 @@ export default function Home() {
           <label>Access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Your OAuth access token" autoComplete="off" data-lpignore="true" /></label>
           {error && <p className="field-error">{error}</p>}
           <button className="primary full" onClick={saveCredentials}>Save and connect <b>→</b></button>
+          <div className="diagnostics">
+            <label className="diagnostics-toggle"><input type="checkbox" checked={debugEnabled} onChange={(event) => setDiagnostics(event.target.checked)} /> Enable diagnostic logging</label>
+            <p>Records safe scan details in this browser. Credentials and authorization headers are never logged.</p>
+            <div><button type="button" onClick={downloadDebugLog}>Download log</button><button type="button" onClick={clearDebugLog}>Clear log</button></div>
+          </div>
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
         </section>
       </div>}

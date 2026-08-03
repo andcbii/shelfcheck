@@ -33,7 +33,6 @@ export default function Home() {
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
-  const useDirectTrakt = useRef(false);
   const tokenRef = useRef("");
 
   useEffect(() => {
@@ -109,29 +108,15 @@ export default function Home() {
       await wait(650);
       try {
         const upstream = new URL(input.toString());
-        const directHeaders = {
-          "Content-Type": "application/json",
-          "trakt-api-version": "2",
-          "trakt-api-key": clientId,
-          Authorization: `Bearer ${tokenRef.current || token}`,
-        };
-        let response: Response;
-
-        if (useDirectTrakt.current) {
-          response = await fetchWithTimeout(upstream, { headers: directHeaders });
-        } else {
-          response = await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
-            headers: {
-              "x-trakt-client-id": clientId,
-              Authorization: `Bearer ${tokenRef.current || token}`,
-            },
-          });
-
-          if (response.status === 403) {
-            useDirectTrakt.current = true;
-            response = await fetchWithTimeout(upstream, { headers: directHeaders });
-          }
-        }
+        const response = await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
+          headers: {
+            "x-trakt-client-id": clientId,
+            Authorization: `Bearer ${tokenRef.current || token}`,
+          },
+        });
+        // Authentication and permission failures will not improve with retries.
+        // Return them immediately so the scan can show a useful error.
+        if (response.status === 401 || response.status === 403) return response;
         if (response.status === 429) {
           if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
           const retryAfter = Number(response.headers.get("Retry-After"));
@@ -155,6 +140,7 @@ export default function Home() {
   async function traktFetch<T>(path: string): Promise<T> {
     const response = await traktRequest(`${TRAKT}${path}`);
     if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
+    if (response.status === 403) throw new Error("Trakt rejected this request (403). Make sure the access token was created with the same Trakt application as the Client ID.");
     if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
     if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
     return response.json();
@@ -170,6 +156,7 @@ export default function Home() {
       url.searchParams.set("limit", "100");
       const response = await traktRequest(url);
       if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
+      if (response.status === 403) throw new Error("Trakt rejected this request (403). Make sure the access token was created with the same Trakt application as the Client ID.");
       if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
       if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
       const batch = await response.json() as T[];
@@ -209,6 +196,7 @@ export default function Home() {
       let checkpoint: ScanCheckpoint = { signature, library, completed: [], results: {}, activity };
       if (savedCheckpoint?.signature === signature && (!savedCheckpoint.activity || !activity || savedCheckpoint.activity === activity)) checkpoint = { ...savedCheckpoint, library, activity };
       const completed = new Set(checkpoint.completed);
+      const completedAtStart = completed.size;
       const queue = library.filter(({ show }) => !completed.has(show.ids.trakt));
       let cursor = 0;
       const failed: CollectionShow[] = [];
@@ -240,7 +228,13 @@ export default function Home() {
       const worker = async () => {
         while (cursor < queue.length) {
           const item = queue[cursor++];
-          try { await scanOne(item); } catch { failed.push(item); }
+          try { await scanOne(item); }
+          catch (scanError) {
+            // If even the first show is rejected, continuing would leave the
+            // interface at 0 while repeating the same failure hundreds of times.
+            if (completed.size === completedAtStart) throw scanError;
+            failed.push(item);
+          }
         }
       };
       await Promise.all(Array.from({ length: Math.min(1, queue.length || 1) }, worker));

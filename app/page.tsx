@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type TraktShow = {
   title: string;
@@ -28,6 +28,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const useDirectTrakt = useRef(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("shelfcheck-trakt");
@@ -82,12 +83,29 @@ export default function Home() {
       await wait(650);
       try {
         const upstream = new URL(input.toString());
-        const response = await fetch(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
-          headers: {
-            "x-trakt-client-id": clientId,
-            Authorization: `Bearer ${token}`,
-          },
-        });
+        const directHeaders = {
+          "Content-Type": "application/json",
+          "trakt-api-version": "2",
+          "trakt-api-key": clientId,
+          Authorization: `Bearer ${token}`,
+        };
+        let response: Response;
+
+        if (useDirectTrakt.current) {
+          response = await fetch(upstream, { headers: directHeaders });
+        } else {
+          response = await fetch(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
+            headers: {
+              "x-trakt-client-id": clientId,
+              Authorization: `Bearer ${token}`,
+            },
+          });
+
+          if (response.status === 403) {
+            useDirectTrakt.current = true;
+            response = await fetch(upstream, { headers: directHeaders });
+          }
+        }
         if (response.status === 429) {
           if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
           const retryAfter = Number(response.headers.get("Retry-After"));

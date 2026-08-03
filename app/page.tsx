@@ -82,8 +82,35 @@ export default function Home() {
     setError("");
   }
 
+  const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+  async function traktRequest(input: string | URL): Promise<Response> {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await wait(650);
+      try {
+        const response = await fetch(input, { headers });
+        if (response.status === 429) {
+          if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
+          const retryAfter = Number(response.headers.get("Retry-After"));
+          await wait(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 5000 * (attempt + 1));
+          continue;
+        }
+        if (response.status >= 500 && attempt < 4) {
+          await wait(1000 * 2 ** attempt);
+          continue;
+        }
+        return response;
+      } catch (requestError) {
+        if (requestError instanceof Error && requestError.message.includes("rate limit")) throw requestError;
+        if (attempt === 4) throw new Error("Shelfcheck could not keep a stable connection to Trakt after several retries. Your previous report is still saved.");
+        await wait(1000 * 2 ** attempt);
+      }
+    }
+    throw new Error("The Trakt request could not be completed.");
+  }
+
   async function traktFetch<T>(path: string): Promise<T> {
-    const response = await fetch(`${TRAKT}${path}`, { headers });
+    const response = await traktRequest(`${TRAKT}${path}`);
     if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
     if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
     if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
@@ -98,7 +125,7 @@ export default function Home() {
       const url = new URL(`${TRAKT}${path}`);
       url.searchParams.set("page", String(page));
       url.searchParams.set("limit", "100");
-      const response = await fetch(url, { headers });
+      const response = await traktRequest(url);
       if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
       if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
       if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
@@ -140,7 +167,7 @@ export default function Home() {
           setProgress(Math.round(((index + 1) / Math.max(library.length, 1)) * 100));
         }
       };
-      await Promise.all(Array.from({ length: Math.min(4, library.length || 1) }, worker));
+      await Promise.all(Array.from({ length: Math.min(2, library.length || 1) }, worker));
       results.sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
       const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
       setMissing(results);

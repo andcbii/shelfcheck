@@ -12,7 +12,6 @@ type CollectionShow = { show: TraktShow };
 type ProgressEpisode = { number: number; completed: boolean };
 type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
-type TokenResponse = { access_token: string; refresh_token: string; expires_in: number; created_at?: number };
 type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed: number[]; results: Record<string, MissingEpisode[]>; activity?: string };
 
 const TRAKT = "https://api.trakt.tv";
@@ -22,9 +21,6 @@ const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
 export default function Home() {
   const [clientId, setClientId] = useState("");
   const [token, setToken] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [refreshToken, setRefreshToken] = useState("");
-  const [expiresAt, setExpiresAt] = useState(0);
   const [connected, setConnected] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -37,10 +33,8 @@ export default function Home() {
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
-  const [authenticating, setAuthenticating] = useState(false);
   const useDirectTrakt = useRef(false);
   const tokenRef = useRef("");
-  const refreshPromise = useRef<Promise<string> | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("shelfcheck-trakt");
@@ -50,9 +44,6 @@ export default function Home() {
         setClientId(value.clientId || "");
         setToken(value.token || "");
         tokenRef.current = value.token || "";
-        setClientSecret(value.clientSecret || "");
-        setRefreshToken(value.refreshToken || "");
-        setExpiresAt(value.expiresAt || 0);
         setConnected(Boolean(value.clientId && value.token));
         setSettingsOpen(false);
       }
@@ -93,42 +84,15 @@ export default function Home() {
       setError("Enter both your Trakt client ID and access token.");
       return;
     }
-    persistCredentials({ access_token: token.trim(), refresh_token: refreshToken, expires_in: Math.max(0, Math.round((expiresAt - Date.now()) / 1000)) });
+    const nextClientId = clientId.trim();
+    const nextToken = token.trim();
+    setClientId(nextClientId);
+    setToken(nextToken);
+    tokenRef.current = nextToken;
+    localStorage.setItem("shelfcheck-trakt", JSON.stringify({ clientId: nextClientId, token: nextToken }));
     setConnected(true);
     setSettingsOpen(false);
     setError("");
-  }
-
-  function persistCredentials(tokens: TokenResponse) {
-    const nextExpiresAt = tokens.created_at ? (tokens.created_at + tokens.expires_in) * 1000 : Date.now() + tokens.expires_in * 1000;
-    tokenRef.current = tokens.access_token;
-    setToken(tokens.access_token); setRefreshToken(tokens.refresh_token || refreshToken); setExpiresAt(nextExpiresAt);
-    localStorage.setItem("shelfcheck-trakt", JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim(), token: tokens.access_token, refreshToken: tokens.refresh_token || refreshToken, expiresAt: nextExpiresAt }));
-  }
-
-  async function refreshAccessToken(): Promise<string> {
-    if (!refreshToken || !clientSecret) throw new Error("Your Trakt session expired. Reconnect Trakt to continue.");
-    if (refreshPromise.current) return refreshPromise.current;
-    refreshPromise.current = (async () => {
-      const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", clientId, clientSecret, refreshToken, redirectUri: `${window.location.origin}/auth/callback` }) });
-      if (!response.ok) throw new Error("Trakt could not renew your session. Reconnect Trakt to continue.");
-      const tokens = await response.json() as TokenResponse;
-      persistCredentials(tokens);
-      return tokens.access_token;
-    })().finally(() => { refreshPromise.current = null; });
-    return refreshPromise.current;
-  }
-
-  async function connectWithTrakt() {
-    if (!clientId.trim() || !clientSecret.trim()) { setError("Enter your Trakt client ID and client secret first."); return; }
-    setAuthenticating(true); setError("");
-    const redirectUri = `${window.location.origin}/auth/callback`;
-    localStorage.setItem("shelfcheck-trakt-oauth-pending", JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim(), redirectUri }));
-    const authorize = new URL("https://trakt.tv/oauth/authorize");
-    authorize.searchParams.set("response_type", "code");
-    authorize.searchParams.set("client_id", clientId.trim());
-    authorize.searchParams.set("redirect_uri", redirectUri);
-    window.location.assign(authorize.toString());
   }
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -145,7 +109,6 @@ export default function Home() {
       await wait(650);
       try {
         const upstream = new URL(input.toString());
-        if (expiresAt && expiresAt < Date.now() + 60_000) await refreshAccessToken();
         const directHeaders = {
           "Content-Type": "application/json",
           "trakt-api-version": "2",
@@ -168,10 +131,6 @@ export default function Home() {
             useDirectTrakt.current = true;
             response = await fetchWithTimeout(upstream, { headers: directHeaders });
           }
-        }
-        if (response.status === 401 && refreshToken && clientSecret) {
-          await refreshAccessToken();
-          continue;
         }
         if (response.status === 429) {
           if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
@@ -378,13 +337,11 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
-          <p className="modal-copy">Enter your Trakt client ID and client secret. Shelfcheck will send you to Trakt and bring you back automatically after approval.</p>
+          <p className="modal-copy">Use your Trakt application client ID and access token. They are saved only in this browser and sent directly to Trakt.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
-          <label>Client secret<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Your Trakt application client secret" autoComplete="off" data-lpignore="true" /></label>
+          <label>Access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Your OAuth access token" autoComplete="off" data-lpignore="true" /></label>
           {error && <p className="field-error">{error}</p>}
-          <button className="primary full" onClick={connectWithTrakt} disabled={authenticating}>{authenticating ? "Waiting for Trakt authorization…" : "Sign in with Trakt"} <b>→</b></button>
-          <label>Or use an access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Paste your existing OAuth access token" autoComplete="off" data-lpignore="true" /></label>
-          <button className="help-link" onClick={saveCredentials}>Connect with access token</button>
+          <button className="primary full" onClick={saveCredentials}>Save and connect <b>→</b></button>
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
         </section>
       </div>}

@@ -244,17 +244,23 @@ export default function Home() {
     if (!connected) { setSettingsOpen(true); return; }
     setScanning(true); setError(""); setProgress(0); setPending(0);
     try {
-      const library = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+      let savedCheckpoint: ScanCheckpoint | null = null;
+      try { savedCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null; }
+      catch { /* ignore invalid checkpoint data */ }
+      // Resume from browser storage immediately. A temporary failure while
+      // downloading the collection must not block hundreds of known shows.
+      const library = savedCheckpoint?.library?.length
+        ? savedCheckpoint.library
+        : shows.length
+          ? shows
+          : await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
       setShows(library); setTotal(library.length);
       const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
       // Collection membership is a fast, reliable change marker. The optional
       // last-activities endpoint must never delay the start of a scan.
       const activity = "";
       let checkpoint: ScanCheckpoint = { signature, library, completed: [], results: {}, activity };
-      try {
-        const saved = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null;
-        if (saved?.signature === signature && (!saved.activity || !activity || saved.activity === activity)) checkpoint = { ...saved, library, activity };
-      } catch { /* use a clean checkpoint */ }
+      if (savedCheckpoint?.signature === signature && (!savedCheckpoint.activity || !activity || savedCheckpoint.activity === activity)) checkpoint = { ...savedCheckpoint, library, activity };
       const completed = new Set(checkpoint.completed);
       const queue = library.filter(({ show }) => !completed.has(show.ids.trakt));
       let cursor = 0;
@@ -290,7 +296,7 @@ export default function Home() {
           try { await scanOne(item); } catch { failed.push(item); }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(2, queue.length || 1) }, worker));
+      await Promise.all(Array.from({ length: Math.min(1, queue.length || 1) }, worker));
       for (const item of failed) {
         if (completed.has(item.show.ids.trakt)) continue;
         await wait(3000);

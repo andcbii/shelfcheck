@@ -108,12 +108,23 @@ export default function Home() {
       await wait(650);
       try {
         const upstream = new URL(input.toString());
-        const response = await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
-          headers: {
-            "x-trakt-client-id": clientId,
-            "x-trakt-access-token": tokenRef.current || token,
-          },
-        });
+        const isLocal = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+        const response = isLocal
+          ? await fetchWithTimeout(upstream, {
+              headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+                "trakt-api-version": "2",
+                "trakt-api-key": clientId,
+                Authorization: `Bearer ${tokenRef.current || token}`,
+              },
+            })
+          : await fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
+              headers: {
+                "x-trakt-client-id": clientId,
+                "x-trakt-access-token": tokenRef.current || token,
+              },
+            });
         // Authentication and permission failures will not improve with retries.
         // Return them immediately so the scan can show a useful error.
         if (response.status === 401 || response.status === 403) return response;

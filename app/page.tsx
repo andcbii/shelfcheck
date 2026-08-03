@@ -230,8 +230,8 @@ export default function Home() {
             <h3>{show.title} <small>{show.year}</small></h3>
             <div className="show-links-row">
               <p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p>
-              <a className="brand-link trakt-brand" href={`https://app.trakt.tv/shows/${show.ids.slug}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on Trakt`} title="View on Trakt"><span>✓</span><b>trakt</b></a>
-              {show.ids.tmdb && <a className="brand-link tmdb-brand" href={`https://www.themoviedb.org/tv/${show.ids.tmdb}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on The Movie Database`} title="View on TMDB"><i /><b>TMDB</b></a>}
+              <a className="brand-link" href={`https://app.trakt.tv/shows/${show.ids.slug}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on Trakt`} title="View on Trakt"><img src="/trakt-logomark.svg" alt="" /></a>
+              {show.ids.tmdb && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.ids.tmdb}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on The Movie Database`} title="View on TMDB"><img src="/tmdb-blue-square.svg" alt="" /></a>}
             </div>
           </div>
           <div className="episode-tags">{episodes.map((ep) => <a

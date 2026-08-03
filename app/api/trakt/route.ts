@@ -1,6 +1,7 @@
 const TRAKT_API = "https://api.trakt.tv";
 const ALLOWED_PATHS = [
   /^\/sync\/collection\/shows$/,
+  /^\/sync\/last_activities$/,
   /^\/shows\/\d+$/,
   /^\/shows\/\d+\/progress\/collection$/,
 ];

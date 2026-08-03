@@ -12,13 +12,19 @@ type CollectionShow = { show: TraktShow };
 type ProgressEpisode = { number: number; completed: boolean };
 type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
+type TokenResponse = { access_token: string; refresh_token: string; expires_in: number; created_at?: number };
+type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed: number[]; results: Record<string, MissingEpisode[]>; activity?: string };
 
 const TRAKT = "https://api.trakt.tv";
 const REPORT_CACHE = "shelfcheck-report-v1";
+const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
 
 export default function Home() {
   const [clientId, setClientId] = useState("");
   const [token, setToken] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const [refreshToken, setRefreshToken] = useState("");
+  const [expiresAt, setExpiresAt] = useState(0);
   const [connected, setConnected] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -28,7 +34,14 @@ export default function Home() {
   const [error, setError] = useState("");
   const [lastScan, setLastScan] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [processed, setProcessed] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [pending, setPending] = useState(0);
+  const [authenticating, setAuthenticating] = useState(false);
+  const [deviceCode, setDeviceCode] = useState("");
   const useDirectTrakt = useRef(false);
+  const tokenRef = useRef("");
+  const refreshPromise = useRef<Promise<string> | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem("shelfcheck-trakt");
@@ -37,6 +50,10 @@ export default function Home() {
         const value = JSON.parse(saved);
         setClientId(value.clientId || "");
         setToken(value.token || "");
+        tokenRef.current = value.token || "";
+        setClientSecret(value.clientSecret || "");
+        setRefreshToken(value.refreshToken || "");
+        setExpiresAt(value.expiresAt || 0);
         setConnected(Boolean(value.clientId && value.token));
         setSettingsOpen(false);
       }
@@ -53,6 +70,13 @@ export default function Home() {
         }
       }
     } catch { /* ignore an invalid or outdated report cache */ }
+    try {
+      const checkpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null;
+      if (checkpoint?.library?.length) {
+        setShows(checkpoint.library); setProcessed(checkpoint.completed.length); setTotal(checkpoint.library.length);
+        setPending(checkpoint.library.length - checkpoint.completed.length); setMissing(Object.values(checkpoint.results || {}).flat());
+      }
+    } catch { /* ignore invalid checkpoint data */ }
   }, []);
 
   const grouped = useMemo(() => {
@@ -70,10 +94,59 @@ export default function Home() {
       setError("Enter both your Trakt client ID and access token.");
       return;
     }
-    localStorage.setItem("shelfcheck-trakt", JSON.stringify({ clientId: clientId.trim(), token: token.trim() }));
+    persistCredentials({ access_token: token.trim(), refresh_token: refreshToken, expires_in: Math.max(0, Math.round((expiresAt - Date.now()) / 1000)) });
     setConnected(true);
     setSettingsOpen(false);
     setError("");
+  }
+
+  function persistCredentials(tokens: TokenResponse) {
+    const nextExpiresAt = tokens.created_at ? (tokens.created_at + tokens.expires_in) * 1000 : Date.now() + tokens.expires_in * 1000;
+    tokenRef.current = tokens.access_token;
+    setToken(tokens.access_token); setRefreshToken(tokens.refresh_token || refreshToken); setExpiresAt(nextExpiresAt);
+    localStorage.setItem("shelfcheck-trakt", JSON.stringify({ clientId: clientId.trim(), clientSecret: clientSecret.trim(), token: tokens.access_token, refreshToken: tokens.refresh_token || refreshToken, expiresAt: nextExpiresAt }));
+  }
+
+  async function refreshAccessToken(): Promise<string> {
+    if (!refreshToken || !clientSecret) throw new Error("Your Trakt session expired. Reconnect Trakt to continue.");
+    if (refreshPromise.current) return refreshPromise.current;
+    refreshPromise.current = (async () => {
+      const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", clientId, clientSecret, refreshToken }) });
+      if (!response.ok) throw new Error("Trakt could not renew your session. Reconnect Trakt to continue.");
+      const tokens = await response.json() as TokenResponse;
+      persistCredentials(tokens);
+      return tokens.access_token;
+    })().finally(() => { refreshPromise.current = null; });
+    return refreshPromise.current;
+  }
+
+  async function connectWithTrakt() {
+    if (!clientId.trim() || !clientSecret.trim()) { setError("Enter your Trakt client ID and client secret first."); return; }
+    setAuthenticating(true); setError(""); setDeviceCode("");
+    const authWindow = window.open("about:blank", "trakt-auth", "width=700,height=760");
+    try {
+      const response = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "device", clientId: clientId.trim() }) });
+      if (!response.ok) throw new Error("Trakt could not start sign-in.");
+      const device = await response.json() as { device_code: string; user_code: string; verification_url: string; expires_in: number; interval: number };
+      setDeviceCode(device.user_code);
+      if (authWindow) authWindow.location.href = device.verification_url;
+      const deadline = Date.now() + device.expires_in * 1000;
+      while (Date.now() < deadline) {
+        await wait(Math.max(device.interval, 5) * 1000);
+        const poll = await fetch("/api/trakt-auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "poll", clientId: clientId.trim(), deviceCode: device.device_code }) });
+        if (poll.ok) {
+          persistCredentials(await poll.json() as TokenResponse);
+          setConnected(true); setSettingsOpen(false); setDeviceCode("");
+          if (authWindow && !authWindow.closed) authWindow.close();
+          return;
+        }
+        if (![400, 404, 409, 410, 418, 429].includes(poll.status)) throw new Error("Trakt sign-in could not be completed.");
+      }
+      throw new Error("Trakt sign-in expired. Please try again.");
+    } catch (e) {
+      if (authWindow && !authWindow.closed) authWindow.close();
+      setError(e instanceof Error ? e.message : "Trakt sign-in could not be completed.");
+    } finally { setAuthenticating(false); }
   }
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -83,11 +156,12 @@ export default function Home() {
       await wait(650);
       try {
         const upstream = new URL(input.toString());
+        if (expiresAt && expiresAt < Date.now() + 60_000) await refreshAccessToken();
         const directHeaders = {
           "Content-Type": "application/json",
           "trakt-api-version": "2",
           "trakt-api-key": clientId,
-          Authorization: `Bearer ${token}`,
+          Authorization: `Bearer ${tokenRef.current || token}`,
         };
         let response: Response;
 
@@ -97,7 +171,7 @@ export default function Home() {
           response = await fetch(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
             headers: {
               "x-trakt-client-id": clientId,
-              Authorization: `Bearer ${token}`,
+              Authorization: `Bearer ${tokenRef.current || token}`,
             },
           });
 
@@ -105,6 +179,10 @@ export default function Home() {
             useDirectTrakt.current = true;
             response = await fetch(upstream, { headers: directHeaders });
           }
+        }
+        if (response.status === 401 && refreshToken && clientSecret) {
+          await refreshAccessToken();
+          continue;
         }
         if (response.status === 429) {
           if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
@@ -157,39 +235,69 @@ export default function Home() {
 
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
-    setScanning(true); setError(""); setProgress(0);
+    setScanning(true); setError(""); setProgress(0); setPending(0);
     try {
       const library = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
-      setShows(library);
-      const results: MissingEpisode[] = [];
+      setShows(library); setTotal(library.length);
+      const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
+      const activity = await traktFetch<Record<string, unknown>>("/sync/last_activities").then(JSON.stringify).catch(() => "");
+      let checkpoint: ScanCheckpoint = { signature, library, completed: [], results: {}, activity };
+      try {
+        const saved = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null;
+        if (saved?.signature === signature && (!saved.activity || !activity || saved.activity === activity)) checkpoint = { ...saved, library, activity };
+      } catch { /* use a clean checkpoint */ }
+      const completed = new Set(checkpoint.completed);
+      const queue = library.filter(({ show }) => !completed.has(show.ids.trakt));
       let cursor = 0;
+      const failed: CollectionShow[] = [];
+      setProcessed(completed.size);
+      setMissing(Object.values(checkpoint.results).flat());
+      const saveCheckpoint = () => {
+        checkpoint.completed = [...completed];
+        localStorage.setItem(CHECKPOINT_CACHE, JSON.stringify(checkpoint));
+        setMissing(Object.values(checkpoint.results).flat());
+        setProcessed(completed.size);
+        setProgress(Math.round((completed.size / Math.max(library.length, 1)) * 100));
+      };
+      const scanOne = async (item: CollectionShow) => {
+        const data = await traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
+        const showResults: MissingEpisode[] = [];
+        for (const season of data.seasons || []) {
+          if (season.number === 0) continue;
+          for (const episode of season.episodes || []) if (!episode.completed) showResults.push({ show: item.show, season: season.number, episode: episode.number });
+        }
+        if (showResults.length) {
+          const details = await traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null);
+          if (details?.images?.poster?.length) item.show = { ...item.show, ...details, images: details.images };
+          showResults.forEach((result) => { result.show = item.show; });
+        }
+        checkpoint.results[String(item.show.ids.trakt)] = showResults;
+        completed.add(item.show.ids.trakt);
+        saveCheckpoint();
+      };
       const worker = async () => {
-        while (cursor < library.length) {
-          const index = cursor++;
-          const item = library[index];
-          const data = await traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
-          const showResults: MissingEpisode[] = [];
-          for (const season of data.seasons || []) {
-            if (season.number === 0) continue;
-            for (const episode of season.episodes || []) {
-              if (!episode.completed) showResults.push({ show: item.show, season: season.number, episode: episode.number });
-            }
-          }
-          if (showResults.length) {
-            const details = await traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null);
-            if (details?.images?.poster?.length) item.show = { ...item.show, ...details, images: details.images };
-            showResults.forEach((result) => { result.show = item.show; });
-            results.push(...showResults);
-          }
-          setProgress(Math.round(((index + 1) / Math.max(library.length, 1)) * 100));
+        while (cursor < queue.length) {
+          const item = queue[cursor++];
+          try { await scanOne(item); } catch { failed.push(item); }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(2, library.length || 1) }, worker));
+      await Promise.all(Array.from({ length: Math.min(2, queue.length || 1) }, worker));
+      for (const item of failed) {
+        if (completed.has(item.show.ids.trakt)) continue;
+        await wait(3000);
+        try { await scanOne(item); } catch { /* saved for the next resume */ }
+      }
+      const results = Object.values(checkpoint.results).flat();
       results.sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
+      const remaining = library.length - completed.size;
+      setPending(remaining);
+      if (remaining) throw new Error(`${completed.size} of ${library.length} shows are safely saved. ${remaining} ${remaining === 1 ? "show is" : "shows are"} waiting to retry; select Resume scan to continue.`);
       const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
       setMissing(results);
       setLastScan(scanTime);
       localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: library, missing: results, lastScan: scanTime }));
+      localStorage.removeItem(CHECKPOINT_CACHE);
+      setPending(0);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The scan could not be completed.");
     } finally { setScanning(false); }
@@ -213,7 +321,7 @@ export default function Home() {
         </div>
         <div className="scan-panel">
           <div className="radar"><span>{scanning ? `${progress}%` : missing.length}</span><small>{scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={scanLibrary} disabled={scanning}>{scanning ? "Checking your shows…" : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
+          <button className="primary" onClick={scanLibrary} disabled={scanning}>{scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${lastScan}` : "Only your collection metadata is read."}</p>
         </div>
       </section>
@@ -232,7 +340,7 @@ export default function Home() {
         </div>
         {error && <div className="error"><span>!</span><p><strong>Scan interrupted</strong>{error}</p></div>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
-        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>Comparing show {Math.max(1, Math.ceil(shows.length * progress / 100))} of {shows.length || "…"}</p></div>}
+        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>Comparing show {processed} of {total || shows.length || "…"}. Every completed show is saved automatically.</p></div>}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => <article key={show.ids.trakt}>
           <div className="show-index">
             <span>{show.title.slice(0, 2).toUpperCase()}</span>
@@ -267,11 +375,13 @@ export default function Home() {
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
-          <p className="modal-copy">Use a Trakt application’s client ID and an OAuth access token. They’re saved only in this browser and sent directly to Trakt.</p>
+          <p className="modal-copy">Enter your Trakt application credentials, then authorize Shelfcheck on Trakt. Renewable tokens are saved only in this browser.</p>
           <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" /></label>
-          <label>Access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Your OAuth access token" autoComplete="off" /></label>
+          <label>Client secret<input type="password" value={clientSecret} onChange={(e) => setClientSecret(e.target.value)} placeholder="Your Trakt application client secret" autoComplete="off" /></label>
+          {deviceCode && <p className="field-error">Enter code <strong>{deviceCode}</strong> on the Trakt page that opened.</p>}
           {error && <p className="field-error">{error}</p>}
-          <button className="primary full" onClick={saveCredentials}>Save and connect <b>→</b></button>
+          <button className="primary full" onClick={connectWithTrakt} disabled={authenticating}>{authenticating ? "Waiting for Trakt authorization…" : "Sign in with Trakt"} <b>→</b></button>
+          {token && <button className="help-link" onClick={saveCredentials}>Keep using the saved access token</button>}
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
         </section>
       </div>}

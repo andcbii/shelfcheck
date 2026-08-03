@@ -90,11 +90,32 @@ export default function Home() {
     return response.json();
   }
 
+  async function traktFetchAll<T>(path: string): Promise<T[]> {
+    const items: T[] = [];
+    let page = 1;
+    let pageCount = 1;
+    do {
+      const url = new URL(`${TRAKT}${path}`);
+      url.searchParams.set("page", String(page));
+      url.searchParams.set("limit", "100");
+      const response = await fetch(url, { headers });
+      if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
+      if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
+      if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
+      const batch = await response.json() as T[];
+      items.push(...batch);
+      const headerCount = Number(response.headers.get("X-Pagination-Page-Count"));
+      pageCount = Number.isFinite(headerCount) && headerCount > 0 ? headerCount : (batch.length === 100 ? page + 1 : page);
+      page += 1;
+    } while (page <= pageCount && page <= 100);
+    return items;
+  }
+
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
     setScanning(true); setError(""); setProgress(0);
     try {
-      const library = await traktFetch<CollectionShow[]>("/sync/collection/shows?extended=full,images");
+      const library = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
       setShows(library);
       const results: MissingEpisode[] = [];
       let cursor = 0;
@@ -102,18 +123,19 @@ export default function Home() {
         while (cursor < library.length) {
           const index = cursor++;
           const item = library[index];
-          const [data, details] = await Promise.all([
-            traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`),
-            traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null),
-          ]);
-          if (details?.images?.poster?.length) {
-            item.show = { ...item.show, ...details, images: details.images };
-          }
+          const data = await traktFetch<{ seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
+          const showResults: MissingEpisode[] = [];
           for (const season of data.seasons || []) {
             if (season.number === 0) continue;
             for (const episode of season.episodes || []) {
-              if (!episode.completed) results.push({ show: item.show, season: season.number, episode: episode.number });
+              if (!episode.completed) showResults.push({ show: item.show, season: season.number, episode: episode.number });
             }
+          }
+          if (showResults.length) {
+            const details = await traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null);
+            if (details?.images?.poster?.length) item.show = { ...item.show, ...details, images: details.images };
+            showResults.forEach((result) => { result.show = item.show; });
+            results.push(...showResults);
           }
           setProgress(Math.round(((index + 1) / Math.max(library.length, 1)) * 100));
         }

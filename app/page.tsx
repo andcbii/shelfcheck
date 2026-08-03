@@ -55,6 +55,10 @@ export default function Home() {
   const [debugEnabled, setDebugEnabled] = useState(false);
   const tokenRef = useRef("");
   const debugEnabledRef = useRef(false);
+  const requestGateRef = useRef<Promise<void>>(Promise.resolve());
+  const nextRequestAtRef = useRef(0);
+  const networkFailuresRef = useRef(0);
+  const networkPauseUntilRef = useRef(0);
 
   useEffect(() => {
     const diagnosticsOn = localStorage.getItem(DEBUG_ENABLED_CACHE) === "true";
@@ -157,6 +161,21 @@ export default function Home() {
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+  async function waitForRequestSlot() {
+    let release!: () => void;
+    const previous = requestGateRef.current;
+    requestGateRef.current = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      const scheduledAt = Math.max(nextRequestAtRef.current, networkPauseUntilRef.current);
+      const delay = Math.max(0, scheduledAt - Date.now());
+      if (delay) await wait(delay);
+      // Six workers may remain in flight, but request starts are paced to
+      // avoid the simultaneous bursts that Trakt/Cloudflare drops.
+      nextRequestAtRef.current = Date.now() + 300;
+    } finally { release(); }
+  }
+
   async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15_000);
@@ -166,7 +185,7 @@ export default function Home() {
 
   async function traktRequest(input: string | URL): Promise<Response> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      await wait(650);
+      await waitForRequestSlot();
       const requestStarted = Date.now();
       try {
         const upstream = new URL(input.toString());
@@ -189,6 +208,7 @@ export default function Home() {
               },
             });
         logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
+        networkFailuresRef.current = 0;
         // Authentication and permission failures will not improve with retries.
         // Return them immediately so the scan can show a useful error.
         if (response.status === 401 || response.status === 403) return response;
@@ -206,6 +226,13 @@ export default function Home() {
       } catch (requestError) {
         const upstream = new URL(input.toString());
         logDebug("request.error", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: requestError instanceof Error ? requestError.message : String(requestError) });
+        if (requestError instanceof Error && requestError.message === "Failed to fetch") {
+          networkFailuresRef.current += 1;
+          if (networkFailuresRef.current >= 3) {
+            networkPauseUntilRef.current = Math.max(networkPauseUntilRef.current, Date.now() + 30_000);
+            logDebug("request.circuit-breaker", { pauseMs: 30000, consecutiveFailures: networkFailuresRef.current });
+          }
+        }
         if (requestError instanceof Error && requestError.message.includes("rate limit")) throw requestError;
         if (attempt === 4) throw new Error("Shelfcheck could not keep a stable connection to Trakt after several retries. Your previous report is still saved.");
         await wait(1000 * 2 ** attempt);

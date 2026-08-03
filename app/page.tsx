@@ -20,6 +20,23 @@ const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
 const DEBUG_LOG_CACHE = "shelfcheck-debug-log-v1";
 const DEBUG_ENABLED_CACHE = "shelfcheck-debug-enabled-v1";
 
+function compactShow(show: TraktShow): TraktShow {
+  return {
+    title: show.title,
+    year: show.year,
+    ids: show.ids,
+    ...(show.images?.poster?.[0] ? { images: { poster: [show.images.poster[0]] } } : {}),
+  };
+}
+
+function compactLibrary(library: CollectionShow[]): CollectionShow[] {
+  return library.map(({ show }) => ({ show: compactShow(show) }));
+}
+
+function compactMissing(items: MissingEpisode[]): MissingEpisode[] {
+  return items.map((item) => ({ ...item, show: compactShow(item.show) }));
+}
+
 export default function Home() {
   const [clientId, setClientId] = useState("");
   const [token, setToken] = useState("");
@@ -60,17 +77,22 @@ export default function Home() {
       if (cached) {
         const report = JSON.parse(cached);
         if (Array.isArray(report.shows) && Array.isArray(report.missing) && typeof report.lastScan === "string") {
-          setShows(report.shows);
-          setMissing(report.missing);
+          const cachedShows = compactLibrary(report.shows);
+          const cachedMissing = compactMissing(report.missing);
+          setShows(cachedShows);
+          setMissing(cachedMissing);
           setLastScan(report.lastScan);
+          try { localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: cachedShows, missing: cachedMissing, lastScan: report.lastScan })); }
+          catch { /* the next completed scan will replace an oversized legacy report */ }
         }
       }
     } catch { /* ignore an invalid or outdated report cache */ }
     try {
       const checkpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null;
       if (checkpoint?.library?.length) {
-        setShows(checkpoint.library); setProcessed(checkpoint.completed.length); setTotal(checkpoint.library.length);
-        setPending(checkpoint.library.length - checkpoint.completed.length); setMissing(Object.values(checkpoint.results || {}).flat());
+        const cachedLibrary = compactLibrary(checkpoint.library);
+        setShows(cachedLibrary); setProcessed(checkpoint.completed.length); setTotal(cachedLibrary.length);
+        setPending(cachedLibrary.length - checkpoint.completed.length); setMissing(compactMissing(Object.values(checkpoint.results || {}).flat()));
       }
     } catch { /* ignore invalid checkpoint data */ }
   }, []);
@@ -80,7 +102,7 @@ export default function Home() {
     try {
       const entries = JSON.parse(localStorage.getItem(DEBUG_LOG_CACHE) || "[]") as unknown[];
       entries.push({ timestamp: new Date().toISOString(), event, ...details });
-      localStorage.setItem(DEBUG_LOG_CACHE, JSON.stringify(entries.slice(-2000)));
+      localStorage.setItem(DEBUG_LOG_CACHE, JSON.stringify(entries.slice(-500)));
     } catch { /* diagnostics must never interrupt a scan */ }
   }
 
@@ -244,6 +266,7 @@ export default function Home() {
           library = shows;
         }
       }
+      library = compactLibrary(library);
       setShows(library); setTotal(library.length);
       logDebug("scan.library-ready", { shows: library.length, resumed: Boolean(savedCheckpoint?.library?.length) });
       const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
@@ -261,10 +284,15 @@ export default function Home() {
       setMissing(Object.values(checkpoint.results).flat());
       const saveCheckpoint = () => {
         checkpoint.completed = [...completed];
-        localStorage.setItem(CHECKPOINT_CACHE, JSON.stringify(checkpoint));
         setMissing(Object.values(checkpoint.results).flat());
         setProcessed(completed.size);
         setProgress(Math.round((completed.size / Math.max(library.length, 1)) * 100));
+        try {
+          localStorage.removeItem(CHECKPOINT_CACHE);
+          localStorage.setItem(CHECKPOINT_CACHE, JSON.stringify(checkpoint));
+        } catch (storageError) {
+          logDebug("checkpoint.storage-error", { error: storageError instanceof Error ? storageError.message : String(storageError), completed: completed.size, total: library.length });
+        }
       };
       const scanOne = async (item: CollectionShow) => {
         const showStarted = Date.now();
@@ -277,7 +305,7 @@ export default function Home() {
         }
         if (showResults.length) {
           const details = await traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null);
-          if (details?.images?.poster?.length) item.show = { ...item.show, ...details, images: details.images };
+          if (details?.images?.poster?.length) item.show = { ...item.show, images: { poster: [details.images.poster[0]] } };
           showResults.forEach((result) => { result.show = item.show; });
         }
         checkpoint.results[String(item.show.ids.trakt)] = showResults;
@@ -312,7 +340,7 @@ export default function Home() {
       const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
       setMissing(results);
       setLastScan(scanTime);
-      localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: library, missing: results, lastScan: scanTime }));
+      localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: compactLibrary(library), missing: compactMissing(results), lastScan: scanTime }));
       localStorage.removeItem(CHECKPOINT_CACHE);
       setPending(0);
     } catch (e) {

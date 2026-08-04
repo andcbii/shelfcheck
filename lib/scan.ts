@@ -14,6 +14,7 @@ type TraktShow = {
 };
 type CollectionShow = { show: TraktShow; seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[] };
 type ProgressSeason = { number: number; episodes: { number: number; completed: boolean }[] };
+type TraktSeason = { number: number; episodes?: { season?: number; number: number; first_aired?: string | null }[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
 type ShowScanState = { fingerprint: string; lastCheckedAt: string; nextCheckAt: string | null };
 type ScanCache = Record<string, ShowScanState>;
@@ -79,6 +80,23 @@ function calendarStartDate() {
   return `${value.year}-${value.month}-${value.day}`;
 }
 
+function localDate(value: Date): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: process.env.TZ || "UTC",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
+
+function hasAired(firstAired: string | null | undefined, today: string): boolean {
+  if (!firstAired) return false;
+  const airedAt = new Date(firstAired);
+  return !Number.isNaN(airedAt.getTime()) && localDate(airedAt) <= today;
+}
+
 async function traktRequest(path: string): Promise<Response> {
   const credentials = await readTraktCredentials();
   if (!credentials) throw new Error("Trakt is not configured.");
@@ -101,7 +119,7 @@ async function traktRequest(path: string): Promise<Response> {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          "User-Agent": "Shelfcheck/1.1.0-beta.4 (+https://github.com/andcbii/shelfcheck)",
+          "User-Agent": "Shelfcheck/1.1.0-beta.5 (+https://github.com/andcbii/shelfcheck)",
           "trakt-api-version": "2",
           "trakt-api-key": credentials.clientId,
           Authorization: `Bearer ${credentials.accessToken}`,
@@ -157,7 +175,7 @@ async function runScan(force = false) {
   const state = readSingleUserState().state || {};
   const logger = createScanLogger(state.diagnosticsEnabled !== false);
   (globalThis as ScanGlobal).__shelfcheckLogger = logger;
-  logger.info("scan.start", { startedAt, version: "1.1.0-beta.4", force });
+  logger.info("scan.start", { startedAt, version: "1.1.0-beta.5", force });
   updateScan({ status: "running", processed: 0, total: 0, startedAt });
   try {
     const prior = (state.checkpoint || state.report) as ScanReport | undefined;
@@ -238,8 +256,26 @@ async function runScan(force = false) {
         const aired = progress.aired ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.length : 0), 0);
         const completed = progress.completed ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.filter((episode) => episode.completed).length : 0), 0);
         item.show = compactShow({ ...item.show, collection: { aired, completed } });
+        const incomplete = seasons.flatMap((season) => season.number
+          ? (season.episodes || []).filter((episode) => !episode.completed).map((episode) => ({ season: season.number, episode: episode.number }))
+          : []);
+        const episodeDates = incomplete.length
+          ? await traktJson<TraktSeason[]>(`/shows/${id}/seasons?extended=episodes,full`).catch((error) => {
+            logger.warn("show.airdates-unavailable", { traktId: item.show.ids.trakt, title: item.show.title, error: error instanceof Error ? error.message : String(error) });
+            return [];
+          })
+          : [];
+        const firstAiredByEpisode = new Map<string, string | null | undefined>();
+        for (const season of episodeDates) for (const episode of season.episodes || []) {
+          firstAiredByEpisode.set(`${episode.season ?? season.number}:${episode.number}`, episode.first_aired);
+        }
+        const today = localDate(new Date());
         const missing: MissingEpisode[] = [];
-        for (const season of seasons) if (season.number) for (const episode of season.episodes || []) if (!episode.completed) missing.push({ show: item.show, season: season.number, episode: episode.number });
+        for (const episode of incomplete) {
+          if (hasAired(firstAiredByEpisode.get(`${episode.season}:${episode.episode}`), today)) {
+            missing.push({ show: item.show, season: episode.season, episode: episode.episode });
+          }
+        }
         if (missing.length && !item.show.images?.poster?.length) {
           const details = await traktJson<TraktShow>(`/shows/${id}?extended=full,images`).catch(() => null);
           if (details?.images?.poster?.[0]) item.show = compactShow({ ...item.show, images: { poster: [details.images.poster[0]] } });

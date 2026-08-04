@@ -46,3 +46,8 @@ export function writeSingleUserState(state: Record<string, unknown>) {
     ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP`)
     .run(SINGLE_USER_ID, JSON.stringify(state));
 }
+
+export function patchSingleUserState(patch: Record<string, unknown>) {
+  const current = readSingleUserState();
+  writeSingleUserState({ ...(current.state || {}), ...patch });
+}

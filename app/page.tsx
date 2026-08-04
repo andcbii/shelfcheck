@@ -14,22 +14,16 @@ type CollectionShow = {
   show: TraktShow;
   seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[];
 };
-type ProgressEpisode = { number: number; completed: boolean };
-type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
-type ShowScanState = { fingerprint: string; lastCheckedAt: string; nextCheckAt: string | null };
-type ScanCache = Record<string, ShowScanState>;
-type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed: number[]; results: Record<string, MissingEpisode[]>; activity?: string; scanCache?: ScanCache };
-type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache };
+type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string };
+type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string };
 type ServerState = {
   report?: ScanReport;
-  checkpoint?: ScanCheckpoint | null;
+  checkpoint?: unknown;
   ignoredShows?: TraktShow[];
+  scan?: ScanStatus;
 };
 
-const TRAKT = "https://api.trakt.tv";
-const REPORT_CACHE = "shelfcheck-report-v1";
-const CHECKPOINT_CACHE = "shelfcheck-checkpoint-v1";
 const DEBUG_LOG_CACHE = "shelfcheck-debug-log-v1";
 const DEBUG_ENABLED_CACHE = "shelfcheck-debug-enabled-v1";
 const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
@@ -48,23 +42,6 @@ function compactShow(show: TraktShow): TraktShow {
 
 function compactLibrary(library: CollectionShow[]): CollectionShow[] {
   return library.map(({ show }) => ({ show: compactShow(show) }));
-}
-
-function collectionFingerprint(item: CollectionShow): string {
-  return (item.seasons || [])
-    .flatMap((season) => (season.episodes || []).map((episode) => `${season.number}:${episode.number}:${episode.collected_at || ""}`))
-    .sort()
-    .join("|");
-}
-
-function collectionActivityMarker(activity: unknown): string {
-  const value = activity as { episodes?: { collected_at?: string }; shows?: { collected_at?: string } };
-  return JSON.stringify([value?.episodes?.collected_at || "", value?.shows?.collected_at || ""]);
-}
-
-function fallbackDueAt(show: TraktShow, checkedAt: Date): number {
-  const ended = ["ended", "canceled", "cancelled"].includes((show.status || "").toLowerCase());
-  return checkedAt.getTime() + (ended ? 30 : 7) * 24 * 60 * 60 * 1000;
 }
 
 function compactMissing(items: MissingEpisode[]): MissingEpisode[] {
@@ -115,15 +92,8 @@ export default function Home() {
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
-  const [rateLimitPaused, setRateLimitPaused] = useState(false);
-  const [scanCache, setScanCache] = useState<ScanCache>({});
-  const [lastActivity, setLastActivity] = useState("");
+  const rateLimitPaused = false;
   const debugEnabledRef = useRef(false);
-  const requestGateRef = useRef<Promise<void>>(Promise.resolve());
-  const nextRequestAtRef = useRef(0);
-  const networkFailuresRef = useRef(0);
-  const networkPauseUntilRef = useRef(0);
-  const connectionValidatedRef = useRef(false);
   const serverSyncTimerRef = useRef<number | null>(null);
   const pendingServerPatchRef = useRef<Partial<ServerState>>({});
 
@@ -141,40 +111,11 @@ export default function Home() {
       if (configured) setSettingsOpen(false);
     }).catch(() => { /* settings remain open when configuration cannot be read */ });
 
-    try {
-      const cached = localStorage.getItem(REPORT_CACHE);
-      if (cached) {
-        const report = JSON.parse(cached);
-        if (Array.isArray(report.shows) && Array.isArray(report.missing) && typeof report.lastScan === "string") {
-          const cachedShows = compactLibrary(report.shows);
-          const cachedMissing = compactMissing(report.missing);
-          setShows(cachedShows);
-          setMissing(cachedMissing);
-          setLastScan(report.lastScan);
-          setScanCache(report.scanCache || {});
-          setLastActivity(report.activity || "");
-          try { localStorage.setItem(REPORT_CACHE, JSON.stringify({ ...report, shows: cachedShows, missing: cachedMissing })); }
-          catch { /* the next completed scan will replace an oversized legacy report */ }
-        }
-      }
-    } catch { /* ignore an invalid or outdated report cache */ }
-    try {
-      const checkpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null;
-      if (checkpoint?.library?.length) {
-        const cachedLibrary = compactLibrary(checkpoint.library);
-        setShows(cachedLibrary); setProcessed(checkpoint.completed.length); setTotal(cachedLibrary.length);
-        setPending(cachedLibrary.length - checkpoint.completed.length); setMissing(compactMissing(Object.values(checkpoint.results || {}).flat()));
-      }
-    } catch { /* ignore invalid checkpoint data */ }
     void fetch("/api/state", { cache: "no-store" }).then(async (response) => {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
-        let localReport: ServerState["report"];
-        let localCheckpoint: ScanCheckpoint | null = null;
-        try { localReport = JSON.parse(localStorage.getItem(REPORT_CACHE) || "null") || undefined; } catch { /* no local report */ }
-        try { localCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null"); } catch { /* no local checkpoint */ }
-        syncServerState({ report: localReport, checkpoint: localCheckpoint, ignoredShows: savedIgnored }, true);
+        syncServerState({ ignoredShows: savedIgnored }, true);
         return;
       }
       if (Array.isArray(state.ignoredShows)) {
@@ -189,16 +130,8 @@ export default function Home() {
           missing: compactMissing(state.report.missing),
         };
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
-        setScanCache(state.report.scanCache || {}); setLastActivity(state.report.activity || "");
-        try { localStorage.setItem(REPORT_CACHE, JSON.stringify(remoteReport)); } catch { /* retain server copy */ }
       }
-      if (state.checkpoint?.library?.length && state.checkpoint.completed.length < state.checkpoint.library.length) {
-        const remoteCheckpoint = { ...state.checkpoint, library: compactLibrary(state.checkpoint.library) };
-        setShows(remoteCheckpoint.library); setProcessed(remoteCheckpoint.completed.length); setTotal(remoteCheckpoint.library.length);
-        setPending(remoteCheckpoint.library.length - remoteCheckpoint.completed.length);
-        setMissing(compactMissing(Object.values(remoteCheckpoint.results || {}).flat()));
-        try { localStorage.setItem(CHECKPOINT_CACHE, JSON.stringify(remoteCheckpoint)); } catch { /* retain server copy */ }
-      }
+      if (state.scan?.status === "running") void pollServerScan();
     }).catch(() => { /* local browser copy remains available */ });
   }, []);
 
@@ -334,289 +267,51 @@ export default function Home() {
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-  async function pauseForRateLimit() {
-    const now = Date.now();
-    if (networkPauseUntilRef.current <= now) {
-      networkPauseUntilRef.current = now + 120_000;
-      setRateLimitPaused(true);
-      logDebug("request.rate-limit-pause", { status: 403, pauseMs: 120000 });
-    }
-    const pauseUntil = networkPauseUntilRef.current;
-    await wait(Math.max(0, pauseUntil - Date.now()));
-    if (Date.now() >= networkPauseUntilRef.current) {
-      setRateLimitPaused(false);
-      logDebug("request.rate-limit-resume", { status: 403 });
-    }
+  async function loadServerReport() {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (!response.ok) throw new Error("Shelfcheck could not load the completed report.");
+    const { state } = await response.json() as { state: ServerState | null };
+    if (!state?.report) return;
+    const report = state.report;
+    setShows(compactLibrary(report.shows));
+    setMissing(compactMissing(report.missing));
+    setLastScan(report.lastScan);
+    setPending(0);
   }
 
-  async function waitForRequestSlot() {
-    let release!: () => void;
-    const previous = requestGateRef.current;
-    requestGateRef.current = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      const scheduledAt = Math.max(nextRequestAtRef.current, networkPauseUntilRef.current);
-      const delay = Math.max(0, scheduledAt - Date.now());
-      if (delay) await wait(delay);
-      // Six workers may remain in flight, but request starts are paced to
-      // avoid the simultaneous bursts that Trakt/Cloudflare drops.
-      nextRequestAtRef.current = Date.now() + 300;
-    } finally { release(); }
-  }
-
-  async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 15_000);
-    try { return await fetch(input, { ...init, signal: controller.signal }); }
-    finally { window.clearTimeout(timeout); }
-  }
-
-  async function traktRequest(input: string | URL): Promise<Response> {
-    const isInitialRequest = !connectionValidatedRef.current;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await waitForRequestSlot();
-      const requestStarted = Date.now();
-      try {
-        const upstream = new URL(input.toString());
-        logDebug("request.start", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1 });
-        const proxyRequest = () => fetchWithTimeout(`/api/trakt?path=${encodeURIComponent(`${upstream.pathname}${upstream.search}`)}`, {
-        });
-        const response = await proxyRequest();
-        logDebug("request.response", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
-        networkFailuresRef.current = 0;
-        if (isInitialRequest) {
-          if (response.ok) {
-            connectionValidatedRef.current = true;
-            logDebug("request.connection-validated", { path: `${upstream.pathname}${upstream.search}`, status: response.status });
-          }
-          return response;
-        }
-        if (response.status === 401) return response;
-        if (response.status === 403) {
-          if (attempt === 4) return response;
-          await pauseForRateLimit();
-          continue;
-        }
-        if (response.status === 429) {
-          if (attempt === 4) throw new Error("Trakt’s rate limit was reached repeatedly. Wait a few minutes, then scan again.");
-          const retryAfter = Number(response.headers.get("Retry-After"));
-          await wait(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 5000 * (attempt + 1));
-          continue;
-        }
-        if (response.status >= 500 && attempt < 4) {
-          await wait(1000 * 2 ** attempt);
-          continue;
-        }
-        return response;
-      } catch (requestError) {
-        const upstream = new URL(input.toString());
-        logDebug("request.error", { path: `${upstream.pathname}${upstream.search}`, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: requestError instanceof Error ? requestError.message : String(requestError) });
-        if (isInitialRequest) {
-          throw new Error("Shelfcheck could not establish the initial connection to Trakt. The scan was stopped before processing any shows.");
-        }
-        if (requestError instanceof Error && requestError.message === "Failed to fetch") {
-          networkFailuresRef.current += 1;
-          if (networkFailuresRef.current >= 3) {
-            networkPauseUntilRef.current = Math.max(networkPauseUntilRef.current, Date.now() + 30_000);
-            logDebug("request.circuit-breaker", { pauseMs: 30000, consecutiveFailures: networkFailuresRef.current });
-          }
-        }
-        if (requestError instanceof Error && requestError.message.includes("rate limit")) throw requestError;
-        if (attempt === 4) throw new Error("Shelfcheck could not keep a stable connection to Trakt after several retries. Your previous report is still saved.");
-        await wait(1000 * 2 ** attempt);
+  async function pollServerScan() {
+    setScanning(true);
+    while (true) {
+      const response = await fetch("/api/scan", { cache: "no-store" });
+      if (!response.ok) throw new Error("Shelfcheck could not read scan progress.");
+      const { scan } = await response.json() as { scan: ScanStatus };
+      setProcessed(scan.processed);
+      setTotal(scan.total);
+      setProgress(Math.round((scan.processed / Math.max(scan.total, 1)) * 100));
+      if (scan.status === "completed") {
+        await loadServerReport();
+        setScanning(false);
+        return;
       }
+      if (scan.status === "error") {
+        setScanning(false);
+        throw new Error(scan.error || "The server-side scan failed.");
+      }
+      await wait(1000);
     }
-    throw new Error("The Trakt request could not be completed.");
-  }
-
-  async function traktFetch<T>(path: string): Promise<T> {
-    const response = await traktRequest(`${TRAKT}${path}`);
-    if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
-    if (response.status === 403) throw new Error("Trakt rejected this request (403). Make sure the access token was created with the same Trakt application as the Client ID.");
-    if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
-    if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
-    return response.json();
-  }
-
-  async function traktFetchAll<T>(path: string): Promise<T[]> {
-    const items: T[] = [];
-    let page = 1;
-    let pageCount = 1;
-    do {
-      const url = new URL(`${TRAKT}${path}`);
-      url.searchParams.set("page", String(page));
-      url.searchParams.set("limit", "100");
-      const response = await traktRequest(url);
-      if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
-      if (response.status === 403) throw new Error("Trakt rejected this request (403). Make sure the access token was created with the same Trakt application as the Client ID.");
-      if (response.status === 429) throw new Error("Trakt’s rate limit was reached. Wait a minute, then scan again.");
-      if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
-      const batch = await response.json() as T[];
-      items.push(...batch);
-      const headerCount = Number(response.headers.get("X-Pagination-Page-Count"));
-      pageCount = Number.isFinite(headerCount) && headerCount > 0 ? headerCount : (batch.length === 100 ? page + 1 : page);
-      page += 1;
-    } while (page <= pageCount && page <= 100);
-    return items;
   }
 
   async function scanLibrary() {
     if (!connected) { setSettingsOpen(true); return; }
-    connectionValidatedRef.current = false;
-    networkFailuresRef.current = 0;
-    networkPauseUntilRef.current = 0;
-    setScanning(true); setRateLimitPaused(false); setError(""); setProgress(0); setPending(0);
-    logDebug("scan.start", { cachedShows: shows.length, pending });
+    setError(""); setPending(0);
     try {
-      // Gate the scan on one completed request. This prevents resumed scans
-      // from starting multiple workers before the Trakt connection is known-good.
-      logDebug("scan.connection-validating");
-      const initialActivity = await traktFetch<unknown>("/sync/last_activities");
-      let savedCheckpoint: ScanCheckpoint | null = null;
-      try { savedCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null; }
-      catch { /* ignore invalid checkpoint data */ }
-      // Resume from browser storage immediately. Otherwise, last activities
-      // lets an unchanged collection avoid even downloading the full library.
-      let library: CollectionShow[];
-      let activity = lastActivity;
-      let freshFingerprints: Record<string, string> | null = null;
-      if (savedCheckpoint?.library?.length && savedCheckpoint.completed.length < savedCheckpoint.library.length) {
-        library = savedCheckpoint.library;
-      } else {
-        activity = collectionActivityMarker(initialActivity);
-        if (shows.length && activity && activity === lastActivity) {
-          library = shows;
-        } else {
-          try {
-            const downloaded = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
-            freshFingerprints = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), collectionFingerprint(item)]));
-            const previousShows = new Map(shows.map((item) => [item.show.ids.trakt, item.show]));
-            library = downloaded.map((item) => ({ show: { ...previousShows.get(item.show.ids.trakt), ...item.show } }));
-          } catch (libraryError) {
-            if (!shows.length) throw libraryError;
-            library = shows;
-            activity = lastActivity;
-          }
-        }
-      }
-      library = compactLibrary(library);
-      setShows(library); setTotal(library.length);
-      logDebug("scan.library-ready", { shows: library.length, resumed: Boolean(savedCheckpoint?.library?.length) });
-      const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
-      let checkpoint: ScanCheckpoint;
-      if (savedCheckpoint?.signature === signature && savedCheckpoint.completed.length < savedCheckpoint.library.length) {
-        checkpoint = { ...savedCheckpoint, library };
-      } else {
-        const priorResults = new Map<number, MissingEpisode[]>();
-        for (const result of missing) {
-          const id = result.show.ids.trakt;
-          priorResults.set(id, [...(priorResults.get(id) || []), result]);
-        }
-        const now = Date.now();
-        const completedFromCache: number[] = [];
-        const resultsFromCache: Record<string, MissingEpisode[]> = {};
-        const nextCache: ScanCache = {};
-        for (const item of library) {
-          const id = String(item.show.ids.trakt);
-          const cached = scanCache[id];
-          const fingerprintChanged = freshFingerprints !== null && freshFingerprints[id] !== cached?.fingerprint;
-          const dueAt = cached ? Date.parse(cached.nextCheckAt || "") : Number.NaN;
-          const due = cached ? !Number.isFinite(dueAt) || dueAt <= now : true;
-          if (!cached || fingerprintChanged || due) continue;
-          completedFromCache.push(item.show.ids.trakt);
-          resultsFromCache[id] = priorResults.get(item.show.ids.trakt) || [];
-          nextCache[id] = cached;
-        }
-        checkpoint = { signature, library, completed: completedFromCache, results: resultsFromCache, activity, scanCache: nextCache };
-      }
-      checkpoint.scanCache ||= {};
-      const completed = new Set(checkpoint.completed);
-      const completedAtStart = completed.size;
-      const queue = library.filter(({ show }) => !completed.has(show.ids.trakt));
-      let cursor = 0;
-      const failed: CollectionShow[] = [];
-      setProcessed(completed.size);
-      setMissing(Object.values(checkpoint.results).flat());
-      const saveCheckpoint = () => {
-        checkpoint.completed = [...completed];
-        setMissing(Object.values(checkpoint.results).flat());
-        setProcessed(completed.size);
-        setProgress(Math.round((completed.size / Math.max(library.length, 1)) * 100));
-        try {
-          localStorage.removeItem(CHECKPOINT_CACHE);
-          localStorage.setItem(CHECKPOINT_CACHE, JSON.stringify(checkpoint));
-        } catch (storageError) {
-          logDebug("checkpoint.storage-error", { error: storageError instanceof Error ? storageError.message : String(storageError), completed: completed.size, total: library.length });
-        }
-        syncServerState({ checkpoint });
-      };
-      const scanOne = async (item: CollectionShow) => {
-        const showStarted = Date.now();
-        logDebug("show.start", { traktId: item.show.ids.trakt, title: item.show.title, completed: completed.size, total: library.length });
-        const data = await traktFetch<{ aired?: number; completed?: number; seasons?: ProgressSeason[]; next_episode?: { first_aired?: string } | null }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false&extended=full`);
-        const aired = data.aired ?? (data.seasons || []).reduce((sum, season) => sum + (season.number === 0 ? 0 : season.episodes.length), 0);
-        const collected = data.completed ?? (data.seasons || []).reduce((sum, season) => sum + (season.number === 0 ? 0 : season.episodes.filter((episode) => episode.completed).length), 0);
-        item.show = { ...item.show, collection: { aired, completed: collected } };
-        const showResults: MissingEpisode[] = [];
-        for (const season of data.seasons || []) {
-          if (season.number === 0) continue;
-          for (const episode of season.episodes || []) if (!episode.completed) showResults.push({ show: item.show, season: season.number, episode: episode.number });
-        }
-        if (showResults.length) {
-          const details = await traktFetch<TraktShow>(`/shows/${item.show.ids.trakt}?extended=full,images`).catch(() => null);
-          if (details?.images?.poster?.length) item.show = { ...item.show, images: { poster: [details.images.poster[0]] } };
-          showResults.forEach((result) => { result.show = item.show; });
-        }
-        checkpoint.results[String(item.show.ids.trakt)] = showResults;
-        const checkedAt = new Date();
-        const fallback = fallbackDueAt(item.show, checkedAt);
-        const nextAiring = data.next_episode?.first_aired ? Date.parse(data.next_episode.first_aired) : Number.NaN;
-        checkpoint.scanCache![String(item.show.ids.trakt)] = {
-          fingerprint: freshFingerprints?.[String(item.show.ids.trakt)] ?? scanCache[String(item.show.ids.trakt)]?.fingerprint ?? "",
-          lastCheckedAt: checkedAt.toISOString(),
-          nextCheckAt: new Date(Number.isFinite(nextAiring) ? Math.min(nextAiring + 2 * 60 * 60 * 1000, fallback) : fallback).toISOString(),
-        };
-        completed.add(item.show.ids.trakt);
-        saveCheckpoint();
-        logDebug("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, missing: showResults.length, elapsedMs: Date.now() - showStarted, completed: completed.size, total: library.length });
-      };
-      const worker = async () => {
-        while (cursor < queue.length) {
-          const item = queue[cursor++];
-          try { await scanOne(item); }
-          catch (scanError) {
-            logDebug("show.error", { traktId: item.show.ids.trakt, title: item.show.title, error: scanError instanceof Error ? scanError.message : String(scanError), completed: completed.size, total: library.length });
-            // If even the first show is rejected, continuing would leave the
-            // interface at 0 while repeating the same failure hundreds of times.
-            if (completed.size === completedAtStart) throw scanError;
-            failed.push(item);
-          }
-        }
-      };
-      await Promise.all(Array.from({ length: Math.min(6, queue.length || 1) }, worker));
-      for (const item of failed) {
-        if (completed.has(item.show.ids.trakt)) continue;
-        await wait(3000);
-        try { await scanOne(item); } catch { /* saved for the next resume */ }
-      }
-      const results = Object.values(checkpoint.results).flat();
-      results.sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
-      const remaining = library.length - completed.size;
-      setPending(remaining);
-      if (remaining) throw new Error(`${completed.size} of ${library.length} shows are safely saved. ${remaining} ${remaining === 1 ? "show is" : "shows are"} waiting to retry; select Resume scan to continue.`);
-      const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
-      setMissing(results);
-      setLastScan(scanTime);
-      const report: ScanReport = { shows: compactLibrary(library), missing: compactMissing(results), lastScan: scanTime, activity, scanCache: checkpoint.scanCache };
-      localStorage.setItem(REPORT_CACHE, JSON.stringify(report));
-      localStorage.removeItem(CHECKPOINT_CACHE);
-      syncServerState({ report, checkpoint: null }, true);
-      setScanCache(checkpoint.scanCache || {}); setLastActivity(activity);
-      setPending(0);
-    } catch (e) {
-      logDebug("scan.error", { error: e instanceof Error ? e.message : String(e), processed, total });
-      setError(e instanceof Error ? e.message : "The scan could not be completed.");
-    } finally { setScanning(false); setRateLimitPaused(false); }
+      const response = await fetch("/api/scan", { method: "POST" });
+      if (!response.ok) throw new Error("Shelfcheck could not start the server-side scan.");
+      await pollServerScan();
+    } catch (scanError) {
+      setScanning(false);
+      setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");
+    }
   }
 
   return (

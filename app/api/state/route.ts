@@ -1,4 +1,4 @@
-import { readSingleUserState, writeSingleUserState } from "@/lib/sqlite";
+import { patchSingleUserState, readSingleUserState } from "@/lib/sqlite";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +11,6 @@ export async function GET() {
 
 export async function PATCH(request: Request) {
   const patch = await request.json() as Record<string, unknown>;
-  const current = readSingleUserState();
-  writeSingleUserState({ ...(current.state || {}), ...patch });
+  patchSingleUserState(patch);
   return Response.json({ saved: true });
 }

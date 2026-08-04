@@ -3,6 +3,7 @@ import "server-only";
 import { readTraktCredentials } from "@/lib/server-config";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { patchSingleUserState, readSingleUserState } from "@/lib/sqlite";
+import { SHELFCHECK_VERSION } from "@/lib/version";
 
 type TraktShow = {
   title: string;
@@ -18,7 +19,7 @@ type TraktSeason = { number: number; episodes?: { season?: number; number: numbe
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
 type ShowScanState = { fingerprint: string; lastCheckedAt: string; nextCheckAt: string | null };
 type ScanCache = Record<string, ShowScanState>;
-type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache };
+type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
 type CalendarEntry = { first_aired?: string; show?: { ids?: { trakt?: number } } };
 export type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string };
 
@@ -69,17 +70,6 @@ function nextFallback(show: TraktShow, checkedAt: Date): number {
   return checkedAt.getTime() + (ended ? 30 : 7) * 86_400_000;
 }
 
-function calendarStartDate() {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: process.env.TZ || "UTC",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${value.year}-${value.month}-${value.day}`;
-}
-
 function localDate(value: Date): string {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: process.env.TZ || "UTC",
@@ -91,10 +81,23 @@ function localDate(value: Date): string {
   return `${fields.year}-${fields.month}-${fields.day}`;
 }
 
-function hasAired(firstAired: string | null | undefined, today: string): boolean {
+function addCalendarDays(date: string, days: number): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+}
+
+function calendarStartDate(offsetDays = 0) {
+  return addCalendarDays(localDate(new Date()), offsetDays);
+}
+
+function hasAired(firstAired: string | null | undefined, today: string, graceDays: number): boolean {
   if (!firstAired) return false;
   const airedAt = new Date(firstAired);
-  return !Number.isNaN(airedAt.getTime()) && localDate(airedAt) <= today;
+  return !Number.isNaN(airedAt.getTime()) && addCalendarDays(localDate(airedAt), graceDays) <= today;
+}
+
+function gracePeriod(value: unknown): number {
+  return Math.max(0, Math.min(30, Math.trunc(Number(value) || 0)));
 }
 
 async function traktRequest(path: string): Promise<Response> {
@@ -119,7 +122,7 @@ async function traktRequest(path: string): Promise<Response> {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          "User-Agent": "Shelfcheck/1.1.0-beta.5 (+https://github.com/andcbii/shelfcheck)",
+          "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
           "trakt-api-version": "2",
           "trakt-api-key": credentials.clientId,
           Authorization: `Bearer ${credentials.accessToken}`,
@@ -175,29 +178,37 @@ async function runScan(force = false) {
   const state = readSingleUserState().state || {};
   const logger = createScanLogger(state.diagnosticsEnabled !== false);
   (globalThis as ScanGlobal).__shelfcheckLogger = logger;
-  logger.info("scan.start", { startedAt, version: "1.1.0-beta.5", force });
+  logger.info("scan.start", { startedAt, version: SHELFCHECK_VERSION, force, airingGraceDays: gracePeriod(state.airingGraceDays) });
   updateScan({ status: "running", processed: 0, total: 0, startedAt });
   try {
     const prior = (state.checkpoint || state.report) as ScanReport | undefined;
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
+    const airingGraceDays = gracePeriod(state.airingGraceDays);
+    const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
     const activity = activityMarker(await traktJson<unknown>("/sync/last_activities"));
     const now = Date.now();
     const startDate = calendarStartDate();
-    const calendar = await traktJson<CalendarEntry[]>(`/calendars/my/shows/${startDate}/31`).catch((error) => {
+    const futureCalendar = await traktJson<CalendarEntry[]>(`/calendars/my/shows/${startDate}/31`).catch((error) => {
       logger.warn("calendar.unavailable", { error: error instanceof Error ? error.message : String(error) });
       return [];
     });
+    const recentStartDate = calendarStartDate(-airingGraceDays);
+    const recentCalendar = airingGraceDays ? await traktJson<CalendarEntry[]>(`/calendars/my/shows/${recentStartDate}/${airingGraceDays}`).catch((error) => {
+      logger.warn("calendar.recent-unavailable", { error: error instanceof Error ? error.message : String(error) });
+      return [];
+    }) : [];
+    const calendar = [...recentCalendar, ...futureCalendar];
     const upcomingChecks = new Map<number, number>();
     for (const entry of calendar) {
       const traktId = entry.show?.ids?.trakt;
       const firstAired = entry.first_aired ? Date.parse(entry.first_aired) : Number.NaN;
-      const checkAt = firstAired + 7_200_000;
+      const checkAt = firstAired + airingGraceDays * 86_400_000 + 7_200_000;
       if (!traktId || !Number.isFinite(checkAt) || checkAt <= now) continue;
       upcomingChecks.set(traktId, Math.min(upcomingChecks.get(traktId) || Number.POSITIVE_INFINITY, checkAt));
     }
-    logger.info("calendar.loaded", { entries: calendar.length, showsWithUpcomingEpisodes: upcomingChecks.size, startDate, days: 31 });
+    logger.info("calendar.loaded", { entries: calendar.length, showsWithUpcomingEpisodes: upcomingChecks.size, startDate: recentStartDate, days: 31 + airingGraceDays });
     let library: CollectionShow[];
     let freshFingerprints: Record<string, string> | null = null;
     if (!force && priorShows.length && activity === prior?.activity) {
@@ -215,7 +226,7 @@ async function runScan(force = false) {
     for (const result of priorMissing) previousResults.set(result.show.ids.trakt, [...(previousResults.get(result.show.ids.trakt) || []), result]);
     const results: Record<string, MissingEpisode[]> = {};
     const scanCache: ScanCache = {};
-    const queue: { item: CollectionShow; reason: "forced" | "new" | "collection-changed" | "scheduled" }[] = [];
+    const queue: { item: CollectionShow; reason: "forced" | "new" | "collection-changed" | "scheduled" | "settings-changed" }[] = [];
     for (const item of library) {
       const id = String(item.show.ids.trakt);
       const cached = priorCache[id];
@@ -224,8 +235,8 @@ async function runScan(force = false) {
       const calendarCheck = upcomingChecks.get(item.show.ids.trakt);
       const dueAt = Math.min(calendarCheck || Number.POSITIVE_INFINITY, fallback);
       const changed = freshFingerprints !== null && freshFingerprints[id] !== cached?.fingerprint;
-      if (force || !cached || changed || !Number.isFinite(dueAt) || dueAt <= now) {
-        queue.push({ item, reason: force ? "forced" : !cached ? "new" : changed ? "collection-changed" : "scheduled" });
+      if (force || gracePeriodChanged || !cached || changed || !Number.isFinite(dueAt) || dueAt <= now) {
+        queue.push({ item, reason: force ? "forced" : gracePeriodChanged ? "settings-changed" : !cached ? "new" : changed ? "collection-changed" : "scheduled" });
       }
       else {
         results[id] = previousResults.get(item.show.ids.trakt) || [];
@@ -242,6 +253,7 @@ async function runScan(force = false) {
       collectionChanged: queue.filter((entry) => entry.reason === "collection-changed").length,
       scheduled: queue.filter((entry) => entry.reason === "scheduled").length,
       forced: queue.filter((entry) => entry.reason === "forced").length,
+      settingsChanged: queue.filter((entry) => entry.reason === "settings-changed").length,
     });
     updateScan({ status: "running", processed, total: library.length, startedAt });
     let cursor = 0;
@@ -272,7 +284,7 @@ async function runScan(force = false) {
         const today = localDate(new Date());
         const missing: MissingEpisode[] = [];
         for (const episode of incomplete) {
-          if (hasAired(firstAiredByEpisode.get(`${episode.season}:${episode.episode}`), today)) {
+          if (hasAired(firstAiredByEpisode.get(`${episode.season}:${episode.episode}`), today, airingGraceDays)) {
             missing.push({ show: item.show, season: episode.season, episode: episode.episode });
           }
         }
@@ -292,7 +304,7 @@ async function runScan(force = false) {
         };
         logger.info("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, reason, missing: missing.length, elapsedMs: Date.now() - showStarted });
         processed += 1;
-        const checkpoint: ScanReport = { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", activity, scanCache };
+        const checkpoint: ScanReport = { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", activity, scanCache, airingGraceDays };
         patchSingleUserState({ checkpoint, scan: { status: "running", processed, total: library.length, startedAt } satisfies ScanStatus });
       }
     };
@@ -300,7 +312,7 @@ async function runScan(force = false) {
     const failedWorker = workers.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failedWorker) throw failedWorker.reason;
     const missing = Object.values(results).flat().sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
-    const report: ScanReport = { shows: library, missing, lastScan: new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }), activity, scanCache };
+    const report: ScanReport = { shows: library, missing, lastScan: new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }), activity, scanCache, airingGraceDays };
     const finishedAt = new Date().toISOString();
     patchSingleUserState({ report, checkpoint: null, scan: { status: "completed", processed: library.length, total: library.length, startedAt, finishedAt } satisfies ScanStatus });
     logger.info("scan.complete", { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: library.length, reused: library.length - queue.length, refreshed: queue.length, missing: missing.length });

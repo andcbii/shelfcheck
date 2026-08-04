@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { SHELFCHECK_VERSION } from "@/lib/version";
 
 type TraktShow = {
   title: string;
@@ -23,6 +24,7 @@ type ServerState = {
   ignoredShows?: TraktShow[];
   scan?: ScanStatus;
   diagnosticsEnabled?: boolean;
+  airingGraceDays?: number;
 };
 
 const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
@@ -73,6 +75,7 @@ export default function Home() {
   const [clientId, setClientId] = useState("");
   const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
+  const [editingCredentials, setEditingCredentials] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(true);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -85,6 +88,7 @@ export default function Home() {
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
   const [debugEnabled, setDebugEnabled] = useState(true);
+  const [airingGraceDays, setAiringGraceDays] = useState(0);
   const [ignoredShows, setIgnoredShows] = useState<TraktShow[]>([]);
   const [openShowMenu, setOpenShowMenu] = useState<number | null>(null);
   const [ignoredManagerOpen, setIgnoredManagerOpen] = useState(false);
@@ -111,10 +115,11 @@ export default function Home() {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
-        syncServerState({ ignoredShows: savedIgnored, diagnosticsEnabled: true }, true);
+        syncServerState({ ignoredShows: savedIgnored, diagnosticsEnabled: true, airingGraceDays: 0 }, true);
         return;
       }
       setDebugEnabled(state.diagnosticsEnabled !== false);
+      setAiringGraceDays(Math.max(0, Math.min(30, Math.trunc(Number(state.airingGraceDays) || 0))));
       if (Array.isArray(state.ignoredShows)) {
         const remoteIgnored = state.ignoredShows.map(compactShow);
         setIgnoredShows(remoteIgnored);
@@ -155,6 +160,12 @@ export default function Home() {
   function setDiagnostics(enabled: boolean) {
     setDebugEnabled(enabled);
     syncServerState({ diagnosticsEnabled: enabled }, true);
+  }
+
+  function setGracePeriod(value: string) {
+    const days = Math.max(0, Math.min(30, Math.trunc(Number(value) || 0)));
+    setAiringGraceDays(days);
+    syncServerState({ airingGraceDays: days }, true);
   }
 
   async function downloadDebugLog() {
@@ -247,11 +258,19 @@ export default function Home() {
       setToken("");
       localStorage.removeItem("shelfcheck-trakt");
       setConnected(true);
+      setEditingCredentials(false);
       setSettingsOpen(false);
       setError("");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Shelfcheck could not save the Trakt configuration.");
     }
+  }
+
+  function cancelCredentialEdit() {
+    setClientId("");
+    setToken("");
+    setError("");
+    setEditingCredentials(false);
   }
 
   const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -314,7 +333,7 @@ export default function Home() {
         <a className="brand" href="#"><span className="brandmark">S</span><span>Shelfcheck</span></a>
         <div className="header-actions">
           <span className={`status ${connected ? "online" : ""}`}><i />{connected ? "Trakt connected" : "Not connected"}</span>
-          <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Trakt settings">⚙</button>
+          <button className="icon-button" onClick={() => { setEditingCredentials(false); setSettingsOpen(true); }} aria-label="Trakt settings">⚙</button>
         </div>
       </header>
 
@@ -405,16 +424,33 @@ export default function Home() {
           <button className="close" onClick={() => setSettingsOpen(false)} disabled={!connected && !lastScan} aria-label="Close">×</button>
           <p className="eyebrow">CONNECTION</p><h2 id="settings-title">Connect your Trakt library</h2>
           <p className="modal-copy">Use your Trakt application client ID and access token. They are stored in /config/config.yml and never returned to the browser.</p>
-          <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
-          <label>Access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Your OAuth access token" autoComplete="off" data-lpignore="true" /></label>
-          {error && <p className="field-error">{error}</p>}
-          <button className="primary full" onClick={saveCredentials}>Save and connect <b>→</b></button>
+          {connected && !editingCredentials ? <div className="credential-status">
+            <span><b aria-hidden="true">✓</b> Trakt credentials configured</span>
+            <button type="button" onClick={() => setEditingCredentials(true)}>Edit credentials</button>
+          </div> : <>
+            <label>Client ID<input value={clientId} onChange={(e) => setClientId(e.target.value)} placeholder="Your Trakt application client ID" autoComplete="off" data-lpignore="true" /></label>
+            <label>Access token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Your OAuth access token" autoComplete="off" data-lpignore="true" /></label>
+            {error && <p className="field-error">{error}</p>}
+            {connected ? <div className="credential-actions">
+              <button type="button" className="primary" onClick={saveCredentials}>Save changes <b>→</b></button>
+              <button type="button" className="secondary" onClick={cancelCredentialEdit}>Cancel</button>
+            </div> : <button className="primary full" onClick={saveCredentials}>Save and connect <b>→</b></button>}
+          </>}
+          <div className="grace-period">
+            <div>
+              <p className="grace-title">Airing grace period</p>
+              <p>Wait this many days after Trakt&apos;s aired date before reporting an episode as missing.</p>
+            </div>
+            <div className="grace-input"><input type="number" min="0" max="30" step="1" value={airingGraceDays} onChange={(event) => setGracePeriod(event.target.value)} aria-label="Airing grace period in days" /><span>Days</span></div>
+            <small>Example: Trakt date Aug 4 → report starting {new Date(Date.UTC(2026, 7, 4 + airingGraceDays)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}</small>
+          </div>
           <div className="diagnostics">
             <label className="diagnostics-toggle"><input type="checkbox" checked={debugEnabled} onChange={(event) => setDiagnostics(event.target.checked)} /> Enable diagnostic logging</label>
             <p>Records safe scan details in /data/logs. Credentials and authorization headers are never logged. The latest 10 scans are retained.</p>
             <div><button type="button" onClick={downloadDebugLog}>Download log</button><button type="button" onClick={deleteAllLogs}>Delete all logs</button></div>
           </div>
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
+          <p className="build-info">Shelfcheck build {SHELFCHECK_VERSION}</p>
         </section>
       </div>}
       {fullRescanConfirmOpen && <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setFullRescanConfirmOpen(false)}>

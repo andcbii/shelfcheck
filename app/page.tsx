@@ -6,16 +6,23 @@ type TraktShow = {
   title: string;
   year: number;
   ids: { trakt: number; slug: string; tmdb?: number };
+  status?: string;
   images?: { poster?: string[] };
   collection?: { aired: number; completed: number };
 };
-type CollectionShow = { show: TraktShow };
+type CollectionShow = {
+  show: TraktShow;
+  seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[];
+};
 type ProgressEpisode = { number: number; completed: boolean };
 type ProgressSeason = { number: number; episodes: ProgressEpisode[] };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
-type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed: number[]; results: Record<string, MissingEpisode[]>; activity?: string };
+type ShowScanState = { fingerprint: string; lastCheckedAt: string; nextCheckAt: string | null };
+type ScanCache = Record<string, ShowScanState>;
+type ScanCheckpoint = { signature: string; library: CollectionShow[]; completed: number[]; results: Record<string, MissingEpisode[]>; activity?: string; scanCache?: ScanCache };
+type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache };
 type ServerState = {
-  report?: { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string };
+  report?: ScanReport;
   checkpoint?: ScanCheckpoint | null;
   ignoredShows?: TraktShow[];
 };
@@ -33,6 +40,7 @@ function compactShow(show: TraktShow): TraktShow {
     title: show.title,
     year: show.year,
     ids: show.ids,
+    ...(show.status ? { status: show.status } : {}),
     ...(show.images?.poster?.[0] ? { images: { poster: [show.images.poster[0]] } } : {}),
     ...(show.collection ? { collection: show.collection } : {}),
   };
@@ -40,6 +48,23 @@ function compactShow(show: TraktShow): TraktShow {
 
 function compactLibrary(library: CollectionShow[]): CollectionShow[] {
   return library.map(({ show }) => ({ show: compactShow(show) }));
+}
+
+function collectionFingerprint(item: CollectionShow): string {
+  return (item.seasons || [])
+    .flatMap((season) => (season.episodes || []).map((episode) => `${season.number}:${episode.number}:${episode.collected_at || ""}`))
+    .sort()
+    .join("|");
+}
+
+function collectionActivityMarker(activity: unknown): string {
+  const value = activity as { episodes?: { collected_at?: string }; shows?: { collected_at?: string } };
+  return JSON.stringify([value?.episodes?.collected_at || "", value?.shows?.collected_at || ""]);
+}
+
+function fallbackDueAt(show: TraktShow, checkedAt: Date): number {
+  const ended = ["ended", "canceled", "cancelled"].includes((show.status || "").toLowerCase());
+  return checkedAt.getTime() + (ended ? 30 : 7) * 24 * 60 * 60 * 1000;
 }
 
 function compactMissing(items: MissingEpisode[]): MissingEpisode[] {
@@ -91,6 +116,8 @@ export default function Home() {
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [rateLimitPaused, setRateLimitPaused] = useState(false);
+  const [scanCache, setScanCache] = useState<ScanCache>({});
+  const [lastActivity, setLastActivity] = useState("");
   const debugEnabledRef = useRef(false);
   const requestGateRef = useRef<Promise<void>>(Promise.resolve());
   const nextRequestAtRef = useRef(0);
@@ -124,7 +151,9 @@ export default function Home() {
           setShows(cachedShows);
           setMissing(cachedMissing);
           setLastScan(report.lastScan);
-          try { localStorage.setItem(REPORT_CACHE, JSON.stringify({ shows: cachedShows, missing: cachedMissing, lastScan: report.lastScan })); }
+          setScanCache(report.scanCache || {});
+          setLastActivity(report.activity || "");
+          try { localStorage.setItem(REPORT_CACHE, JSON.stringify({ ...report, shows: cachedShows, missing: cachedMissing })); }
           catch { /* the next completed scan will replace an oversized legacy report */ }
         }
       }
@@ -155,11 +184,12 @@ export default function Home() {
       }
       if (state.report?.shows && state.report?.missing && state.report.lastScan) {
         const remoteReport = {
+          ...state.report,
           shows: compactLibrary(state.report.shows),
           missing: compactMissing(state.report.missing),
-          lastScan: state.report.lastScan,
         };
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
+        setScanCache(state.report.scanCache || {}); setLastActivity(state.report.activity || "");
         try { localStorage.setItem(REPORT_CACHE, JSON.stringify(remoteReport)); } catch { /* retain server copy */ }
       }
       if (state.checkpoint?.library?.length && state.checkpoint.completed.length < state.checkpoint.library.length) {
@@ -441,32 +471,65 @@ export default function Home() {
       // Gate the scan on one completed request. This prevents resumed scans
       // from starting multiple workers before the Trakt connection is known-good.
       logDebug("scan.connection-validating");
-      await traktFetch<CollectionShow[]>("/sync/collection/shows?limit=1");
+      const initialActivity = await traktFetch<unknown>("/sync/last_activities");
       let savedCheckpoint: ScanCheckpoint | null = null;
       try { savedCheckpoint = JSON.parse(localStorage.getItem(CHECKPOINT_CACHE) || "null") as ScanCheckpoint | null; }
       catch { /* ignore invalid checkpoint data */ }
-      // Resume from browser storage immediately. A temporary failure while
-      // downloading the collection must not block hundreds of known shows.
+      // Resume from browser storage immediately. Otherwise, last activities
+      // lets an unchanged collection avoid even downloading the full library.
       let library: CollectionShow[];
+      let activity = lastActivity;
+      let freshFingerprints: Record<string, string> | null = null;
       if (savedCheckpoint?.library?.length && savedCheckpoint.completed.length < savedCheckpoint.library.length) {
         library = savedCheckpoint.library;
       } else {
-        try {
-          library = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
-        } catch (libraryError) {
-          if (!shows.length) throw libraryError;
+        activity = collectionActivityMarker(initialActivity);
+        if (shows.length && activity && activity === lastActivity) {
           library = shows;
+        } else {
+          try {
+            const downloaded = await traktFetchAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+            freshFingerprints = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), collectionFingerprint(item)]));
+            const previousShows = new Map(shows.map((item) => [item.show.ids.trakt, item.show]));
+            library = downloaded.map((item) => ({ show: { ...previousShows.get(item.show.ids.trakt), ...item.show } }));
+          } catch (libraryError) {
+            if (!shows.length) throw libraryError;
+            library = shows;
+            activity = lastActivity;
+          }
         }
       }
       library = compactLibrary(library);
       setShows(library); setTotal(library.length);
       logDebug("scan.library-ready", { shows: library.length, resumed: Boolean(savedCheckpoint?.library?.length) });
       const signature = library.map(({ show }) => show.ids.trakt).sort((a, b) => a - b).join(",");
-      // Collection membership is a fast, reliable change marker. The optional
-      // last-activities endpoint must never delay the start of a scan.
-      const activity = "";
-      let checkpoint: ScanCheckpoint = { signature, library, completed: [], results: {}, activity };
-      if (savedCheckpoint?.signature === signature && (!savedCheckpoint.activity || !activity || savedCheckpoint.activity === activity)) checkpoint = { ...savedCheckpoint, library, activity };
+      let checkpoint: ScanCheckpoint;
+      if (savedCheckpoint?.signature === signature && savedCheckpoint.completed.length < savedCheckpoint.library.length) {
+        checkpoint = { ...savedCheckpoint, library };
+      } else {
+        const priorResults = new Map<number, MissingEpisode[]>();
+        for (const result of missing) {
+          const id = result.show.ids.trakt;
+          priorResults.set(id, [...(priorResults.get(id) || []), result]);
+        }
+        const now = Date.now();
+        const completedFromCache: number[] = [];
+        const resultsFromCache: Record<string, MissingEpisode[]> = {};
+        const nextCache: ScanCache = {};
+        for (const item of library) {
+          const id = String(item.show.ids.trakt);
+          const cached = scanCache[id];
+          const fingerprintChanged = freshFingerprints !== null && freshFingerprints[id] !== cached?.fingerprint;
+          const dueAt = cached ? Date.parse(cached.nextCheckAt || "") : Number.NaN;
+          const due = cached ? !Number.isFinite(dueAt) || dueAt <= now : true;
+          if (!cached || fingerprintChanged || due) continue;
+          completedFromCache.push(item.show.ids.trakt);
+          resultsFromCache[id] = priorResults.get(item.show.ids.trakt) || [];
+          nextCache[id] = cached;
+        }
+        checkpoint = { signature, library, completed: completedFromCache, results: resultsFromCache, activity, scanCache: nextCache };
+      }
+      checkpoint.scanCache ||= {};
       const completed = new Set(checkpoint.completed);
       const completedAtStart = completed.size;
       const queue = library.filter(({ show }) => !completed.has(show.ids.trakt));
@@ -490,7 +553,7 @@ export default function Home() {
       const scanOne = async (item: CollectionShow) => {
         const showStarted = Date.now();
         logDebug("show.start", { traktId: item.show.ids.trakt, title: item.show.title, completed: completed.size, total: library.length });
-        const data = await traktFetch<{ aired?: number; completed?: number; seasons?: ProgressSeason[] }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false`);
+        const data = await traktFetch<{ aired?: number; completed?: number; seasons?: ProgressSeason[]; next_episode?: { first_aired?: string } | null }>(`/shows/${item.show.ids.trakt}/progress/collection?hidden=false&specials=false&count_specials=false&extended=full`);
         const aired = data.aired ?? (data.seasons || []).reduce((sum, season) => sum + (season.number === 0 ? 0 : season.episodes.length), 0);
         const collected = data.completed ?? (data.seasons || []).reduce((sum, season) => sum + (season.number === 0 ? 0 : season.episodes.filter((episode) => episode.completed).length), 0);
         item.show = { ...item.show, collection: { aired, completed: collected } };
@@ -505,6 +568,14 @@ export default function Home() {
           showResults.forEach((result) => { result.show = item.show; });
         }
         checkpoint.results[String(item.show.ids.trakt)] = showResults;
+        const checkedAt = new Date();
+        const fallback = fallbackDueAt(item.show, checkedAt);
+        const nextAiring = data.next_episode?.first_aired ? Date.parse(data.next_episode.first_aired) : Number.NaN;
+        checkpoint.scanCache![String(item.show.ids.trakt)] = {
+          fingerprint: freshFingerprints?.[String(item.show.ids.trakt)] ?? scanCache[String(item.show.ids.trakt)]?.fingerprint ?? "",
+          lastCheckedAt: checkedAt.toISOString(),
+          nextCheckAt: new Date(Number.isFinite(nextAiring) ? Math.min(nextAiring + 2 * 60 * 60 * 1000, fallback) : fallback).toISOString(),
+        };
         completed.add(item.show.ids.trakt);
         saveCheckpoint();
         logDebug("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, missing: showResults.length, elapsedMs: Date.now() - showStarted, completed: completed.size, total: library.length });
@@ -536,10 +607,11 @@ export default function Home() {
       const scanTime = new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
       setMissing(results);
       setLastScan(scanTime);
-      const report = { shows: compactLibrary(library), missing: compactMissing(results), lastScan: scanTime };
+      const report: ScanReport = { shows: compactLibrary(library), missing: compactMissing(results), lastScan: scanTime, activity, scanCache: checkpoint.scanCache };
       localStorage.setItem(REPORT_CACHE, JSON.stringify(report));
       localStorage.removeItem(CHECKPOINT_CACHE);
       syncServerState({ report, checkpoint: null }, true);
+      setScanCache(checkpoint.scanCache || {}); setLastActivity(activity);
       setPending(0);
     } catch (e) {
       logDebug("scan.error", { error: e instanceof Error ? e.message : String(e), processed, total });
@@ -566,7 +638,7 @@ export default function Home() {
         <div className="scan-panel">
           <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{rateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
           <button className="primary" onClick={scanLibrary} disabled={scanning}>{rateLimitPaused ? "Paused - Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
-          <p>{lastScan ? `Last scan ${lastScan}` : "Only your collection metadata is read."}</p>
+          <p>{lastScan ? `Last scan ${lastScan} · Incremental scan beta` : "Only your collection metadata is read. Incremental scanning is beta."}</p>
         </div>
       </section>
 

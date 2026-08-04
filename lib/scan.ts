@@ -1,6 +1,7 @@
 import "server-only";
 
 import { readTraktCredentials } from "@/lib/server-config";
+import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { patchSingleUserState, readSingleUserState } from "@/lib/sqlite";
 
 type TraktShow = {
@@ -22,7 +23,7 @@ export type ScanStatus = { status: "idle" | "running" | "completed" | "error"; p
 const TRAKT = "https://api.trakt.tv";
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-type ScanGlobal = typeof globalThis & { __shelfcheckScan?: Promise<void>; __shelfcheckNextRequestAt?: number; __shelfcheckRequestGate?: Promise<void> };
+type ScanGlobal = typeof globalThis & { __shelfcheckScan?: Promise<void>; __shelfcheckNextRequestAt?: number; __shelfcheckRequestGate?: Promise<void>; __shelfcheckLogger?: ScanLogger };
 
 function compactShow(show: TraktShow): TraktShow {
   return {
@@ -80,6 +81,8 @@ async function traktRequest(path: string): Promise<Response> {
       if (delay) await wait(delay);
       global.__shelfcheckNextRequestAt = Date.now() + 300;
     } finally { release(); }
+    const requestStarted = Date.now();
+    global.__shelfcheckLogger?.info("request.start", { path, attempt: attempt + 1 });
     try {
       const response = await fetch(`${TRAKT}${path}`, {
         signal: AbortSignal.timeout(15_000),
@@ -92,17 +95,21 @@ async function traktRequest(path: string): Promise<Response> {
           Authorization: `Bearer ${credentials.accessToken}`,
         },
       });
+      global.__shelfcheckLogger?.info("request.response", { path, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
       if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
       if (response.status === 403) throw new Error("Trakt rejected this request (403). Check that the token and Client ID belong to the same application.");
       if (response.status === 429 || response.status >= 500) {
         if (attempt === 4) throw new Error(`Trakt request failed (${response.status}).`);
         const retryAfter = Number(response.headers.get("Retry-After"));
-        await wait(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** attempt);
+        const delayMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** attempt;
+        global.__shelfcheckLogger?.warn("request.retry", { path, attempt: attempt + 1, status: response.status, delayMs });
+        await wait(delayMs);
         continue;
       }
       if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
       return response;
     } catch (error) {
+      global.__shelfcheckLogger?.warn("request.error", { path, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: error instanceof Error ? error.message : String(error) });
       if (error instanceof Error && (error.message.includes("access token") || error.message.includes("403"))) throw error;
       if (attempt === 4) throw new Error(error instanceof Error ? error.message : "The Trakt request failed.");
       await wait(1000 * 2 ** attempt);
@@ -135,9 +142,12 @@ function updateScan(scan: ScanStatus) {
 
 async function runScan() {
   const startedAt = new Date().toISOString();
+  const state = readSingleUserState().state || {};
+  const logger = createScanLogger(state.diagnosticsEnabled === true);
+  (globalThis as ScanGlobal).__shelfcheckLogger = logger;
+  logger.info("scan.start", { startedAt, version: "1.1.0-beta.3" });
   updateScan({ status: "running", processed: 0, total: 0, startedAt });
   try {
-    const state = readSingleUserState().state || {};
     const prior = (state.checkpoint || state.report) as ScanReport | undefined;
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
@@ -147,25 +157,29 @@ async function runScan() {
     let freshFingerprints: Record<string, string> | null = null;
     if (priorShows.length && activity === prior?.activity) {
       library = priorShows;
+      logger.info("collection.cache-hit", { shows: library.length, activity });
     } else {
       const downloaded = await traktAll<CollectionShow>("/sync/collection/shows?extended=full,images");
       freshFingerprints = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), fingerprint(item)]));
       const previous = new Map(priorShows.map((item) => [item.show.ids.trakt, item.show]));
       library = downloaded.map((item) => ({ show: compactShow({ ...previous.get(item.show.ids.trakt), ...item.show }) }));
+      logger.info("collection.refreshed", { shows: library.length, previousShows: priorShows.length, activityChanged: activity !== prior?.activity });
     }
 
     const previousResults = new Map<number, MissingEpisode[]>();
     for (const result of priorMissing) previousResults.set(result.show.ids.trakt, [...(previousResults.get(result.show.ids.trakt) || []), result]);
     const results: Record<string, MissingEpisode[]> = {};
     const scanCache: ScanCache = {};
-    const queue: CollectionShow[] = [];
+    const queue: { item: CollectionShow; reason: "new" | "collection-changed" | "scheduled" }[] = [];
     const now = Date.now();
     for (const item of library) {
       const id = String(item.show.ids.trakt);
       const cached = priorCache[id];
       const dueAt = cached ? Date.parse(cached.nextCheckAt || "") : Number.NaN;
       const changed = freshFingerprints !== null && freshFingerprints[id] !== cached?.fingerprint;
-      if (!cached || changed || !Number.isFinite(dueAt) || dueAt <= now) queue.push(item);
+      if (!cached || changed || !Number.isFinite(dueAt) || dueAt <= now) {
+        queue.push({ item, reason: !cached ? "new" : changed ? "collection-changed" : "scheduled" });
+      }
       else {
         results[id] = previousResults.get(item.show.ids.trakt) || [];
         scanCache[id] = cached;
@@ -173,12 +187,22 @@ async function runScan() {
     }
 
     let processed = library.length - queue.length;
+    logger.info("scan.plan", {
+      total: library.length,
+      reused: processed,
+      refreshing: queue.length,
+      newShows: queue.filter((entry) => entry.reason === "new").length,
+      collectionChanged: queue.filter((entry) => entry.reason === "collection-changed").length,
+      scheduled: queue.filter((entry) => entry.reason === "scheduled").length,
+    });
     updateScan({ status: "running", processed, total: library.length, startedAt });
     let cursor = 0;
     const worker = async () => {
       while (cursor < queue.length) {
-        const item = queue[cursor++];
+        const { item, reason } = queue[cursor++];
         const id = String(item.show.ids.trakt);
+        const showStarted = Date.now();
+        logger.info("show.start", { traktId: item.show.ids.trakt, title: item.show.title, reason });
         const progress = await traktJson<{ aired?: number; completed?: number; seasons?: ProgressSeason[]; next_episode?: { first_aired?: string } | null }>(`/shows/${id}/progress/collection?hidden=false&specials=false&count_specials=false&extended=full`);
         const seasons = progress.seasons || [];
         const aired = progress.aired ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.length : 0), 0);
@@ -200,6 +224,7 @@ async function runScan() {
           lastCheckedAt: checkedAt.toISOString(),
           nextCheckAt: new Date(Number.isFinite(nextAiring) ? Math.min(nextAiring + 7_200_000, fallback) : fallback).toISOString(),
         };
+        logger.info("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, reason, missing: missing.length, elapsedMs: Date.now() - showStarted });
         processed += 1;
         const checkpoint: ScanReport = { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", activity, scanCache };
         patchSingleUserState({ checkpoint, scan: { status: "running", processed, total: library.length, startedAt } satisfies ScanStatus });
@@ -212,9 +237,13 @@ async function runScan() {
     const report: ScanReport = { shows: library, missing, lastScan: new Date().toLocaleString([], { dateStyle: "medium", timeStyle: "short" }), activity, scanCache };
     const finishedAt = new Date().toISOString();
     patchSingleUserState({ report, checkpoint: null, scan: { status: "completed", processed: library.length, total: library.length, startedAt, finishedAt } satisfies ScanStatus });
+    logger.info("scan.complete", { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: library.length, reused: library.length - queue.length, refreshed: queue.length, missing: missing.length });
   } catch (error) {
     const current = getScanStatus();
     updateScan({ ...current, status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The scan failed." });
+    logger.error("scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
+  } finally {
+    (globalThis as ScanGlobal).__shelfcheckLogger = undefined;
   }
 }
 

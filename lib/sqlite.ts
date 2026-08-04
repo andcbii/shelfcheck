@@ -8,7 +8,7 @@ const SINGLE_USER_ID = "single-user";
 
 type DatabaseCache = typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
 
-function dataDirectory() {
+export function dataDirectory() {
   return process.env.SHELFCHECK_DATA_DIR || path.join(process.cwd(), ".runtime", "data");
 }
 

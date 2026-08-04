@@ -22,10 +22,9 @@ type ServerState = {
   checkpoint?: unknown;
   ignoredShows?: TraktShow[];
   scan?: ScanStatus;
+  diagnosticsEnabled?: boolean;
 };
 
-const DEBUG_LOG_CACHE = "shelfcheck-debug-log-v1";
-const DEBUG_ENABLED_CACHE = "shelfcheck-debug-enabled-v1";
 const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
 const IGNORED_SHOWS_COOKIE = "shelfcheck-ignored-shows-v1";
 
@@ -93,14 +92,10 @@ export default function Home() {
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const rateLimitPaused = false;
-  const debugEnabledRef = useRef(false);
   const serverSyncTimerRef = useRef<number | null>(null);
   const pendingServerPatchRef = useRef<Partial<ServerState>>({});
 
   useEffect(() => {
-    const diagnosticsOn = localStorage.getItem(DEBUG_ENABLED_CACHE) === "true";
-    setDebugEnabled(diagnosticsOn);
-    debugEnabledRef.current = diagnosticsOn;
     const savedIgnored = loadIgnoredShows();
     setIgnoredShows(savedIgnored);
     try { persistIgnoredShows(savedIgnored); } catch { /* persistence must not block startup */ }
@@ -115,9 +110,10 @@ export default function Home() {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
-        syncServerState({ ignoredShows: savedIgnored }, true);
+        syncServerState({ ignoredShows: savedIgnored, diagnosticsEnabled: false }, true);
         return;
       }
+      setDebugEnabled(state.diagnosticsEnabled === true);
       if (Array.isArray(state.ignoredShows)) {
         const remoteIgnored = state.ignoredShows.map(compactShow);
         setIgnoredShows(remoteIgnored);
@@ -155,36 +151,28 @@ export default function Home() {
     }
   }
 
-  function logDebug(event: string, details: Record<string, unknown> = {}) {
-    if (!debugEnabledRef.current) return;
-    try {
-      const entries = JSON.parse(localStorage.getItem(DEBUG_LOG_CACHE) || "[]") as unknown[];
-      entries.push({ timestamp: new Date().toISOString(), event, ...details });
-      localStorage.setItem(DEBUG_LOG_CACHE, JSON.stringify(entries.slice(-500)));
-    } catch { /* diagnostics must never interrupt a scan */ }
-  }
-
   function setDiagnostics(enabled: boolean) {
     setDebugEnabled(enabled);
-    debugEnabledRef.current = enabled;
-    localStorage.setItem(DEBUG_ENABLED_CACHE, String(enabled));
-    if (enabled) logDebug("diagnostics.enabled", { location: window.location.href });
+    syncServerState({ diagnosticsEnabled: enabled }, true);
   }
 
-  function downloadDebugLog() {
-    const entries = JSON.parse(localStorage.getItem(DEBUG_LOG_CACHE) || "[]") as unknown[];
-    const contents = entries.map((entry) => JSON.stringify(entry)).join("\n") || JSON.stringify({ timestamp: new Date().toISOString(), event: "diagnostics.empty" });
-    const url = URL.createObjectURL(new Blob([`${contents}\n`], { type: "application/x-ndjson" }));
+  async function downloadDebugLog() {
+    const response = await fetch("/api/logs", { cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      setError(body.error || "Shelfcheck could not download the current log.");
+      return;
+    }
+    const url = URL.createObjectURL(await response.blob());
     const link = document.createElement("a");
-    link.href = url;
-    link.download = `shelfcheck-debug-${new Date().toISOString().replace(/[:.]/g, "-")}.log`;
-    link.click();
+    link.href = url; link.download = "shelfcheck.log"; link.click();
     URL.revokeObjectURL(url);
   }
 
-  function clearDebugLog() {
-    localStorage.removeItem(DEBUG_LOG_CACHE);
-    logDebug("diagnostics.cleared");
+  async function deleteAllLogs() {
+    if (!window.confirm("Delete shelfcheck.log and all nine retained scan logs? This cannot be undone.")) return;
+    const response = await fetch("/api/logs", { method: "DELETE" });
+    if (!response.ok) setError("Shelfcheck could not delete the diagnostic logs.");
   }
 
   const ignoredIds = useMemo(() => new Set(ignoredShows.map((show) => show.ids.trakt)), [ignoredShows]);
@@ -416,8 +404,8 @@ export default function Home() {
           <button className="primary full" onClick={saveCredentials}>Save and connect <b>→</b></button>
           <div className="diagnostics">
             <label className="diagnostics-toggle"><input type="checkbox" checked={debugEnabled} onChange={(event) => setDiagnostics(event.target.checked)} /> Enable diagnostic logging</label>
-            <p>Records safe scan details in this browser. Credentials and authorization headers are never logged.</p>
-            <div><button type="button" onClick={downloadDebugLog}>Download log</button><button type="button" onClick={clearDebugLog}>Clear log</button></div>
+            <p>Records safe scan details in /data/logs. Credentials and authorization headers are never logged. The latest 10 scans are retained.</p>
+            <div><button type="button" onClick={downloadDebugLog}>Download log</button><button type="button" onClick={deleteAllLogs}>Delete all logs</button></div>
           </div>
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
         </section>

@@ -84,13 +84,14 @@ export default function Home() {
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState(0);
   const [pending, setPending] = useState(0);
-  const [debugEnabled, setDebugEnabled] = useState(false);
+  const [debugEnabled, setDebugEnabled] = useState(true);
   const [ignoredShows, setIgnoredShows] = useState<TraktShow[]>([]);
   const [openShowMenu, setOpenShowMenu] = useState<number | null>(null);
   const [ignoredManagerOpen, setIgnoredManagerOpen] = useState(false);
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const [fullRescanConfirmOpen, setFullRescanConfirmOpen] = useState(false);
   const rateLimitPaused = false;
   const serverSyncTimerRef = useRef<number | null>(null);
   const pendingServerPatchRef = useRef<Partial<ServerState>>({});
@@ -110,10 +111,10 @@ export default function Home() {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
-        syncServerState({ ignoredShows: savedIgnored, diagnosticsEnabled: false }, true);
+        syncServerState({ ignoredShows: savedIgnored, diagnosticsEnabled: true }, true);
         return;
       }
-      setDebugEnabled(state.diagnosticsEnabled === true);
+      setDebugEnabled(state.diagnosticsEnabled !== false);
       if (Array.isArray(state.ignoredShows)) {
         const remoteIgnored = state.ignoredShows.map(compactShow);
         setIgnoredShows(remoteIgnored);
@@ -289,11 +290,16 @@ export default function Home() {
     }
   }
 
-  async function scanLibrary() {
+  async function scanLibrary(force = false) {
     if (!connected) { setSettingsOpen(true); return; }
+    setFullRescanConfirmOpen(false);
     setError(""); setPending(0);
     try {
-      const response = await fetch("/api/scan", { method: "POST" });
+      const response = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ force }),
+      });
       if (!response.ok) throw new Error("Shelfcheck could not start the server-side scan.");
       await pollServerScan();
     } catch (scanError) {
@@ -320,8 +326,9 @@ export default function Home() {
         </div>
         <div className="scan-panel">
           <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{rateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={scanLibrary} disabled={scanning}>{rateLimitPaused ? "Paused - Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
+          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning}>{rateLimitPaused ? "Paused - Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${lastScan} · Incremental scan beta` : "Only your collection metadata is read. Incremental scanning is beta."}</p>
+          {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning}>Force full rescan</button>}
         </div>
       </section>
 
@@ -408,6 +415,17 @@ export default function Home() {
             <div><button type="button" onClick={downloadDebugLog}>Download log</button><button type="button" onClick={deleteAllLogs}>Delete all logs</button></div>
           </div>
           <a className="help-link" href="https://trakt.tv/oauth/applications" target="_blank" rel="noreferrer">Create or view a Trakt application ↗</a>
+        </section>
+      </div>}
+      {fullRescanConfirmOpen && <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setFullRescanConfirmOpen(false)}>
+        <section className="modal rescan-modal" role="dialog" aria-modal="true" aria-labelledby="rescan-title">
+          <p className="eyebrow">FULL LIBRARY CHECK</p>
+          <h2 id="rescan-title">Force a full rescan?</h2>
+          <p className="modal-copy">Shelfcheck will ignore cached results and check all {shows.length} shows against Trakt. This may take several minutes.</p>
+          <div className="modal-actions">
+            <button type="button" className="secondary" onClick={() => setFullRescanConfirmOpen(false)}>Cancel</button>
+            <button type="button" className="primary" onClick={() => scanLibrary(true)}>Force full rescan <b>→</b></button>
+          </div>
         </section>
       </div>}
     </main>

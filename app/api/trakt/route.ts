@@ -1,4 +1,5 @@
 import { readTraktCredentials } from "@/lib/server-config";
+import { SHELFCHECK_VERSION } from "@/lib/version";
 
 const TRAKT_API = "https://api.trakt.tv";
 const ALLOWED_PATHS = [
@@ -27,7 +28,7 @@ export async function GET(request: Request) {
       headers: {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "User-Agent": "Shelfcheck/1.0.2 (+https://github.com/andcbii/shelfcheck)",
+        "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
         "trakt-api-version": "2",
         "trakt-api-key": credentials.clientId,
         Authorization: `Bearer ${credentials.accessToken}`,

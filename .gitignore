@@ -21,6 +21,11 @@
 # misc
 .DS_Store
 *.pem
+config.yml
+config.yaml
+config.*.yml
+config.*.yaml
+!config.example.yml
 
 # debug
 npm-debug.log*

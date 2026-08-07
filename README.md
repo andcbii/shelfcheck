@@ -26,6 +26,12 @@ Open `http://localhost:3000`. Stop the app with `docker compose down`. The named
 volumes survive that command; do not add `--volumes` unless you intend to erase
 Shelfcheck's configuration and data.
 
+Published releases are also available from Docker Hub:
+
+```bash
+docker pull andcbii/shelfcheck:1.2.0
+```
+
 An equivalent bind-mount example is:
 
 ```bash
@@ -43,7 +49,7 @@ publish port 3000 directly to the public internet.
 
 ## Local development
 
-Requires Node.js `>=22.13.0` and pnpm.
+Requires Node.js 24 or newer and pnpm.
 
 ```bash
 pnpm install
@@ -66,3 +72,7 @@ trakt:
 ```
 
 Treat `config.yml` as a secret and never commit it.
+
+## License
+
+Shelfcheck is available under the [MIT License](LICENSE).

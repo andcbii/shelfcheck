@@ -26,6 +26,11 @@ function database() {
     payload TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_scan_status (
+    user_id TEXT PRIMARY KEY NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`);
   db.exec("PRAGMA optimize");
   cache.__shelfcheckDatabase = db;
   return db;
@@ -50,4 +55,27 @@ export function writeSingleUserState(state: Record<string, unknown>) {
 export function patchSingleUserState(patch: Record<string, unknown>) {
   const current = readSingleUserState();
   writeSingleUserState({ ...(current.state || {}), ...patch });
+}
+
+export function readSingleUserScanStatus(): Record<string, unknown> | null {
+  const row = database().prepare(
+    "SELECT payload FROM shelfcheck_scan_status WHERE user_id = ?",
+  ).get(SINGLE_USER_ID) as { payload: string } | undefined;
+  if (row) return JSON.parse(row.payload) as Record<string, unknown>;
+
+  const current = readSingleUserState();
+  const legacy = current.state?.scan as Record<string, unknown> | undefined;
+  if (!legacy) return null;
+  writeSingleUserScanStatus(legacy);
+  const stateWithoutScan = { ...(current.state || {}) };
+  delete stateWithoutScan.scan;
+  writeSingleUserState(stateWithoutScan);
+  return legacy;
+}
+
+export function writeSingleUserScanStatus(scan: Record<string, unknown>) {
+  database().prepare(`INSERT INTO shelfcheck_scan_status (user_id, payload, updated_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP`)
+    .run(SINGLE_USER_ID, JSON.stringify(scan));
 }

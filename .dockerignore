@@ -1,11 +1,9 @@
 .git
 .next
-.openai
+.vinext
 .pnpm-store
 .runtime
-.vinext
 .wrangler
-build
 dist
 node_modules
 *.log

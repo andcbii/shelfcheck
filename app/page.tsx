@@ -1,5 +1,8 @@
 "use client";
 
+/* Poster and provider logos intentionally use native images with an app-owned proxy. */
+/* eslint-disable @next/next/no-img-element */
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 
@@ -16,8 +19,8 @@ type CollectionShow = {
   seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[];
 };
 type MissingEpisode = { show: TraktShow; season: number; episode: number };
-type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string };
-type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string };
+type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
+type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
 type ServerState = {
   report?: ScanReport;
   checkpoint?: unknown;
@@ -71,6 +74,12 @@ function loadIgnoredShows(): TraktShow[] {
     .sort((a, b) => a.title.localeCompare(b.title));
 }
 
+function formatLastScan(value: string | null): string {
+  if (!value) return "";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
 export default function Home() {
   const [clientId, setClientId] = useState("");
   const [token, setToken] = useState("");
@@ -86,7 +95,6 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [processed, setProcessed] = useState(0);
   const [total, setTotal] = useState(0);
-  const [pending, setPending] = useState(0);
   const [debugEnabled, setDebugEnabled] = useState(true);
   const [airingGraceDays, setAiringGraceDays] = useState(0);
   const [ignoredShows, setIgnoredShows] = useState<TraktShow[]>([]);
@@ -96,13 +104,18 @@ export default function Home() {
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [fullRescanConfirmOpen, setFullRescanConfirmOpen] = useState(false);
-  const rateLimitPaused = false;
+  const [rateLimitPaused, setRateLimitPaused] = useState(false);
+  const [scanCacheCount, setScanCacheCount] = useState(0);
+  const [cacheClearConfirmOpen, setCacheClearConfirmOpen] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [cacheMessage, setCacheMessage] = useState("");
   const serverSyncTimerRef = useRef<number | null>(null);
+  const scanAbortControllerRef = useRef<AbortController | null>(null);
   const pendingServerPatchRef = useRef<Partial<ServerState>>({});
 
   useEffect(() => {
     const savedIgnored = loadIgnoredShows();
-    setIgnoredShows(savedIgnored);
+    queueMicrotask(() => setIgnoredShows(savedIgnored));
     try { persistIgnoredShows(savedIgnored); } catch { /* persistence must not block startup */ }
     void fetch("/api/config", { cache: "no-store" }).then(async (response) => {
       if (!response.ok) return;
@@ -132,9 +145,18 @@ export default function Home() {
           missing: compactMissing(state.report.missing),
         };
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
+        setScanCacheCount(Object.keys(state.report.scanCache || {}).length);
       }
-      if (state.scan?.status === "running") void pollServerScan();
+      if (state.scan?.status === "running") void pollServerScan().catch((pollError) => {
+        if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
+      });
     }).catch(() => { /* local browser copy remains available */ });
+    return () => {
+      scanAbortControllerRef.current?.abort();
+      if (serverSyncTimerRef.current !== null) window.clearTimeout(serverSyncTimerRef.current);
+    };
+    // Startup synchronization intentionally runs once; pollServerScan reads server state itself.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function syncServerState(patch: Partial<ServerState>, immediate = false) {
@@ -185,6 +207,21 @@ export default function Home() {
     if (!window.confirm("Delete shelfcheck.log and all nine retained scan logs? This cannot be undone.")) return;
     const response = await fetch("/api/logs", { method: "DELETE" });
     if (!response.ok) setError("Shelfcheck could not delete the diagnostic logs.");
+  }
+
+  async function clearCache() {
+    setClearingCache(true);
+    setCacheMessage("");
+    const response = await fetch("/api/scan", { method: "DELETE" });
+    const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
+    setClearingCache(false);
+    if (!response.ok) {
+      setError(body.error || "Shelfcheck could not clear the scan cache.");
+      return;
+    }
+    setScanCacheCount(0);
+    setCacheClearConfirmOpen(false);
+    setCacheMessage(`${body.cleared || 0} cached show results cleared. The next scan will rebuild them.`);
   }
 
   const ignoredIds = useMemo(() => new Set(ignoredShows.map((show) => show.ids.trakt)), [ignoredShows]);
@@ -273,7 +310,13 @@ export default function Home() {
     setEditingCredentials(false);
   }
 
-  const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+  const wait = (milliseconds: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(resolve, milliseconds);
+    signal.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Scan polling was cancelled.", "AbortError"));
+    }, { once: true });
+  });
 
   async function loadServerReport() {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -284,35 +327,45 @@ export default function Home() {
     setShows(compactLibrary(report.shows));
     setMissing(compactMissing(report.missing));
     setLastScan(report.lastScan);
-    setPending(0);
+    setScanCacheCount(Object.keys(report.scanCache || {}).length);
   }
 
   async function pollServerScan() {
+    scanAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    scanAbortControllerRef.current = controller;
     setScanning(true);
-    while (true) {
-      const response = await fetch("/api/scan", { cache: "no-store" });
-      if (!response.ok) throw new Error("Shelfcheck could not read scan progress.");
-      const { scan } = await response.json() as { scan: ScanStatus };
-      setProcessed(scan.processed);
-      setTotal(scan.total);
-      setProgress(Math.round((scan.processed / Math.max(scan.total, 1)) * 100));
-      if (scan.status === "completed") {
-        await loadServerReport();
-        setScanning(false);
-        return;
+    try {
+      while (!controller.signal.aborted) {
+        const response = await fetch("/api/scan", { cache: "no-store", signal: controller.signal });
+        if (!response.ok) throw new Error("Shelfcheck could not read scan progress.");
+        const { scan } = await response.json() as { scan: ScanStatus };
+        setProcessed(scan.processed);
+        setTotal(scan.total);
+        setRateLimitPaused(scan.rateLimitPaused === true);
+        setProgress(Math.round((scan.processed / Math.max(scan.total, 1)) * 100));
+        if (scan.status === "completed") {
+          await loadServerReport();
+          setRateLimitPaused(false);
+          setScanning(false);
+          return;
+        }
+        if (scan.status === "error") {
+          setScanning(false);
+          setRateLimitPaused(false);
+          throw new Error(scan.error || "The server-side scan failed.");
+        }
+        await wait(1000, controller.signal);
       }
-      if (scan.status === "error") {
-        setScanning(false);
-        throw new Error(scan.error || "The server-side scan failed.");
-      }
-      await wait(1000);
+    } finally {
+      if (scanAbortControllerRef.current === controller) scanAbortControllerRef.current = null;
     }
   }
 
   async function scanLibrary(force = false) {
     if (!connected) { setSettingsOpen(true); return; }
     setFullRescanConfirmOpen(false);
-    setError(""); setPending(0);
+    setError("");
     try {
       const response = await fetch("/api/scan", {
         method: "POST",
@@ -323,7 +376,7 @@ export default function Home() {
       await pollServerScan();
     } catch (scanError) {
       setScanning(false);
-      setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");
+      if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");
     }
   }
 
@@ -345,9 +398,9 @@ export default function Home() {
         </div>
         <div className="scan-panel">
           <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{rateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning}>{rateLimitPaused ? "Paused - Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : pending ? `Resume scan (${pending} left)` : lastScan ? "Scan again" : "Scan Trakt library"}<b>→</b></button>
-          <p>{lastScan ? `Last scan ${lastScan} · Incremental scan beta` : "Only your collection metadata is read. Incremental scanning is beta."}</p>
-          {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning}>Force full rescan</button>}
+          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning}>{rateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
+          <p>{lastScan ? `Last scan ${formatLastScan(lastScan)}` : "Only your collection metadata is read."}</p>
+          {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning}>Run Deep Scan</button>}
         </div>
       </section>
 
@@ -383,7 +436,7 @@ export default function Home() {
         </div>
         {error && <div className="error"><span>!</span><p><strong>Scan interrupted</strong>{error}</p></div>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
-        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{rateLimitPaused ? "Paused - Rate Limit. Scanning will resume automatically in two minutes." : `Comparing show ${processed} of ${total || shows.length || "…"}. Every completed show is saved automatically.`}</p></div>}
+        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{rateLimitPaused ? "Paused due to Rate Limit" : `Comparing show ${processed} of ${total || shows.length || "…"}. Progress is saved periodically.`}</p></div>}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => {
           const percentCollected = show.collection?.aired ? Math.round((show.collection.completed / show.collection.aired) * 100) : null;
           return <article key={show.ids.trakt}>
@@ -444,6 +497,16 @@ export default function Home() {
             <div className="grace-input"><input type="number" min="0" max="30" step="1" value={airingGraceDays} onChange={(event) => setGracePeriod(event.target.value)} aria-label="Airing grace period in days" /><span>Days</span></div>
             <small>Example: Trakt date Aug 4 → report starting {new Date(Date.UTC(2026, 7, 4 + airingGraceDays)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}</small>
           </div>
+          <div className="diagnostics scan-cache-settings">
+            <p className="diagnostics-toggle scan-cache-title">Scan cache</p>
+            <p>Quick and Deep scans reuse cached collection fingerprints and Trakt update timestamps. Clear the cache to make the next scan rebuild every show&apos;s result.</p>
+            <p className="scan-cache-status">Cached results for {scanCacheCount} {scanCacheCount === 1 ? "show" : "shows"}{lastScan ? ` · Latest scan ${formatLastScan(lastScan)}` : ""}</p>
+            {!cacheClearConfirmOpen ? <button type="button" onClick={() => { setCacheMessage(""); setCacheClearConfirmOpen(true); }} disabled={scanning || scanCacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
+              <p>This clears scan results only. Your credentials, settings, ignored shows, and logs will not change.</p>
+              <div><button type="button" onClick={() => setCacheClearConfirmOpen(false)} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
+            </div>}
+            {cacheMessage && <p className="cache-message">{cacheMessage}</p>}
+          </div>
           <div className="diagnostics">
             <label className="diagnostics-toggle"><input type="checkbox" checked={debugEnabled} onChange={(event) => setDiagnostics(event.target.checked)} /> Enable diagnostic logging</label>
             <p>Records safe scan details in /data/logs. Credentials and authorization headers are never logged. The latest 10 scans are retained.</p>
@@ -455,12 +518,12 @@ export default function Home() {
       </div>}
       {fullRescanConfirmOpen && <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setFullRescanConfirmOpen(false)}>
         <section className="modal rescan-modal" role="dialog" aria-modal="true" aria-labelledby="rescan-title">
-          <p className="eyebrow">FULL LIBRARY CHECK</p>
-          <h2 id="rescan-title">Force a full rescan?</h2>
-          <p className="modal-copy">Shelfcheck will ignore cached results and check all {shows.length} shows against Trakt. This may take several minutes.</p>
+          <p className="eyebrow">DEEP LIBRARY CHECK</p>
+          <h2 id="rescan-title">Run a Deep Scan?</h2>
+          <p className="modal-copy">Shelfcheck will compare the collection fingerprint, aired count, and Trakt update timestamp for all {shows.length} shows, then manually rescan only the shows that changed. It can exclude incomplete episodes whose confirmed Trakt air date has not arrived, so its total can differ from Quick Scan. Clear the scan cache in Settings to rebuild every show.</p>
           <div className="modal-actions">
             <button type="button" className="secondary" onClick={() => setFullRescanConfirmOpen(false)}>Cancel</button>
-            <button type="button" className="primary" onClick={() => scanLibrary(true)}>Force full rescan <b>→</b></button>
+            <button type="button" className="primary" onClick={() => scanLibrary(true)}>Run Deep Scan <b>→</b></button>
           </div>
         </section>
       </div>}

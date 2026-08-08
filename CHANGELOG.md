@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.3.0 - 2026-08-08
+
+### Added
+
+- Added a first-visit search chooser with separate Trakt and Plex destinations.
+- Added a persistent Trakt/Plex switcher to move between collection sources.
+- Added a Plex placeholder page for the upcoming Plex library audit.
+- Added Trakt Authorization Code login, automatic access-token refresh, and logout.
+
+### Changed
+
+- Replaced manual access-token entry with Trakt application credentials and browser authorization.
+- Made the active Trakt sign-in state explicit in the application header.
+- Moved the existing Trakt collection audit to `/trakt`.
+- Ignored shows now use server state exclusively instead of legacy browser storage.
+
+### Fixed
+
+- Menus now close when clicking outside them or pressing Escape.
+- Trakt authorization callbacks now return to the Trakt audit after the landing page was introduced.
+
 ## 1.2.0 - 2026-08-07
 
 ### Added

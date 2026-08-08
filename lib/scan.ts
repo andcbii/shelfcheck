@@ -1,6 +1,6 @@
 import "server-only";
 
-import { readTraktCredentials } from "@/lib/server-config";
+import { validTraktCredentials } from "@/lib/trakt-auth";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, type ScanReason } from "@/lib/scan-cache";
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, writeSingleUserScanStatus } from "@/lib/sqlite";
@@ -137,7 +137,7 @@ function gracePeriod(value: unknown): number {
 }
 
 async function traktRequest(path: string): Promise<Response> {
-  const credentials = await readTraktCredentials();
+  let credentials = await validTraktCredentials();
   if (!credentials) throw new Error("Trakt is not configured.");
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const global = globalThis as ScanGlobal;
@@ -153,6 +153,7 @@ async function traktRequest(path: string): Promise<Response> {
     const requestStarted = Date.now();
     global.__shelfcheckLogger?.info("request.start", { path, attempt: attempt + 1 });
     try {
+      if (!credentials) throw new Error("Log in to Trakt before scanning.");
       const response = await fetch(`${TRAKT}${path}`, {
         signal: AbortSignal.timeout(15_000),
         headers: {
@@ -166,7 +167,12 @@ async function traktRequest(path: string): Promise<Response> {
       });
       updateRateLimit(response, global);
       global.__shelfcheckLogger?.info("request.response", { path, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
-      if (response.status === 401) throw new Error("Trakt rejected the access token. Check your credentials and try again.");
+      if (response.status === 401 && attempt === 0) {
+        credentials = await validTraktCredentials(true);
+        if (!credentials) throw new Error("Log in to Trakt before scanning.");
+        continue;
+      }
+      if (response.status === 401) throw new Error("Your Trakt login has expired. Log out, then log in again.");
       if (response.status === 403) throw new Error("Trakt rejected this request (403). Check that the token and Client ID belong to the same application.");
       if (response.status === 429 || response.status >= 500) {
         if (attempt === 4) throw new Error(`Trakt request failed (${response.status}).`);

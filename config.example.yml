@@ -1,4 +1,3 @@
-# Copy this file to /config/config.yml, or enter the same values in Shelfcheck's UI.
 trakt:
   client_id: "your-trakt-client-id"
-  access_token: "your-trakt-access-token"
+  client_secret: "your-trakt-client-secret"

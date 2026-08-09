@@ -22,19 +22,19 @@ function logsDirectory() {
   return path.join(dataDirectory(), "logs");
 }
 
-export function createScanLogger(enabled: boolean): ScanLogger {
+export function createScanLogger(enabled: boolean, baseName = "shelfcheck"): ScanLogger {
   if (!enabled) return silentLogger;
   const logDirectory = logsDirectory();
-  const currentLog = path.join(logDirectory, "shelfcheck.log");
+  const currentLog = path.join(logDirectory, `${baseName}.log`);
   try {
     mkdirSync(logDirectory, { recursive: true });
-    const oldest = path.join(logDirectory, "shelfcheck-9.log");
+    const oldest = path.join(logDirectory, `${baseName}-9.log`);
     if (existsSync(oldest)) rmSync(oldest);
     for (let index = 8; index >= 1; index -= 1) {
-      const source = path.join(logDirectory, `shelfcheck-${index}.log`);
-      if (existsSync(source)) renameSync(source, path.join(logDirectory, `shelfcheck-${index + 1}.log`));
+      const source = path.join(logDirectory, `${baseName}-${index}.log`);
+      if (existsSync(source)) renameSync(source, path.join(logDirectory, `${baseName}-${index + 1}.log`));
     }
-    if (existsSync(currentLog)) renameSync(currentLog, path.join(logDirectory, "shelfcheck-1.log"));
+    if (existsSync(currentLog)) renameSync(currentLog, path.join(logDirectory, `${baseName}-1.log`));
     writeFileSync(currentLog, "", { encoding: "utf8", mode: 0o600 });
   } catch (error) {
     console.error("Shelfcheck could not initialize its scan log.", error);
@@ -55,16 +55,16 @@ export function createScanLogger(enabled: boolean): ScanLogger {
   };
 }
 
-export function readCurrentScanLog() {
-  const currentLog = path.join(logsDirectory(), "shelfcheck.log");
+export function readCurrentScanLog(baseName = "shelfcheck") {
+  const currentLog = path.join(logsDirectory(), `${baseName}.log`);
   return existsSync(currentLog) ? readFileSync(currentLog) : null;
 }
 
-export function deleteAllScanLogs() {
+export function deleteAllScanLogs(baseName = "shelfcheck") {
   const logDirectory = logsDirectory();
   let deleted = 0;
   for (let index = 0; index <= 9; index += 1) {
-    const target = path.join(logDirectory, index === 0 ? "shelfcheck.log" : `shelfcheck-${index}.log`);
+    const target = path.join(logDirectory, index === 0 ? `${baseName}.log` : `${baseName}-${index}.log`);
     if (existsSync(target)) {
       rmSync(target);
       deleted += 1;

@@ -1,3 +1,14 @@
 trakt:
   client_id: "your-trakt-client-id"
   client_secret: "your-trakt-client-secret"
+
+plex:
+  url: "http://your-plex-server:32400"
+  token: "your-plex-token"
+
+tmdb:
+  token: "your-tmdb-api-read-access-token"
+
+tvdb:
+  api_key: "your-tvdb-v4-api-key"
+  # pin: "your-subscriber-pin"

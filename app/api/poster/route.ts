@@ -1,5 +1,8 @@
 const ALLOWED_HOST = /(^|\.)trakt\.tv$/i;
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 export async function GET(request: Request) {
   const source = new URL(request.url).searchParams.get("src");
   if (!source) return new Response("Missing image source", { status: 400 });
@@ -12,6 +15,7 @@ export async function GET(request: Request) {
 
     const upstream = await fetch(imageUrl, {
       headers: { Accept: "image/avif,image/webp,image/*" },
+      signal: AbortSignal.timeout(15_000),
     });
     if (!upstream.ok || !upstream.body) {
       return new Response("Poster unavailable", { status: upstream.status || 502 });

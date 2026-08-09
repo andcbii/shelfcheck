@@ -1,6 +1,6 @@
 # Roadmap
 
-## Version 2.0.0 wish list
+## Version 3.0.0 wish list
 
 ### Grace periods
 
@@ -16,6 +16,6 @@
 - Allow the reviewed status to be toggled off if it was selected accidentally.
 - Change the episode's color to indicate that it has been reviewed.
 
-### Popups
+### Series options
 
-- Close popups when the user clicks elsewhere on the page.
+- Allow an individual show to use TVDB DVD order instead of the default episode order.

@@ -12,6 +12,23 @@ export type TraktCredentials = TraktApplication & {
   redirectUri: string;
 };
 
+export type PlexProviders = {
+  plexUrl: string;
+  plexToken: string;
+  tmdbToken: string;
+  tvdbApiKey: string;
+  tvdbPin?: string;
+};
+export type PlexProviderPatch = { [Key in keyof PlexProviders]?: PlexProviders[Key] | null };
+export type PlexProviderStatus = {
+  plexUrl: string;
+  plexTokenSaved: boolean;
+  tmdbTokenSaved: boolean;
+  tvdbApiKeySaved: boolean;
+  tvdbPinSaved: boolean;
+  configured: boolean;
+};
+
 type ShelfcheckConfig = {
   trakt?: {
     client_id?: string;
@@ -21,13 +38,16 @@ type ShelfcheckConfig = {
     expires_at?: number;
     redirect_uri?: string;
   };
+  plex?: { url?: string; token?: string };
+  tmdb?: { token?: string };
+  tvdb?: { api_key?: string; pin?: string };
 };
 
 function configDirectory() {
   return process.env.SHELFCHECK_CONFIG_DIR || path.join(process.cwd(), ".runtime", "config");
 }
 
-export function configPath() {
+function configPath() {
   return path.join(configDirectory(), "config.yml");
 }
 
@@ -69,11 +89,13 @@ export async function readTraktCredentials(): Promise<TraktCredentials | null> {
 }
 
 export async function writeTraktApplication(application: TraktApplication) {
-  await writeConfig({ trakt: { client_id: application.clientId, client_secret: application.clientSecret } });
+  const document = await readConfig();
+  await writeConfig({ ...document, trakt: { client_id: application.clientId, client_secret: application.clientSecret } });
 }
 
 export async function writeTraktCredentials(credentials: TraktCredentials) {
-  await writeConfig({
+  const document = await readConfig();
+  await writeConfig({ ...document,
     trakt: {
       client_id: credentials.clientId,
       client_secret: credentials.clientSecret,
@@ -82,6 +104,48 @@ export async function writeTraktCredentials(credentials: TraktCredentials) {
       expires_at: credentials.expiresAt,
       redirect_uri: credentials.redirectUri,
     },
+  });
+}
+
+export async function readPlexProviders(): Promise<PlexProviders | null> {
+  const document = await readConfig();
+  const plexUrl = document.plex?.url?.trim().replace(/\/$/, "") || "";
+  const plexToken = document.plex?.token?.trim() || "";
+  const tmdbToken = document.tmdb?.token?.trim() || "";
+  const tvdbApiKey = document.tvdb?.api_key?.trim() || "";
+  const tvdbPin = document.tvdb?.pin?.trim() || undefined;
+  return plexUrl && plexToken && tmdbToken && tvdbApiKey
+    ? { plexUrl, plexToken, tmdbToken, tvdbApiKey, ...(tvdbPin ? { tvdbPin } : {}) }
+    : null;
+}
+
+export async function readPlexProviderStatus(): Promise<PlexProviderStatus> {
+  const document = await readConfig();
+  const plexUrl = document.plex?.url?.trim() || "";
+  const plexTokenSaved = Boolean(document.plex?.token?.trim());
+  const tmdbTokenSaved = Boolean(document.tmdb?.token?.trim());
+  const tvdbApiKeySaved = Boolean(document.tvdb?.api_key?.trim());
+  const tvdbPinSaved = Boolean(document.tvdb?.pin?.trim());
+  return { plexUrl, plexTokenSaved, tmdbTokenSaved, tvdbApiKeySaved, tvdbPinSaved, configured: Boolean(plexUrl && plexTokenSaved && tmdbTokenSaved && tvdbApiKeySaved) };
+}
+
+export async function writePlexProviders(credentials: PlexProviderPatch) {
+  const document = await readConfig();
+  const plexUrl = credentials.plexUrl === null ? null : credentials.plexUrl?.replace(/\/$/, "");
+  const has = (key: keyof PlexProviderPatch) => Object.prototype.hasOwnProperty.call(credentials, key);
+  await writeConfig({
+    ...document,
+    ...(has("plexUrl") || has("plexToken") ? { plex: {
+      ...document.plex,
+      ...(has("plexUrl") ? { url: plexUrl || undefined } : {}),
+      ...(has("plexToken") ? { token: credentials.plexToken || undefined } : {}),
+    } } : {}),
+    ...(has("tmdbToken") ? { tmdb: { ...document.tmdb, token: credentials.tmdbToken || undefined } } : {}),
+    ...(has("tvdbApiKey") || has("tvdbPin") ? { tvdb: {
+      ...document.tvdb,
+      ...(has("tvdbApiKey") ? { api_key: credentials.tvdbApiKey || undefined } : {}),
+      ...(has("tvdbPin") ? { pin: credentials.tvdbPin || undefined } : {}),
+    } } : {}),
   });
 }
 

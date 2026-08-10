@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { groupPlexShows, type PlexMetadata } from "../lib/plex-inventory";
+import { groupPlexShows, plexEpisodeFingerprint, type PlexMetadata } from "../lib/plex-inventory";
 
 const show = (ratingKey: string, plexGuid: string, tmdbId: number, tvdbId: number): PlexMetadata => ({
   ratingKey,
@@ -34,4 +34,10 @@ test("still groups duplicate records by Plex identity when provider IDs differ",
   ]);
 
   assert.equal(groups.length, 1);
+});
+
+test("episode fingerprint changes when an episode is added without changing the show", () => {
+  const before = [{ ratingKey: "1", updatedAt: 100 }];
+  const after = [...before, { ratingKey: "2", updatedAt: 100 }];
+  assert.notEqual(plexEpisodeFingerprint(before), plexEpisodeFingerprint(after));
 });

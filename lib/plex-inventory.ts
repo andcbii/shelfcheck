@@ -51,6 +51,11 @@ export function plexFingerprint(group: PlexShowGroup): string | undefined {
   return group.records.map((record) => `${record.ratingKey}:${record.updatedAt}`).sort().join("|");
 }
 
+export function plexEpisodeFingerprint(episodes: PlexMetadata[]): string | undefined {
+  if (episodes.some((episode) => !episode.ratingKey || !Number.isFinite(episode.updatedAt))) return undefined;
+  return episodes.map((episode) => `${episode.ratingKey}:${episode.updatedAt}`).sort().join("|");
+}
+
 export function hasPlexEpisodeCoordinate(episode: PlexMetadata): episode is PlexMetadata & { parentIndex: number; index: number } {
   return Number.isFinite(episode.parentIndex) && Number.isFinite(episode.index);
 }

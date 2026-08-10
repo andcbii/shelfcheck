@@ -1,4 +1,5 @@
 import { exchangeAuthorizationCode } from "@/lib/trakt-auth";
+import { requestOrigin } from "@/lib/request-origin";
 
 export const runtime = "nodejs";
 
@@ -8,7 +9,7 @@ function cookieValue(request: Request, name: string) {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const origin = url.origin;
+  const origin = requestOrigin(request);
   const code = url.searchParams.get("code") || "";
   const state = url.searchParams.get("state") || "";
   const expectedState = cookieValue(request, "shelfcheck-trakt-state");

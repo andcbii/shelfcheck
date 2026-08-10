@@ -14,14 +14,36 @@ export function idsFromGuids(guids: { id?: string }[] = []) {
 }
 
 export function groupPlexShows(shows: PlexMetadata[]): PlexShowGroup[] {
-  const groups = new Map<string, PlexShowGroup>();
-  for (const show of shows) {
+  const parents = shows.map((_, index) => index);
+  const root = (index: number): number => parents[index] === index ? index : (parents[index] = root(parents[index]));
+  const join = (left: number, right: number) => { parents[root(right)] = root(left); };
+  const aliases = new Map<string, number>();
+
+  for (const [index, show] of shows.entries()) {
     const plexGuid = show.guid?.startsWith("plex://show/") ? show.guid : undefined;
-    const identity = plexGuid || `ratingKey:${show.ratingKey || "unknown"}`;
-    const group = groups.get(identity) || { identity, ...(plexGuid ? { plexGuid } : {}), records: [] };
-    group.records.push(show); groups.set(identity, group);
+    const { tmdbId, tvdbId } = idsFromGuids(show.Guid);
+    // Requiring the complete pair avoids merging distinct TMDB series that TVDB
+    // represents as one record (for example, the two Animaniacs series).
+    const providerPair = tmdbId && tvdbId ? `tmdb:${tmdbId}|tvdb:${tvdbId}` : undefined;
+    for (const alias of [plexGuid, providerPair]) {
+      if (!alias) continue;
+      const existing = aliases.get(alias);
+      if (existing === undefined) aliases.set(alias, index);
+      else join(existing, index);
+    }
   }
-  return [...groups.values()];
+
+  const recordsByRoot = new Map<number, PlexMetadata[]>();
+  for (const [index, show] of shows.entries()) {
+    const records = recordsByRoot.get(root(index)) || [];
+    records.push(show);
+    recordsByRoot.set(root(index), records);
+  }
+
+  return [...recordsByRoot.values()].map((records) => {
+    const plexGuid = records.map((record) => record.guid).find((guid) => guid?.startsWith("plex://show/"));
+    return { identity: plexGuid || `ratingKey:${records[0]?.ratingKey || "unknown"}`, ...(plexGuid ? { plexGuid } : {}), records };
+  });
 }
 
 export function plexFingerprint(group: PlexShowGroup): string | undefined {

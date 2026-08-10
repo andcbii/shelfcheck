@@ -1,10 +1,13 @@
-export const PLEX_CACHE_VERSION = 8;
+export const PLEX_CACHE_VERSION = 10;
 
 export type PlexScanCacheEntry = {
   plexFingerprint?: string;
   tmdbId?: number;
   tvdbId?: number;
   tvdbEpisodeImdbIds?: Record<string, string[]>;
+  localTmdbEpisodeIds?: number[];
+  localTvdbEpisodeIds?: number[];
+  localImdbEpisodeIds?: string[];
   lastCheckedAt: string;
 };
 

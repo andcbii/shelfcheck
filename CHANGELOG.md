@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.1.0 - 2026-08-10
+
+### Added
+
+- Added Plex reports for automatically reconciled episodes, unresolved shows,
+  and unusual TMDB/TVDB provider relationships.
+- Added library-wide Plex episode identity indexing so separately managed Plex
+  shows can satisfy explicit cross-provider episode links.
+
+### Changed
+
+- Explicit TMDB and TVDB external-ID links are authoritative when Plex owns the
+  exact linked episode; parent-series agreement is no longer required.
+- Provider-match reporting retains many-to-one, one-to-many, and conflicting
+  parent-series relationships for review instead of rejecting explicit links.
+- Plex shows with the same complete TMDB/TVDB identity are audited as one
+  combined library holding while distinct TMDB series remain separate.
+
+### Fixed
+
+- Fixed false missing episodes when multiple TMDB series map into one TVDB
+  series, including the 1993 and 2020 Animaniacs records.
+- Fixed split sequel or continuation libraries, including Baseball and The
+  Tenth Inning, where provider databases assign different parent series.
+
 ## 2.0.1 - 2026-08-09
 
 ### Fixed

@@ -1,4 +1,5 @@
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState } from "@/lib/sqlite";
+import { parseTraktPreferencesPatch } from "@/lib/preferences";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,9 +13,7 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
-  const patch = await request.json() as Record<string, unknown>;
-  const statePatch = { ...patch };
-  delete statePatch.scan;
-  patchSingleUserState(statePatch);
+  const body: unknown = await request.json().catch(() => ({}));
+  patchSingleUserState(parseTraktPreferencesPatch(body));
   return Response.json({ saved: true });
 }

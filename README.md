@@ -28,7 +28,7 @@ Shelfcheck's configuration and data.
 Published releases are also available from Docker Hub:
 
 ```bash
-docker pull andcbii/shelfcheck:1.3.0
+docker pull andcbii/shelfcheck:2.0.0
 ```
 
 An equivalent bind-mount example is:

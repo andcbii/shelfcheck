@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.0.0 - 2026-08-09
+
+### Added
+
+- Added a complete Plex library audit with TMDB, TVDB, IMDb, and Trakt episode crosswalks.
+- Added optional automatic compound-episode reconciliation, enabled by default.
+- Added concurrent Plex show processing with conservative provider pacing, resumable checkpoints, diagnostics, and concurrent heartbeat status.
+- Added independent Plex preferences for ignored shows, unaired episodes, airing offsets, cache management, and diagnostics.
+
+### Changed
+
+- Ignored Plex and Trakt shows are now excluded before provider work so future scans skip their API calls.
+- Provider timing distinguishes request queueing, network work, and rate-limit waits.
+- Split scan concurrency, provider transport, inventory, cache policy, episode reconciliation, shared UI controls, and Trakt data normalization into focused modules.
+- Persisted preferences are validated and stored JSON is read through safe typed boundaries.
+- Normalized repository line endings and removed unused starter assets.
+
+### Fixed
+
+- One owned compound episode can satisfy multiple equivalent TVDB episode records when corroborating evidence is strong.
+- Plex episodes without a usable air date are hidden when **Hide unaired episodes** is enabled.
+- Concurrent scan heartbeats now report every active show instead of presenting one worker as the entire scan.
+- TMDB-owned episodes remain satisfied when provider season/episode coordinates differ.
+- Scan progress updates preserve active heartbeat and provider rate-limit state.
+- Expired Trakt authorization fails immediately after refresh instead of entering the retry ladder.
+- Plex polling now cancels on navigation and reports status-loading failures instead of leaving a stuck scan indicator.
+- Tagged releases now pass application and container verification before publishing.
+
 ## 1.3.0 - 2026-08-08
 
 ### Added

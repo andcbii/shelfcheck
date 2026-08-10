@@ -5,21 +5,13 @@ import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, type ScanReason } from "@/lib/scan-cache";
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, writeSingleUserScanStatus } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
+import { ignoredTraktIds } from "@/lib/ignored-shows";
+import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
+import { runWorkerPool } from "@/lib/scan-concurrency";
+import { isTerminalTraktError, TraktHttpError } from "@/lib/trakt-http";
 
-type TraktShow = {
-  title: string;
-  year: number;
-  ids: { trakt: number; slug: string; tmdb?: number };
-  status?: string;
-  images?: { poster?: string[] };
-  collection?: { aired: number; completed: number };
-  aired_episodes?: number;
-  updated_at?: string;
-};
-type CollectionShow = { show: TraktShow; seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[] };
 type ProgressSeason = { number: number; episodes: { number: number; completed: boolean }[] };
 type TraktSeason = { number: number; episodes?: { season?: number; number: number; first_aired?: string | null }[] };
-type MissingEpisode = { show: TraktShow; season: number; episode: number };
 type ShowScanState = {
   collectionFingerprint: string;
   airedEpisodes?: number;
@@ -81,17 +73,6 @@ function updateRateLimit(response: Response, global: ScanGlobal) {
   } catch {
     global.__shelfcheckLogger?.warn("rate-limit.invalid", { header });
   }
-}
-
-function compactShow(show: TraktShow): TraktShow {
-  return {
-    title: show.title,
-    year: show.year,
-    ids: show.ids,
-    ...(show.status ? { status: show.status } : {}),
-    ...(show.images?.poster?.[0] ? { images: { poster: [show.images.poster[0]] } } : {}),
-    ...(show.collection ? { collection: show.collection } : {}),
-  };
 }
 
 function compactCache(cache: ScanCache | undefined): ScanCache {
@@ -172,8 +153,8 @@ async function traktRequest(path: string): Promise<Response> {
         if (!credentials) throw new Error("Log in to Trakt before scanning.");
         continue;
       }
-      if (response.status === 401) throw new Error("Your Trakt login has expired. Log out, then log in again.");
-      if (response.status === 403) throw new Error("Trakt rejected this request (403). Check that the token and Client ID belong to the same application.");
+      if (response.status === 401) throw new TraktHttpError(401, "Your Trakt login has expired. Log out, then log in again.");
+      if (response.status === 403) throw new TraktHttpError(403, "Trakt rejected this request (403). Check that the token and Client ID belong to the same application.");
       if (response.status === 429 || response.status >= 500) {
         if (attempt === 4) throw new Error(`Trakt request failed (${response.status}).`);
         const retryAfter = Number(response.headers.get("Retry-After"));
@@ -189,7 +170,7 @@ async function traktRequest(path: string): Promise<Response> {
       return response;
     } catch (error) {
       global.__shelfcheckLogger?.warn("request.error", { path, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: error instanceof Error ? error.message : String(error) });
-      if (error instanceof Error && (error.message.includes("access token") || error.message.includes("403"))) throw error;
+      if (isTerminalTraktError(error)) throw error;
       if (attempt === 4) throw new Error(error instanceof Error ? error.message : "The Trakt request failed.");
       await wait(1000 * 2 ** attempt);
     }
@@ -236,7 +217,10 @@ async function runScan(force = false) {
     const priorCache = compactCache(prior?.scanCache);
     const airingGraceDays = gracePeriod(state.airingGraceDays);
     const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
-    const downloaded = await traktAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+    const downloadedAll = await traktAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+    const ignoredIds = ignoredTraktIds(state.ignoredShows);
+    const downloaded = downloadedAll.filter((item) => !ignoredIds.has(item.show.ids.trakt));
+    logger.info("collection.ignored-skipped", { ignored: downloadedAll.length - downloaded.length, checked: downloaded.length });
     const freshFingerprints = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), collectionFingerprint(item)]));
     const freshAiredEpisodes = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), item.show.aired_episodes]));
     const freshTraktUpdatedAt = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), item.show.updated_at || ""]));
@@ -248,7 +232,7 @@ async function runScan(force = false) {
     const library: CollectionShow[] = downloaded.map((item) => {
       const collected = collectedEpisodeCount(item);
       const aired = item.show.aired_episodes;
-      return { show: compactShow({
+      return { show: compactTraktShow({
         ...previous.get(item.show.ids.trakt),
         ...item.show,
         ...(Number.isFinite(aired) ? { collection: { aired: aired as number, completed: collected } } : {}),
@@ -302,10 +286,7 @@ async function runScan(force = false) {
       logger.info("checkpoint.saved", { reason, processed, total: library.length });
     };
     scanGlobal.__shelfcheckSaveCheckpoint = (reason) => saveCheckpoint(reason, true);
-    let cursor = 0;
-    const worker = async () => {
-      while (cursor < queue.length) {
-        const { item, reason } = queue[cursor++];
+    await runWorkerPool(queue, 6, async ({ item, reason }) => {
         const id = String(item.show.ids.trakt);
         const showStarted = Date.now();
         logger.info("show.start", { traktId: item.show.ids.trakt, title: item.show.title, reason });
@@ -318,7 +299,7 @@ async function runScan(force = false) {
           const seasons = progress.seasons || [];
           const aired = progress.aired ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.length : 0), 0);
           const completed = progress.completed ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.filter((episode) => episode.completed).length : 0), 0);
-          item.show = compactShow({ ...item.show, collection: { aired, completed } });
+        item.show = compactTraktShow({ ...item.show, collection: { aired, completed } });
           incomplete = seasons.flatMap((season) => season.number
             ? (season.episodes || []).filter((episode) => !episode.completed).map((episode) => ({ season: season.number, episode: episode.number }))
             : []);
@@ -351,7 +332,7 @@ async function runScan(force = false) {
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });
         if (missing.length && !item.show.images?.poster?.length) {
           const details = await traktJson<TraktShow>(`/shows/${id}?extended=full,images`).catch(() => null);
-          if (details?.images?.poster?.[0]) item.show = compactShow({ ...item.show, images: { poster: [details.images.poster[0]] } });
+          if (details?.images?.poster?.[0]) item.show = compactTraktShow({ ...item.show, images: { poster: [details.images.poster[0]] } });
           for (const result of missing) result.show = item.show;
         }
         results[id] = missing;
@@ -368,11 +349,7 @@ async function runScan(force = false) {
         processed += 1;
         updateScan({ status: "running", processed, total: library.length, startedAt, ...rateLimitStatusFields(globalThis as ScanGlobal) });
         saveCheckpoint("interval");
-      }
-    };
-    const workers = await Promise.allSettled(Array.from({ length: Math.min(6, queue.length || 1) }, worker));
-    const failedWorker = workers.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failedWorker) throw failedWorker.reason;
+    });
     const missing = Object.values(results).flat().sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
     const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache, airingGraceDays };
     const finishedAt = new Date().toISOString();

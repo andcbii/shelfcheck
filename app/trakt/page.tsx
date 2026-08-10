@@ -5,26 +5,18 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
+import { DiagnosticLogActions } from "@/app/components/diagnostic-log-actions";
+import { IgnoredShowsManager } from "@/app/components/ignored-shows-manager";
+import { ScanSortControl } from "@/app/components/scan-sort-control";
+import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
+import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 
-type TraktShow = {
-  title: string;
-  year: number;
-  ids: { trakt: number; slug: string; tmdb?: number };
-  status?: string;
-  images?: { poster?: string[] };
-  collection?: { aired: number; completed: number };
-};
-type CollectionShow = {
-  show: TraktShow;
-  seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[];
-};
-type MissingEpisode = { show: TraktShow; season: number; episode: number };
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
 type ServerState = {
   report?: ScanReport;
-  checkpoint?: unknown;
   ignoredShows?: TraktShow[];
   scan?: ScanStatus;
   diagnosticsEnabled?: boolean;
@@ -33,25 +25,6 @@ type ServerState = {
 
 const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
 const IGNORED_SHOWS_COOKIE = "shelfcheck-ignored-shows-v1";
-
-function compactShow(show: TraktShow): TraktShow {
-  return {
-    title: show.title,
-    year: show.year,
-    ids: show.ids,
-    ...(show.status ? { status: show.status } : {}),
-    ...(show.images?.poster?.[0] ? { images: { poster: [show.images.poster[0]] } } : {}),
-    ...(show.collection ? { collection: show.collection } : {}),
-  };
-}
-
-function compactLibrary(library: CollectionShow[]): CollectionShow[] {
-  return library.map(({ show }) => ({ show: compactShow(show) }));
-}
-
-function compactMissing(items: MissingEpisode[]): MissingEpisode[] {
-  return items.map((item) => ({ ...item, show: compactShow(item.show) }));
-}
 
 function clearLegacyIgnoredShowsBrowserCache() {
   try { localStorage.removeItem(IGNORED_SHOWS_CACHE); } catch { /* browser storage may be unavailable */ }
@@ -90,6 +63,8 @@ export default function Home() {
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const [collapsedShows, setCollapsedShows] = useState<Set<number>>(new Set());
+  const [collapsedSeasons, setCollapsedSeasons] = useState<Set<string>>(new Set());
   const [fullRescanConfirmOpen, setFullRescanConfirmOpen] = useState(false);
   const [rateLimitPaused, setRateLimitPaused] = useState(false);
   const [scanCacheCount, setScanCacheCount] = useState(0);
@@ -124,14 +99,14 @@ export default function Home() {
       setDebugEnabled(state.diagnosticsEnabled !== false);
       setAiringGraceDays(Math.max(0, Math.min(30, Math.trunc(Number(state.airingGraceDays) || 0))));
       if (Array.isArray(state.ignoredShows)) {
-        const remoteIgnored = state.ignoredShows.map(compactShow);
+        const remoteIgnored = state.ignoredShows.map(compactTraktShow);
         setIgnoredShows(remoteIgnored);
       }
       if (state.report?.shows && state.report?.missing && state.report.lastScan) {
         const remoteReport = {
           ...state.report,
-          shows: compactLibrary(state.report.shows),
-          missing: compactMissing(state.report.missing),
+          shows: compactTraktLibrary(state.report.shows),
+          missing: compactMissingEpisodes(state.report.missing),
         };
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
         setScanCacheCount(Object.keys(state.report.scanCache || {}).length);
@@ -205,25 +180,6 @@ export default function Home() {
     syncServerState({ airingGraceDays: days }, true);
   }
 
-  async function downloadDebugLog() {
-    const response = await fetch("/api/logs", { cache: "no-store" });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { error?: string };
-      setError(body.error || "Shelfcheck could not download the current log.");
-      return;
-    }
-    const url = URL.createObjectURL(await response.blob());
-    const link = document.createElement("a");
-    link.href = url; link.download = "shelfcheck.log"; link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function deleteAllLogs() {
-    if (!window.confirm("Delete shelfcheck.log and all nine retained scan logs? This cannot be undone.")) return;
-    const response = await fetch("/api/logs", { method: "DELETE" });
-    if (!response.ok) setError("Shelfcheck could not delete the diagnostic logs.");
-  }
-
   async function clearCache() {
     setClearingCache(true);
     setCacheMessage("");
@@ -241,10 +197,11 @@ export default function Home() {
 
   const ignoredIds = useMemo(() => new Set(ignoredShows.map((show) => show.ids.trakt)), [ignoredShows]);
   const visibleMissing = useMemo(() => missing.filter((item) => !ignoredIds.has(item.show.ids.trakt)), [missing, ignoredIds]);
+  const activelyRateLimitPaused = isActiveRateLimitPause(scanning, rateLimitPaused);
 
   const grouped = useMemo(() => {
     const map = new Map<number, { show: TraktShow; episodes: MissingEpisode[] }>();
-    visibleMissing.filter((item) => item.show.title.toLowerCase().includes(query.toLowerCase())).forEach((item) => {
+    visibleMissing.filter((item) => matchesSearch(item.show.title, query)).forEach((item) => {
       const current = map.get(item.show.ids.trakt) || { show: item.show, episodes: [] };
       current.episodes.push(item);
       map.set(item.show.ids.trakt, current);
@@ -272,7 +229,7 @@ export default function Home() {
 
   function ignoreShow(show: TraktShow) {
     setIgnoredShows((current) => {
-      const next = [...current.filter((item) => item.ids.trakt !== show.ids.trakt), compactShow(show)].sort((a, b) => a.title.localeCompare(b.title));
+      const next = [...current.filter((item) => item.ids.trakt !== show.ids.trakt), compactTraktShow(show)].sort((a, b) => a.title.localeCompare(b.title));
       syncServerState({ ignoredShows: next }, true);
       return next;
     });
@@ -292,6 +249,19 @@ export default function Home() {
     setErrorContext("auth");
     if (applicationConfigured) window.location.assign("/api/auth/trakt/login");
     else setConnectionOpen(true);
+  }
+
+  const traktSeasonKey = (traktId: number, season: number) => `${traktId}:${season}`;
+  function toggleTraktShow(traktId: number) {
+    setCollapsedShows((current) => { const next = new Set(current); if (next.has(traktId)) next.delete(traktId); else next.add(traktId); return next; });
+    setOpenShowMenu(null);
+  }
+  function setAllTraktShows(collapsed: boolean) { setCollapsedShows(collapsed ? new Set(grouped.map(({ show }) => show.ids.trakt)) : new Set()); setOpenShowMenu(null); }
+  function toggleTraktSeason(traktId: number, season: number) {
+    setCollapsedSeasons((current) => { const next = new Set(current); const key = traktSeasonKey(traktId, season); if (next.has(key)) next.delete(key); else next.add(key); return next; });
+  }
+  function setAllTraktSeasons(traktId: number, episodes: MissingEpisode[], collapsed: boolean) {
+    setCollapsedSeasons((current) => { const next = new Set(current); for (const season of new Set(episodes.map((episode) => episode.season))) { const key = traktSeasonKey(traktId, season); if (collapsed) next.add(key); else next.delete(key); } return next; });
   }
 
   async function saveTraktCredentials() {
@@ -351,8 +321,8 @@ export default function Home() {
     const { state } = await response.json() as { state: ServerState | null };
     if (!state?.report) return;
     const report = state.report;
-    setShows(compactLibrary(report.shows));
-    setMissing(compactMissing(report.missing));
+    setShows(compactTraktLibrary(report.shows));
+    setMissing(compactMissingEpisodes(report.missing));
     setLastScan(report.lastScan);
     setScanCacheCount(Object.keys(report.scanCache || {}).length);
   }
@@ -431,48 +401,38 @@ export default function Home() {
           <p className="intro">Shelfcheck compares every collected show against Trakt’s aired episode list, then gives you one clean report of what’s missing.</p>
         </div>
         <div className="scan-panel">
-          <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{rateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning}>{rateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
+          <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{activelyRateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
+          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning}>{activelyRateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${formatLastScan(lastScan)}` : "Only your collection metadata is read."}</p>
           {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning}>Run Deep Scan</button>}
         </div>
       </section>
 
       <div className="summary-wrap">
-        <section className="summary" aria-label="Scan summary">
-          <div><span>COLLECTED SHOWS</span><strong>{shows.length || "—"}</strong></div>
+        <section className="summary scan-summary" aria-label="Scan summary">
+          <div><span>SHOWS IN COLLECTION</span><strong>{shows.length || "—"}</strong></div>
+          <div><span>SHOWS WITH MISSING EPISODES</span><strong>{lastScan ? grouped.length : "—"}</strong></div>
           <div><span>MISSING EPISODES</span><strong>{lastScan ? visibleMissing.length : "—"}</strong></div>
-          <div><span>SHOWS WITH GAPS</span><strong>{lastScan ? grouped.length : "—"}</strong></div>
           <div className="ignored-stat" data-menu-root="ignored"><button type="button" onClick={() => setIgnoredManagerOpen((open) => !open)} aria-expanded={ignoredManagerOpen}><span>IGNORED SHOWS ↗</span><strong>{ignoredShows.length}</strong></button></div>
-          <div className="health"><span>COLLECTION STATUS</span><strong>{!lastScan ? "Not scanned" : visibleMissing.length ? "Needs attention" : "Complete"}</strong></div>
         </section>
-        {ignoredManagerOpen && <section className="ignored-manager" aria-label="Ignored shows" data-menu-root="ignored">
-          <div><h3>Ignored shows ({ignoredShows.length})</h3><button type="button" onClick={() => setIgnoredManagerOpen(false)} aria-label="Close ignored shows">×</button></div>
-          {ignoredShows.length === 0 ? <p>No shows are ignored.</p> : ignoredShows.map((show) => <div className="ignored-row" key={show.ids.trakt}><span>{show.title}</span><button type="button" onClick={() => restoreShow(show.ids.trakt)}>Restore</button></div>)}
-        </section>}
+        {ignoredManagerOpen && <IgnoredShowsManager items={ignoredShows.map((show) => ({ key: show.ids.trakt, title: show.title }))} onClose={() => setIgnoredManagerOpen(false)} onRestore={(key) => restoreShow(Number(key))} showCount />}
       </div>
 
       <section className="report">
         <div className="report-heading">
-          <div><p className="eyebrow">MISSING REPORT</p><h2>{!lastScan ? "Ready when you are" : visibleMissing.length ? `${visibleMissing.length} episodes to find` : "Your collection is complete"}</h2></div>
-          {lastScan && visibleMissing.length > 0 && <div className="report-controls">
-            <label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter shows" /></label>
-            <div className="sort-control" data-menu-root="sort">
-              <button type="button" className="sort-trigger" onClick={() => setSortMenuOpen((open) => !open)} aria-haspopup="menu" aria-expanded={sortMenuOpen}>
-                <span>{sortField === "title" ? "By title" : "By percent collected"}</span><b aria-label={sortAscending ? "Ascending" : "Descending"}>{sortAscending ? "▲" : "▼"}</b>
-              </button>
-              {sortMenuOpen && <div className="sort-menu" role="menu">
-                <button type="button" role="menuitem" className={sortField === "title" ? "selected" : ""} onClick={() => chooseSort("title")}><span>Title</span><b>{sortField === "title" ? (sortAscending ? "↑" : "↓") : ""}</b></button>
-                <button type="button" role="menuitem" className={sortField === "percent" ? "selected" : ""} onClick={() => chooseSort("percent")}><span>Percent collected</span><b>{sortField === "percent" ? (sortAscending ? "↑" : "↓") : ""}</b></button>
-              </div>}
-            </div>
-          </div>}
+          <p className="eyebrow">TRAKT MISSING REPORT</p>
+          <div className="report-primary-row"><h2>{visibleMissing.length} missing episodes</h2>
+          {lastScan && visibleMissing.length > 0 && <ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} />}
+          </div>
+          {lastScan && visibleMissing.length > 0 && <div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllTraktShows(false)}>Expand all</button><button onClick={() => setAllTraktShows(true)}>Collapse all</button></div></div>}
         </div>
         {error && <div className="error"><span>!</span><p><strong>{errorContext === "auth" ? "Trakt login failed" : "Scan interrupted"}</strong>{error}</p></div>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
-        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{rateLimitPaused ? "Paused due to Rate Limit" : `Comparing show ${processed} of ${total || shows.length || "…"}. Progress is saved periodically.`}</p></div>}
+        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{activelyRateLimitPaused ? "Paused due to Rate Limit" : `Comparing show ${processed} of ${total || shows.length || "…"}. Progress is saved periodically.`}</p></div>}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => {
           const percentCollected = show.collection?.aired ? Math.round((show.collection.completed / show.collection.aired) * 100) : null;
+          const showCollapsed = collapsedShows.has(show.ids.trakt);
+          const seasons = [...new Set(episodes.map((episode) => episode.season))].sort((a, b) => a - b);
           return <article key={show.ids.trakt}>
           <div className="collection-percent"><strong>{percentCollected === null ? "—" : `${percentCollected}%`}</strong><span>COLLECTED</span></div>
           <div className="show-index">
@@ -490,16 +450,16 @@ export default function Home() {
               <small>{show.year}</small>
               <a className="brand-link" href={`https://app.trakt.tv/shows/${show.ids.slug}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on Trakt`} title="View on Trakt"><img src="/trakt-logomark.svg" alt="" /></a>
               {show.ids.tmdb && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.ids.tmdb}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on The Movie Database`} title="View on TMDB"><img src="/tmdb-blue-square.svg" alt="" /></a>}
+              <button className="show-collapse-toggle" onClick={() => toggleTraktShow(show.ids.trakt)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button>
             </div>
             {openShowMenu === show.ids.trakt && <div className="show-action-menu" role="menu"><button type="button" role="menuitem" onClick={() => ignoreShow(show)}>⊘ <span>Ignore this show</span></button></div>}
-            <div className="show-links-row"><p>{episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p></div>
-            <div className="episode-tags">{episodes.map((ep) => <a
-            key={`${ep.season}-${ep.episode}`}
-            href={`https://app.trakt.tv/shows/${show.ids.slug}?season=${ep.season}&view=episode&episode=${ep.episode}`}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Open ${show.title} season ${ep.season} episode ${ep.episode} on Trakt`}
-          >S{String(ep.season).padStart(2,"0")}E{String(ep.episode).padStart(2,"0")}<b aria-hidden="true">↗</b></a>)}</div>
+            {!showCollapsed && <>
+            <div className="compact-show-meta"><p>{show.collection?.completed ?? 0} collected · {episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p><div className="season-all-controls"><button onClick={() => setAllTraktSeasons(show.ids.trakt, episodes, false)}>Show all</button><button onClick={() => setAllTraktSeasons(show.ids.trakt, episodes, true)}>Collapse all</button></div></div>
+            <div className="plex-seasons">{seasons.map((season) => {
+              const seasonEpisodes = episodes.filter((episode) => episode.season === season).sort((a, b) => a.episode - b.episode);
+              const collapsed = collapsedSeasons.has(traktSeasonKey(show.ids.trakt, season));
+              return <section className="plex-season" key={season}><button className="plex-season-heading" onClick={() => toggleTraktSeason(show.ids.trakt, season)} aria-expanded={!collapsed}><span>Season {String(season).padStart(2, "0")}</span><small>{seasonEpisodes.length} missing</small><b>{collapsed ? "+" : "−"}</b></button>{!collapsed && <div className="plex-episode-grid trakt-season-episodes">{seasonEpisodes.map((ep) => <div className="plex-episode-item" key={`${ep.season}-${ep.episode}`}><div className="episode-tile-row"><span className="episode-code-tile">S{String(ep.season).padStart(2,"0")}E{String(ep.episode).padStart(2,"0")}</span><div className="episode-provider-links"><a href={`https://app.trakt.tv/shows/${show.ids.slug}?season=${ep.season}&view=episode&episode=${ep.episode}`} target="_blank" rel="noreferrer" title="View episode on Trakt" aria-label={`Open ${show.title} season ${ep.season} episode ${ep.episode} on Trakt`}><img src="/trakt-logomark.svg" alt="" /></a>{show.ids.tmdb && <a href={`https://www.themoviedb.org/tv/${show.ids.tmdb}/season/${ep.season}/episode/${ep.episode}`} target="_blank" rel="noreferrer" title="View episode on TMDB" aria-label={`Open ${show.title} season ${ep.season} episode ${ep.episode} on TMDB`}><img src="/tmdb-blue-square.svg" alt="" /></a>}</div></div></div>)}</div>}</section>;
+            })}</div></>}
           </div>
         </article>})}</div>}
       </section>
@@ -545,7 +505,7 @@ export default function Home() {
           <div className="diagnostics">
             <label className="diagnostics-toggle"><input type="checkbox" checked={debugEnabled} onChange={(event) => setDiagnostics(event.target.checked)} /> Enable diagnostic logging</label>
             <p>Records safe scan details in /data/logs. Credentials and authorization headers are never logged. The latest 10 scans are retained.</p>
-            <div><button type="button" onClick={downloadDebugLog}>Download log</button><button type="button" onClick={deleteAllLogs}>Delete all logs</button></div>
+            <DiagnosticLogActions endpoint="/api/logs" filename="shelfcheck.log" confirmMessage="Delete shelfcheck.log and all nine retained scan logs? This cannot be undone." downloadError="Shelfcheck could not download the current log." deleteError="Shelfcheck could not delete the diagnostic logs." onError={setError} />
           </div>
           <p className="build-info">Shelfcheck build {SHELFCHECK_VERSION}</p>
         </section>

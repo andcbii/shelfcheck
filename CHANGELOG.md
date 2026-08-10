@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.1 - 2026-08-09
+
+### Fixed
+
+- Trakt authorization now uses the public HTTPS origin forwarded by a reverse
+  proxy instead of the container's internal HTTP origin.
+
 ## 2.0.0 - 2026-08-09
 
 ### Added

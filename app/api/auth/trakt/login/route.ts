@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { requestOrigin } from "@/lib/request-origin";
 import { traktApplication } from "@/lib/trakt-auth";
 
 export const runtime = "nodejs";
@@ -7,7 +8,7 @@ export async function GET(request: Request) {
   try {
     const { clientId } = await traktApplication();
     const state = randomBytes(24).toString("base64url");
-    const origin = new URL(request.url).origin;
+    const origin = requestOrigin(request);
     const redirectUri = `${origin}/api/auth/trakt/callback`;
     const target = new URL("https://auth.trakt.tv/oauth/authorize");
     target.searchParams.set("response_type", "code");

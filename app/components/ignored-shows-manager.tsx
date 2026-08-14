@@ -1,6 +1,6 @@
 "use client";
 
-type IgnoredItem = { key: string | number; title: string };
+type IgnoredItem = { key: string | number; title: string; detail?: string };
 
 type Props = {
   items: IgnoredItem[];
@@ -18,7 +18,7 @@ export function IgnoredShowsManager({ items, onClose, onRestore, showCount = fal
       </div>
       {items.length === 0 ? <p>No shows are ignored.</p> : items.map((show) => (
         <div className="ignored-row" key={show.key}>
-          <span>{show.title}</span>
+          <span>{show.title}{show.detail && <small>{show.detail}</small>}</span>
           <button type="button" onClick={() => onRestore(show.key)}>Restore</button>
         </div>
       ))}

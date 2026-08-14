@@ -10,14 +10,18 @@ import { SHELFCHECK_VERSION } from "@/lib/version";
 import { DiagnosticLogActions } from "@/app/components/diagnostic-log-actions";
 import { IgnoredShowsManager } from "@/app/components/ignored-shows-manager";
 import { ScanSortControl } from "@/app/components/scan-sort-control";
+import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
+import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
+type IgnoredTraktSeasons = { traktId: number; title: string; seasons: number[] };
 type ServerState = {
   report?: ScanReport;
   ignoredShows?: TraktShow[];
+  ignoredSeasons?: IgnoredTraktSeasons[];
   scan?: ScanStatus;
   diagnosticsEnabled?: boolean;
   airingGraceDays?: number;
@@ -58,7 +62,10 @@ export default function Home() {
   const [debugEnabled, setDebugEnabled] = useState(true);
   const [airingGraceDays, setAiringGraceDays] = useState(0);
   const [ignoredShows, setIgnoredShows] = useState<TraktShow[]>([]);
+  const [ignoredSeasons, setIgnoredSeasons] = useState<IgnoredTraktSeasons[]>([]);
   const [openShowMenu, setOpenShowMenu] = useState<number | null>(null);
+  const [seasonIgnoreShow, setSeasonIgnoreShow] = useState<TraktShow | null>(null);
+  const [seasonIgnoreDraft, setSeasonIgnoreDraft] = useState<number[]>([]);
   const [ignoredManagerOpen, setIgnoredManagerOpen] = useState(false);
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);
@@ -93,7 +100,7 @@ export default function Home() {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
-        syncServerState({ ignoredShows: [], diagnosticsEnabled: true, airingGraceDays: 0 }, true);
+        syncServerState({ ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0 }, true);
         return;
       }
       setDebugEnabled(state.diagnosticsEnabled !== false);
@@ -102,6 +109,7 @@ export default function Home() {
         const remoteIgnored = state.ignoredShows.map(compactTraktShow);
         setIgnoredShows(remoteIgnored);
       }
+      if (Array.isArray(state.ignoredSeasons)) setIgnoredSeasons(state.ignoredSeasons);
       if (state.report?.shows && state.report?.missing && state.report.lastScan) {
         const remoteReport = {
           ...state.report,
@@ -138,6 +146,7 @@ export default function Home() {
       if (event.key !== "Escape") return;
       setSortMenuOpen(false);
       setOpenShowMenu(null);
+      setSeasonIgnoreShow(null);
       setIgnoredManagerOpen(false);
     };
 
@@ -196,7 +205,8 @@ export default function Home() {
   }
 
   const ignoredIds = useMemo(() => new Set(ignoredShows.map((show) => show.ids.trakt)), [ignoredShows]);
-  const visibleMissing = useMemo(() => missing.filter((item) => !ignoredIds.has(item.show.ids.trakt)), [missing, ignoredIds]);
+  const ignoredSeasonMap = useMemo(() => new Map(ignoredSeasons.map((show) => [show.traktId, new Set(show.seasons)])), [ignoredSeasons]);
+  const visibleMissing = useMemo(() => missing.filter((item) => !ignoredIds.has(item.show.ids.trakt) && !ignoredSeasonMap.get(item.show.ids.trakt)?.has(item.season)), [missing, ignoredIds, ignoredSeasonMap]);
   const activelyRateLimitPaused = isActiveRateLimitPause(scanning, rateLimitPaused);
 
   const grouped = useMemo(() => {
@@ -242,6 +252,39 @@ export default function Home() {
       syncServerState({ ignoredShows: next }, true);
       return next;
     });
+  }
+
+  function restoreSeasons(traktId: number) {
+    setIgnoredSeasons((current) => {
+      const next = current.filter((show) => show.traktId !== traktId);
+      syncServerState({ ignoredSeasons: next }, true);
+      return next;
+    });
+  }
+
+  function openSeasonIgnore(show: TraktShow) {
+    setSeasonIgnoreShow(show);
+    setSeasonIgnoreDraft(ignoredSeasons.find((item) => item.traktId === show.ids.trakt)?.seasons || []);
+    setOpenShowMenu(null);
+  }
+
+  function saveIgnoredSeasons() {
+    if (!seasonIgnoreShow) return;
+    const next = ignoredSeasons.filter((show) => show.traktId !== seasonIgnoreShow.ids.trakt);
+    if (seasonIgnoreDraft.length) next.push({ traktId: seasonIgnoreShow.ids.trakt, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b) });
+    const sorted = next.sort((a, b) => a.title.localeCompare(b.title));
+    setIgnoredSeasons(sorted);
+    syncServerState({ ignoredSeasons: sorted }, true);
+    setSeasonIgnoreShow(null);
+  }
+
+  async function clearShowCache(show: TraktShow) {
+    setOpenShowMenu(null); setCacheMessage("");
+    const response = await fetch(`/api/scan?traktId=${show.ids.trakt}`, { method: "DELETE" });
+    const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
+    if (!response.ok) { setError(body.error || `Shelfcheck could not clear ${show.title}'s cache.`); return; }
+    if (body.cleared) setScanCacheCount((count) => Math.max(0, count - 1));
+    setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
   }
 
   function loginToTrakt() {
@@ -359,7 +402,7 @@ export default function Home() {
     }
   }
 
-  async function scanLibrary(force = false) {
+  async function scanLibrary(force = false, traktId?: number) {
     if (!connected) { loginToTrakt(); return; }
     setFullRescanConfirmOpen(false);
     setErrorContext("scan");
@@ -368,7 +411,7 @@ export default function Home() {
       const response = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force }),
+        body: JSON.stringify({ force, traktId }),
       });
       if (!response.ok) throw new Error("Shelfcheck could not start the server-side scan.");
       await pollServerScan();
@@ -376,6 +419,11 @@ export default function Home() {
       setScanning(false);
       if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");
     }
+  }
+
+  async function forceCheckShow(show: TraktShow) {
+    setOpenShowMenu(null); setCacheMessage("");
+    await scanLibrary(false, show.ids.trakt);
   }
 
   return (
@@ -413,9 +461,9 @@ export default function Home() {
           <div><span>SHOWS IN COLLECTION</span><strong>{shows.length || "—"}</strong></div>
           <div><span>SHOWS WITH MISSING EPISODES</span><strong>{lastScan ? grouped.length : "—"}</strong></div>
           <div><span>MISSING EPISODES</span><strong>{lastScan ? visibleMissing.length : "—"}</strong></div>
-          <div className="ignored-stat" data-menu-root="ignored"><button type="button" onClick={() => setIgnoredManagerOpen((open) => !open)} aria-expanded={ignoredManagerOpen}><span>IGNORED SHOWS ↗</span><strong>{ignoredShows.length}</strong></button></div>
+          <div className="ignored-stat" data-menu-root="ignored"><button type="button" onClick={() => setIgnoredManagerOpen((open) => !open)} aria-expanded={ignoredManagerOpen}><span>IGNORED SHOWS ↗</span><strong>{ignoredShows.length + ignoredSeasons.length}</strong></button></div>
         </section>
-        {ignoredManagerOpen && <IgnoredShowsManager items={ignoredShows.map((show) => ({ key: show.ids.trakt, title: show.title }))} onClose={() => setIgnoredManagerOpen(false)} onRestore={(key) => restoreShow(Number(key))} showCount />}
+        {ignoredManagerOpen && <IgnoredShowsManager items={[...ignoredShows.map((show) => ({ key: `show|${show.ids.trakt}`, title: show.title })), ...ignoredSeasons.map((show) => ({ key: `seasons|${show.traktId}`, title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredManagerOpen(false)} onRestore={(key) => { const value = String(key); if (value.startsWith("show|")) restoreShow(Number(value.slice(5))); else if (value.startsWith("seasons|")) restoreSeasons(Number(value.slice(8))); }} showCount />}
       </div>
 
       <section className="report">
@@ -427,6 +475,7 @@ export default function Home() {
           {lastScan && visibleMissing.length > 0 && <div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllTraktShows(false)}>Expand all</button><button onClick={() => setAllTraktShows(true)}>Collapse all</button></div></div>}
         </div>
         {error && <div className="error"><span>!</span><p><strong>{errorContext === "auth" ? "Trakt login failed" : "Scan interrupted"}</strong>{error}</p></div>}
+        {cacheMessage && !settingsOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
         {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{activelyRateLimitPaused ? "Paused due to Rate Limit" : `Comparing show ${processed} of ${total || shows.length || "…"}. Progress is saved periodically.`}</p></div>}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => {
@@ -452,7 +501,8 @@ export default function Home() {
               {show.ids.tmdb && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.ids.tmdb}`} target="_blank" rel="noreferrer" aria-label={`Open ${show.title} on The Movie Database`} title="View on TMDB"><img src="/tmdb-blue-square.svg" alt="" /></a>}
               <button className="show-collapse-toggle" onClick={() => toggleTraktShow(show.ids.trakt)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button>
             </div>
-            {openShowMenu === show.ids.trakt && <div className="show-action-menu" role="menu"><button type="button" role="menuitem" onClick={() => ignoreShow(show)}>⊘ <span>Ignore this show</span></button></div>}
+            {ignoredSeasons.find((item) => item.traktId === show.ids.trakt) && <div className="ignored-season-status">Ignored {ignoredSeasons.find((item) => item.traktId === show.ids.trakt)!.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}</div>}
+            {openShowMenu === show.ids.trakt && <ShowActionsMenu onIgnoreShow={() => ignoreShow(show)} onForceCheck={() => void forceCheckShow(show)} onClearCache={() => void clearShowCache(show)} onIgnoreSeasons={() => openSeasonIgnore(show)} />}
             {!showCollapsed && <>
             <div className="compact-show-meta"><p>{show.collection?.completed ?? 0} collected · {episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p><div className="season-all-controls"><button onClick={() => setAllTraktSeasons(show.ids.trakt, episodes, false)}>Show all</button><button onClick={() => setAllTraktSeasons(show.ids.trakt, episodes, true)}>Collapse all</button></div></div>
             <div className="plex-seasons">{seasons.map((season) => {
@@ -465,6 +515,8 @@ export default function Home() {
       </section>
 
       <footer><span>SHELFCHECK / TRAKT API</span><span>Your credentials stay in your private configuration volume.</span></footer>
+
+      {seasonIgnoreShow && <SeasonIgnoreModal showTitle={seasonIgnoreShow.title} seasons={[...new Set(missing.filter((episode) => episode.show.ids.trakt === seasonIgnoreShow.ids.trakt).map((episode) => episode.season))].sort((a, b) => a - b).map((season) => ({ number: season, issueCount: missing.filter((episode) => episode.show.ids.trakt === seasonIgnoreShow.ids.trakt && episode.season === season).length }))} selected={seasonIgnoreDraft} onChange={setSeasonIgnoreDraft} onClose={() => setSeasonIgnoreShow(null)} onSave={saveIgnoredSeasons} />}
 
       {connectionOpen && <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setConnectionOpen(false)}>
         <section className="modal" role="dialog" aria-modal="true" aria-labelledby="connection-title">

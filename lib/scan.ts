@@ -200,7 +200,7 @@ function updateScan(scan: ScanStatus) {
   writeSingleUserScanStatus(scan);
 }
 
-async function runScan(force = false) {
+async function runScan(force = false, targetTraktId?: number) {
   const startedAt = new Date().toISOString();
   const state = readSingleUserState().state || {};
   const logger = createScanLogger(state.diagnosticsEnabled !== false);
@@ -208,7 +208,7 @@ async function runScan(force = false) {
   scanGlobal.__shelfcheckLogger = logger;
   scanGlobal.__shelfcheckRateLimitPaused = false;
   scanGlobal.__shelfcheckRateLimitResumeAt = undefined;
-  logger.info("scan.start", { startedAt, version: SHELFCHECK_VERSION, mode: force ? "deep" : "quick", airingGraceDays: gracePeriod(state.airingGraceDays) });
+  logger.info("scan.start", { startedAt, version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) });
   updateScan({ status: "running", processed: 0, total: 0, startedAt });
   try {
     const prior = (state.checkpoint || state.report) as ScanReport | undefined;
@@ -238,20 +238,28 @@ async function runScan(force = false) {
         ...(Number.isFinite(aired) ? { collection: { aired: aired as number, completed: collected } } : {}),
       }) };
     });
+    if (targetTraktId && !library.some((item) => item.show.ids.trakt === targetTraktId)) throw new Error("That show is not available in the current Trakt collection.");
+    const candidates = targetTraktId ? library.filter((item) => item.show.ids.trakt === targetTraktId) : library;
     logger.info("collection.refreshed", { shows: library.length, previousShows: priorShows.length });
 
     const previousResults = new Map<number, MissingEpisode[]>();
     for (const result of priorMissing) previousResults.set(result.show.ids.trakt, [...(previousResults.get(result.show.ids.trakt) || []), result]);
     const results: Record<string, MissingEpisode[]> = {};
     const scanCache: ScanCache = {};
+    if (targetTraktId) for (const item of library) {
+      if (item.show.ids.trakt === targetTraktId) continue;
+      const id = String(item.show.ids.trakt);
+      results[id] = previousResults.get(item.show.ids.trakt) || [];
+      if (priorCache[id]) scanCache[id] = priorCache[id];
+    }
     const queue: { item: CollectionShow; reason: ScanReason }[] = [];
-    for (const item of library) {
+    for (const item of candidates) {
       const id = String(item.show.ids.trakt);
       const cached = priorCache[id];
       const collectionChanged = freshFingerprints[id] !== cached?.collectionFingerprint;
       const airedChanged = freshAiredEpisodes[id] !== cached?.airedEpisodes;
       const traktUpdated = freshTraktUpdatedAt[id] !== (cached?.traktUpdatedAt || "");
-      const reason = scanReason({ deep: force, gracePeriodChanged, cached: Boolean(cached), collectionChanged, airedChanged, traktUpdated });
+      const reason = targetTraktId ? "forced-show-check" : scanReason({ deep: force, gracePeriodChanged, cached: Boolean(cached), collectionChanged, airedChanged, traktUpdated });
       if (reason) queue.push({ item, reason });
       else {
         results[id] = previousResults.get(item.show.ids.trakt) || [];
@@ -259,9 +267,9 @@ async function runScan(force = false) {
       }
     }
 
-    let processed = library.length - queue.length;
+    let processed = candidates.length - queue.length;
     logger.info("scan.plan", {
-      total: library.length,
+      total: candidates.length,
       reused: processed,
       refreshing: queue.length,
       newShows: queue.filter((entry) => entry.reason === "new").length,
@@ -270,7 +278,7 @@ async function runScan(force = false) {
       traktUpdated: queue.filter((entry) => entry.reason === "trakt-updated").length,
       settingsChanged: queue.filter((entry) => entry.reason === "settings-changed").length,
     });
-    updateScan({ status: "running", processed, total: library.length, startedAt });
+    updateScan({ status: "running", processed, total: candidates.length, startedAt });
     let lastCheckpointProcessed = processed;
     let lastCheckpointAt = Date.now();
     let lastForcedCheckpointProcessed = -1;
@@ -283,14 +291,14 @@ async function runScan(force = false) {
       lastCheckpointProcessed = processed;
       lastCheckpointAt = now;
       if (forceSave) lastForcedCheckpointProcessed = processed;
-      logger.info("checkpoint.saved", { reason, processed, total: library.length });
+      logger.info("checkpoint.saved", { reason, processed, total: candidates.length });
     };
     scanGlobal.__shelfcheckSaveCheckpoint = (reason) => saveCheckpoint(reason, true);
     await runWorkerPool(queue, 6, async ({ item, reason }) => {
         const id = String(item.show.ids.trakt);
         const showStarted = Date.now();
         logger.info("show.start", { traktId: item.show.ids.trakt, title: item.show.title, reason });
-        const canTrustFreshCompleteCount = !force && freshCollectionComplete[id] === true;
+        const canTrustFreshCompleteCount = !force && !targetTraktId && freshCollectionComplete[id] === true;
         let incomplete: { season: number; episode: number }[] = [];
         if (canTrustFreshCompleteCount) {
           logger.info("show.collection-complete", { traktId: item.show.ids.trakt, title: item.show.title, reason });
@@ -304,7 +312,7 @@ async function runScan(force = false) {
             ? (season.episodes || []).filter((episode) => !episode.completed).map((episode) => ({ season: season.number, episode: episode.number }))
             : []);
         }
-        const requiresAirDates = Boolean(incomplete.length && (force || airingGraceDays > 0));
+        const requiresAirDates = Boolean(incomplete.length && (force || Boolean(targetTraktId) || airingGraceDays > 0));
         let airDateRequestSucceeded = true;
         const episodeDates = requiresAirDates
           ? await traktJson<TraktSeason[]>(`/shows/${id}/seasons?extended=episodes,full`).catch((error) => {
@@ -324,7 +332,7 @@ async function runScan(force = false) {
           const firstAired = firstAiredByEpisode.get(`${episode.season}:${episode.episode}`);
           const airDateKnown = hasUsableAirDate(firstAired);
           if (requiresAirDates && !airDateKnown) unknownAirDates += 1;
-          if (shouldReportIncompleteEpisode(force, airingGraceDays, hasAired(firstAired, today, airingGraceDays), !requiresAirDates || airDateKnown)) {
+          if (shouldReportIncompleteEpisode(force || Boolean(targetTraktId), airingGraceDays, hasAired(firstAired, today, airingGraceDays), !requiresAirDates || airDateKnown)) {
             missing.push({ show: item.show, season: episode.season, episode: episode.episode });
           }
         }
@@ -347,15 +355,15 @@ async function runScan(force = false) {
         }
         logger.info("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, reason, missing: missing.length, cached: cacheable, elapsedMs: Date.now() - showStarted });
         processed += 1;
-        updateScan({ status: "running", processed, total: library.length, startedAt, ...rateLimitStatusFields(globalThis as ScanGlobal) });
+        updateScan({ status: "running", processed, total: candidates.length, startedAt, ...rateLimitStatusFields(globalThis as ScanGlobal) });
         saveCheckpoint("interval");
     });
     const missing = Object.values(results).flat().sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
     const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache, airingGraceDays };
     const finishedAt = new Date().toISOString();
     patchSingleUserState({ report, checkpoint: null });
-    updateScan({ status: "completed", processed: library.length, total: library.length, startedAt, finishedAt });
-    logger.info("scan.complete", { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: library.length, reused: library.length - queue.length, refreshed: queue.length, missing: missing.length });
+    updateScan({ status: "completed", processed: candidates.length, total: candidates.length, startedAt, finishedAt });
+    logger.info("scan.complete", { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: missing.length, targetTraktId });
   } catch (error) {
     scanGlobal.__shelfcheckSaveCheckpoint?.("error");
     const current = getScanStatus();
@@ -377,20 +385,36 @@ export function getScanStatus(): ScanStatus {
   return scan;
 }
 
-export function startScan(force = false): ScanStatus {
+export function startScan(force = false, targetTraktId?: number): ScanStatus {
   const global = globalThis as ScanGlobal;
   if (!global.__shelfcheckScan) {
-    global.__shelfcheckScan = runScan(force).finally(() => { global.__shelfcheckScan = undefined; });
+    global.__shelfcheckScan = runScan(force, targetTraktId).finally(() => { global.__shelfcheckScan = undefined; });
   }
   return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
 }
 
-export function clearScanCache(): { cleared: number } {
+export function clearScanCache(traktId?: number): { cleared: number } {
   const global = globalThis as ScanGlobal;
   if (global.__shelfcheckScan) throw new Error("Wait for the current scan to finish before clearing the cache.");
   const state = readSingleUserState().state || {};
   const report = state.report as ScanReport | undefined;
   const checkpoint = state.checkpoint as ScanReport | undefined;
+  if (traktId) {
+    const key = String(traktId);
+    const hadReportCache = Boolean(report?.scanCache?.[key]);
+    const hadCheckpointCache = Boolean(checkpoint?.scanCache?.[key]);
+    if (report) {
+      const scanCache = { ...(report.scanCache || {}) };
+      delete scanCache[key];
+      patchSingleUserState({ report: { ...report, scanCache } });
+    }
+    if (checkpoint) {
+      const scanCache = { ...(checkpoint.scanCache || {}) };
+      delete scanCache[key];
+      patchSingleUserState({ checkpoint: { ...checkpoint, scanCache, shows: checkpoint.shows.filter((item) => item.show.ids.trakt !== traktId), missing: checkpoint.missing.filter((episode) => episode.show.ids.trakt !== traktId) } });
+    }
+    return { cleared: hadReportCache || hadCheckpointCache ? 1 : 0 };
+  }
   const cleared = new Set([
     ...Object.keys(report?.scanCache || {}),
     ...Object.keys(checkpoint?.scanCache || {}),

@@ -7,7 +7,7 @@ export type ScanCacheInputs = {
   traktUpdated: boolean;
 };
 
-export type ScanReason = "new" | "collection-changed" | "aired-changed" | "trakt-updated" | "settings-changed";
+export type ScanReason = "new" | "collection-changed" | "aired-changed" | "trakt-updated" | "settings-changed" | "forced-show-check";
 
 type CollectedShow = {
   show: { aired_episodes?: number };

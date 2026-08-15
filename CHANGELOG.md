@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.2.0 - 2026-08-15
+
+### Added
+
+- Added exact TMDB episode metadata and provider links to Plex auto-match
+  reports, plus shared report pagination and a local TVDB asset.
+- Added regression coverage for cache compatibility, checkpoint pairing,
+  provider rate limits, public-origin handling, and report links.
+
+### Changed
+
+- OAuth redirects now use the explicitly configured `SHELFCHECK_PUBLIC_URL`
+  instead of trusting forwarded host headers. Reverse-proxy deployments must set
+  this value to Shelfcheck's externally visible origin.
+- Plex and Trakt now share race-safe scan polling and bounded progress display.
+- Plex provider requests honor provider-wide `Retry-After` pauses and fail
+  promptly when a provider requests an excessive cooldown.
+- Plex preferences are saved as validated partial patches.
+- Plex poster proxying is restricted to image thumbnail paths and a 10 MB limit.
+
+### Fixed
+
+- Fixed targeted Plex rescans carrying incompatible cache entries, ignored or
+  deleted shows, or stale checkpoint results into later reports.
+- Targeted Plex rescans now reject incompatible caches synchronously with an
+  actionable conflict response instead of starting a scan that cannot succeed.
+- Fixed failed episode identity lookups and warned results becoming reusable
+  cached answers.
+- Fixed provider change feeds missing updates made during the previous scan.
+- Fixed scan polling delays retaining abort listeners after normal completion.
+- Fixed invalid Trakt show IDs falling through to whole-cache deletion.
+
 ## 2.1.0 - 2026-08-10
 
 ### Added

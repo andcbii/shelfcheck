@@ -3,7 +3,7 @@
 /* Poster and provider logos intentionally use native images with an app-owned proxy. */
 /* eslint-disable @next/next/no-img-element */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
@@ -14,6 +14,8 @@ import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
+import { scanProgressPercent } from "@/lib/scan-progress";
+import { useScanPoller } from "@/app/hooks/use-scan-poller";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
@@ -26,14 +28,6 @@ type ServerState = {
   diagnosticsEnabled?: boolean;
   airingGraceDays?: number;
 };
-
-const IGNORED_SHOWS_CACHE = "shelfcheck-ignored-shows-v1";
-const IGNORED_SHOWS_COOKIE = "shelfcheck-ignored-shows-v1";
-
-function clearLegacyIgnoredShowsBrowserCache() {
-  try { localStorage.removeItem(IGNORED_SHOWS_CACHE); } catch { /* browser storage may be unavailable */ }
-  document.cookie = `${IGNORED_SHOWS_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax`;
-}
 
 function formatLastScan(value: string | null): string {
   if (!value) return "";
@@ -78,12 +72,21 @@ export default function Home() {
   const [cacheClearConfirmOpen, setCacheClearConfirmOpen] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
   const [cacheMessage, setCacheMessage] = useState("");
-  const serverSyncTimerRef = useRef<number | null>(null);
-  const scanAbortControllerRef = useRef<AbortController | null>(null);
-  const pendingServerPatchRef = useRef<Partial<ServerState>>({});
+  const { poll: pollServerScan, abort: abortScanPoll } = useScanPoller<{ scan: ScanStatus }>({
+    url: "/api/scan",
+    onPollingChange: setScanning,
+    onResponse: async ({ scan }) => {
+      setProcessed(scan.processed);
+      setTotal(scan.total);
+      setRateLimitPaused(scan.rateLimitPaused === true);
+      setProgress(scanProgressPercent(scan.processed, scan.total, scan.status === "running"));
+      if (scan.status === "completed") { await loadServerReport(); setRateLimitPaused(false); return true; }
+      if (scan.status === "error") { setRateLimitPaused(false); throw new Error(scan.error || "The server-side scan failed."); }
+      return false;
+    },
+  });
 
   useEffect(() => {
-    clearLegacyIgnoredShowsBrowserCache();
     void fetch("/api/config", { cache: "no-store" }).then(async (response) => {
       if (!response.ok) return;
       const status = await response.json() as { connected: boolean; applicationConfigured: boolean };
@@ -100,7 +103,7 @@ export default function Home() {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
-        syncServerState({ ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0 }, true);
+        syncServerState({ ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0 });
         return;
       }
       setDebugEnabled(state.diagnosticsEnabled !== false);
@@ -124,12 +127,9 @@ export default function Home() {
       });
     }).catch(() => { /* local browser copy remains available */ });
     return () => {
-      scanAbortControllerRef.current?.abort();
-      if (serverSyncTimerRef.current !== null) window.clearTimeout(serverSyncTimerRef.current);
+      abortScanPoll();
     };
-    // Startup synchronization intentionally runs once; pollServerScan reads server state itself.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [abortScanPoll, pollServerScan]);
 
   useEffect(() => {
     if (!sortMenuOpen && openShowMenu === null && !ignoredManagerOpen) return;
@@ -158,50 +158,35 @@ export default function Home() {
     };
   }, [ignoredManagerOpen, openShowMenu, sortMenuOpen]);
 
-  function syncServerState(patch: Partial<ServerState>, immediate = false) {
-    pendingServerPatchRef.current = { ...pendingServerPatchRef.current, ...patch };
-    const send = () => {
-      serverSyncTimerRef.current = null;
-      const body = pendingServerPatchRef.current;
-      pendingServerPatchRef.current = {};
-      void fetch("/api/state", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).catch(() => { /* the browser copy remains available for retry */ });
-    };
-    if (immediate) {
-      if (serverSyncTimerRef.current !== null) window.clearTimeout(serverSyncTimerRef.current);
-      send();
-    } else if (serverSyncTimerRef.current === null) {
-      serverSyncTimerRef.current = window.setTimeout(send, 3000);
-    }
+  function syncServerState(patch: Partial<ServerState>) {
+    void fetch("/api/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
+      .then((response) => { if (!response.ok) throw new Error("Shelfcheck could not save the settings."); })
+      .catch((syncError) => setError(syncError instanceof Error ? syncError.message : "Shelfcheck could not save the settings."));
   }
 
   function setDiagnostics(enabled: boolean) {
     setDebugEnabled(enabled);
-    syncServerState({ diagnosticsEnabled: enabled }, true);
+    syncServerState({ diagnosticsEnabled: enabled });
   }
 
   function setGracePeriod(value: string) {
     const days = Math.max(0, Math.min(30, Math.trunc(Number(value) || 0)));
     setAiringGraceDays(days);
-    syncServerState({ airingGraceDays: days }, true);
+    syncServerState({ airingGraceDays: days });
   }
 
   async function clearCache() {
     setClearingCache(true);
     setCacheMessage("");
-    const response = await fetch("/api/scan", { method: "DELETE" });
-    const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-    setClearingCache(false);
-    if (!response.ok) {
-      setError(body.error || "Shelfcheck could not clear the scan cache.");
-      return;
-    }
-    setScanCacheCount(0);
-    setCacheClearConfirmOpen(false);
-    setCacheMessage(`${body.cleared || 0} cached show results cleared. The next scan will rebuild them.`);
+    try {
+      const response = await fetch("/api/scan", { method: "DELETE" });
+      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
+      if (!response.ok) throw new Error(body.error || "Shelfcheck could not clear the scan cache.");
+      setScanCacheCount(0);
+      setCacheClearConfirmOpen(false);
+      setCacheMessage(`${body.cleared || 0} cached show results cleared. The next scan will rebuild them.`);
+    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : "Shelfcheck could not clear the scan cache."); }
+    finally { setClearingCache(false); }
   }
 
   const ignoredIds = useMemo(() => new Set(ignoredShows.map((show) => show.ids.trakt)), [ignoredShows]);
@@ -240,7 +225,7 @@ export default function Home() {
   function ignoreShow(show: TraktShow) {
     setIgnoredShows((current) => {
       const next = [...current.filter((item) => item.ids.trakt !== show.ids.trakt), compactTraktShow(show)].sort((a, b) => a.title.localeCompare(b.title));
-      syncServerState({ ignoredShows: next }, true);
+      syncServerState({ ignoredShows: next });
       return next;
     });
     setOpenShowMenu(null);
@@ -249,7 +234,7 @@ export default function Home() {
   function restoreShow(traktId: number) {
     setIgnoredShows((current) => {
       const next = current.filter((show) => show.ids.trakt !== traktId);
-      syncServerState({ ignoredShows: next }, true);
+      syncServerState({ ignoredShows: next });
       return next;
     });
   }
@@ -257,7 +242,7 @@ export default function Home() {
   function restoreSeasons(traktId: number) {
     setIgnoredSeasons((current) => {
       const next = current.filter((show) => show.traktId !== traktId);
-      syncServerState({ ignoredSeasons: next }, true);
+      syncServerState({ ignoredSeasons: next });
       return next;
     });
   }
@@ -274,17 +259,19 @@ export default function Home() {
     if (seasonIgnoreDraft.length) next.push({ traktId: seasonIgnoreShow.ids.trakt, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b) });
     const sorted = next.sort((a, b) => a.title.localeCompare(b.title));
     setIgnoredSeasons(sorted);
-    syncServerState({ ignoredSeasons: sorted }, true);
+    syncServerState({ ignoredSeasons: sorted });
     setSeasonIgnoreShow(null);
   }
 
   async function clearShowCache(show: TraktShow) {
     setOpenShowMenu(null); setCacheMessage("");
-    const response = await fetch(`/api/scan?traktId=${show.ids.trakt}`, { method: "DELETE" });
-    const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-    if (!response.ok) { setError(body.error || `Shelfcheck could not clear ${show.title}'s cache.`); return; }
-    if (body.cleared) setScanCacheCount((count) => Math.max(0, count - 1));
-    setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
+    try {
+      const response = await fetch(`/api/scan?traktId=${show.ids.trakt}`, { method: "DELETE" });
+      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
+      if (!response.ok) throw new Error(body.error || `Shelfcheck could not clear ${show.title}'s cache.`);
+      if (body.cleared) setScanCacheCount((count) => Math.max(0, count - 1));
+      setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
+    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : `Shelfcheck could not clear ${show.title}'s cache.`); }
   }
 
   function loginToTrakt() {
@@ -338,25 +325,16 @@ export default function Home() {
 
   async function logoutOfTrakt() {
     if (!window.confirm("Log out of Trakt? Shelfcheck will delete its stored access and refresh tokens.")) return;
-    const response = await fetch("/api/auth/trakt/logout", { method: "POST" });
-    if (!response.ok) {
-      setError("Shelfcheck could not log out of Trakt.");
-      return;
-    }
-    setConnected(false);
-    setClientId("");
-    setClientSecret("");
-    setConnectionOpen(false);
-    setError("");
+    try {
+      const response = await fetch("/api/auth/trakt/logout", { method: "POST" });
+      if (!response.ok) throw new Error("Shelfcheck could not log out of Trakt.");
+      setConnected(false);
+      setClientId("");
+      setClientSecret("");
+      setConnectionOpen(false);
+      setError("");
+    } catch (logoutError) { setError(logoutError instanceof Error ? logoutError.message : "Shelfcheck could not log out of Trakt."); }
   }
-
-  const wait = (milliseconds: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(resolve, milliseconds);
-    signal.addEventListener("abort", () => {
-      window.clearTimeout(timer);
-      reject(new DOMException("Scan polling was cancelled.", "AbortError"));
-    }, { once: true });
-  });
 
   async function loadServerReport() {
     const response = await fetch("/api/state", { cache: "no-store" });
@@ -368,38 +346,6 @@ export default function Home() {
     setMissing(compactMissingEpisodes(report.missing));
     setLastScan(report.lastScan);
     setScanCacheCount(Object.keys(report.scanCache || {}).length);
-  }
-
-  async function pollServerScan() {
-    scanAbortControllerRef.current?.abort();
-    const controller = new AbortController();
-    scanAbortControllerRef.current = controller;
-    setScanning(true);
-    try {
-      while (!controller.signal.aborted) {
-        const response = await fetch("/api/scan", { cache: "no-store", signal: controller.signal });
-        if (!response.ok) throw new Error("Shelfcheck could not read scan progress.");
-        const { scan } = await response.json() as { scan: ScanStatus };
-        setProcessed(scan.processed);
-        setTotal(scan.total);
-        setRateLimitPaused(scan.rateLimitPaused === true);
-        setProgress(Math.round((scan.processed / Math.max(scan.total, 1)) * 100));
-        if (scan.status === "completed") {
-          await loadServerReport();
-          setRateLimitPaused(false);
-          setScanning(false);
-          return;
-        }
-        if (scan.status === "error") {
-          setScanning(false);
-          setRateLimitPaused(false);
-          throw new Error(scan.error || "The server-side scan failed.");
-        }
-        await wait(1000, controller.signal);
-      }
-    } finally {
-      if (scanAbortControllerRef.current === controller) scanAbortControllerRef.current = null;
-    }
   }
 
   async function scanLibrary(force = false, traktId?: number) {
@@ -416,7 +362,6 @@ export default function Home() {
       if (!response.ok) throw new Error("Shelfcheck could not start the server-side scan.");
       await pollServerScan();
     } catch (scanError) {
-      setScanning(false);
       if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");
     }
   }

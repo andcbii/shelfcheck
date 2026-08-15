@@ -17,13 +17,14 @@ export async function GET(request: Request) {
       headers: { Accept: "image/avif,image/webp,image/*" },
       signal: AbortSignal.timeout(15_000),
     });
-    if (!upstream.ok || !upstream.body) {
+    const contentType = upstream.headers.get("Content-Type") || "";
+    if (!upstream.ok || !upstream.body || !contentType.toLowerCase().startsWith("image/")) {
       return new Response("Poster unavailable", { status: upstream.status || 502 });
     }
 
     return new Response(upstream.body, {
       headers: {
-        "Content-Type": upstream.headers.get("Content-Type") || "image/webp",
+        "Content-Type": contentType,
         "Cache-Control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=604800",
         "X-Content-Type-Options": "nosniff",
       },

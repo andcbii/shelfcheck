@@ -9,6 +9,8 @@ export type PlexPreferences = {
   diagnosticsEnabled: boolean;
 };
 
+export type PlexPreferencesPatch = Partial<PlexPreferences>;
+
 export function parsePlexPreferences(value: unknown): PlexPreferences {
   const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const ignoredShows = Array.isArray(source.ignoredShows) ? source.ignoredShows.flatMap((item) => {
@@ -23,7 +25,7 @@ export function parsePlexPreferences(value: unknown): PlexPreferences {
     const seasons = [...new Set(show.seasons.filter((season): season is number => typeof season === "number" && Number.isFinite(season) && season >= 0).map(Math.trunc))].sort((a, b) => a - b);
     return seasons.length ? [{ ratingKey: show.ratingKey, title: show.title, seasons }] : [];
   }) : [];
-  const rawOffset = typeof source.airingOffsetDays === "number" ? source.airingOffsetDays : 0;
+  const rawOffset = typeof source.airingOffsetDays === "number" && Number.isFinite(source.airingOffsetDays) ? source.airingOffsetDays : 0;
   return {
     ignoredShows,
     ignoredSeasons,
@@ -32,6 +34,16 @@ export function parsePlexPreferences(value: unknown): PlexPreferences {
     autoCompoundEpisodes: source.autoCompoundEpisodes !== false,
     diagnosticsEnabled: source.diagnosticsEnabled !== false,
   };
+}
+
+export function parsePlexPreferencesPatch(value: unknown): PlexPreferencesPatch {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const parsed = parsePlexPreferences(source);
+  const patch: PlexPreferencesPatch = {};
+  for (const key of ["ignoredShows", "ignoredSeasons", "hideUnairedEpisodes", "airingOffsetDays", "autoCompoundEpisodes", "diagnosticsEnabled"] as const) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) patch[key] = parsed[key] as never;
+  }
+  return patch;
 }
 
 export type TraktPreferencesPatch = { ignoredShows?: TraktShow[]; ignoredSeasons?: { traktId: number; title: string; seasons: number[] }[]; diagnosticsEnabled?: boolean; airingGraceDays?: number };

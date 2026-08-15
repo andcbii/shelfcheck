@@ -1,5 +1,5 @@
 import { getPlexReport } from "@/lib/plex-scan";
-import { UnmatchedShowReport } from "@/app/plex/reports/unmatched-shows/unmatched-show-report";
+import { UnmatchedShowReport } from "@/app/reports/components/unmatched-show-report";
 import { ReportSidebar } from "@/app/reports/report-sidebar";
 import { ReportTopbar } from "@/app/reports/report-topbar";
 import { hasMultipleProviderMatches } from "@/lib/plex-reporting";

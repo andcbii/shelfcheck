@@ -12,7 +12,7 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
-  const body = await request.json() as { clientId?: unknown; clientSecret?: unknown };
+  const body = await request.json().catch(() => ({})) as { clientId?: unknown; clientSecret?: unknown };
   const clientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
   const clientSecret = typeof body.clientSecret === "string" ? body.clientSecret.trim() : "";
   if (!clientId || !clientSecret) {

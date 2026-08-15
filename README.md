@@ -13,7 +13,8 @@ publish port `3000` directly to the public internet.
 - Compare a Trakt TV collection with Trakt's aired episode list.
 - Compare every Plex TV library with TMDB and TVDB episode data.
 - Reuse unchanged show results and resume interrupted scans from checkpoints.
-- Skip ignored shows before show-specific provider calls are made.
+- Remove ignored shows from saved scan results and skip their show-specific
+  provider calls. Restoring one requires a new scan to rebuild its result.
 - Display active rate-limit pauses and automatically resume when allowed.
 - Hide unaired Plex episodes, including episodes without an air date, and apply
   an optional 0–30 day aired-date offset.
@@ -37,7 +38,7 @@ erase Shelfcheck's configuration and data.
 Published releases are available from Docker Hub:
 
 ```bash
-docker pull andcbii/shelfcheck:2.1.0
+docker pull andcbii/shelfcheck:2.2.0
 ```
 
 An equivalent bind-mount example is:
@@ -45,10 +46,11 @@ An equivalent bind-mount example is:
 ```bash
 docker run -d --name shelfcheck \
   -p 3000:3000 \
+  -e SHELFCHECK_PUBLIC_URL=http://localhost:3000 \
   -v /your/host/config:/config \
   -v /your/host/data:/data \
   --restart unless-stopped \
-  andcbii/shelfcheck:2.1.0
+  andcbii/shelfcheck:2.2.0
 ```
 
 The image runs as UID/GID `1001`. Both mounted directories must be writable by
@@ -83,6 +85,11 @@ The TVDB subscriber PIN is optional. A Plex search requires the Plex URL and
 token, a TMDB API read-access token, and a TVDB v4 API key.
 
 Treat `config.yml` as a secret and never commit it.
+
+Set `SHELFCHECK_PUBLIC_URL` to the exact externally visible Shelfcheck origin,
+including `https://` when TLS terminates at a reverse proxy. Shelfcheck uses this
+pinned origin for OAuth redirects and cookie security instead of trusting
+client-supplied forwarding headers.
 
 ### Trakt authorization
 
@@ -138,7 +145,9 @@ a 200 ms TVDB start gate) to improve throughput without sending bursts. Explicit
 provider rate limits pause the affected work, save progress, appear in the UI,
 and resume automatically. Interrupted searches can reuse their saved checkpoint.
 
-Ignored Plex shows are filtered before TMDB, TVDB, and Trakt show checks. The
+Ignored Plex shows are removed from saved scan results and filtered before TMDB,
+TVDB, and Trakt show checks. Restoring an ignored show makes it eligible for the
+next scan; its previous result and cache are not retained. The
 **Hide unaired episodes** preference hides episodes whose air date plus the
 configured offset has not arrived and also hides episodes with no air date.
 

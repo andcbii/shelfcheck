@@ -5,6 +5,7 @@
 
 import { useMemo, useState } from "react";
 import type { PlexAutoMatch, PlexAutoMatchEpisode, PlexAutoMatchMethod } from "@/lib/plex-scan";
+import { ReportPagination } from "@/app/reports/report-pagination";
 
 const MATCH_TYPES: { value: "all" | PlexAutoMatchMethod; label: string }[] = [
   { value: "all", label: "All" },
@@ -13,17 +14,14 @@ const MATCH_TYPES: { value: "all" | PlexAutoMatchMethod; label: string }[] = [
   { value: "Matched via TMDB External ID", label: "TMDB External ID" },
   { value: "Shelfcheck Compound Match", label: "Compound" },
 ];
-const TVDB_LOGO = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/tvdb.svg";
 
 function episodeCode(episode: PlexAutoMatchEpisode) {
   return `S${String(episode.season).padStart(2, "0")}E${String(episode.episode).padStart(2, "0")}`;
 }
 
 function ProviderRecord({ provider, episode }: { provider: "TMDB" | "TVDB"; episode: PlexAutoMatchEpisode }) {
-  const href = provider === "TMDB"
-    ? episode.showId ? `https://www.themoviedb.org/tv/${episode.showId}/season/${episode.season}/episode/${episode.episode}` : undefined
-    : episode.showSlug && episode.id ? `https://thetvdb.com/series/${encodeURIComponent(episode.showSlug)}/episodes/${episode.id}` : undefined;
-  const logo = provider === "TMDB" ? "/tmdb-blue-square.svg" : TVDB_LOGO;
+  const href = episode.url;
+  const logo = provider === "TMDB" ? "/tmdb-blue-square.svg" : "/tvdb-square.svg";
   return <div className="provider-record">
     <div>{href ? <a className="report-provider-link" href={href} target="_blank" rel="noreferrer" title={`View episode on ${provider}`} aria-label={`View episode on ${provider}`}><img src={logo} alt="" /></a> : <span className="report-provider-link unavailable"><img src={logo} alt="" /></span>}<code>{episodeCode(episode)}</code></div>
     <strong>{episode.show}</strong>
@@ -43,7 +41,6 @@ export function AutoMatchReport({ matches }: { matches: PlexAutoMatch[] }) {
   const [page, setPage] = useState(1);
   const filtered = useMemo(() => filter === "all" ? matches : matches.filter((match) => match.method === filter), [filter, matches]);
   const counts = useMemo(() => new Map(MATCH_TYPES.map(({ value }) => [value, value === "all" ? matches.length : matches.filter((match) => match.method === value).length])), [matches]);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const visible = filtered.slice((page - 1) * pageSize, page * pageSize);
 
   function chooseFilter(value: "all" | PlexAutoMatchMethod) { setFilter(value); setPage(1); }
@@ -62,6 +59,6 @@ export function AutoMatchReport({ matches }: { matches: PlexAutoMatch[] }) {
         <ProviderRecord provider="TVDB" episode={match.tvdb} />
       </article>)}
     </div> : <div className="empty auto-match-empty"><div>↔</div><h3>{matches.length ? "No matches of this type" : "No auto matches recorded"}</h3><p>{matches.length ? "Choose another match type to see its records." : "Run a new Plex search to populate this report with episode reconciliation details."}</p></div>}
-    {filtered.length > 0 && <div className="report-pagination"><p>Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of {filtered.length}</p><label>Results per page<select value={pageSize} onChange={(event) => choosePageSize(Number(event.target.value))}>{[10, 25, 50, 100].map((size) => <option value={size} key={size}>{size}</option>)}</select></label><div><button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1}>← Previous</button><span>{page} / {totalPages}</span><button type="button" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page === totalPages}>Next →</button></div></div>}
+    <ReportPagination total={filtered.length} page={page} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={choosePageSize} />
   </>;
 }

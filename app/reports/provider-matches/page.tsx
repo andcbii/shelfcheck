@@ -1,4 +1,4 @@
-import { ProviderMatchReport } from "@/app/plex/reports/provider-match-report";
+import { ProviderMatchReport } from "@/app/reports/components/provider-match-report";
 import { ReportSidebar } from "@/app/reports/report-sidebar";
 import { ReportTopbar } from "@/app/reports/report-topbar";
 import { getPlexReport } from "@/lib/plex-scan";

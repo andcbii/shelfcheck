@@ -1,5 +1,5 @@
 import { getPlexReport, type PlexAutoMatch } from "@/lib/plex-scan";
-import { AutoMatchReport } from "@/app/plex/reports/auto-match-report";
+import { AutoMatchReport } from "@/app/reports/components/auto-match-report";
 import { ReportSidebar } from "@/app/reports/report-sidebar";
 import { ReportTopbar } from "@/app/reports/report-topbar";
 import { hasMultipleProviderMatches } from "@/lib/plex-reporting";

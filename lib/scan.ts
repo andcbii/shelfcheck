@@ -394,12 +394,13 @@ export function startScan(force = false, targetTraktId?: number): ScanStatus {
 }
 
 export function clearScanCache(traktId?: number): { cleared: number } {
+  if (traktId !== undefined && (!Number.isInteger(traktId) || traktId <= 0)) throw new Error("A positive Trakt show ID is required.");
   const global = globalThis as ScanGlobal;
   if (global.__shelfcheckScan) throw new Error("Wait for the current scan to finish before clearing the cache.");
   const state = readSingleUserState().state || {};
   const report = state.report as ScanReport | undefined;
   const checkpoint = state.checkpoint as ScanReport | undefined;
-  if (traktId) {
+  if (traktId !== undefined) {
     const key = String(traktId);
     const hadReportCache = Boolean(report?.scanCache?.[key]);
     const hadCheckpointCache = Boolean(checkpoint?.scanCache?.[key]);

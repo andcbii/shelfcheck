@@ -24,8 +24,13 @@ export class ProviderStartGate<TProvider> {
     const previous = this.gates.get(provider) || Promise.resolve();
     this.gates.set(provider, new Promise<void>((resolve) => { release = resolve; }));
     await previous;
-    const waitMs = Math.max(0, (this.nextStarts.get(provider) || 0) - this.clock.now());
-    if (waitMs) await this.clock.sleep(waitMs);
+    let waitMs = 0;
+    while (true) {
+      const remainingMs = Math.max(0, (this.nextStarts.get(provider) || 0) - this.clock.now());
+      if (!remainingMs) break;
+      waitMs += remainingMs;
+      await this.clock.sleep(remainingMs);
+    }
     const startedAt = this.clock.now();
     this.nextStarts.set(provider, startedAt + spacingMs);
     release();

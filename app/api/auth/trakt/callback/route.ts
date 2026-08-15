@@ -2,6 +2,9 @@ import { exchangeAuthorizationCode } from "@/lib/trakt-auth";
 import { requestOrigin } from "@/lib/request-origin";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const clearStateCookie = "shelfcheck-trakt-state=; Path=/api/auth/trakt/callback; HttpOnly; SameSite=Lax; Max-Age=0";
 
 function cookieValue(request: Request, name: string) {
   return request.headers.get("cookie")?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1) || "";
@@ -21,10 +24,10 @@ export async function GET(request: Request) {
       status: 302,
       headers: {
         Location: new URL("/trakt?trakt=connected", origin).toString(),
-        "Set-Cookie": "shelfcheck-trakt-state=; Path=/api/auth/trakt/callback; HttpOnly; SameSite=Lax; Max-Age=0",
+        "Set-Cookie": clearStateCookie,
       },
     });
   } catch (error) {
-    return Response.redirect(new URL(`/trakt?auth_error=${encodeURIComponent(error instanceof Error ? error.message : "Trakt login failed.")}`, origin));
+    return new Response(null, { status: 302, headers: { Location: new URL(`/trakt?auth_error=${encodeURIComponent(error instanceof Error ? error.message : "Trakt login failed.")}`, origin).toString(), "Set-Cookie": clearStateCookie } });
   }
 }

@@ -12,6 +12,6 @@ export function tmdbShowLinksToTvdb(show: TmdbSeriesExternalMatch, tvdbId: numbe
 }
 
 /** A TMDB /find result for a TVDB episode is sufficient when Plex owns that exact TMDB episode ID. */
-export function ownedTmdbEpisodeMatch(matches: TmdbEpisodeIdentityMatch[], ownedEpisodeIds: Set<number>): TmdbEpisodeIdentityMatch | undefined {
+export function ownedTmdbEpisodeMatch<T extends TmdbEpisodeIdentityMatch>(matches: T[], ownedEpisodeIds: Set<number>): T | undefined {
   return matches.find((episode) => Boolean(episode.id && ownedEpisodeIds.has(episode.id)));
 }

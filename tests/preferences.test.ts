@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parsePlexPreferences, parseTraktPreferencesPatch } from "../lib/preferences";
+import { parsePlexPreferences, parsePlexPreferencesPatch, parseTraktPreferencesPatch } from "../lib/preferences";
 
 test("Plex preferences reject unknown fields and clamp the air-date offset", () => {
   assert.deepEqual(parsePlexPreferences({ airingOffsetDays: 99, hideUnairedEpisodes: true, unexpected: "value" }), {
@@ -20,6 +20,15 @@ test("Plex preferences normalize ignored seasons", () => {
     { ratingKey: "plex://show/two", title: "Two", seasons: [] },
   ] });
   assert.deepEqual(parsed.ignoredSeasons, [{ ratingKey: "plex://show/one", title: "One", seasons: [1, 2] }]);
+});
+
+test("Plex preference patches preserve omitted fields", () => {
+  assert.deepEqual(parsePlexPreferencesPatch({ hideUnairedEpisodes: true }), { hideUnairedEpisodes: true });
+});
+
+test("Plex preferences reject non-finite offsets", () => {
+  assert.equal(parsePlexPreferences({ airingOffsetDays: Number.NaN }).airingOffsetDays, 0);
+  assert.equal(parsePlexPreferences({ airingOffsetDays: Number.POSITIVE_INFINITY }).airingOffsetDays, 0);
 });
 
 test("Trakt preference patches retain only supported settings", () => {

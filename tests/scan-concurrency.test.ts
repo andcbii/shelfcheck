@@ -35,6 +35,23 @@ test("provider gate serializes starts at the configured spacing", async () => {
   assert.deepEqual(starts, [0, 200, 400]);
 });
 
+test("provider gate rechecks a rate-limit deadline extended while a request is queued", async () => {
+  let now = 0;
+  let sleeps = 0;
+  const clock = {
+    now: () => now,
+    sleep: async (milliseconds: number) => {
+      now += milliseconds;
+      if (sleeps++ === 0) gate.delayUntil("Trakt", 120_000);
+    },
+  };
+  const gate = new ProviderStartGate<string>(clock);
+  gate.delayUntil("Trakt", 30_000);
+  const slot = await gate.wait("Trakt", 250);
+  assert.equal(slot.startedAt, 120_000);
+  assert.equal(slot.waitMs, 120_000);
+});
+
 test("heartbeat tracker retains all concurrent shows independently", () => {
   const tracker = new ActiveScanTracker();
   tracker.update("a", "Show A", "tmdb");

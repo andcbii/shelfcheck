@@ -10,35 +10,14 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-      - name: Install pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 11.9.0
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Audit production dependencies
-        run: pnpm audit --prod --audit-level high
-      - name: Verify application
-        run: pnpm lint && pnpm test && pnpm build
-      - name: Build container
-        run: docker build --tag shelfcheck:release-check .
+    uses: ./.github/workflows/verify.yml
 
   github-release:
     needs: verify
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           generate_release_notes: true
 

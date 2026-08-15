@@ -7,7 +7,8 @@ test("uses the request origin without proxy headers", () => {
   assert.equal(requestOrigin(new Request("http://localhost:3000/trakt")), "http://localhost:3000");
 });
 
-test("uses the public protocol and host forwarded by a reverse proxy", () => {
+test("uses the configured public origin behind a reverse proxy", () => {
+  process.env.SHELFCHECK_PUBLIC_URL = "https://shelfcheck.alderaan.co/path";
   const request = new Request("http://shelfcheck:3000/api/auth/trakt/login", {
     headers: {
       "x-forwarded-proto": "https",
@@ -16,9 +17,10 @@ test("uses the public protocol and host forwarded by a reverse proxy", () => {
   });
 
   assert.equal(requestOrigin(request), "https://shelfcheck.alderaan.co");
+  delete process.env.SHELFCHECK_PUBLIC_URL;
 });
 
-test("uses the first value from a chain of forwarding proxies", () => {
+test("does not trust forwarding headers without a configured public origin", () => {
   const request = new Request("http://shelfcheck:3000/api/auth/trakt/login", {
     headers: {
       "x-forwarded-proto": "https, http",
@@ -26,5 +28,11 @@ test("uses the first value from a chain of forwarding proxies", () => {
     },
   });
 
-  assert.equal(requestOrigin(request), "https://shelfcheck.alderaan.co");
+  assert.equal(requestOrigin(request), "http://shelfcheck:3000");
+});
+
+test("falls back to the request origin for an invalid public URL", () => {
+  process.env.SHELFCHECK_PUBLIC_URL = "javascript:alert(1)";
+  assert.equal(requestOrigin(new Request("http://localhost:3000/trakt")), "http://localhost:3000");
+  delete process.env.SHELFCHECK_PUBLIC_URL;
 });

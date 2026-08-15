@@ -13,3 +13,7 @@ test("reports multiple Plex shows converging on one provider pair", () => {
 test("omits an ordinary one-to-one provider match", () => {
   assert.equal(hasMultipleProviderMatches({ plexGuids: ["plex://show/example"], providerMatches: { tmdb: [{ id: 1 }], tvdb: [{ id: 2 }] } }), false);
 });
+
+test("tolerates partially populated provider matches from persisted reports", () => {
+  assert.equal(hasMultipleProviderMatches({ providerMatches: {} }), false);
+});

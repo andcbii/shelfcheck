@@ -4,7 +4,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { DiagnosticLogActions } from "@/app/components/diagnostic-log-actions";
@@ -14,6 +14,9 @@ import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { shouldShowPlexMissingEpisode } from "@/lib/plex-airdate";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
+import { scanProgressPercent } from "@/lib/scan-progress";
+import { useScanPoller } from "@/app/hooks/use-scan-poller";
+import { parsePlexPreferences } from "@/lib/preferences";
 
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
 type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string };
@@ -27,7 +30,7 @@ type PlexSettings = { ignoredShows: IgnoredShow[]; ignoredSeasons: IgnoredSeason
 
 const EMPTY_CONFIG: ConfigStatus = { plexUrl: "", plexTokenSaved: false, tmdbTokenSaved: false, tvdbApiKeySaved: false, tvdbPinSaved: false, configured: false };
 const EMPTY_SETTINGS: PlexSettings = { ignoredShows: [], ignoredSeasons: [], hideUnairedEpisodes: false, airingOffsetDays: 0, autoCompoundEpisodes: true, diagnosticsEnabled: true };
-const TVDB_LOGO = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/svg/tvdb.svg";
+const TVDB_LOGO = "/tvdb-square.svg";
 
 function localToday() {
   const now = new Date();
@@ -41,7 +44,6 @@ function episodeTileDate(airDate?: string) {
 }
 
 export default function PlexPage() {
-  const pollAbortControllerRef = useRef<AbortController | null>(null);
   const [configured, setConfigured] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -56,6 +58,7 @@ export default function PlexPage() {
   const [status, setStatus] = useState<Status>({ status: "idle", processed: 0, total: 0 });
   const [report, setReport] = useState<Report | null>(null);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [query, setQuery] = useState("");
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);
@@ -68,6 +71,17 @@ export default function PlexPage() {
   const [fields, setFields] = useState({ plexUrl: "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
   const [changedFields, setChangedFields] = useState<Partial<Record<FieldKey, boolean>>>({});
   const [configStatus, setConfigStatus] = useState<ConfigStatus>(EMPTY_CONFIG);
+  const { poll } = useScanPoller<{ scan?: Status; report?: Report | null; error?: string }>({
+    url: "/api/plex/scan",
+    onPollingChange: setScanning,
+    onResponse: (body) => {
+      if (!body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
+      setStatus(body.scan);
+      if (body.scan.status === "completed") { setReport(body.report || null); return true; }
+      if (body.scan.status === "error") throw new Error(body.scan.error || "The Plex scan failed.");
+      return false;
+    },
+  });
 
   useEffect(() => {
     void fetch("/api/plex/config", { cache: "no-store" }).then((response) => response.json()).then((body: ConfigStatus) => {
@@ -78,21 +92,14 @@ export default function PlexPage() {
       if (!response.ok) throw new Error(body.error || "Plex preferences could not be loaded.");
       return body;
     }).then(({ settings: savedSettings }) => {
-      setSettings({
-        ignoredShows: Array.isArray(savedSettings?.ignoredShows) ? savedSettings.ignoredShows : [],
-        ignoredSeasons: Array.isArray(savedSettings?.ignoredSeasons) ? savedSettings.ignoredSeasons : [],
-        hideUnairedEpisodes: savedSettings?.hideUnairedEpisodes === true,
-        airingOffsetDays: Math.max(0, Math.min(30, Math.trunc(Number(savedSettings?.airingOffsetDays) || 0))),
-        autoCompoundEpisodes: savedSettings?.autoCompoundEpisodes !== false,
-        diagnosticsEnabled: savedSettings?.diagnosticsEnabled !== false,
-      });
+      setSettings(parsePlexPreferences(savedSettings));
+      setSettingsLoaded(true);
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Plex preferences could not be loaded."));
     void fetch("/api/plex/scan", { cache: "no-store" }).then((response) => response.json()).then((body) => {
       setStatus(body.scan); setReport(body.report);
-      if (body.scan?.status === "running") void poll();
+      if (body.scan?.status === "running") void poll().catch((pollError) => { if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded."); });
     }).catch(() => setError("The previous Plex scan status could not be loaded."));
-    return () => pollAbortControllerRef.current?.abort();
-  }, []);
+  }, [poll]);
 
   useEffect(() => {
     if (!ignoredOpen && openShowMenu === null && openEpisodeMenu === null && !connectionOpen && !preferencesOpen && !sortMenuOpen) return;
@@ -125,6 +132,7 @@ export default function PlexPage() {
   const activeShows = useMemo(() => resultShows.filter((show) => !ignoredIds.has(show.ratingKey)), [resultShows, ignoredIds]);
   const missingCount = activeShows.reduce((sum, show) => sum + show.missing.length, 0);
   const activelyRateLimitPaused = isActiveRateLimitPause(scanning && status.status === "running", status.rateLimitPaused);
+  const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
   const visible = useMemo(() => activeShows.filter((show) => show.missing.length && matchesSearch(show.title, query)).sort((a, b) => {
     if (sortField === "title") { const result = a.title.localeCompare(b.title); return sortAscending ? result : -result; }
@@ -133,69 +141,56 @@ export default function PlexPage() {
     return sortAscending ? result : -result;
   }), [activeShows, query, sortAscending, sortField]);
 
-  async function poll() {
-    pollAbortControllerRef.current?.abort();
-    const controller = new AbortController();
-    pollAbortControllerRef.current = controller;
-    setScanning(true);
-    try {
-      while (!controller.signal.aborted) {
-        const response = await fetch("/api/plex/scan", { cache: "no-store", signal: controller.signal });
-        const body = await response.json().catch(() => ({})) as { scan?: Status; report?: Report | null; error?: string };
-        if (!response.ok || !body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
-        setStatus(body.scan);
-        if (body.scan.status === "completed") { setReport(body.report || null); return; }
-        if (body.scan.status === "error") { setError(body.scan.error || "The Plex scan failed."); return; }
-        await new Promise((resolve) => window.setTimeout(resolve, 1000));
-      }
-    } catch (pollError) {
-      if (!controller.signal.aborted) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded.");
-    } finally {
-      if (pollAbortControllerRef.current === controller) pollAbortControllerRef.current = null;
-      if (!controller.signal.aborted) setScanning(false);
-    }
-  }
-
   async function scan() {
     if (!configured) { setConnectionOpen(true); return; }
     setError("");
-    const response = await fetch("/api/plex/scan", { method: "POST" });
-    if (!response.ok) { setError("Shelfcheck could not start the Plex scan."); return; }
-    await poll();
+    try {
+      const response = await fetch("/api/plex/scan", { method: "POST" });
+      if (!response.ok) throw new Error("Shelfcheck could not start the Plex scan.");
+      await poll();
+    } catch (scanError) { if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "Shelfcheck could not start the Plex scan."); }
   }
 
   async function forceCheckShow(show: Show) {
     if (!configured) { setConnectionOpen(true); return; }
     setOpenShowMenu(null); setCacheMessage(""); setError("");
-    const response = await fetch("/api/plex/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ratingKey: show.ratingKey }) });
-    const body = await response.json().catch(() => ({})) as { error?: string };
-    if (!response.ok) { setError(body.error || `Shelfcheck could not check ${show.title}.`); return; }
-    await poll();
+    try {
+      const response = await fetch("/api/plex/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ratingKey: show.ratingKey }) });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error || `Shelfcheck could not check ${show.title}.`);
+      await poll();
+    } catch (scanError) { if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : `Shelfcheck could not check ${show.title}.`); }
   }
 
   async function saveConfig() {
     setSaving(true); setError("");
-    const patch = Object.fromEntries((Object.keys(changedFields) as FieldKey[]).filter((key) => changedFields[key]).map((key) => [key, fields[key]]));
-    const response = await fetch("/api/plex/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
-    const body = await response.json().catch(() => ({}));
-    setSaving(false);
-    if (!response.ok) { setError(body.error || "Credentials could not be saved."); return; }
-    setConfigured(body.configured === true); setConfigStatus(body as ConfigStatus); setConnectionOpen(false); setChangedFields({});
-    setFields({ plexUrl: body.plexUrl || "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
+    try {
+      const patch = Object.fromEntries((Object.keys(changedFields) as FieldKey[]).filter((key) => changedFields[key]).map((key) => [key, fields[key]]));
+      const response = await fetch("/api/plex/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || "Credentials could not be saved.");
+      setConfigured(body.configured === true); setConfigStatus(body as ConfigStatus); setConnectionOpen(false); setChangedFields({});
+      setFields({ plexUrl: body.plexUrl || "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
+    } catch (saveError) { setError(saveError instanceof Error ? saveError.message : "Credentials could not be saved."); }
+    finally { setSaving(false); }
   }
 
-  function saveSettings(next: PlexSettings) {
+  function saveSettings(next: PlexSettings, patch: Partial<PlexSettings>) {
+    if (!settingsLoaded) { setError("Wait for Plex preferences to finish loading."); return; }
     setSettings(next);
-    void fetch("/api/plex/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) });
+    void fetch("/api/plex/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
+      .then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Plex preferences could not be saved."); } })
+      .catch((saveError) => setError(saveError instanceof Error ? saveError.message : "Plex preferences could not be saved."));
   }
 
   function ignoreShow(show: Show) {
-    saveSettings({ ...settings, ignoredShows: [...settings.ignoredShows.filter((item) => item.ratingKey !== show.ratingKey), { ratingKey: show.ratingKey, title: show.title }].sort((a, b) => a.title.localeCompare(b.title)) });
+    const ignoredShows = [...settings.ignoredShows.filter((item) => item.ratingKey !== show.ratingKey), { ratingKey: show.ratingKey, title: show.title }].sort((a, b) => a.title.localeCompare(b.title));
+    saveSettings({ ...settings, ignoredShows }, { ignoredShows });
     setOpenShowMenu(null);
   }
 
-  function restoreShow(ratingKey: string) { saveSettings({ ...settings, ignoredShows: settings.ignoredShows.filter((show) => show.ratingKey !== ratingKey) }); }
-  function restoreSeasons(ratingKey: string) { saveSettings({ ...settings, ignoredSeasons: settings.ignoredSeasons.filter((show) => show.ratingKey !== ratingKey) }); }
+  function restoreShow(ratingKey: string) { const ignoredShows = settings.ignoredShows.filter((show) => show.ratingKey !== ratingKey); saveSettings({ ...settings, ignoredShows }, { ignoredShows }); }
+  function restoreSeasons(ratingKey: string) { const ignoredSeasons = settings.ignoredSeasons.filter((show) => show.ratingKey !== ratingKey); saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons }); }
   function openSeasonIgnore(show: Show) {
     setSeasonIgnoreShow(show);
     setSeasonIgnoreDraft(settings.ignoredSeasons.find((item) => item.ratingKey === show.ratingKey)?.seasons || []);
@@ -205,16 +200,19 @@ export default function PlexPage() {
     if (!seasonIgnoreShow) return;
     const next = settings.ignoredSeasons.filter((show) => show.ratingKey !== seasonIgnoreShow.ratingKey);
     if (seasonIgnoreDraft.length) next.push({ ratingKey: seasonIgnoreShow.ratingKey, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b) });
-    saveSettings({ ...settings, ignoredSeasons: next.sort((a, b) => a.title.localeCompare(b.title)) });
+    const ignoredSeasons = next.sort((a, b) => a.title.localeCompare(b.title));
+    saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons });
     setSeasonIgnoreShow(null);
   }
   async function clearShowCache(show: Show) {
     setOpenShowMenu(null); setCacheMessage("");
-    const response = await fetch(`/api/plex/scan?ratingKey=${encodeURIComponent(show.ratingKey)}`, { method: "DELETE" });
-    const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-    if (!response.ok) { setError(body.error || `Shelfcheck could not clear ${show.title}'s cache.`); return; }
-    setReport((current) => current ? { ...current, scanCache: Object.fromEntries(Object.entries(current.scanCache || {}).filter(([key]) => key !== show.ratingKey)) } : current);
-    setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
+    try {
+      const response = await fetch(`/api/plex/scan?ratingKey=${encodeURIComponent(show.ratingKey)}`, { method: "DELETE" });
+      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
+      if (!response.ok) throw new Error(body.error || `Shelfcheck could not clear ${show.title}'s cache.`);
+      setReport((current) => current ? { ...current, scanCache: Object.fromEntries(Object.entries(current.scanCache || {}).filter(([key]) => key !== show.ratingKey)) } : current);
+      setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
+    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : `Shelfcheck could not clear ${show.title}'s cache.`); }
   }
   function chooseSort(field: "title" | "percent") {
     if (field === sortField) setSortAscending((ascending) => !ascending);
@@ -254,12 +252,14 @@ export default function PlexPage() {
   }
   async function clearCache() {
     setClearingCache(true); setCacheMessage("");
-    const response = await fetch("/api/plex/scan", { method: "DELETE" });
-    const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-    setClearingCache(false);
-    if (!response.ok) { setError(body.error || "Shelfcheck could not clear the Plex scan cache."); return; }
-    setReport(null); setCacheClearConfirmOpen(false);
-    setCacheMessage(`${body.cleared || 0} cached Plex show results cleared. The next scan will rebuild them.`);
+    try {
+      const response = await fetch("/api/plex/scan", { method: "DELETE" });
+      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
+      if (!response.ok) throw new Error(body.error || "Shelfcheck could not clear the Plex scan cache.");
+      setReport(null); setCacheClearConfirmOpen(false);
+      setCacheMessage(`${body.cleared || 0} cached Plex show results cleared. The next scan will rebuild them.`);
+    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : "Shelfcheck could not clear the Plex scan cache."); }
+    finally { setClearingCache(false); }
   }
   const saved = (key: FieldKey) => key === "plexUrl" ? Boolean(configStatus.plexUrl) : configStatus[`${key}Saved` as keyof ConfigStatus] === true;
   const updateField = (key: FieldKey, value: string) => { setFields((current) => ({ ...current, [key]: value })); setChangedFields((current) => ({ ...current, [key]: true })); };
@@ -267,11 +267,11 @@ export default function PlexPage() {
   return <main>
     <header className="topbar">
       <div className="header-left"><Link className="brand" href="/"><span className="brandmark">S</span><span>Shelfcheck</span></Link><nav className="mode-switch" aria-label="Search source"><Link href="/trakt">Trakt</Link><Link className="active" href="/plex" aria-current="page">Plex</Link></nav></div>
-      <div className="header-actions"><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences">⚙</button></div>
+      <div className="header-actions"><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
-      <div className="scan-panel"><div className="radar"><span>{scanning ? Math.round(status.processed / Math.max(status.total, 1) * 100) + "%" : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={scan} disabled={scanning}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p></div>
+      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={scan} disabled={scanning}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p></div>
     </section>
     <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{activeShows.filter((show) => show.missing.length).length}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{settings.ignoredShows.length + settings.ignoredSeasons.length}</strong></button></div></section>
       {ignoredOpen && <IgnoredShowsManager items={[...settings.ignoredShows.map((show) => ({ key: `show|${show.ratingKey}`, title: show.title })), ...settings.ignoredSeasons.map((show) => ({ key: `seasons|${show.ratingKey}`, title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onRestore={(key) => { const value = String(key); if (value.startsWith("show|")) restoreShow(value.slice(5)); else if (value.startsWith("seasons|")) restoreSeasons(value.slice(8)); }} />}
@@ -280,7 +280,7 @@ export default function PlexPage() {
     <section className="report"><div className="report-heading"><p className="eyebrow">PLEX MISSING REPORT</p><div className="report-primary-row"><h2>{missingCount} missing episodes</h2><ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} /></div><div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllShows(false)}>Expand all</button><button onClick={() => setAllShows(true)}>Collapse all</button></div></div></div>
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
-      {scanning ? <div className="loading"><span style={{ width: `${status.processed / Math.max(status.total, 1) * 100}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
+      {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(show.missing.map((episode) => episode.season))].sort((a, b) => a - b);
         const showCollapsed = collapsedShows.has(show.ratingKey);
         const totalEpisodes = show.plexEpisodes + show.missing.length;
@@ -320,9 +320,9 @@ export default function PlexPage() {
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="plex-preferences-title">
         <button className="close" onClick={() => setPreferencesOpen(false)} aria-label="Close">×</button>
         <p className="eyebrow">SETTINGS</p><h2 id="plex-preferences-title">Shelfcheck preferences</h2>
-        <div className="plex-preference"><div><strong>Hide unaired episodes</strong><p>Hide episodes until their listed air date plus the offset below. Episodes without an air date are also hidden.</p></div><input type="checkbox" checked={settings.hideUnairedEpisodes} onChange={(event) => saveSettings({ ...settings, hideUnairedEpisodes: event.target.checked })} /></div>
-        <div className="grace-period"><div><p className="grace-title">Aired-date offset</p><p>Wait this many calendar days after an episode’s air date before showing it.</p></div><div className="grace-input"><input type="number" min="0" max="30" value={settings.airingOffsetDays} onChange={(event) => saveSettings({ ...settings, airingOffsetDays: Math.max(0, Math.min(30, Math.trunc(Number(event.target.value) || 0))) })} /><span>Days</span></div></div>
-        <div className="plex-preference"><div><strong>Auto Compound Episodes</strong><p>As a final check, let one owned double-length TMDB episode satisfy matching split TVDB episodes.</p></div><input type="checkbox" checked={settings.autoCompoundEpisodes} onChange={(event) => saveSettings({ ...settings, autoCompoundEpisodes: event.target.checked })} /></div>
+        <div className="plex-preference"><div><strong>Hide unaired episodes</strong><p>Hide episodes until their listed air date plus the offset below. Episodes without an air date are also hidden.</p></div><input type="checkbox" checked={settings.hideUnairedEpisodes} onChange={(event) => { const hideUnairedEpisodes = event.target.checked; saveSettings({ ...settings, hideUnairedEpisodes }, { hideUnairedEpisodes }); }} /></div>
+        <div className="grace-period"><div><p className="grace-title">Aired-date offset</p><p>Wait this many calendar days after an episode’s air date before showing it.</p></div><div className="grace-input"><input type="number" min="0" max="30" value={settings.airingOffsetDays} onChange={(event) => { const airingOffsetDays = Math.max(0, Math.min(30, Math.trunc(Number(event.target.value) || 0))); saveSettings({ ...settings, airingOffsetDays }, { airingOffsetDays }); }} /><span>Days</span></div></div>
+        <div className="plex-preference"><div><strong>Auto Compound Episodes</strong><p>As a final check, let one owned double-length TMDB episode satisfy matching split TVDB episodes.</p></div><input type="checkbox" checked={settings.autoCompoundEpisodes} onChange={(event) => { const autoCompoundEpisodes = event.target.checked; saveSettings({ ...settings, autoCompoundEpisodes }, { autoCompoundEpisodes }); }} /></div>
         <div className="diagnostics scan-cache-settings">
           <p className="diagnostics-toggle scan-cache-title">Scan cache</p>
           <p>Plex scans save the latest provider comparison so results remain available between visits. Clear the cache to remove that report and make the next scan rebuild every show.</p>
@@ -334,7 +334,7 @@ export default function PlexPage() {
           {cacheMessage && <p className="cache-message">{cacheMessage}</p>}
         </div>
         <div className="diagnostics">
-          <label className="diagnostics-toggle"><input type="checkbox" checked={settings.diagnosticsEnabled} onChange={(event) => saveSettings({ ...settings, diagnosticsEnabled: event.target.checked })} /> Enable diagnostic logging</label>
+          <label className="diagnostics-toggle"><input type="checkbox" checked={settings.diagnosticsEnabled} onChange={(event) => { const diagnosticsEnabled = event.target.checked; saveSettings({ ...settings, diagnosticsEnabled }, { diagnosticsEnabled }); }} /> Enable diagnostic logging</label>
           <p>Records safe Plex scan details in /data/logs. Credentials and authorization headers are never logged. The latest 10 Plex scans are retained.</p>
           <DiagnosticLogActions endpoint="/api/plex/logs" filename="shelfcheck-plex.log" confirmMessage="Delete shelfcheck-plex.log and all nine retained Plex scan logs? This cannot be undone." downloadError="Shelfcheck could not download the current Plex log." deleteError="Shelfcheck could not delete the Plex diagnostic logs." onError={setError} />
         </div>

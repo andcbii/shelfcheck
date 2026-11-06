@@ -3,7 +3,7 @@ import "server-only";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, type ScanReason } from "@/lib/scan-cache";
-import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, writeSingleUserScanStatus } from "@/lib/sqlite";
+import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, trackScanIgnores, writeSingleUserScanStatus } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
@@ -210,6 +210,7 @@ async function runScan(force = false, targetTraktId?: number) {
   scanGlobal.__shelfcheckRateLimitResumeAt = undefined;
   logger.info("scan.start", { startedAt, version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) });
   updateScan({ status: "running", processed: 0, total: 0, startedAt });
+  const finishIgnoreTracking = trackScanIgnores("trakt", Date.parse(startedAt));
   try {
     const prior = (state.checkpoint || state.report) as ScanReport | undefined;
     const priorShows = prior?.shows || [];
@@ -218,7 +219,7 @@ async function runScan(force = false, targetTraktId?: number) {
     const airingGraceDays = gracePeriod(state.airingGraceDays);
     const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
     const downloadedAll = await traktAll<CollectionShow>("/sync/collection/shows?extended=full,images");
-    const ignoredIds = ignoredTraktIds(state.ignoredShows);
+    const ignoredIds = ignoredTraktIds(state.ignoredShows, Date.parse(startedAt));
     const downloaded = downloadedAll.filter((item) => !ignoredIds.has(item.show.ids.trakt));
     logger.info("collection.ignored-skipped", { ignored: downloadedAll.length - downloaded.length, checked: downloaded.length });
     const freshFingerprints = Object.fromEntries(downloaded.map((item) => [String(item.show.ids.trakt), collectionFingerprint(item)]));
@@ -370,6 +371,7 @@ async function runScan(force = false, targetTraktId?: number) {
     updateScan({ ...current, status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The scan failed." });
     logger.error("scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
   } finally {
+    finishIgnoreTracking();
     scanGlobal.__shelfcheckLogger = undefined;
     scanGlobal.__shelfcheckSaveCheckpoint = undefined;
   }

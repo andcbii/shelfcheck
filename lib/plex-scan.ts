@@ -2,7 +2,7 @@ import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
-import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
+import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, trackScanIgnores, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { compoundTvdbCoverage, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
@@ -211,6 +211,7 @@ async function runPlexScan(targetRatingKey?: string) {
   let processed = 0;
   let currentTotal = 0;
   const setHeartbeat = (key: string, show: string, phase: string) => activeWork.update(key, show, phase);
+  const finishIgnoreTracking = trackScanIgnores("plex", Date.parse(startedAt));
   try {
     const config = await readPlexProviders();
     if (!config) throw new Error("Configure Plex, TMDB, and TVDB credentials before scanning.");
@@ -219,7 +220,7 @@ async function runPlexScan(targetRatingKey?: string) {
     const libraries = await Promise.all(showSections.map((section) => plexJson(`/library/sections/${section.key}/all?type=2&includeGuids=1`, config.plexUrl, config.plexToken)));
     const physicalShows = libraries.flatMap((library) => library.MediaContainer?.Metadata || []);
     const allShows = groupPlexShows(physicalShows);
-    const ignoredKeys = ignoredPlexKeys(settings.ignoredShows);
+    const ignoredKeys = ignoredPlexKeys(settings.ignoredShows, Date.parse(startedAt));
     const shows = allShows.filter((show) => !ignoredKeys.has(show.identity));
     if (targetRatingKey && !shows.some((show) => show.identity === targetRatingKey)) throw new Error("That show is not available in the current Plex libraries.");
     const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
@@ -583,9 +584,11 @@ async function runPlexScan(targetRatingKey?: string) {
   } catch (error) {
     updateStatus({ status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The Plex scan failed.", rateLimitPaused: false, rateLimitProvider: undefined });
     logger.error("plex.scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, providerMetrics: providerClient.metrics() });
+  } finally {
+    finishIgnoreTracking();
+    clearInterval(heartbeatTimer);
+    global.__shelfcheckPlexLogger = undefined;
   }
-  clearInterval(heartbeatTimer);
-  global.__shelfcheckPlexLogger = undefined;
 }
 
 export function getPlexScanStatus(): PlexScanStatus {

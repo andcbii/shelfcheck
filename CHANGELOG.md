@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Temporary whole-show and season ignores for 30 days, 90 days, or six calendar
+  months in Plex and Trakt, alongside permanent ignores.
+- Expiry dates, duration changes, and immediate Restore in Ignored Shows.
+
+### Fixed
+
+- Whole-show ignores immediately remove saved results, caches, and checkpoints,
+  including results written by a scan that was already running.
+- Existing permanent ignores are normalized on upgrade so Restore cannot expose
+  previously retained results.
+
 ## 2.2.0 - 2026-08-15
 
 ### Added

@@ -15,6 +15,8 @@ publish port `3000` directly to the public internet.
 - Reuse unchanged show results and resume interrupted scans from checkpoints.
 - Remove ignored shows from saved scan results and skip their show-specific
   provider calls. Restoring one requires a new scan to rebuild its result.
+- Ignore shows or selected seasons for 30 days, 90 days, six calendar months,
+  or forever, with expiry dates and duration changes in Ignored Shows.
 - Display active rate-limit pauses and automatically resume when allowed.
 - Hide unaired Plex episodes, including episodes without an air date, and apply
   an optional 0–30 day aired-date offset.
@@ -150,6 +152,26 @@ TVDB, and Trakt show checks. Restoring an ignored show makes it eligible for the
 next scan; its previous result and cache are not retained. The
 **Hide unaired episodes** preference hides episodes whose air date plus the
 configured offset has not arrived and also hides episodes with no air date.
+
+### Temporary ignores
+
+In either search mode, click a show title and choose **Ignore this show** to
+select **30 days**, **90 days**, **6 months**, or **Forever**. **Ignore seasons**
+offers the same durations for a group of selected seasons. Existing ignores
+remain permanent.
+
+Thirty and ninety days run from the time selected. Six months uses your device's
+local calendar and clamps to the last valid day when necessary. Ignores survive
+restarts and end automatically; expiry does not start a scan. Whole-show expiry
+or Restore makes the show eligible for your next scan. Season expiry reveals
+any previously hidden episodes already present in the report.
+
+Open **Ignored Shows** to see local expiry dates, change a duration, or restore
+an item immediately. Changing a duration starts a new period from now; editing
+only the selected seasons preserves their deadline. Selected seasons share one
+duration, and their ignore remains independent of any whole-show ignore.
+Expired items disappear from the list and count. A show whose ignore expires
+during a scan waits until the following scan.
 
 ## Storage and diagnostics
 

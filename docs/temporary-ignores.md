@@ -1,6 +1,6 @@
 # Temporary ignores
 
-Status: implemented locally. The canonical specification is [GitHub issue #3](https://github.com/andcbii/shelfcheck/issues/3).
+Status: initially released in 2.3.0; the delayed Plex report correction is prepared for 2.3.1. The canonical specification is [GitHub issue #3](https://github.com/andcbii/shelfcheck/issues/3).
 
 ## Confirmed behavior
 

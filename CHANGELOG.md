@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.1 - 2026-11-06
+
+### Fixed
+
+- Delayed Plex report responses cannot restore whole-show results or caches
+  removed by Ignore. Restore and expiry require a new scan to obtain results.
+- Older initial report loads and aborted scan polls cannot replace newer scan
+  results. Saved ignores also prune reports that arrive before preferences load.
+- Added client regression coverage for Ignore, delayed report delivery, Restore,
+  expiry, and fresh scans after the ignore ends.
+
 ## 2.3.0 - 2026-11-06
 
 ### Added

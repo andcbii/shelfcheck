@@ -4,7 +4,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { DiagnosticLogActions } from "@/app/components/diagnostic-log-actions";
@@ -35,6 +35,14 @@ const EMPTY_CONFIG: ConfigStatus = { plexUrl: "", plexTokenSaved: false, tmdbTok
 const EMPTY_SETTINGS: PlexSettings = { ignoredShows: [], ignoredSeasons: [], hideUnairedEpisodes: false, airingOffsetDays: 0, autoCompoundEpisodes: true, diagnosticsEnabled: true };
 const TVDB_LOGO = "/tvdb-square.svg";
 
+function pruneClientReport(report: Report, invalidated: Set<string>): Report {
+  return {
+    ...report,
+    shows: report.shows.filter((show) => !invalidated.has(show.ratingKey)),
+    scanCache: Object.fromEntries(Object.entries(report.scanCache || {}).filter(([key]) => !invalidated.has(key))),
+  };
+}
+
 function localToday() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -64,6 +72,8 @@ export default function PlexPage() {
   const [scanning, setScanning] = useState(false);
   const [status, setStatus] = useState<Status>({ status: "idle", processed: 0, total: 0 });
   const [report, setReport] = useState<Report | null>(null);
+  const reportInvalidations = useRef(new Set<string>());
+  const scanRequestPending = useRef(false);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [query, setQuery] = useState("");
@@ -78,19 +88,20 @@ export default function PlexPage() {
   const [fields, setFields] = useState({ plexUrl: "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
   const [changedFields, setChangedFields] = useState<Partial<Record<FieldKey, boolean>>>({});
   const [configStatus, setConfigStatus] = useState<ConfigStatus>(EMPTY_CONFIG);
-  const { poll } = useScanPoller<{ scan?: Status; report?: Report | null; error?: string }>({
+  const { poll, abort } = useScanPoller<{ scan?: Status; report?: Report | null; error?: string }>({
     url: "/api/plex/scan",
     onPollingChange: setScanning,
     onResponse: (body) => {
       if (!body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
       setStatus(body.scan);
-      if (body.scan.status === "completed") { setReport(body.report || null); return true; }
+      if (body.scan.status === "completed") { setReport(body.report ? pruneClientReport(body.report, reportInvalidations.current) : null); return true; }
       if (body.scan.status === "error") throw new Error(body.scan.error || "The Plex scan failed.");
       return false;
     },
   });
 
   useEffect(() => {
+    const initialInvalidations = reportInvalidations.current;
     void fetch("/api/plex/config", { cache: "no-store" }).then((response) => response.json()).then((body: ConfigStatus) => {
       setConfigStatus(body); setConfigured(body.configured); setFields((current) => ({ ...current, plexUrl: body.plexUrl }));
     }).catch(() => setError("Plex configuration could not be loaded."));
@@ -99,11 +110,15 @@ export default function PlexPage() {
       if (!response.ok) throw new Error(body.error || "Plex preferences could not be loaded.");
       return body;
     }).then(({ settings: savedSettings }) => {
-      setSettings(parsePlexPreferences(savedSettings));
+      const parsedSettings = parsePlexPreferences(savedSettings);
+      for (const show of activeIgnores(parsedSettings.ignoredShows)) reportInvalidations.current.add(show.ratingKey);
+      setReport((current) => current ? pruneClientReport(current, reportInvalidations.current) : current);
+      setSettings(parsedSettings);
       setSettingsLoaded(true);
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Plex preferences could not be loaded."));
     void fetch("/api/plex/scan", { cache: "no-store" }).then((response) => response.json()).then((body) => {
-      setStatus(body.scan); setReport(body.report);
+      if (initialInvalidations !== reportInvalidations.current) return;
+      setStatus(body.scan); setReport(body.report ? pruneClientReport(body.report, initialInvalidations) : null);
       if (body.scan?.status === "running") void poll().catch((pollError) => { if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded."); });
     }).catch(() => setError("The previous Plex scan status could not be loaded."));
   }, [poll]);
@@ -152,25 +167,30 @@ export default function PlexPage() {
     return sortAscending ? result : -result;
   }), [activeShows, query, sortAscending, sortField]);
 
-  async function scan() {
+  async function scan(show?: Show) {
+    if (scanRequestPending.current) return;
     if (!configured) { setConnectionOpen(true); return; }
+    scanRequestPending.current = true;
+    // Only a new scan can return results removed by a previous whole-show ignore.
+    // Replace before POST so ignores applied while it is pending stay invalidated.
+    reportInvalidations.current = new Set(activeIgnores(settings.ignoredShows).map((item) => item.ratingKey));
+    abort();
     setError("");
     try {
-      const response = await fetch("/api/plex/scan", { method: "POST" });
-      if (!response.ok) throw new Error("Shelfcheck could not start the Plex scan.");
+      const response = await fetch("/api/plex/scan", {
+        method: "POST",
+        ...(show ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ratingKey: show.ratingKey }) } : {}),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!response.ok) throw new Error(body.error || (show ? `Shelfcheck could not check ${show.title}.` : "Shelfcheck could not start the Plex scan."));
       await poll();
     } catch (scanError) { if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "Shelfcheck could not start the Plex scan."); }
+    finally { scanRequestPending.current = false; }
   }
 
   async function forceCheckShow(show: Show) {
-    if (!configured) { setConnectionOpen(true); return; }
-    setOpenShowMenu(null); setCacheMessage(""); setError("");
-    try {
-      const response = await fetch("/api/plex/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ratingKey: show.ratingKey }) });
-      const body = await response.json().catch(() => ({})) as { error?: string };
-      if (!response.ok) throw new Error(body.error || `Shelfcheck could not check ${show.title}.`);
-      await poll();
-    } catch (scanError) { if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : `Shelfcheck could not check ${show.title}.`); }
+    setOpenShowMenu(null); setCacheMessage("");
+    await scan(show);
   }
 
   async function saveConfig() {
@@ -197,7 +217,8 @@ export default function PlexPage() {
   function ignoreShow(show: Show, duration: IgnoreDuration) {
     const ignoredShows = [...activeIgnores(settings.ignoredShows).filter((item) => item.ratingKey !== show.ratingKey), { ratingKey: show.ratingKey, title: show.title, ...createIgnoreTiming(duration) }].sort((a, b) => a.title.localeCompare(b.title));
     saveSettings({ ...settings, ignoredShows }, { ignoredShows });
-    setReport((current) => current ? { ...current, shows: current.shows.filter((item) => item.ratingKey !== show.ratingKey), scanCache: Object.fromEntries(Object.entries(current.scanCache || {}).filter(([key]) => key !== show.ratingKey)) } : current);
+    reportInvalidations.current.add(show.ratingKey);
+    setReport((current) => current ? pruneClientReport(current, reportInvalidations.current) : current);
     setShowToIgnore(null);
     setOpenShowMenu(null);
   }
@@ -307,7 +328,7 @@ export default function PlexPage() {
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
-      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={scan} disabled={scanning}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p></div>
+      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p></div>
     </section>
     <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{activeShows.filter((show) => show.missing.length).length}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
       {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: `show|${show.ratingKey}`, title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: `seasons|${show.ratingKey}`, title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={(key) => { const value = String(key); if (value.startsWith("show|")) restoreShow(value.slice(5)); else if (value.startsWith("seasons|")) restoreSeasons(value.slice(8)); }} />}

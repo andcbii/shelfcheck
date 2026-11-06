@@ -26,6 +26,7 @@ export function useScanPoller<TBody>(options: ScanPollerOptions<TBody>) {
       while (!controller.signal.aborted) {
         const response = await fetch(optionsRef.current.url, { cache: "no-store", signal: controller.signal });
         const body = await response.json().catch(() => ({})) as TBody & { error?: string };
+        if (controller.signal.aborted || generationRef.current !== generation) return;
         if (!response.ok) throw new Error(body.error || "Scan status could not be loaded.");
         if (await optionsRef.current.onResponse(body)) return;
         await new Promise<void>((resolve, reject) => {

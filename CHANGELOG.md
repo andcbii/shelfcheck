@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.3.0 - 2026-11-06
 
 ### Added
 
@@ -10,10 +10,16 @@
 
 ### Fixed
 
+- Trakt login and token refresh identify Shelfcheck with its versioned User-Agent
+  to avoid Cloudflare blocking the OAuth token request.
 - Whole-show ignores immediately remove saved results, caches, and checkpoints,
   including results written by a scan that was already running.
 - Existing permanent ignores are normalized on upgrade so Restore cannot expose
   previously retained results.
+
+### Security
+
+- Updated Next.js and image-processing dependencies to patched releases.
 
 ## 2.2.0 - 2026-08-15
 

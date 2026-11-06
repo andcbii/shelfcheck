@@ -1,6 +1,7 @@
 import "server-only";
 
 import { readTraktApplication, readTraktCredentials, writeTraktCredentials, type TraktCredentials } from "@/lib/server-config";
+import { SHELFCHECK_VERSION } from "@/lib/version";
 
 const TOKEN_URL = "https://auth.trakt.tv/oauth/token";
 
@@ -28,7 +29,11 @@ async function saveToken(application: { clientId: string; clientSecret: string }
 async function tokenRequest(body: Record<string, string>, application: { clientId: string; clientSecret: string }, redirectUri: string) {
   const response = await fetch(TOKEN_URL, {
     method: "POST",
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
+    },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),
   });

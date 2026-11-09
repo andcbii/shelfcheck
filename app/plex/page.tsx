@@ -60,6 +60,7 @@ export default function PlexPage() {
   const [coverageMappingId, setCoverageMappingId] = useState<string | undefined>();
   const [coverageUrls, setCoverageUrls] = useState<string[] | null>(null);
   const minimumCoverageRevision = useRef(0);
+  const [coveragePending, setCoveragePending] = useState(false);
   const [configured, setConfigured] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -99,6 +100,8 @@ export default function PlexPage() {
     onResponse: (body) => {
       if (!body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
       if ((body.coverage?.revision || 0) < minimumCoverageRevision.current) return false;
+      minimumCoverageRevision.current = body.coverage?.revision || 0;
+      setCoveragePending(Boolean(body.coverage?.pending));
       setStatus(body.scan);
       if (body.scan.status === "completed") { setReport(body.report ? pruneClientReport(body.report, reportInvalidations.current) : null); return true; }
       if (body.scan.status === "error") throw new Error(body.scan.error || "The Plex scan failed.");
@@ -124,6 +127,8 @@ export default function PlexPage() {
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Plex preferences could not be loaded."));
     void fetch("/api/plex/scan", { cache: "no-store" }).then((response) => response.json()).then((body) => {
       if (initialInvalidations !== reportInvalidations.current || (body.coverage?.revision || 0) < minimumCoverageRevision.current) return;
+      minimumCoverageRevision.current = body.coverage?.revision || 0;
+      setCoveragePending(Boolean(body.coverage?.pending));
       setStatus(body.scan); setReport(body.report ? pruneClientReport(body.report, initialInvalidations) : null);
       if (body.scan?.status === "running") void poll().catch((pollError) => { if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded."); });
     }).catch(() => setError("The previous Plex scan status could not be loaded."));
@@ -173,7 +178,11 @@ export default function PlexPage() {
     return sortAscending ? result : -result;
   }), [activeShows, query, sortAscending, sortField]);
 
-  const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(member => activeShows.some(show => show.ratingKey === member.showKey && matchesSearch(show.title, query) && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id))));
+  const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => activeShows.some(show => show.ratingKey === member.showKey && matchesSearch(show.title, query) && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
+  const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
+    ...group,
+    members: group.members.map(member => member.status === "missing" && !group.missing.some(missing => missing.provider === member.provider && missing.id === member.id && visibleCoverageMissing(missing)) ? { ...member, status: "alternative" as const } : member),
+  }));
   const groupedIdentities = new Set(coverageGroups.flatMap(group => group.members.map(member => `${member.provider}:${member.id}`)));
   function ungroupedMissing(show: Show) {
     return show.missing.map(episode => ({ ...episode, sources: episode.sources.filter(provider => !groupedIdentities.has(`${provider}:${provider === "TMDB" ? episode.tmdbEpisodeId : episode.tvdbEpisodeId}`)) })).filter(episode => episode.sources.length);
@@ -342,7 +351,8 @@ export default function PlexPage() {
   }
 
   function coverageChanged(revision: number) {
-    minimumCoverageRevision.current = revision;
+    minimumCoverageRevision.current = Math.max(minimumCoverageRevision.current, revision);
+    setCoveragePending(true);
     reportInvalidations.current = new Set(reportInvalidations.current);
     setReport(null);
     abort();
@@ -369,6 +379,7 @@ export default function PlexPage() {
     <div className="episode-reports-nav"><Link className="episode-reports-link" href="/reports">Reports <span>→</span></Link></div>
     <section className="report"><div className="report-heading"><p className="eyebrow">PLEX MISSING REPORT</p><div className="report-primary-row"><h2>{missingCount} missing episodes</h2><ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} /></div><div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllShows(false)}>Expand all</button><button onClick={() => setAllShows(true)}>Collapse all</button></div></div></div>
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
+      {coveragePending && <p role="status" className="plex-warning">Coverage pending. Some mapped content could not be checked. Use New Plex search to retry after checking Plex and provider connections.</p>}
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
       {!scanning && coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>

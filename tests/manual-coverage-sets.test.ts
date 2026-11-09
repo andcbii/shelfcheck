@@ -142,6 +142,15 @@ test("complete sets require corrected direct inventory and corrections survive o
   assert.equal(partReport.report.shows[0].missing[0].tvdbEpisodeId,11551380);
   assert.deepEqual(partReport.report.coverageGroups[0].members.map((m:{id:number,status:string})=>[m.id,m.status]),[[6741845,"alternative"],[11551379,"direct"],[11551380,"missing"]]);
   assert.deepEqual((await state()).mappings[0].corrections[0].identities,[{provider:"TVDB",id:11551379}]);
+  const beforeMalformed = await state();
+  for (const identity of [null, [], "TMDB", {}, { provider: "IMDB", id: 11551379 }, { provider: "TVDB", id: "11551379" }, { provider: "TVDB", id: 0 }, { provider: "TVDB", id: -1 }, { provider: "TVDB", id: 1.5 }, { provider: "TVDB", id: 9007199254740992 }]) {
+    const rejected = await api.POST(request({ action: "correct", mappingId: mapping.id, revision: beforeMalformed.revision, item: beforeMalformed.mappings[0].evidence[0], identities: [{ provider: "TVDB", id: 11551379 }, identity] }));
+    assert.equal(rejected.status, 400, await rejected.clone().text());
+    assert.equal((await rejected.json()).code, "validation");
+    const afterMalformed = await state();
+    assert.equal(afterMalformed.revision, beforeMalformed.revision);
+    assert.deepEqual(afterMalformed.mappings[0].corrections, beforeMalformed.mappings[0].corrections);
+  }
   const fullReport=await correct([{provider:"TMDB",id:6741845}]);
   assert.deepEqual(fullReport.report.shows[0].missing,[]);
   assert.deepEqual((await state()).mappings[0].corrections[0].identities,[{provider:"TMDB",id:6741845}]);

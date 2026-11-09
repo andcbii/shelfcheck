@@ -1,3 +1,4 @@
+import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { correctedCoverageInventory, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import type { CoverageEvidence, CoverageOutcome, CoverageGroup } from "@/lib/manual-coverage-model";
@@ -128,13 +129,6 @@ async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set
   return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds };
 }
 
-async function tvdbToken(apiKey: string, pin?: string): Promise<string> {
-  const response = await checkedJson<{ data?: { token?: string } | string }>(`${TVDB}/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apikey: apiKey, ...(pin ? { pin } : {}) }) }, "TVDB");
-  const token = typeof response.data === "string" ? response.data : response.data?.token;
-  if (!token) throw new Error("TVDB login did not return a token.");
-  return token;
-}
-
 async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<{ episodes: ProviderEpisode[]; slug?: string }> {
   const episodes: ProviderEpisode[] = [];
   const series = cachedSlug ? null : await checkedJson<{ data?: { slug?: string; name?: string } }>(`${TVDB}/series/${seriesId}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
@@ -236,7 +230,7 @@ async function runPlexScan(targetRatingKey?: string) {
     if (targetRatingKey && !shows.some((show) => show.identity === targetRatingKey)) throw new Error("That show is not available in the current Plex libraries.");
     const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
     logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
-    const token = await tvdbToken(config.tvdbApiKey, config.tvdbPin);
+    const token = await authenticateTvdb(providerClient, config.tvdbApiKey, config.tvdbPin);
     const traktCredentials = await validTraktCredentials().catch((error) => {
       logger.warn("plex.crosswalk.trakt-unavailable", { error: error instanceof Error ? error.message : String(error) });
       return null;

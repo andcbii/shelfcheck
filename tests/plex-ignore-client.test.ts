@@ -272,3 +272,58 @@ test("coverage groups respect aired-date and season-ignore visibility", async (t
     });
   }
 });
+
+
+test("mixed coverage groups keep excluded members as alternative context rather than missing", async (t) => {
+  for (const settings of [
+    { hideUnairedEpisodes: true },
+    { ignoredSeasons: [{ ratingKey: "two", title: "Other show", seasons: [2] }] },
+    { ignoredShows: [{ ratingKey: "two", title: "Other show" }] },
+  ]) await t.test(JSON.stringify(settings), async subtest => {
+    const members = [
+      { provider: "TMDB", id: 100, show: "Visible show", title: "Visible gap", season: 1, episode: 1, url: "https://example.com/100", status: "missing" },
+      { provider: "TVDB", id: 200, show: "Other show", title: "Excluded gap", season: 2, episode: 2, url: "https://example.com/200", status: "missing" },
+    ];
+    const grouped = { ...report, shows: [
+      { ...report.shows[0], missing: [{ season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"] }] },
+      { ratingKey: "two", title: "Other show", plexEpisodes: 1, missing: [{ season: 2, episode: 2, airDate: "2099-01-01", tvdbEpisodeId: 200, sources: ["TVDB"] }] },
+    ], coverageGroups: [{ mappingId: "mixed", members, missing: [{ ...members[0], showKey: "one" }, { ...members[1], showKey: "two" }] }] };
+    const defaults = configuredFetch(async () => json({ ...completed, report: grouped }));
+    const { container } = await mountPage(subtest, async (input, init) => input === "/api/plex/state" ? json({ settings }) : defaults(input, init));
+    const rows = container.querySelectorAll('[aria-label="Incomplete coverage group"] li');
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].querySelector("strong")?.textContent, "Missing");
+    assert.equal(rows[1].querySelector("strong")?.textContent, "Alternative \u00b7 outside this comparison");
+    assert.match(rows[0].textContent || "", /Episode ID 100/);
+    assert.match(rows[1].textContent || "", /Episode ID 200/);
+  });
+});
+
+
+test("completed Plex reports show pending coverage and offer a fresh scan retry", async (t) => {
+  let pending = 1;
+  const { container, click } = await mountPage(t, configuredFetch(async (_input, init) => {
+    if (init?.method === "POST") { pending = 0; return json({}); }
+    return json({ ...completed, coverage: { revision: 3, pending } });
+  }));
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /New Plex search/);
+  assert.equal(container.querySelectorAll(".show-list article").length, 1);
+  await click("New Plex search");
+  assert.equal(container.querySelector('[role="status"]'), null);
+});
+
+
+test("a completed poll keeps coverage pending when an older initial response arrives later", async (t) => {
+  const initial = deferred<Response>();
+  let reads = 0;
+  const { container, click } = await mountPage(t, configuredFetch(async (_input, init) => {
+    if (init?.method === "POST") return json({});
+    if (++reads === 1) return initial.promise;
+    return json({ ...completed, coverage: { revision: 4, pending: 1 } });
+  }));
+  await click("New Plex search");
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
+  await act(async () => initial.resolve(json({ ...completed, coverage: { revision: 3, pending: 0 } })));
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
+});

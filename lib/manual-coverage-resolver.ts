@@ -1,3 +1,4 @@
+import { authenticateTvdb } from "@/lib/tvdb-auth";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { readPlexProviders } from "@/lib/server-config";
@@ -23,6 +24,8 @@ async function resolveCoverageInputs(urls: unknown) {
   const config = await readPlexProviders();
   if (!config)
     throw new CoverageError("Configure Plex, TMDB, and TVDB credentials before resolving episodes.", 409, "configuration");
+  let token: Promise<string> | undefined;
+  const tvdbToken = () => token ||= authenticateTvdb(client, config.tvdbApiKey, config.tvdbPin);
   const members: CoverageMember[] = [];
   for (const value of urls) {
     const input = value.trim();
@@ -74,14 +77,7 @@ async function resolveCoverageInputs(urls: unknown) {
       const match = url.pathname.match(/^\/series\/[^/]+\/episodes\/(\d+)\/?$/);
       if (!match)
         throw new CoverageError("This TVDB URL is not an episode. Open the episode record first.");
-      const login = await client.json<{
-        data?: {
-          token?: string;
-        } | string;
-      }>("https://api4.thetvdb.com/v4/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apikey: config.tvdbApiKey, ...(config.tvdbPin ? { pin: config.tvdbPin } : {}) }) }, "TVDB");
-      const token = typeof login.data === "string" ? login.data : login.data?.token;
-      if (!token)
-        throw new CoverageError("TVDB login did not return a token.", 503, "provider-unavailable");
+      const token = await tvdbToken();
       const init = { headers: { Authorization: `Bearer ${token}` } };
       const { data: record } = await client.json<{
         data?: {

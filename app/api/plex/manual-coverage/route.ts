@@ -1,6 +1,6 @@
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
 import { requestCoverageRecheck } from "@/lib/plex-scan";
-import { CoverageError, coverageState, deleteCoverageMapping, listCoverageMappings, readCoverageEvidence, saveCoverageMapping, listCoverageCorrections, saveOwnershipCorrection } from "@/lib/manual-coverage";
+import { CoverageError, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping, listCoverageCorrections, saveOwnershipCorrection } from "@/lib/manual-coverage";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const headers = { "Cache-Control": "private, no-store" };
@@ -44,10 +44,17 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const id = new URL(request.url).searchParams.get("id") || "";
-    deleteCoverageMapping(id);
-    requestCoverageRecheck();
-    return Response.json({ deleted: [id], ...coverageState() }, { headers });
+    const id = new URL(request.url).searchParams.get("id");
+    let result: { deleted: string[]; missing: string[] };
+    if (id !== null) {
+      deleteCoverageMapping(id);
+      result = { deleted: [id], missing: [] };
+    } else {
+      const body = await request.json().catch(() => { throw new CoverageError("Supply selected mapping identities as JSON."); });
+      result = deleteCoverageMappings(body?.ids);
+    }
+    if (result.deleted.length) requestCoverageRecheck();
+    return Response.json({ ...result, ...coverageState() }, { headers });
   } catch (error) {
     return failure(error);
   }

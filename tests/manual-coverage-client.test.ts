@@ -71,7 +71,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(correct);
   await act(async()=>correct.click());
   assert.deepEqual((corrected as {identities:unknown}).identities,[{provider:"TMDB",id:100}]);
-  const part=container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1];
+  const part=container.querySelectorAll<HTMLInputElement>('fieldset input[type="checkbox"]')[1];
   await act(async()=>part.click());
   const selected=[...container.querySelectorAll("button")].find(button=>button.textContent==="Declare selected parts");
   assert.ok(selected); await act(async()=>selected.click());
@@ -160,8 +160,91 @@ test("selecting an existing member opens its mapping for editing instead of offe
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
   await act(async () => resolve.click());
-  assert.match(container.textContent || "", /Editing mapping existing � Revision 4/);
+  assert.match(container.textContent || "", /Editing mapping existing · Revision 4/);
   assert.equal(container.querySelector('[aria-label="Episode URL or provider-qualified ID 1"]')?.getAttribute("value"), "https://example.com/100");
   assert.equal(container.querySelector('[aria-label="Resolved episode preview"]'), null);
   assert.equal(saves, 0);
+});
+
+
+test("bulk cleanup selects Needs review across pages and confirms the exact count", async (t) => {
+  const browser = new Window({ url: "http://localhost/plex" });
+  const old = new Map<string, PropertyDescriptor | undefined>();
+  let mappings = Array.from({length:13},(_,i)=>({id:`mapping-${i}`,revision:1,health:i===12 ? "healthy":"needs-review",members:[],createdAt:"now"}));
+  let deleted: string[] = [];
+  let fail = false;
+  let changed = 0;
+  for (const [key,value] of Object.entries({window:browser,document:browser.document,HTMLElement:browser.HTMLElement,IS_REACT_ACT_ENVIRONMENT:true,fetch:async (input:unknown, init?:RequestInit)=>{
+    if(init?.method==="DELETE") {
+      if(fail) return Response.json({error:"Please retry cleanup."},{status:503});
+      if (!init.body) {
+        const id = new URL(String(input), "http://localhost").searchParams.get("id");
+        mappings = mappings.filter(m => m.id !== id && m.id !== "mapping-0").map(m => m.id === "mapping-1" ? {...m, health:"healthy"} : m);
+        return Response.json({deleted:[id],revision:2});
+      }
+      deleted = JSON.parse(String(init.body)).ids;
+      mappings=mappings.filter(m=>!deleted.includes(m.id));
+      return Response.json({deleted,missing:[],revision:2});
+    }
+    return Response.json({mappings,pending:0});
+  }})) {
+    old.set(key,Object.getOwnPropertyDescriptor(globalThis,key));
+    Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});
+  }
+  const container=document.createElement("div");
+  const root=createRoot(container);
+  t.after(async()=>{
+    await act(async()=>root.unmount());
+    await browser.happyDOM.close();
+    for(const [key,value] of old) {if(value) Object.defineProperty(globalThis,key,value); else Reflect.deleteProperty(globalThis,key);}
+  });
+  await act(async()=>root.render(createElement(ManualCoverageManager,{initialUrls:[],onClose(){},onChanged(){changed++;}})));
+  const click=async(label:string)=>{
+    const button=[...container.querySelectorAll("button")].find(b=>b.textContent===label);
+    assert.ok(button,`button ${label}`);
+    await act(async()=>button.click());
+  };
+  const filter=container.querySelector<HTMLSelectElement>('[aria-label="Mapping health"]')!;
+  const changeFilter=async(value:string)=>act(async()=>{filter.value=value;filter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
+  const next=()=>click("Next \u2192");
+  await changeFilter("needs-review");
+  assert.equal(container.querySelectorAll("article").length,10);
+  await click("Select all 12 matching mappings");
+  assert.match(container.textContent||"",/12 mappings selected/);
+  await next();
+  assert.equal(container.querySelectorAll("article").length,2);
+  assert.ok([...container.querySelectorAll<HTMLInputElement>('article input[type="checkbox"]')].every(input=>input.checked));
+  await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
+  assert.match(container.textContent||"",/11 mappings selected/);
+  await click("Delete selected mappings");
+  assert.match(container.querySelector('[aria-label="Confirm mapping deletion"]')?.textContent||"",/Delete 11 selected mappings/);
+  await click("Cancel bulk deletion");
+  assert.deepEqual(deleted,[]);
+  // A refresh after a row deletion also removes vanished and newly healthy
+  // identities from the selection and clamps the former last page.
+  await click("Delete mapping");
+  assert.match(container.textContent||"",/9 mappings selected/);
+  assert.match(container.textContent||"",/Showing 1.9 of 9/);
+  assert.equal(container.querySelectorAll("article").length,9);
+  changed=0;
+  await changeFilter("all");
+  assert.match(container.textContent||"",/0 mappings selected/);
+  assert.match(container.textContent||"",/Selection cleared/);
+  await changeFilter("needs-review");
+  await click("Select all 9 matching mappings");
+  await click("Delete selected mappings");
+  fail=true;
+  await click("Confirm delete 9 mappings");
+  assert.match(container.querySelector('[role="alert"]')?.textContent||"",/Please retry/);
+  assert.equal(changed,0);
+  fail=false;
+  await click("Confirm delete 9 mappings");
+  assert.deepEqual(deleted,[...Array.from({length:8},(_,i)=>`mapping-${i+2}`),"mapping-11"]);
+  assert.equal(changed,1);
+  assert.match(container.textContent||"",/Deleted 9 mappings/);
+  assert.match(container.textContent||"",/0 mappings selected/);
+  assert.equal(container.querySelectorAll("article").length,0);
+  await changeFilter("all");
+  assert.equal(container.querySelectorAll("article").length,2);
+  assert.match(container.textContent||"",/Showing 1.2 of 2/);
 });

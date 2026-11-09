@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
+import { ReportPagination } from "@/app/reports/report-pagination";
 import type { CoverageEvidence, CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
   initialUrls: string[];
@@ -23,7 +24,25 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
   const [selectedParts, setSelectedParts] = useState<Record<string, string[]>>({});
   const [pending, setPending] = useState(false);
   const [healthFilter, setHealthFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [confirmation, setConfirmation] = useState<string[] | null>(null);
   const visibleMappings = mappings.filter(mapping => healthFilter === "all" || mapping.health === healthFilter);
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleMappings.length / pageSize)));
+  const selectedIds = selected.filter(id => visibleMappings.some(mapping => mapping.id === id));
+  const pageMappings = visibleMappings.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  function changeSelection(ids: string[]) {
+    setSelected(ids);
+    setConfirmation(null);
+  }
+  function acceptMappings(next: CoverageMapping[]) {
+    setMappings(next);
+    const matchingCount = next.filter(mapping => healthFilter === "all" || mapping.health === healthFilter).length;
+    setPage(current => Math.min(current, Math.max(1, Math.ceil(matchingCount / pageSize))));
+    setSelected(current => current.filter(id => next.some(mapping => mapping.id === id && (healthFilter === "all" || mapping.health === healthFilter))));
+    setConfirmation(null);
+  }
   function openMapping(mapping: CoverageMapping) {
     setEditing(mapping);
     setUrls(mapping.members.map(member => member.url));
@@ -38,7 +57,7 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
       throw new Error(body.error);
     if (typeof body.revision === "number" && body.revision < acceptedRevision.current) return;
     acceptedRevision.current = body.revision || acceptedRevision.current;
-    setMappings(body.mappings);
+    acceptMappings(body.mappings);
     setRevision(body.revision);
     setPending(Boolean(body.pending));
   }
@@ -52,6 +71,9 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
         if (typeof body.revision === "number" && body.revision < acceptedRevision.current) return;
         acceptedRevision.current = body.revision || acceptedRevision.current;
         setMappings(body.mappings);
+        setSelected([]);
+        setConfirmation(null);
+        setPage(1);
         setRevision(body.revision);
         const existing = body.mappings.find((mapping: CoverageMapping) => initialMappingId ? mapping.id === initialMappingId : mapping.members.some(member => initialUrls.includes(member.url)));
         if (existing) openMapping(existing);
@@ -125,6 +147,24 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
       setBusy(false);
     }
   }
+  async function removeSelected(ids: string[]) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch("/api/plex/manual-coverage", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error);
+      if (editing && ids.includes(editing.id)) { setEditing(null); setPreview(null); }
+      changeSelection([]);
+      acceptedRevision.current = Math.max(acceptedRevision.current, body.revision);
+      setRevision(body.revision);
+      onChanged(body.revision);
+      setMessage(`Deleted ${body.deleted.length} mappings.${body.missing.length ? ` ${body.missing.length} selected mappings were already removed.` : ""} Plex comparisons are pending recheck.`);
+      await load();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not delete selected mappings.");
+    } finally { setBusy(false); }
+  }
   function itemCorrection(mapping: CoverageMapping, item: CoverageEvidence) {
     const key=`${mapping.id}:${item.showKey}:${item.ratingKey}`;
     const correction=mapping.corrections?.find(c=>c.ratingKey===item.ratingKey && c.showKey===item.showKey);
@@ -142,7 +182,7 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
     return members.map(member => <p key={`${member.provider}:${member.id}`}><strong>{member.provider} · {member.show}</strong><br />{member.title} · S{member.season} E{member.episode} · Episode ID {member.id}<br /><a href={member.url} target="_blank" rel="noreferrer">{member.url}</a></p>);
   }
   return <div className="modal-backdrop"><section className="modal manual-coverage-manager" role="dialog" aria-modal="true" aria-label="Manual Coverage"><header><h2>Manual Coverage</h2><button onClick={onClose} aria-label="Close manual coverage">Close</button></header>
- {editing && <p>Editing mapping {editing.id} � Revision {editing.revision}</p>}
+ {editing && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
  <button disabled={busy} onClick={() => {
     setEditing(null);
     setUrls(["", ""]);
@@ -160,9 +200,17 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
  <button disabled={busy || urls.some(url => !url.trim())} onClick={() => void action({ action: "resolve", urls, id: editing?.id })}>Resolve and review</button>
  {preview && <section aria-label="Resolved episode preview">{records(preview.members)}<button disabled={busy} onClick={() => void action({ action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision })}>Save coverage mapping</button></section>}
  {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
- <label>Mapping health<select aria-label="Mapping health" value={healthFilter} onChange={event => setHealthFilter(event.target.value)}><option value="all">All mappings</option><option value="needs-review">Needs review</option><option value="pending">Pending</option></select></label>
+ <label>Mapping health<select aria-label="Mapping health" value={healthFilter} disabled={busy} onChange={event => {
+    setHealthFilter(event.target.value);
+    setPage(1);
+    changeSelection([]);
+    setMessage("Selection cleared because the health filter changed.");
+  }}><option value="all">All mappings</option><option value="needs-review">Needs review</option><option value="pending">Pending</option></select></label>
  <p role="status">{pending ? "Coverage comparisons are pending. Check Plex scan status or start a new Plex search if a provider is unavailable." : ""}</p><h3>Saved mappings ({mappings.length})</h3>{!mappings.length && <p>No manual coverage mappings saved.</p>}
- {visibleMappings.map(mapping => <article key={mapping.id}><p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{records(mapping.members)}<button disabled={busy} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => itemCorrection(mapping,item)) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={busy} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
+ <section aria-label="Mapping selection"><p role="status">{selectedIds.length} mappings selected. Selection spans pages; changing the health filter clears it.</p><button disabled={busy || !visibleMappings.length} onClick={() => changeSelection(visibleMappings.map(mapping => mapping.id))}>Select all {visibleMappings.length} matching mappings</button><button disabled={busy || !selectedIds.length} onClick={() => changeSelection([])}>Clear selection</button><button disabled={busy || !selectedIds.length} onClick={() => setConfirmation([...selectedIds])}>Delete selected mappings</button></section>
+ {confirmation && <section role="alertdialog" aria-label="Confirm mapping deletion"><p>Delete {confirmation.length} selected mappings? Plex comparisons will be rechecked.</p><button disabled={busy} onClick={() => void removeSelected(confirmation)}>Confirm delete {confirmation.length} mappings</button><button disabled={busy} onClick={() => setConfirmation(null)}>Cancel bulk deletion</button></section>}
+ <ReportPagination total={visibleMappings.length} page={currentPage} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1); }}/>
+ {pageMappings.map(mapping => <article key={mapping.id}><label><input type="checkbox" aria-label={`Select mapping ${mapping.id}`} disabled={busy} checked={selectedIds.includes(mapping.id)} onChange={event => changeSelection(event.target.checked ? [...selectedIds, mapping.id] : selectedIds.filter(id => id !== mapping.id))}/>Select mapping</label><p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{records(mapping.members)}<button disabled={busy} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => itemCorrection(mapping,item)) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={busy} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
  </section></div>;
 }
 

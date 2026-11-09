@@ -69,16 +69,27 @@ export function saveCoverageMapping(members: CoverageMember[], edit?: { id: stri
 }
 
 export function deleteCoverageMapping(id: string) {
+  const result = deleteCoverageMappings([id]);
+  if (!result.deleted.length) throw new CoverageError("Mapping not found.", 404, "not-found");
+  return id;
+}
+
+export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missing: string[] } {
+  if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== "string" || !id.trim()))
+    throw new CoverageError("Select explicit mapping identities to delete.");
   const db = coverageDatabase();
   db.exec("BEGIN IMMEDIATE");
   try {
-    const result = db.prepare("DELETE FROM shelfcheck_coverage_mappings WHERE id=?").run(id);
-    if (!result.changes)
-      throw new CoverageError("Mapping not found.", 404, "not-found");
-    correctionTable().prepare("DELETE FROM shelfcheck_coverage_corrections WHERE mapping_id=?").run(id);
-    db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+    const deleted: string[] = [];
+    const missing: string[] = [];
+    for (const id of new Set<string>(ids)) {
+      const result = db.prepare("DELETE FROM shelfcheck_coverage_mappings WHERE id=?").run(id);
+      if (result.changes) correctionTable().prepare("DELETE FROM shelfcheck_coverage_corrections WHERE mapping_id=?").run(id);
+      (result.changes ? deleted : missing).push(id);
+    }
+    if (deleted.length) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
     db.exec("COMMIT");
-    return id;
+    return { deleted, missing };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;

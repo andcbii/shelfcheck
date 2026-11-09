@@ -153,7 +153,11 @@ test("complete sets require corrected direct inventory and corrections survive o
   assert.equal((await state()).mappings[0].corrections.length,1);
   const independentPreview=await resolve(["tmdb:101 show:10 season:1 episode:2","tvdb:201"]);
   const independent=await (await api.POST(request({action:"save",preview:independentPreview.preview}))).json(); await wait();
-  await api.DELETE(new Request("http://localhost/api/plex/manual-coverage?id="+independent.mapping.id,{method:"DELETE"})); await wait();
+  const batchDelete=await api.DELETE(new Request("http://localhost/api/plex/manual-coverage",{method:"DELETE",body:JSON.stringify({ids:[independent.mapping.id,"already-removed"]})}));
+  const batchResult=await batchDelete.json();
+  assert.deepEqual(batchResult.deleted,[independent.mapping.id]);
+  assert.deepEqual(batchResult.missing,["already-removed"]);
+  await wait();
   assert.equal((await state()).mappings[0].corrections.length,1);
   contentVersion++;
   await rescan();

@@ -8,6 +8,8 @@ import type { CoverageMember } from "@/lib/manual-coverage-model";
 const client = new PlexProviderClient(() => undefined, () => {
 });
 export async function resolveCoverageUrls(urls: unknown) {
+  // A failed attempt must not permanently disable later user-requested retries.
+  client.resetMetrics();
   try {
     return await resolveCoverageInputs(urls);
   } catch (error) {
@@ -16,8 +18,8 @@ export async function resolveCoverageUrls(urls: unknown) {
   }
 }
 async function resolveCoverageInputs(urls: unknown) {
-  if (!Array.isArray(urls) || urls.length !== 2 || urls.some(url => typeof url !== "string"))
-    throw new CoverageError("Supply one TMDB episode and one TVDB episode using URLs or provider-qualified IDs.");
+  if (!Array.isArray(urls) || urls.length < 2 || urls.some(url => typeof url !== "string"))
+    throw new CoverageError("Supply nonempty complete TMDB and TVDB episode sets using URLs or provider-qualified IDs.");
   const config = await readPlexProviders();
   if (!config)
     throw new CoverageError("Configure Plex, TMDB, and TVDB credentials before resolving episodes.", 409, "configuration");
@@ -106,7 +108,7 @@ async function resolveCoverageInputs(urls: unknown) {
       throw new CoverageError("Use an episode URL from TMDB or TVDB.");
   }
   if (new Set(members.map(m => m.provider)).size !== 2)
-    throw new CoverageError("Review one episode from each provider.");
+    throw new CoverageError("Review at least one episode from each provider.");
   const db = coverageDatabase();
   db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_coverage_previews(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires INTEGER NOT NULL)");
   db.prepare("DELETE FROM shelfcheck_coverage_previews WHERE expires<?").run(Date.now());

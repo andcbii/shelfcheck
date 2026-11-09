@@ -9,6 +9,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const old = new Map<string, PropertyDescriptor | undefined>();
   const members = [{ provider: "TMDB", id: 100, show: "Target", title: "Missing", season: 1, episode: 1, url: "https://example.com/100" }, { provider: "TVDB", id: 200, show: "Other", title: "Equivalent", season: 8, episode: 8, url: "https://example.com/200" }];
   let deleted = "";
+  let corrected: unknown;
   let changed = 0;
   let savedPreview = "";
   let savedId = "";
@@ -19,6 +20,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch: async (input: unknown, init?: RequestInit) => {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
+        if (body.action === "correct") { corrected=body; return Response.json({revision:1}); }
         if (body.action === "resolve") {
           resolvedInputs = body.urls;
           return Response.json({ preview: "reviewed", members });
@@ -34,7 +36,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         deleted = String(input);
         return Response.json({ revision: 2 });
       }
-      return Response.json({ mappings: [{ id: "saved", revision: 1, health: "needs-review", healthMessage: "Provider confirmed deletion.", members }, {id:"healthy", revision:2, members}], pending: 0 });
+      return Response.json({ revision: 1, mappings: [{ id: "saved", revision: 1, health: "needs-review", healthMessage: "Provider confirmed deletion.", members, evidence:[{ratingKey:"file",showKey:"show",fingerprint:"content",identities:members.map(m=>({provider:m.provider,id:m.id}))}] }, {id:"healthy",revision:2,members}], pending: 0 });
     } })) {
     old.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
@@ -65,6 +67,16 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(healthFilter);
   await act(async () => {healthFilter.value="needs-review";healthFilter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   assert.equal(container.querySelectorAll("article").length,1);
+  const correct=[...container.querySelectorAll("button")].find(button=>button.textContent==="Declare complete TMDB set");
+  assert.ok(correct);
+  await act(async()=>correct.click());
+  assert.deepEqual((corrected as {identities:unknown}).identities,[{provider:"TMDB",id:100}]);
+  const part=container.querySelectorAll<HTMLInputElement>('fieldset input[type="checkbox"]')[1];
+  await act(async()=>part.click());
+  const selected=[...container.querySelectorAll("button")].find(button=>button.textContent==="Declare selected parts");
+  assert.ok(selected); await act(async()=>selected.click());
+  assert.deepEqual((corrected as {identities:unknown}).identities,[{provider:"TVDB",id:200}]);
+  changed=0;
   const initialResolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(initialResolve);
   await act(async () => initialResolve.click());
@@ -148,7 +160,7 @@ test("selecting an existing member opens its mapping for editing instead of offe
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
   await act(async () => resolve.click());
-  assert.match(container.textContent || "", /Editing mapping existing � Revision 4/);
+  assert.match(container.textContent || "", /Editing mapping existing · Revision 4/);
   assert.equal(container.querySelector('[aria-label="Episode URL or provider-qualified ID 1"]')?.getAttribute("value"), "https://example.com/100");
   assert.equal(container.querySelector('[aria-label="Resolved episode preview"]'), null);
   assert.equal(saves, 0);

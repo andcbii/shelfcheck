@@ -18,6 +18,7 @@ export type CoverageEvidence = {
     id: number;
   }[];
 };
+export type CoverageCorrection = CoverageEvidence & { mappingId: string };
 export type CoverageMapping = {
   id: string;
   revision: number;
@@ -26,4 +27,5 @@ export type CoverageMapping = {
   health?: "healthy" | "pending" | "needs-review";
   healthMessage?: string;
   evidence?: CoverageEvidence[];
+  corrections?: CoverageCorrection[];
 };

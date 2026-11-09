@@ -24,8 +24,10 @@ test("provider-qualified episode IDs require resolving context and review canoni
     rmSync(dir,{recursive:true,force:true});
   });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
+  let throttled = false;
   t.mock.method(globalThis,"fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
+    if (throttled && u.hostname === "api.themoviedb.org") return Response.json({error:"cooldown"},{status:429,headers:{"Retry-After":"3600"}});
     if (u.pathname === "/3/tv/10/season/0/episode/2") return Response.json({id:100,name:"Combined special",season_number:0,episode_number:2});
     if (u.pathname === "/3/tv/10") return Response.json({id:10,name:"First show"});
     if (u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
@@ -60,6 +62,10 @@ test("provider-qualified episode IDs require resolving context and review canoni
   const forgedSave = await api.POST(new Request("http://localhost/api/plex/manual-coverage", {method:"POST",body:JSON.stringify({action:"save",preview:"not-issued"})}));
   assert.equal(forgedSave.status,400);
   assert.deepEqual((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings, []);
+  throttled=true;
+  assert.equal((await resolve(["tmdb:100 show:10 season:0 episode:2","tvdb:200"])).status,503);
+  throttled=false;
+  assert.equal((await resolve(["tmdb:100 show:10 season:0 episode:2","tvdb:200"])).status,200,"a later provider-resolution attempt can recover after an outage");
   await config.writePlexProviders({tmdbToken:null});
   const unconfigured = await resolve(["tmdb:100 show:10 season:0 episode:2","tvdb:200"]);
   assert.equal(unconfigured.status,409);

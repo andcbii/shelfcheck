@@ -23,6 +23,10 @@ publish port `3000` directly to the public internet.
 - Apply a configurable 0–30 day airing grace period to Trakt results.
 - Recognize conservative compound-episode mappings where one owned,
   double-length TMDB episode represents multiple split TVDB episodes.
+- Link complete TMDB and TVDB episode sets with persistent manual coverage,
+  including cross-show mappings and corrections for ambiguous Plex items.
+- Review incomplete coverage groups, repair broken mappings, and bulk-delete
+  selected mappings from the Manual Coverage manager.
 - Retain downloadable, credential-safe diagnostic logs for the latest 10 scans.
 - Inspect auto-matched episodes, unmatched shows, and unusual TMDB/TVDB show
   relationships in dedicated Plex reports.
@@ -40,7 +44,7 @@ erase Shelfcheck's configuration and data.
 Published releases are available from Docker Hub:
 
 ```bash
-docker pull andcbii/shelfcheck:2.3.1
+docker pull andcbii/shelfcheck:2.4.0
 ```
 
 An equivalent bind-mount example is:
@@ -52,7 +56,7 @@ docker run -d --name shelfcheck \
   -v /your/host/config:/config \
   -v /your/host/data:/data \
   --restart unless-stopped \
-  andcbii/shelfcheck:2.3.1
+  andcbii/shelfcheck:2.4.0
 ```
 
 The image runs as UID/GID `1001`. Both mounted directories must be writable by

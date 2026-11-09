@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.4.0 - 2026-11-08
+
+### Added
+
+- Persistent manual Plex episode coverage mappings between complete TMDB and
+  TVDB episode sets, including different seasons and parent shows.
+- Episode URL and provider-qualified ID previews, mapping creation and editing,
+  ownership corrections for ambiguous Plex items, and grouped incomplete results.
+- Provider health states, reviewed repair, and explicit bulk cleanup across pages
+  in the Manual Coverage manager.
+- Revision-aware queued rechecks and pending feedback after mapping changes,
+  preserving existing automatic matching and separate Trakt scans.
+
 ## 2.3.1 - 2026-11-06
 
 ### Fixed

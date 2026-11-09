@@ -1,33 +1,33 @@
-# Shelfcheck 2.3.1
+# Shelfcheck 2.4.0
 
-Shelfcheck 2.3.1 fixes a Plex report race in temporary and permanent whole-show
-ignores.
+Shelfcheck 2.4.0 adds persistent manual episode coverage for Plex scans.
 
-## Plex ignore results
+## Manual episode coverage
 
-A delayed scan response could put an ignored show's old results back into the
-page, allowing Restore or expiry to reveal them without a new scan. Plex now
-keeps those results and cache entries removed until a scan starts after the
-ignore ends. Older initial report requests and aborted polls cannot replace
-fresh scan results.
+Use **Link episodes** on a missing episode, or open **Manual Coverage**, to
+resolve and review TMDB and TVDB episode URLs or provider-qualified IDs. Link
+complete episode sets across seasons and shows, including combined specials
+and their split parts. An incomplete source set grants no additional coverage.
 
-Client regression tests cover delayed report delivery, Restore, expiry,
-preference loading, and fresh scans after an ignore ends. Season ignores continue
-to filter existing results, which can reappear when their ignore ends.
+Manual coverage runs after existing automatic matching and uses directly owned
+Plex content across included libraries. Ambiguous combined/split metadata can
+be corrected locally without changing Plex or provider records. Separate Trakt
+collection scans retain their existing behavior.
 
-For the temporary-ignore features and Trakt OAuth request changes introduced in
-2.3.0, see the [2.3.0 release](https://github.com/andcbii/shelfcheck/releases/tag/v2.3.0).
+Mappings and compatible ownership corrections survive restarts and cleared
+reports or caches. Changes queue automatic rechecks with pending feedback and
+protection against stale scan results. Incomplete results show owned content,
+automatic satisfaction, remaining gaps, and alternative complete sets.
+
+The manager supports editing, provider-health review, repair, individual
+deletion, and confirmed bulk deletion of an explicit selection across pages.
+Temporary provider failures retain pending state instead of deleting mappings.
 
 ## Upgrading
 
-Use Docker image `andcbii/shelfcheck:2.3.1` and keep your existing `/config` and
-`/data` mounts when replacing the container. No configuration or database reset is
-required; provider credentials and preferences stay in their existing volumes.
+Use Docker image `andcbii/shelfcheck:2.4.0` or `andcbii/shelfcheck:latest` and
+retain your existing `/config` and `/data` mounts. No configuration or database
+reset is required. The first Plex scan refreshes older cached report data.
 
-> [!IMPORTANT]
-> **Reverse-proxy upgrade notice:** Installations using Trakt OAuth behind a
-> reverse proxy must set `SHELFCHECK_PUBLIC_URL` to Shelfcheck's exact externally
-> visible origin, such as `https://shelfcheck.example.com`. Without this setting,
-> Trakt login may redirect to the container's internal or non-HTTPS address.
-
-Direct-access installations do not need to set this variable.
+Reverse-proxy installations using Trakt OAuth must continue to set
+`SHELFCHECK_PUBLIC_URL` to Shelfcheck's exact externally visible origin.

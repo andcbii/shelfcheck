@@ -34,7 +34,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         deleted = String(input);
         return Response.json({ revision: 2 });
       }
-      return Response.json({ mappings: [{ id: "saved", revision: 1, members }], pending: 0 });
+      return Response.json({ mappings: [{ id: "saved", revision: 1, health: "needs-review", healthMessage: "Provider confirmed deletion.", members }, {id:"healthy", revision:2, members}], pending: 0 });
     } })) {
     old.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
@@ -58,6 +58,13 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.match(container.textContent || "", /Target/);
   assert.match(container.textContent || "", /Other/);
   assert.match(container.textContent || "", /200/);
+  assert.match(container.textContent || "", /Needs review/);
+  assert.match(container.textContent || "", /Provider confirmed deletion/);
+  assert.equal(container.querySelectorAll("article").length,2);
+  const healthFilter = container.querySelector<HTMLSelectElement>('[aria-label="Mapping health"]');
+  assert.ok(healthFilter);
+  await act(async () => {healthFilter.value="needs-review";healthFilter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
+  assert.equal(container.querySelectorAll("article").length,1);
   const initialResolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(initialResolve);
   await act(async () => initialResolve.click());

@@ -1,3 +1,4 @@
+import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import type { CoverageEvidence } from "@/lib/manual-coverage-model";
 import "server-only";
@@ -193,8 +194,8 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
 
 async function runPlexScan(targetRatingKey?: string) {
   const startedAt = new Date().toISOString();
-  const coverageRevision = coverageState().revision;
-  const mappings = listCoverageMappings();
+  let coverageRevision = coverageState().revision;
+  let mappings = listCoverageMappings();
   if (mappings.length) beginCoverageRecheck(coverageRevision);
   const settings = parsePlexPreferences(readPlexSettings());
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
@@ -219,6 +220,11 @@ async function runPlexScan(targetRatingKey?: string) {
   const finishIgnoreTracking = trackScanIgnores("plex", Date.parse(startedAt));
   try {
     const config = await readPlexProviders();
+    if (config && mappings.length) {
+      await recheckCoverageHealth(providerClient, config);
+      coverageRevision = coverageState().revision;
+      mappings = listCoverageMappings();
+    }
     if (!config) throw new Error("Configure Plex, TMDB, and TVDB credentials before scanning.");
     const sections = await plexJson("/library/sections", config.plexUrl, config.plexToken);
     const showSections = (sections.MediaContainer?.Directory || []).filter((section) => section.type === "show" && section.key);
@@ -545,7 +551,7 @@ async function runPlexScan(targetRatingKey?: string) {
         const key = `${episode.season}:${episode.episode}`;
         if (localEpisodes.has(key)) continue;
         if (providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes })) continue;
-        const mapping = mappings.find(mapping => mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
+        const mapping = mappings.find(mapping => (!mapping.health || mapping.health === "healthy") && mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
         if (mapping) {
           const sourceMembers = mapping.members.filter(member => member.provider !== episode.source);
           const evidence = manualInventory.filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
@@ -608,7 +614,7 @@ async function runPlexScan(targetRatingKey?: string) {
     if (coverageState().revision !== coverageRevision) return;
     writePlexReport(report);
     const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
-    if (!results.some(show => show.warning) && inventoryComplete) completeCoverageRecheck(coverageRevision);
+    if (!results.some(show => show.warning) && inventoryComplete && !mappings.some(mapping => mapping.health === "pending")) completeCoverageRecheck(coverageRevision);
     if (!targetRatingKey) clearPlexCheckpoint();
     else if (rawCheckpoint) {
       const nextCheckpoint = checkpointWithoutRatingKey(rawCheckpoint, targetRatingKey);

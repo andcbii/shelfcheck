@@ -7,6 +7,12 @@ type ProviderMetric = { requests: number; failures: number; retries: number; net
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 export const MAX_PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
 
+export class ProviderHttpError extends Error {
+  constructor(readonly provider: PlexProviderName, readonly status: number) {
+    super(`${provider} request failed (${status}).`);
+  }
+}
+
 export class ProviderCooldownTooLongError extends Error {
   constructor(readonly provider: PlexProviderName, readonly retryAfterMs: number) {
     super(`${provider} requested a ${Math.ceil(retryAfterMs / 60_000)}-minute cooldown. Affected shows will be checked again next scan.`);
@@ -71,8 +77,8 @@ export class PlexProviderClient {
           return response.json() as Promise<T>;
         }
         this.logger()?.warn("plex.request.response", details);
-        if (response.status !== 429 && response.status < 500) throw new Error(`${provider} request failed (${response.status}).`);
-        if (attempt === 4) throw new Error(`${provider} request failed (${response.status}) after retries.`);
+        if (response.status !== 429 && response.status < 500) throw new ProviderHttpError(provider, response.status);
+        if (attempt === 4) throw new ProviderHttpError(provider, response.status);
         let delay: number;
         try {
           delay = acceptedRetryDelay(provider, response, attempt);
@@ -96,7 +102,7 @@ export class PlexProviderClient {
         await wait(delay);
       } catch (error) {
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
-        if (error instanceof Error && /request failed \(4\d\d\)/.test(error.message)) { metric.failures += 1; throw error; }
+        if (error instanceof ProviderHttpError) { metric.failures += 1; throw error; }
         if (attempt === 4) { metric.failures += 1; throw new Error(`${provider} request failed after retries: ${error instanceof Error ? error.message : String(error)}`); }
         const delay = Math.min(30_000, 1000 * 2 ** attempt);
         metric.retries += 1;

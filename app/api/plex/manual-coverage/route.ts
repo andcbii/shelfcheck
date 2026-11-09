@@ -25,7 +25,11 @@ export async function POST(request: Request) {
     }
     if (body.id !== undefined && (typeof body.id !== "string" || !body.id))
       throw new CoverageError("Supply the mapping identity to edit.");
-    const mapping = saveCoverageMapping(reviewedCoverageMembers(body.preview), body.id === undefined ? undefined : { id: body.id, revision: body.revision });
+    const reviewed = reviewedCoverageMembers(body.preview);
+    // Revalidate the exact reviewed canonical identities. Coordinates can locate a
+    // different TMDB record since preview, but must never replace that identity.
+    await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
+    const mapping = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision });
     requestCoverageRecheck();
     return Response.json({ mapping, ...coverageState() }, { status: body.id === undefined ? 201 : 200, headers });
   } catch (error) {

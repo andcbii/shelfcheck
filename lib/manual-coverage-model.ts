@@ -23,5 +23,7 @@ export type CoverageMapping = {
   revision: number;
   members: CoverageMember[];
   createdAt: string;
+  health?: "healthy" | "pending" | "needs-review";
+  healthMessage?: string;
   evidence?: CoverageEvidence[];
 };

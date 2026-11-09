@@ -18,6 +18,8 @@ export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [pending, setPending] = useState(false);
+  const [healthFilter, setHealthFilter] = useState("all");
+  const visibleMappings = mappings.filter(mapping => healthFilter === "all" || mapping.health === healthFilter);
   function openMapping(mapping: CoverageMapping) {
     setEditing(mapping);
     setUrls(mapping.members.map(member => member.url));
@@ -128,8 +130,9 @@ export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props
  <button disabled={busy || urls.some(url => !url.trim())} onClick={() => void action({ action: "resolve", urls, id: editing?.id })}>Resolve and review</button>
  {preview && <section aria-label="Resolved episode preview">{records(preview.members)}<button disabled={busy} onClick={() => void action({ action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision })}>Save coverage mapping</button></section>}
  {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
+ <label>Mapping health<select aria-label="Mapping health" value={healthFilter} onChange={event => setHealthFilter(event.target.value)}><option value="all">All mappings</option><option value="needs-review">Needs review</option><option value="pending">Pending</option></select></label>
  <p role="status">{pending ? "Coverage comparisons are pending. Check Plex scan status or start a new Plex search if a provider is unavailable." : ""}</p><h3>Saved mappings ({mappings.length})</h3>{!mappings.length && <p>No manual coverage mappings saved.</p>}
- {mappings.map(mapping => <article key={mapping.id}>{records(mapping.members)}<button disabled={busy} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => <p key={`${item.showKey}:${item.ratingKey}`}>Plex item {item.ratingKey} · {item.showKey}<br />{item.identities.map(identity => `${identity.provider} ${identity.id}`).join(", ")}</p>) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={busy} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
+ {visibleMappings.map(mapping => <article key={mapping.id}><p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{records(mapping.members)}<button disabled={busy} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => <p key={`${item.showKey}:${item.ratingKey}`}>Plex item {item.ratingKey} · {item.showKey}<br />{item.identities.map(identity => `${identity.provider} ${identity.id}`).join(", ")}</p>) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={busy} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
  </section></div>;
 }
 

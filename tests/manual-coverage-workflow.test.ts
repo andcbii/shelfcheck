@@ -39,6 +39,9 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   });
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
   let unavailableSource = false;
+  let healthFailure = 0;
+  let movedTmdb = false;
+  let missingTmdbCoordinate = false;
   let reverse = false;
   let owned = false;
   let sourceId = 200;
@@ -57,6 +60,9 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   sqlite.writePlexSettings({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
+    if (u.pathname === "/v4/episodes/200/extended" && healthFailure) return Response.json({}, {status: healthFailure, headers: healthFailure === 429 ? {"Retry-After":"86400"} : undefined});
+    if (u.pathname === "/3/tv/10/season/1/episode/1" && missingTmdbCoordinate) return Response.json({}, {status:404});
+    if (u.pathname === "/3/tv/10/season/1/episode/1" && movedTmdb) return Response.json({id:999,season_number:1,episode_number:1,name:"Similar title"});
     let body: unknown;
     if (u.hostname === "plex") {
       if (unavailableSource && u.pathname.includes("/2/allLeaves")) return Response.json({error:"Plex source unavailable"},{status:404});
@@ -193,6 +199,76 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   cache.__shelfcheckDatabase?.close();
   delete cache.__shelfcheckDatabase;
   assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 2);
+  // Provider outages retain identities and pending state; only native episode 404 confirms deletion.
+  const mappingList = async () => (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings;
+  const rerun = async () => {
+    await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
+    return wait();
+  };
+  healthFailure = 401;
+  const outage = await rerun();
+  assert.equal(outage.coverage.pending, 1);
+  assert.equal((await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id).health, "pending");
+  assert.equal(outage.report.shows[0].missing[0].tmdbEpisodeId, 100);
+  healthFailure = 429;
+  assert.equal((await rerun()).coverage.pending,1,"Long cooldowns retain pending state without deleting mappings");
+  assert.equal((await mappingList()).find((m: {id:string})=>m.id===saved.mapping.id).health,"pending");
+  healthFailure = 404;
+  const deletedMember = await rerun();
+  let broken = (await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id);
+  assert.equal(broken.health, "needs-review");
+  assert.deepEqual(broken.members.map((m: {id:number;title:string}) => [m.id,m.title]), [[100,"Missing"],[200,"Equivalent"]]);
+  assert.equal(deletedMember.report.shows[0].missing[0].tmdbEpisodeId, 100);
+  (cache.__shelfcheckDatabase as DatabaseSync | undefined)?.close();
+  delete cache.__shelfcheckDatabase;
+  const reopenedBroken = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
+  assert.equal(reopenedBroken.health,"needs-review");
+  assert.deepEqual(reopenedBroken.members,broken.members);
+  // Automatic decisions still apply while a mapping needs repair.
+  automatic = true;
+  owned = false;
+  assert.deepEqual((await rerun()).report.shows[0].missing, []);
+  automatic = false;
+  owned = true;
+  const invalidRepair = await api.POST(request({action:"resolve",id:broken.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:200"]}));
+  assert.equal(invalidRepair.status, 503);
+  const afterRejectedRepair = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
+  assert.deepEqual(afterRejectedRepair.members,broken.members);
+  assert.equal(afterRejectedRepair.revision,broken.revision);
+  const expiredHealthPreview = await api.POST(request({action:"save",id:broken.id,revision:broken.revision,preview:preview.preview}));
+  assert.equal(expiredHealthPreview.status,503,"A previously reviewed preview cannot save a now-deleted member");
+  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).revision,broken.revision);
+  healthFailure = 0;
+  // Health stays Needs review until a user resolves and reviews a whole replacement.
+  await rerun();
+  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).health,"needs-review");
+  const repairPreview = await (await api.POST(request({action:"resolve",id:broken.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:202"]}))).json();
+  const repairResponse = await api.POST(request({action:"save",id:broken.id,revision:broken.revision,preview:repairPreview.preview}));
+  assert.equal(repairResponse.status,200);
+  saved.mapping = (await repairResponse.json()).mapping;
+  sourceId = 202;
+  assert.deepEqual((await wait()).report.shows[0].missing, []);
+  assert.ok(saved.mapping.revision > broken.revision);
+  assert.notEqual(saved.mapping.health,"needs-review");
+  // Coordinates returning another ID cannot silently replace the saved canonical TMDB member.
+  movedTmdb = true;
+  const moved = await rerun();
+  assert.equal(moved.coverage.pending,1);
+  broken = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
+  assert.equal(broken.health,"pending");
+  assert.deepEqual(broken.members.map((m: {id:number})=>m.id),[100,202]);
+  movedTmdb = false;
+  missingTmdbCoordinate = true;
+  assert.equal((await rerun()).coverage.pending,1);
+  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).health,"pending","A TMDB coordinate 404 cannot prove canonical deletion");
+  missingTmdbCoordinate = false;
+  await rerun();
+  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).health,"healthy");
+  const returnPreview = await (await api.POST(request({action:"resolve",id:broken.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:200"]}))).json();
+  const current = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
+  saved.mapping = (await (await api.POST(request({action:"save",id:current.id,revision:current.revision,preview:returnPreview.preview}))).json()).mapping;
+  sourceId = 200;
+  await wait();
   // Automatic ownership keeps its existing result and is not relabelled manual.
   automatic = true;
   owned = false;

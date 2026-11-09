@@ -1,3 +1,5 @@
+import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import type { CoverageEvidence } from "@/lib/manual-coverage-model";
 import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
@@ -27,10 +29,10 @@ export type PlexAutoMatchMethod = "Matched via IMDb" | "Matched via Trakt" | "Ma
 export type PlexAutoMatchEpisode = { id?: number; showId?: number; showSlug?: string; show: string; name?: string; season: number; episode: number; airDate?: string; url?: string };
 export type PlexAutoMatch = { method: PlexAutoMatchMethod; tmdb: PlexAutoMatchEpisode; tvdb: PlexAutoMatchEpisode };
 export type PlexProviderResolution = { tmdb: boolean; tvdb: boolean };
-export type PlexShowResult = PlexShow & { missing: PlexMissingEpisode[]; providerResolution?: PlexProviderResolution; providerMatches?: PlexProviderMatches; autoMatches?: PlexAutoMatch[]; compoundCoverage?: CompoundCoverage[]; warning?: string };
+export type PlexShowResult = PlexShow & { missing: PlexMissingEpisode[]; providerResolution?: PlexProviderResolution; providerMatches?: PlexProviderMatches; autoMatches?: PlexAutoMatch[]; compoundCoverage?: CompoundCoverage[]; manualCoverage?: { mappingId: string; source: CoverageEvidence[] }[]; warning?: string };
 type PlexCacheEntry = PlexScanCacheEntry;
-export type PlexReport = { shows: PlexShowResult[]; lastScan: string; startedAt?: string; finishedAt?: string; scanCache?: Record<string, PlexCacheEntry>; cacheVersion?: number; autoCompoundEpisodes?: boolean };
-type PlexCheckpoint = { shows: PlexShowResult[]; scanCache: Record<string, PlexCacheEntry>; cacheVersion: number; savedAt: string; autoCompoundEpisodes?: boolean };
+export type PlexReport = { shows: PlexShowResult[]; lastScan: string; startedAt?: string; finishedAt?: string; scanCache?: Record<string, PlexCacheEntry>; cacheVersion?: number; autoCompoundEpisodes?: boolean; coverageRevision?: number };
+type PlexCheckpoint = { shows: PlexShowResult[]; scanCache: Record<string, PlexCacheEntry>; cacheVersion: number; savedAt: string; autoCompoundEpisodes?: boolean; coverageRevision?: number };
 
 type PlexContainer = { MediaContainer?: { Directory?: PlexMetadata[]; Metadata?: PlexMetadata[] } };
 type TmdbShow = { id: number; name?: string; first_air_date?: string | null; seasons?: { season_number: number }[]; external_ids?: { tvdb_id?: number | null } };
@@ -191,6 +193,9 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
 
 async function runPlexScan(targetRatingKey?: string) {
   const startedAt = new Date().toISOString();
+  const coverageRevision = coverageState().revision;
+  const mappings = listCoverageMappings();
+  if (mappings.length) beginCoverageRecheck(coverageRevision);
   const settings = parsePlexPreferences(readPlexSettings());
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
   const logger = createScanLogger(settings.diagnosticsEnabled !== false, "shelfcheck-plex");
@@ -233,10 +238,10 @@ async function runPlexScan(targetRatingKey?: string) {
     logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktCredentials), tmdbFallback: true });
     const prior = getPlexReport();
     const rawCheckpoint = readPlexCheckpoint() as PlexCheckpoint | null;
-    const checkpoint = !targetRatingKey && checkpointIsUsable(rawCheckpoint, autoCompoundEpisodes) ? rawCheckpoint : null;
+    const checkpoint = !targetRatingKey && (rawCheckpoint?.coverageRevision || 0) === coverageRevision && checkpointIsUsable(rawCheckpoint, autoCompoundEpisodes) ? rawCheckpoint : null;
     if (checkpoint) logger.info("plex.checkpoint.resume", { savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length });
     else if (rawCheckpoint && !targetRatingKey) { logger.warn("plex.checkpoint.discarded", { savedAt: rawCheckpoint.savedAt, cacheVersion: rawCheckpoint.cacheVersion, reason: "expired-or-incompatible" }); clearPlexCheckpoint(); }
-    const cacheUsable = plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
+    const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
     let tmdbChanges: Set<number> | null = null;
     let tvdbChanges: Set<number> | null = null;
     if (!targetRatingKey && cacheUsable && prior) {
@@ -266,7 +271,7 @@ async function runPlexScan(targetRatingKey?: string) {
     const queue: PlexShowGroup[] = [];
     const localResponsesByRatingKey = new Map<string, PlexContainer>();
     currentTotal = candidates.length;
-    await runWorkerPool(shows, PLEX_SCAN_WORKERS, async (group) => {
+    await runWorkerPool(mappings.length ? allShows : shows, PLEX_SCAN_WORKERS, async (group) => {
       const responses = await Promise.allSettled(group.records.map(async (record) => ({
         ratingKey: record.ratingKey,
         response: await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken),
@@ -278,6 +283,20 @@ async function runPlexScan(targetRatingKey?: string) {
         } else logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: result.reason instanceof Error ? result.reason.message : String(result.reason) });
       }
     });
+    const manualInventory: CoverageEvidence[] = [];
+    for (const group of allShows) for (const record of group.records) {
+      for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
+        const ids = idsFromGuids(item.Guid);
+        manualInventory.push({
+          ratingKey: item.ratingKey || "", showKey: group.identity, fingerprint: JSON.stringify(item),
+          identities: [
+            ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
+            ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
+          ],
+        });
+      }
+    }
+    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
     for (const group of candidates) {
       const cached = checkpoint?.scanCache[group.identity] || prior?.scanCache?.[group.identity];
       const previous = previousShows.get(group.identity);
@@ -292,7 +311,9 @@ async function runPlexScan(targetRatingKey?: string) {
       const providersUnchanged = tmdbChanges !== null && tvdbChanges !== null && (!tmdbId || !tmdbChanges.has(tmdbId)) && (!tvdbId || !tvdbChanges.has(tvdbId));
       const tvdbLinkUsable = !tvdbId || Boolean(previous?.tvdbSlug);
       const resumed = resumeKeys.has(group.identity) && Boolean(cached && previous && plexUnchanged && idsUnchanged && tvdbLinkUsable);
-      const reused = !targetRatingKey && !previous?.warning && (resumed || Boolean(cacheUsable && cached && previous && plexUnchanged && idsUnchanged && providersUnchanged && tvdbLinkUsable));
+      // Manual prerequisites can change in another library, including an ignored show.
+      // ID-only caches cannot certify the current source inventory.
+      const reused = !mappings.length && !targetRatingKey && !previous?.warning && (resumed || Boolean(cacheUsable && cached && previous && plexUnchanged && idsUnchanged && providersUnchanged && tvdbLinkUsable));
       const reasons = targetRatingKey ? ["forced-show-check"] : reused ? [resumed ? "interrupted-scan-checkpoint" : "unchanged"] : [!cached ? "no-cache" : null, !previous ? "no-prior-result" : null, !plexUnchanged ? "plex-or-episodes-changed" : null, !idsUnchanged ? "provider-ids-changed" : null, !providersUnchanged ? "tmdb-or-tvdb-changed" : null, !tvdbLinkUsable ? "missing-tvdb-slug" : null, !cacheUsable && !resumed ? "cache-incompatible" : null].filter(Boolean);
       logger.info("plex.cache.decision", { ratingKey: group.identity, title: group.records[0]?.title, decision: reused ? "reuse" : "refresh", reasons });
       if (reused && cached && previous) {
@@ -307,7 +328,7 @@ async function runPlexScan(targetRatingKey?: string) {
     }
     logger.info("plex.scan.plan", { total: candidates.length, reused: processed, refreshing: queue.length, tmdbChanged: tmdbChanges?.size, tvdbChanged: tvdbChanges?.size, cacheUsable, targetRatingKey });
     updateStatus({ status: "running", processed, total: candidates.length });
-    for (const response of localResponsesByRatingKey.values()) for (const episode of response.MediaContainer?.Metadata || []) {
+    for (const group of shows) for (const record of group.records) for (const episode of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
       const ids = idsFromGuids(episode.Guid);
       if (ids.tmdbId) libraryTmdbEpisodeIds.add(ids.tmdbId);
       if (ids.tvdbId) libraryTvdbEpisodeIds.add(ids.tvdbId);
@@ -517,12 +538,23 @@ async function runPlexScan(targetRatingKey?: string) {
         }
         logger.info("plex.show.auto-compound", { ratingKey, enabled: true, candidates: compoundCovered.length, reconciled });
       }
+      const manualCoverage: NonNullable<PlexShowResult["manualCoverage"]> = [];
       const missingMap = new Map<string, PlexMissingEpisode>();
       for (const episode of providerEpisodes) {
         if (episode.season === 0) continue;
         const key = `${episode.season}:${episode.episode}`;
         if (localEpisodes.has(key)) continue;
         if (providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes })) continue;
+        const mapping = mappings.find(mapping => mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
+        if (mapping) {
+          const sourceMembers = mapping.members.filter(member => member.provider !== episode.source);
+          const evidence = manualInventory.filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
+          const sourceComplete = sourceMembers.length && sourceMembers.every(member => evidence.some(item => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
+          if (sourceComplete) {
+            if (!manualCoverage.some(item => item.mappingId === mapping.id)) manualCoverage.push({ mappingId: mapping.id, source: evidence });
+            continue;
+          }
+        }
         const existing = missingMap.get(key);
         if (existing) {
           if (!existing.sources.includes(episode.source)) existing.sources.push(episode.source);
@@ -555,7 +587,7 @@ async function runPlexScan(targetRatingKey?: string) {
         tmdb: tmdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, ...(show.first_air_date ? { year: Number(show.first_air_date.slice(0, 4)) } : {}) })),
         tvdb: tvdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, slug: show.slug, ...(show.year && Number.isFinite(Number(show.year)) ? { year: Number(show.year) } : {}) })),
       };
-      results.push({ ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, missing: [...missingMap.values()].sort((a, b) => a.season - b.season || a.episode - b.episode), ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(warning ? { warning } : {}) });
+      results.push({ ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, missing: [...missingMap.values()].sort((a, b) => a.season - b.season || a.episode - b.episode), ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) });
       const fingerprint = plexFingerprint(group);
       const episodeFingerprint = plexEpisodeFingerprint(localMetadata);
       cachedTvdbEpisodeImdbIds = pruneEpisodeIdentityCache(cachedTvdbEpisodeImdbIds, providerEpisodes.filter((episode) => episode.source === "TVDB").flatMap((episode) => episode.providerEpisodeId ? [episode.providerEpisodeId] : []));
@@ -565,15 +597,18 @@ async function runPlexScan(targetRatingKey?: string) {
       updateStatus({ status: "running", processed, total: candidates.length });
       if (!targetRatingKey && shouldSaveCheckpoint(processed, lastCheckpointProcessed, Date.now(), lastCheckpointAt)) {
         const savedAt = new Date().toISOString();
-        writePlexCheckpoint({ shows: checkpointShowsWithCache(results, scanCache), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes });
+        if (coverageState().revision === coverageRevision) writePlexCheckpoint({ shows: checkpointShowsWithCache(results, scanCache), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision });
         logger.info("plex.checkpoint.saved", { savedAt, processed, total: candidates.length, shows: results.length, cacheEntries: Object.keys(scanCache).length });
         lastCheckpointProcessed = processed;
         lastCheckpointAt = Date.now();
       }
     });
     const finishedAt = new Date().toISOString();
-    const report: PlexReport = { shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes };
+    const report: PlexReport = { shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
+    if (coverageState().revision !== coverageRevision) return;
     writePlexReport(report);
+    const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
+    if (!results.some(show => show.warning) && inventoryComplete) completeCoverageRecheck(coverageRevision);
     if (!targetRatingKey) clearPlexCheckpoint();
     else if (rawCheckpoint) {
       const nextCheckpoint = checkpointWithoutRatingKey(rawCheckpoint, targetRatingKey);
@@ -604,7 +639,10 @@ export function getPlexScanStatus(): PlexScanStatus {
   return status || { status: "idle", processed: 0, total: 0 };
 }
 
-export function getPlexReport(): PlexReport | null { return readPlexReport() as PlexReport | null; }
+export function getPlexReport(): PlexReport | null {
+  const report = readPlexReport() as PlexReport | null;
+  return report && (report.coverageRevision || 0) === coverageState().revision ? report : null;
+}
 
 export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
   if ((globalThis as ScanGlobal).__shelfcheckPlexScan) throw new Error("Wait for the current Plex scan to finish before clearing the cache.");
@@ -639,6 +677,22 @@ export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
       throw new Error("Run a full Plex search before force-checking one show because the scan settings or cache format changed.");
     }
   }
-  global.__shelfcheckPlexScan = runPlexScan(targetRatingKey).finally(() => { global.__shelfcheckPlexScan = undefined; });
+  global.__shelfcheckPlexScan = (async () => {
+    let target = targetRatingKey;
+    do {
+      coverageRecheckQueued = false;
+      await runPlexScan(target);
+      target = undefined;
+    } while (coverageRecheckQueued);
+  })().finally(() => { global.__shelfcheckPlexScan = undefined; });
   return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
+}
+
+let coverageRecheckQueued = false;
+export function requestCoverageRecheck() {
+  if ((globalThis as ScanGlobal).__shelfcheckPlexScan) {
+    coverageRecheckQueued = true;
+    return;
+  }
+  startPlexScan();
 }

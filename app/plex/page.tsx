@@ -4,6 +4,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
+import { ManualCoverageManager } from "@/app/components/manual-coverage-manager";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
@@ -55,6 +56,8 @@ function episodeTileDate(airDate?: string) {
 }
 
 export default function PlexPage() {
+  const [coverageUrls, setCoverageUrls] = useState<string[] | null>(null);
+  const minimumCoverageRevision = useRef(0);
   const [configured, setConfigured] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -88,11 +91,12 @@ export default function PlexPage() {
   const [fields, setFields] = useState({ plexUrl: "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
   const [changedFields, setChangedFields] = useState<Partial<Record<FieldKey, boolean>>>({});
   const [configStatus, setConfigStatus] = useState<ConfigStatus>(EMPTY_CONFIG);
-  const { poll, abort } = useScanPoller<{ scan?: Status; report?: Report | null; error?: string }>({
+  const { poll, abort } = useScanPoller<{ scan?: Status; report?: Report | null; coverage?: { revision: number; pending: number }; error?: string }>({
     url: "/api/plex/scan",
     onPollingChange: setScanning,
     onResponse: (body) => {
       if (!body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
+      if ((body.coverage?.revision || 0) < minimumCoverageRevision.current) return false;
       setStatus(body.scan);
       if (body.scan.status === "completed") { setReport(body.report ? pruneClientReport(body.report, reportInvalidations.current) : null); return true; }
       if (body.scan.status === "error") throw new Error(body.scan.error || "The Plex scan failed.");
@@ -117,7 +121,7 @@ export default function PlexPage() {
       setSettingsLoaded(true);
     }).catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Plex preferences could not be loaded."));
     void fetch("/api/plex/scan", { cache: "no-store" }).then((response) => response.json()).then((body) => {
-      if (initialInvalidations !== reportInvalidations.current) return;
+      if (initialInvalidations !== reportInvalidations.current || (body.coverage?.revision || 0) < minimumCoverageRevision.current) return;
       setStatus(body.scan); setReport(body.report ? pruneClientReport(body.report, initialInvalidations) : null);
       if (body.scan?.status === "running") void poll().catch((pollError) => { if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded."); });
     }).catch(() => setError("The previous Plex scan status could not be loaded."));
@@ -318,13 +322,33 @@ export default function PlexPage() {
     } catch (clearError) { setError(clearError instanceof Error ? clearError.message : "Shelfcheck could not clear the Plex scan cache."); }
     finally { setClearingCache(false); }
   }
+  function linkEpisode(show: Show, episode: Missing) {
+    const url = show.tmdbId && episode.tmdbEpisodeId
+      ? `https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`
+      : show.tvdbSlug && episode.tvdbEpisodeId
+        ? `https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}/episodes/${episode.tvdbEpisodeId}`
+        : "";
+    setCoverageUrls([url]);
+    setOpenEpisodeMenu(null);
+  }
+
+  function coverageChanged(revision: number) {
+    minimumCoverageRevision.current = revision;
+    reportInvalidations.current = new Set(reportInvalidations.current);
+    setReport(null);
+    abort();
+    void poll().catch(error => {
+      if (!(error instanceof DOMException && error.name === "AbortError")) setError(error instanceof Error ? error.message : "Coverage recheck failed.");
+    });
+  }
+
   const saved = (key: FieldKey) => key === "plexUrl" ? Boolean(configStatus.plexUrl) : configStatus[`${key}Saved` as keyof ConfigStatus] === true;
   const updateField = (key: FieldKey, value: string) => { setFields((current) => ({ ...current, [key]: value })); setChangedFields((current) => ({ ...current, [key]: true })); };
 
   return <main>
     <header className="topbar">
       <div className="header-left"><Link className="brand" href="/"><span className="brandmark">S</span><span>Shelfcheck</span></Link><nav className="mode-switch" aria-label="Search source"><Link href="/trakt">Trakt</Link><Link className="active" href="/plex" aria-current="page">Plex</Link></nav></div>
-      <div className="header-actions"><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
+      <div className="header-actions"><button onClick={() => setCoverageUrls([])}>Manual Coverage</button><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
@@ -361,7 +385,7 @@ export default function PlexPage() {
                   const tileDate = episodeTileDate(episode.airDate);
                   return <div className="plex-episode-item" key={episodeKey}>
                     <div className="episode-tile-row"><button className="episode-code-tile plex-episode-trigger" onClick={() => setOpenEpisodeMenu((current) => current === episodeKey ? null : episodeKey)} aria-expanded={openEpisodeMenu === episodeKey}><span>S{String(episode.season).padStart(2, "0")}E{String(episode.episode).padStart(2, "0")}</span>{tileDate && <small>{tileDate}</small>}</button><div className="episode-provider-links">{show.tmdbId && episode.sources.includes("TMDB") && <a href={`https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`} target="_blank" rel="noreferrer" title="View episode on TMDB" aria-label="View episode on TMDB"><img src="/tmdb-blue-square.svg" alt="" /></a>}{show.tvdbSlug && episode.tvdbEpisodeId && <a href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}/episodes/${episode.tvdbEpisodeId}`} target="_blank" rel="noreferrer" title="View episode on TVDB" aria-label="View episode on TVDB"><img src={TVDB_LOGO} alt="" /></a>}</div></div>
-                    {openEpisodeMenu === episodeKey && <div className="plex-episode-menu"><p><span>Aired</span><strong>{episode.airDate || "No Aired Date"}</strong></p><div>{show.tmdbId && episode.sources.includes("TMDB") && <a href={`https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`} target="_blank" rel="noreferrer"><img src="/tmdb-blue-square.svg" alt="" />View on TMDB</a>}{show.tvdbSlug && episode.tvdbEpisodeId && <a href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}/episodes/${episode.tvdbEpisodeId}`} target="_blank" rel="noreferrer"><img src={TVDB_LOGO} alt="" />View on TVDB</a>}</div></div>}
+                    {openEpisodeMenu === episodeKey && <div className="plex-episode-menu"><button onClick={() => linkEpisode(show, episode)}>Link episodes</button><p><span>Aired</span><strong>{episode.airDate || "No Aired Date"}</strong></p><div>{show.tmdbId && episode.sources.includes("TMDB") && <a href={`https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`} target="_blank" rel="noreferrer"><img src="/tmdb-blue-square.svg" alt="" />View on TMDB</a>}{show.tvdbSlug && episode.tvdbEpisodeId && <a href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}/episodes/${episode.tvdbEpisodeId}`} target="_blank" rel="noreferrer"><img src={TVDB_LOGO} alt="" />View on TVDB</a>}</div></div>}
                   </div>;
                 })}</div>}
               </section>;
@@ -371,6 +395,7 @@ export default function PlexPage() {
       })}</div> : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
     </section>
     <footer><span>SHELFCHECK / PLEX API</span><span>Your credentials stay in your private configuration volume.</span></footer>
+    {coverageUrls && <ManualCoverageManager initialUrls={coverageUrls} onClose={() => setCoverageUrls(null)} onChanged={coverageChanged} />}
     {showToIgnore && <IgnoreDurationModal showTitle={showToIgnore.title} onClose={() => setShowToIgnore(null)} onSelect={(duration) => ignoreShow(showToIgnore, duration)} />}
       {seasonIgnoreShow && <SeasonIgnoreModal showTitle={seasonIgnoreShow.title} seasons={seasonIgnoreOptions.map((season) => ({ number: season, issueCount: seasonIgnoreShow.missing.filter((episode) => episode.season === season).length }))} selected={seasonIgnoreDraft} duration={seasonIgnoreDuration} onDurationChange={setSeasonIgnoreDuration} onChange={setSeasonIgnoreDraft} onClose={() => setSeasonIgnoreShow(null)} onSave={saveIgnoredSeasons} />}
     {connectionOpen && <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setConnectionOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="plex-providers-title"><button className="close" onClick={() => setConnectionOpen(false)} aria-label="Close">×</button><p className="eyebrow">CONFIG.YML</p><h2 id="plex-providers-title">Plex providers</h2><p className="modal-copy">Saved values are kept unless you replace them or click Clear. Secrets stay masked and are never returned to the browser. Saving does not start a scan.</p>{([ ["plexUrl","Plex server URL"], ["plexToken","Plex token"], ["tmdbToken","TMDB API read access token"], ["tvdbApiKey","TVDB v4 API key"], ["tvdbPin","TVDB subscriber PIN (optional)"] ] as [FieldKey,string][]).map(([key,label]) => <label key={key}><span className="credential-label"><span>{label} {saved(key) && <b>Saved</b>}</span>{saved(key) && <button type="button" onClick={() => updateField(key, "")}>Clear</button>}</span><input type={key === "plexUrl" ? "url" : "password"} value={fields[key]} placeholder={saved(key) && key !== "plexUrl" ? "Saved — enter a new value to replace" : ""} onChange={(event) => updateField(key, event.target.value)} /></label>)}<button className="primary full" onClick={saveConfig} disabled={saving}>{saving ? "Saving…" : "Save to config.yml"}<b>→</b></button></section></div>}

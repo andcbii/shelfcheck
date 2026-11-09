@@ -208,3 +208,29 @@ test("Plex ignores an aborted old poll after Restore and a fresh scan", async (t
 
   assert.equal(container.querySelector(".episode-code-tile span")?.textContent, "S01E03", "an aborted older poll must not replace the post-Restore scan");
 });
+
+test("manual mapping deletion cannot be overwritten by an older initial Plex report response", async (t) => {
+  const initialReport = deferred<Response>();
+  let scanReads = 0;
+  let saved = true;
+  const fresh = { ...report, shows: report.shows.map(show => ({ ...show, title: "Fresh coverage revision" })) };
+  const defaults = configuredFetch(async () => {
+    if (++scanReads === 1) return initialReport.promise;
+    return json({ scan: completed.scan, report: fresh, coverage: { revision: 2, pending: 0 } });
+  });
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (String(input).startsWith("/api/plex/manual-coverage")) {
+      if (init?.method === "DELETE") {
+        saved = false;
+        return json({ deleted: ["saved"], revision: 2, pending: 1 });
+      }
+      return json({ revision: saved ? 1 : 2, pending: 0, mappings: saved ? [{ id: "saved", revision: 1, members: [] }] : [] });
+    }
+    return defaults(input, init);
+  });
+  await click("Manual Coverage");
+  await click("Delete mapping");
+  await act(async () => { initialReport.resolve(json({ ...completed, coverage: { revision: 1, pending: 0 } })); });
+  await click("Close manual coverage");
+  assert.equal(container.querySelector(".show-name-button")?.textContent, "Fresh coverage revision");
+});

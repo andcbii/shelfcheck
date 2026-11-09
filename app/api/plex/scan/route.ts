@@ -1,9 +1,10 @@
+import { coverageState } from "@/lib/manual-coverage";
 import { clearPlexScanCache, getPlexReport, getPlexScanStatus, startPlexScan } from "@/lib/plex-scan";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() { return Response.json({ scan: getPlexScanStatus(), report: getPlexReport() }, { headers: { "Cache-Control": "private, no-store" } }); }
+export async function GET() { return Response.json({ scan: getPlexScanStatus(), report: getPlexReport(), coverage: coverageState() }, { headers: { "Cache-Control": "private, no-store" } }); }
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({})) as { ratingKey?: string };

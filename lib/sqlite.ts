@@ -278,3 +278,14 @@ export function writePlexSettings<T extends Record<string, unknown>>(settings: T
     if (checkpoint) writePlexCheckpoint(checkpoint);
   }
 }
+
+// Manual rules are durable instance data, independent of generated scan state.
+export function coverageDatabase() {
+  const db = database();
+  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_coverage_state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0);
+    INSERT OR IGNORE INTO shelfcheck_coverage_state(id) VALUES(1);
+    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, PRIMARY KEY(provider, episode_id));
+    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_evidence(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);`);
+  return db;
+}

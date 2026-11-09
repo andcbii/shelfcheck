@@ -3,10 +3,11 @@ import { useEffect, useRef, useState } from "react";
 import type { CoverageEvidence, CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
   initialUrls: string[];
+  initialMappingId?: string;
   onClose: () => void;
   onChanged: (revision: number) => void;
 };
-export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props) {
+export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, onChanged }: Props) {
   const [urls, setUrls] = useState(initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""]);
   const [editing, setEditing] = useState<CoverageMapping | null>(null);
   const [mappings, setMappings] = useState<CoverageMapping[]>([]);
@@ -52,7 +53,7 @@ export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props
         acceptedRevision.current = body.revision || acceptedRevision.current;
         setMappings(body.mappings);
         setRevision(body.revision);
-        const existing = body.mappings.find((mapping: CoverageMapping) => mapping.members.some(member => initialUrls.includes(member.url)));
+        const existing = body.mappings.find((mapping: CoverageMapping) => initialMappingId ? mapping.id === initialMappingId : mapping.members.some(member => initialUrls.includes(member.url)));
         if (existing) openMapping(existing);
         setPending(Boolean(body.pending));
       }
@@ -63,7 +64,7 @@ export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props
     return () => {
       active = false;
     };
-  }, [initialUrls]);
+  }, [initialUrls, initialMappingId]);
   async function action(body: unknown) {
     setError("");
     setBusy(true);

@@ -234,3 +234,41 @@ test("manual mapping deletion cannot be overwritten by an older initial Plex rep
   await click("Close manual coverage");
   assert.equal(container.querySelector(".show-name-button")?.textContent, "Fresh coverage revision");
 });
+
+
+test("incomplete coverage displays one identity-preserving group and opens its saved mapping", async (t) => {
+  const members = [
+    {provider:"TMDB",id:100,showId:10,show:"Combined show",title:"Complete special",season:1,episode:1,url:"https://www.themoviedb.org/tv/10/season/1/episode/1",status:"missing"},
+    {provider:"TVDB",id:200,showId:20,show:"Parts show",title:"Part one",season:1,episode:1,url:"https://thetvdb.com/series/parts/episodes/200",status:"direct"},
+    {provider:"TVDB",id:201,showId:21,show:"Other parts show",title:"Part two",season:1,episode:1,url:"https://thetvdb.com/series/other-parts/episodes/201",status:"missing"},
+    {provider:"TVDB",id:202,showId:21,show:"Other parts show",title:"Automatically matched",season:1,episode:2,url:"https://thetvdb.com/series/other-parts/episodes/202",status:"automatic"},
+  ];
+  const groupedReport = {...report,shows:[{...report.shows[0],missing:[{season:1,episode:1,airDate:"2020-01-01",tmdbEpisodeId:100,tvdbEpisodeId:999,sources:["TMDB","TVDB"]}]},{ratingKey:"two",title:"Separate Plex comparison",plexEpisodes:1,missing:[{season:1,episode:1,airDate:"2020-01-01",tvdbEpisodeId:201,sources:["TVDB"]}]}],coverageGroups:[{mappingId:"group",members,missing:[{provider:"TMDB",id:100,status:"missing",season:1,airDate:"2020-01-01",showKey:"one"},{provider:"TVDB",id:201,status:"missing",season:1,airDate:"2020-01-01",showKey:"two"}]}]};
+  const defaults=configuredFetch(async()=>json({...completed,report:groupedReport}));
+  const {container,click}=await mountPage(t,async(input,init)=>String(input).startsWith("/api/plex/manual-coverage") ? json({revision:1,mappings:[{id:"group",revision:1,members}],pending:0}) : defaults(input,init));
+  const group=container.querySelector('[aria-label="Incomplete coverage group"]');
+  assert.ok(group);
+  assert.equal(container.querySelectorAll('[aria-label="Incomplete coverage group"]').length,1);
+  assert.match(group.textContent||"",/Directly owned/);
+  assert.match(group.textContent||"",/Satisfied automatically/);
+  assert.match(group.textContent||"",/Part two/);
+  assert.match(group.textContent||"",/Alternative complete TMDB set/);
+  assert.match(group.textContent||"",/Alternative complete TVDB set/);
+  assert.deepEqual([...group.querySelectorAll('a')].map(a=>a.getAttribute('href')),members.map(m=>m.url));
+  assert.equal(container.querySelectorAll('.plex-episode-item').length,1,"the ungrouped provider at the same coordinates keeps its tile");
+  assert.equal(container.querySelectorAll('.show-list article').length,2,"Plex show comparisons remain separate");
+  await click("Edit coverage mapping");
+  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing mapping group/);
+});
+
+
+test("coverage groups respect aired-date and season-ignore visibility", async (t) => {
+  for (const settings of [{hideUnairedEpisodes:true}, {ignoredSeasons:[{ratingKey:"one",title:"Example Show",seasons:[1]}]}]) {
+    await t.test(JSON.stringify(settings),async subtest=>{
+      const groupedReport={...report,shows:[{...report.shows[0],missing:[{season:1,episode:1,airDate:"2099-01-01",tmdbEpisodeId:100,sources:["TMDB"]}]}],coverageGroups:[{mappingId:"hidden",members:[],missing:[{provider:"TMDB",id:100,status:"missing",season:1,airDate:"2099-01-01",showKey:"one"}]}]};
+      const defaults=configuredFetch(async()=>json({...completed,report:groupedReport}));
+      const {container}=await mountPage(subtest,async(input,init)=>input==="/api/plex/state" ? json({settings}) : defaults(input,init));
+      assert.equal(container.querySelector('[aria-label="Incomplete coverage group"]'),null);
+    });
+  }
+});

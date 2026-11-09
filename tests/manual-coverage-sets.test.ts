@@ -113,9 +113,16 @@ test("complete sets require corrected direct inventory and corrections survive o
   await wait();
   owned=true;
   const rescan=async()=>{await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"})); return wait();};
-  assert.equal((await rescan()).report.shows[0].missing[0].tmdbEpisodeId,6741845,"one part cannot complete the source set");
+  const incomplete = await rescan();
+  assert.equal(incomplete.report.shows[0].missing[0].tmdbEpisodeId,6741845,"one part cannot complete the source set");
+  assert.equal(incomplete.report.coverageGroups.length, 1);
+  assert.deepEqual(incomplete.report.coverageGroups[0].members.map((m: {id:number,status:string}) => [m.id,m.status]), [[6741845,"missing"],[11551379,"direct"],[11551380,"alternative"]]);
+  assert.equal(incomplete.report.coverageGroups[0].mappingId,mapping.id);
   parts=[11551379,11551380];
-  assert.deepEqual((await rescan()).report.shows[0].missing,[]);
+  const complete = await rescan();
+  assert.deepEqual(complete.report.shows[0].missing,[]);
+  assert.deepEqual(complete.report.coverageGroups,[]);
+  assert.ok((await state()).mappings.some((m:{id:string})=>m.id===mapping.id),"complete mappings remain in the manager");
   // Reverse direction: a single combined item covers both parts, but a conflicting
   // combined-plus-part item must first declare its actual content.
   show.Guid=[{id:"tvdb://20"}]; source.Guid=[{id:"tmdb://10"}];
@@ -125,12 +132,15 @@ test("complete sets require corrected direct inventory and corrections survive o
   parts=[11551379]; sourceProvider="tvdb"; ambiguous=true;
   const unresolved=await rescan();
   assert.equal(unresolved.report.shows[0].missing[0].tvdbEpisodeId,11551380,"conflicting combined identity cannot manufacture part two");
+  assert.equal(unresolved.report.coverageGroups.length,1);
+  assert.deepEqual(unresolved.report.coverageGroups[0].members.map((m:{id:number,status:string})=>[m.id,m.status]),[[6741845,"alternative"],[11551379,"missing"],[11551380,"missing"]]);
 
   // Direct TMDB normal matching elsewhere is preserved; the correction applies only to manual fallback.
   await rescan();
   const correct=async(identities: {provider:string,id:number}[])=>{const current=await state(); const item=current.mappings[0].evidence[0]; const result=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item,identities})); assert.equal(result.status,200,await result.clone().text()); return wait();};
   const partReport=await correct([{provider:"TVDB",id:11551379}]);
   assert.equal(partReport.report.shows[0].missing[0].tvdbEpisodeId,11551380);
+  assert.deepEqual(partReport.report.coverageGroups[0].members.map((m:{id:number,status:string})=>[m.id,m.status]),[[6741845,"alternative"],[11551379,"direct"],[11551380,"missing"]]);
   assert.deepEqual((await state()).mappings[0].corrections[0].identities,[{provider:"TVDB",id:11551379}]);
   const fullReport=await correct([{provider:"TMDB",id:6741845}]);
   assert.deepEqual(fullReport.report.shows[0].missing,[]);
@@ -195,5 +205,6 @@ test("complete sets require corrected direct inventory and corrections survive o
   assert.ok(noChaining.report.shows[0].autoMatches.some((match:{tvdb:{id:number}})=>match.tvdb.id===11551379),"Y is satisfied by its normal automatic crosswalk");
   assert.ok(noChaining.report.shows[0].missing.some((episode:{tmdbEpisodeId:number})=>episode.tmdbEpisodeId===101),"Z remains missing because inferred Y is not directly owned");
   assert.equal(noChaining.report.shows[0].manualCoverage,undefined);
+  assert.deepEqual(noChaining.report.coverageGroups[0].members.map((m:{id:number,status:string})=>[m.id,m.status]),[[101,"missing"],[11551379,"automatic"]]);
 
 });

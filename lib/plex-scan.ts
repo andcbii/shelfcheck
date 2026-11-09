@@ -1,6 +1,6 @@
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { correctedCoverageInventory, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
-import type { CoverageEvidence } from "@/lib/manual-coverage-model";
+import type { CoverageEvidence, CoverageOutcome, CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
@@ -30,9 +30,9 @@ export type PlexAutoMatchMethod = "Matched via IMDb" | "Matched via Trakt" | "Ma
 export type PlexAutoMatchEpisode = { id?: number; showId?: number; showSlug?: string; show: string; name?: string; season: number; episode: number; airDate?: string; url?: string };
 export type PlexAutoMatch = { method: PlexAutoMatchMethod; tmdb: PlexAutoMatchEpisode; tvdb: PlexAutoMatchEpisode };
 export type PlexProviderResolution = { tmdb: boolean; tvdb: boolean };
-export type PlexShowResult = PlexShow & { missing: PlexMissingEpisode[]; providerResolution?: PlexProviderResolution; providerMatches?: PlexProviderMatches; autoMatches?: PlexAutoMatch[]; compoundCoverage?: CompoundCoverage[]; manualCoverage?: { mappingId: string; source: CoverageEvidence[] }[]; warning?: string };
+export type PlexShowResult = PlexShow & { missing: PlexMissingEpisode[]; coverageOutcomes?: CoverageOutcome[]; providerResolution?: PlexProviderResolution; providerMatches?: PlexProviderMatches; autoMatches?: PlexAutoMatch[]; compoundCoverage?: CompoundCoverage[]; manualCoverage?: { mappingId: string; source: CoverageEvidence[] }[]; warning?: string };
 type PlexCacheEntry = PlexScanCacheEntry;
-export type PlexReport = { shows: PlexShowResult[]; lastScan: string; startedAt?: string; finishedAt?: string; scanCache?: Record<string, PlexCacheEntry>; cacheVersion?: number; autoCompoundEpisodes?: boolean; coverageRevision?: number };
+export type PlexReport = { shows: PlexShowResult[]; coverageGroups?: CoverageGroup[]; lastScan: string; startedAt?: string; finishedAt?: string; scanCache?: Record<string, PlexCacheEntry>; cacheVersion?: number; autoCompoundEpisodes?: boolean; coverageRevision?: number };
 type PlexCheckpoint = { shows: PlexShowResult[]; scanCache: Record<string, PlexCacheEntry>; cacheVersion: number; savedAt: string; autoCompoundEpisodes?: boolean; coverageRevision?: number };
 
 type PlexContainer = { MediaContainer?: { Directory?: PlexMetadata[]; Metadata?: PlexMetadata[] } };
@@ -546,17 +546,22 @@ async function runPlexScan(targetRatingKey?: string) {
       }
       const manualCoverage: NonNullable<PlexShowResult["manualCoverage"]> = [];
       const missingMap = new Map<string, PlexMissingEpisode>();
+      const coverageOutcomes: CoverageOutcome[] = [];
       for (const episode of providerEpisodes) {
         if (episode.season === 0) continue;
         const key = `${episode.season}:${episode.episode}`;
-        if (localEpisodes.has(key)) continue;
-        if (providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes })) continue;
+        const memberMapping = mappings.find(mapping => mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
+        const outcome = memberMapping && episode.providerEpisodeId ? { provider: episode.source, id: episode.providerEpisodeId, status: "missing" as CoverageOutcome["status"], season: episode.season, airDate: episode.airDate } : undefined;
+        if (outcome) coverageOutcomes.push(outcome);
+        if (localEpisodes.has(key)) { if (outcome) outcome.status = "automatic"; continue; }
+        if (providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes })) { if (outcome) outcome.status = "automatic"; continue; }
         const mapping = mappings.find(mapping => (!mapping.health || mapping.health === "healthy") && mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
         if (mapping) {
           const sourceMembers = mapping.members.filter(member => member.provider !== episode.source);
           const evidence = correctedCoverageInventory(mapping, manualInventory).filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
           const sourceComplete = sourceMembers.length && sourceMembers.every(member => evidence.some(item => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
           if (sourceComplete) {
+            if (outcome) outcome.status = "manual";
             if (!manualCoverage.some(item => item.mappingId === mapping.id)) manualCoverage.push({ mappingId: mapping.id, source: evidence });
             continue;
           }
@@ -593,7 +598,7 @@ async function runPlexScan(targetRatingKey?: string) {
         tmdb: tmdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, ...(show.first_air_date ? { year: Number(show.first_air_date.slice(0, 4)) } : {}) })),
         tvdb: tvdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, slug: show.slug, ...(show.year && Number.isFinite(Number(show.year)) ? { year: Number(show.year) } : {}) })),
       };
-      results.push({ ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, missing: [...missingMap.values()].sort((a, b) => a.season - b.season || a.episode - b.episode), ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) });
+      results.push({ ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, coverageOutcomes, missing: [...missingMap.values()].sort((a, b) => a.season - b.season || a.episode - b.episode), ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) });
       const fingerprint = plexFingerprint(group);
       const episodeFingerprint = plexEpisodeFingerprint(localMetadata);
       cachedTvdbEpisodeImdbIds = pruneEpisodeIdentityCache(cachedTvdbEpisodeImdbIds, providerEpisodes.filter((episode) => episode.source === "TVDB").flatMap((episode) => episode.providerEpisodeId ? [episode.providerEpisodeId] : []));
@@ -610,7 +615,19 @@ async function runPlexScan(targetRatingKey?: string) {
       }
     });
     const finishedAt = new Date().toISOString();
-    const report: PlexReport = { shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
+    const coverageGroups: CoverageGroup[] = mappings.flatMap(mapping => {
+      const outcomes = results.flatMap(show => (show.coverageOutcomes || []).filter(outcome => mapping.members.some(member => member.provider === outcome.provider && member.id === outcome.id)).map(outcome => ({ ...outcome, showKey: show.ratingKey })));
+      const missing = outcomes.filter(outcome => outcome.status === "missing");
+      if (!missing.length) return [];
+      const inventory = correctedCoverageInventory(mapping, manualInventory);
+      return [{ mappingId: mapping.id, health: mapping.health, missing, members: mapping.members.map(member => {
+        const direct = inventory.some(item => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id));
+        const matched = outcomes.filter(outcome => outcome.provider === member.provider && outcome.id === member.id);
+        const status = direct ? "direct" : matched.some(outcome => outcome.status === "missing") ? "missing" : matched.some(outcome => outcome.status === "automatic") ? "automatic" : matched.some(outcome => outcome.status === "manual") ? "manual" : "alternative";
+        return { ...member, status };
+      }) }];
+    });
+    const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
     if (coverageState().revision !== coverageRevision) return;
     writePlexReport(report);
     const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));

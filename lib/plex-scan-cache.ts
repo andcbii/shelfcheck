@@ -1,4 +1,4 @@
-export const PLEX_CACHE_VERSION = 11;
+export const PLEX_CACHE_VERSION = 12;
 
 export type PlexScanCacheEntry = {
   plexFingerprint?: string;

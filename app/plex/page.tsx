@@ -4,6 +4,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
+import type { CoverageGroup } from "@/lib/manual-coverage-model";
 import { ManualCoverageManager } from "@/app/components/manual-coverage-manager";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
@@ -24,7 +25,7 @@ import { parsePlexPreferences } from "@/lib/preferences";
 
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
 type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string };
-type Report = { shows: Show[]; lastScan: string; scanCache?: Record<string, unknown> };
+type Report = { shows: Show[]; lastScan: string; coverageGroups?: CoverageGroup[]; scanCache?: Record<string, unknown> };
 type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" };
 type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: boolean; tvdbApiKeySaved: boolean; tvdbPinSaved: boolean; configured: boolean };
 type FieldKey = "plexUrl" | "plexToken" | "tmdbToken" | "tvdbApiKey" | "tvdbPin";
@@ -56,6 +57,7 @@ function episodeTileDate(airDate?: string) {
 }
 
 export default function PlexPage() {
+  const [coverageMappingId, setCoverageMappingId] = useState<string | undefined>();
   const [coverageUrls, setCoverageUrls] = useState<string[] | null>(null);
   const minimumCoverageRevision = useRef(0);
   const [configured, setConfigured] = useState(false);
@@ -170,6 +172,12 @@ export default function PlexPage() {
     const result = (aTotal ? a.plexEpisodes / aTotal : 0) - (bTotal ? b.plexEpisodes / bTotal : 0) || a.title.localeCompare(b.title);
     return sortAscending ? result : -result;
   }), [activeShows, query, sortAscending, sortField]);
+
+  const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(member => activeShows.some(show => show.ratingKey === member.showKey && matchesSearch(show.title, query) && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id))));
+  const groupedIdentities = new Set(coverageGroups.flatMap(group => group.members.map(member => `${member.provider}:${member.id}`)));
+  function ungroupedMissing(show: Show) {
+    return show.missing.map(episode => ({ ...episode, sources: episode.sources.filter(provider => !groupedIdentities.has(`${provider}:${provider === "TMDB" ? episode.tmdbEpisodeId : episode.tvdbEpisodeId}`)) })).filter(episode => episode.sources.length);
+  }
 
   async function scan(show?: Show) {
     if (scanRequestPending.current) return;
@@ -323,6 +331,7 @@ export default function PlexPage() {
     finally { setClearingCache(false); }
   }
   function linkEpisode(show: Show, episode: Missing) {
+    setCoverageMappingId(undefined);
     const url = show.tmdbId && episode.tmdbEpisodeId
       ? `https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`
       : show.tvdbSlug && episode.tvdbEpisodeId
@@ -348,7 +357,7 @@ export default function PlexPage() {
   return <main>
     <header className="topbar">
       <div className="header-left"><Link className="brand" href="/"><span className="brandmark">S</span><span>Shelfcheck</span></Link><nav className="mode-switch" aria-label="Search source"><Link href="/trakt">Trakt</Link><Link className="active" href="/plex" aria-current="page">Plex</Link></nav></div>
-      <div className="header-actions"><button onClick={() => setCoverageUrls([])}>Manual Coverage</button><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
+      <div className="header-actions"><button onClick={() => { setCoverageMappingId(undefined); setCoverageUrls([]); }}>Manual Coverage</button><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
@@ -361,8 +370,14 @@ export default function PlexPage() {
     <section className="report"><div className="report-heading"><p className="eyebrow">PLEX MISSING REPORT</p><div className="report-primary-row"><h2>{missingCount} missing episodes</h2><ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} /></div><div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllShows(false)}>Expand all</button><button onClick={() => setAllShows(true)}>Collapse all</button></div></div></div>
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
+      {!scanning && coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
+        <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>
+        <p>Every episode in either alternative complete set covers this content. Automatic matches keep their status and do not count as directly owned members.</p>
+        {group.health && group.health !== "healthy" && <p>{group.health === "pending" ? "Coverage pending recheck" : "Mapping needs review"}</p>}
+        {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{member.season} E{member.episode} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong></li>)}</ul></section>)}
+      </section>)}
       {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
-        const seasons = [...new Set(show.missing.map((episode) => episode.season))].sort((a, b) => a - b);
+        const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);
         const showCollapsed = collapsedShows.has(show.ratingKey);
         const totalEpisodes = show.plexEpisodes + show.missing.length;
         const percentCollected = totalEpisodes ? Math.round((show.plexEpisodes / totalEpisodes) * 100) : null;
@@ -376,7 +391,7 @@ export default function PlexPage() {
             {!showCollapsed && <><div className="compact-show-meta"><p>{show.plexEpisodes} collected · {show.missing.length} missing {show.missing.length === 1 ? "episode" : "episodes"}</p><div className="season-all-controls"><button onClick={() => setAllSeasons(show, false)}>Show all</button><button onClick={() => setAllSeasons(show, true)}>Collapse all</button></div></div>
             {show.warning && <p className="plex-warning">{show.warning}</p>}
             <div className="plex-seasons">{seasons.map((season) => {
-              const episodes = show.missing.filter((episode) => episode.season === season).sort((a, b) => a.episode - b.episode);
+              const episodes = ungroupedMissing(show).filter((episode) => episode.season === season).sort((a, b) => a.episode - b.episode);
               const collapsed = collapsedSeasons.has(seasonKey(show, season));
               return <section className="plex-season" key={season}>
                 <button className="plex-season-heading" onClick={() => toggleSeason(show, season)} aria-expanded={!collapsed}><span>Season {String(season).padStart(2, "0")}</span><small>{episodes.length} missing</small><b>{collapsed ? "+" : "−"}</b></button>
@@ -395,7 +410,7 @@ export default function PlexPage() {
       })}</div> : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
     </section>
     <footer><span>SHELFCHECK / PLEX API</span><span>Your credentials stay in your private configuration volume.</span></footer>
-    {coverageUrls && <ManualCoverageManager initialUrls={coverageUrls} onClose={() => setCoverageUrls(null)} onChanged={coverageChanged} />}
+    {coverageUrls && <ManualCoverageManager initialMappingId={coverageMappingId} initialUrls={coverageUrls} onClose={() => setCoverageUrls(null)} onChanged={coverageChanged} />}
     {showToIgnore && <IgnoreDurationModal showTitle={showToIgnore.title} onClose={() => setShowToIgnore(null)} onSelect={(duration) => ignoreShow(showToIgnore, duration)} />}
       {seasonIgnoreShow && <SeasonIgnoreModal showTitle={seasonIgnoreShow.title} seasons={seasonIgnoreOptions.map((season) => ({ number: season, issueCount: seasonIgnoreShow.missing.filter((episode) => episode.season === season).length }))} selected={seasonIgnoreDraft} duration={seasonIgnoreDuration} onDurationChange={setSeasonIgnoreDuration} onChange={setSeasonIgnoreDraft} onClose={() => setSeasonIgnoreShow(null)} onSave={saveIgnoredSeasons} />}
     {connectionOpen && <div className="modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setConnectionOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="plex-providers-title"><button className="close" onClick={() => setConnectionOpen(false)} aria-label="Close">×</button><p className="eyebrow">CONFIG.YML</p><h2 id="plex-providers-title">Plex providers</h2><p className="modal-copy">Saved values are kept unless you replace them or click Clear. Secrets stay masked and are never returned to the browser. Saving does not start a scan.</p>{([ ["plexUrl","Plex server URL"], ["plexToken","Plex token"], ["tmdbToken","TMDB API read access token"], ["tvdbApiKey","TVDB v4 API key"], ["tvdbPin","TVDB subscriber PIN (optional)"] ] as [FieldKey,string][]).map(([key,label]) => <label key={key}><span className="credential-label"><span>{label} {saved(key) && <b>Saved</b>}</span>{saved(key) && <button type="button" onClick={() => updateField(key, "")}>Clear</button>}</span><input type={key === "plexUrl" ? "url" : "password"} value={fields[key]} placeholder={saved(key) && key !== "plexUrl" ? "Saved — enter a new value to replace" : ""} onChange={(event) => updateField(key, event.target.value)} /></label>)}<button className="primary full" onClick={saveConfig} disabled={saving}>{saving ? "Saving…" : "Save to config.yml"}<b>→</b></button></section></div>}

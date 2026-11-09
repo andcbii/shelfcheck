@@ -29,3 +29,17 @@ export type CoverageMapping = {
   evidence?: CoverageEvidence[];
   corrections?: CoverageCorrection[];
 };
+
+export type CoverageOutcome = {
+  provider: CoverageProvider;
+  id: number;
+  status: "automatic" | "manual" | "missing";
+  season: number;
+  airDate?: string;
+};
+export type CoverageGroup = {
+  mappingId: string;
+  health?: CoverageMapping["health"];
+  members: (CoverageMember & { status: "direct" | "automatic" | "manual" | "missing" | "alternative" })[];
+  missing: (CoverageOutcome & { showKey: string })[];
+};

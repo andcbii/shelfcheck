@@ -141,3 +141,22 @@ export function correctedCoverageInventory(mapping: CoverageMapping, inventory: 
     return ambiguous ? {...item,identities:item.identities.filter(i=>!mapping.members.some(m=>sameIdentity(m,i)))} : item;
   });
 }
+
+// Lookup results must never overwrite a mapping repaired or deleted during an HTTP request.
+export function updateCoverageHealth(snapshot: CoverageMapping, health: NonNullable<CoverageMapping["health"]>, healthMessage?: string) {
+  const db = coverageDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(snapshot.id) as {payload:string} | undefined;
+    const current: CoverageMapping | undefined = row && JSON.parse(row.payload);
+    if (current && current.revision === snapshot.revision && ((current.health || "healthy") !== health || current.healthMessage !== healthMessage)) {
+      const revision = coverageState().revision + 1;
+      db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify({...current, health, healthMessage, revision}), current.id);
+      db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+    }
+    db.exec("COMMIT");
+  } catch(error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}

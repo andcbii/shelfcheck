@@ -39,6 +39,7 @@ test("complete sets require corrected direct inventory and corrections survive o
   });
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
   let owned = false;
+  let inferredSource = false;
   let parts = [11551379];
   let sourceProvider = "tvdb";
   let expandedTarget = false;
@@ -60,7 +61,7 @@ test("complete sets require corrected direct inventory and corrections survive o
       else if (u.pathname.includes("/sections/"))
         body = { MediaContainer: { Metadata: u.pathname.includes("/sections/1/") ? [show] : [source] } };
       else if (u.pathname.includes("allLeaves"))
-        body = { MediaContainer: { Metadata: u.pathname.includes("/2/") && owned ? parts.map(id => ({ ratingKey: `part-${id}`, updatedAt: contentVersion, parentIndex: 8, index: id, Guid: [{ id: `${sourceProvider}://${id}` }, ...(ambiguous ? [{id:"tmdb://6741845"}] : [])] })) : [{ ratingKey: "unrelated", parentIndex: 99, index: 99 }] } };
+        body = { MediaContainer: { Metadata: inferredSource && u.pathname.includes("/1/") ? [{ratingKey:"direct-X",parentIndex:99,index:99,Guid:[{id:"tmdb://6741845"}]}] : u.pathname.includes("/2/") && owned ? parts.map(id => ({ ratingKey: `part-${id}`, updatedAt: contentVersion, parentIndex: 8, index: id, Guid: [{ id: `${sourceProvider}://${id}` }, ...(ambiguous ? [{id:"tmdb://6741845"}] : [])] })) : [{ ratingKey: "unrelated", parentIndex: 99, index: 99 }] } };
       else
         body = { MediaContainer: { Metadata: [show] } };
     }
@@ -96,7 +97,7 @@ test("complete sets require corrected direct inventory and corrections survive o
     else if (u.pathname === "/v4/updates")
       body = { data: [] };
     else if (u.pathname.includes("/find/"))
-      body = { tv_results: [], tv_episode_results: [] };
+      body = { tv_results: [], tv_episode_results: inferredSource && u.pathname.endsWith("/11551379") ? [{id:6741845,show_id:10,season_number:1,episode_number:1}] : [] };
     else
       throw new Error("Unexpected HTTP: " + u);
     return Response.json(body);
@@ -182,5 +183,17 @@ test("complete sets require corrected direct inventory and corrections survive o
   blockSeason=false;unblock();
   assert.deepEqual((await wait()).report.shows[0].missing.map((e:{tmdbEpisodeId:number})=>e.tmdbEpisodeId),[6741845,101],"partial TMDB declaration cannot complete a two-member side");
 
+
+  // X is directly held and automatically satisfies Y, but Y is not direct
+  // inventory and therefore cannot satisfy Z through a separate explicit link.
+  const noChain=await resolve(["tmdb:101 show:10 season:1 episode:2","tvdb:11551379"]);
+  const chainEdit=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:noChain.preview}));
+  assert.equal(chainEdit.status,200); await wait();
+  inferredSource=true; owned=false; show.Guid=[{id:"tmdb://10"},{id:"tvdb://20"}];
+  await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
+  const noChaining=await rescan();
+  assert.ok(noChaining.report.shows[0].autoMatches.some((match:{tvdb:{id:number}})=>match.tvdb.id===11551379),"Y is satisfied by its normal automatic crosswalk");
+  assert.ok(noChaining.report.shows[0].missing.some((episode:{tmdbEpisodeId:number})=>episode.tmdbEpisodeId===101),"Z remains missing because inferred Y is not directly owned");
+  assert.equal(noChaining.report.shows[0].manualCoverage,undefined);
 
 });

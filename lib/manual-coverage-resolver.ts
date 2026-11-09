@@ -8,6 +8,8 @@ import type { CoverageMember } from "@/lib/manual-coverage-model";
 const client = new PlexProviderClient(() => undefined, () => {
 });
 export async function resolveCoverageUrls(urls: unknown) {
+  // A failed attempt must not permanently disable later user-requested retries.
+  client.resetMetrics();
   try {
     return await resolveCoverageInputs(urls);
   } catch (error) {

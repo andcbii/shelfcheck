@@ -18,10 +18,12 @@ export type CoverageEvidence = {
     id: number;
   }[];
 };
+export type CoverageCorrection = CoverageEvidence & { mappingId: string };
 export type CoverageMapping = {
   id: string;
   revision: number;
   members: CoverageMember[];
   createdAt: string;
   evidence?: CoverageEvidence[];
+  corrections?: CoverageCorrection[];
 };

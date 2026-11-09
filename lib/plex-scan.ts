@@ -1,4 +1,4 @@
-import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { correctedCoverageInventory, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import type { CoverageEvidence } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -288,7 +288,7 @@ async function runPlexScan(targetRatingKey?: string) {
       for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
         const ids = idsFromGuids(item.Guid);
         manualInventory.push({
-          ratingKey: item.ratingKey || "", showKey: group.identity, fingerprint: JSON.stringify(item),
+          ratingKey: item.ratingKey || "", showKey: group.identity, fingerprint: JSON.stringify([config.plexUrl,item]),
           identities: [
             ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
             ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
@@ -296,7 +296,7 @@ async function runPlexScan(targetRatingKey?: string) {
         });
       }
     }
-    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
+    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory, allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))));
     for (const group of candidates) {
       const cached = checkpoint?.scanCache[group.identity] || prior?.scanCache?.[group.identity];
       const previous = previousShows.get(group.identity);
@@ -548,7 +548,7 @@ async function runPlexScan(targetRatingKey?: string) {
         const mapping = mappings.find(mapping => mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
         if (mapping) {
           const sourceMembers = mapping.members.filter(member => member.provider !== episode.source);
-          const evidence = manualInventory.filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
+          const evidence = correctedCoverageInventory(mapping, manualInventory).filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
           const sourceComplete = sourceMembers.length && sourceMembers.every(member => evidence.some(item => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
           if (sourceComplete) {
             if (!manualCoverage.some(item => item.mappingId === mapping.id)) manualCoverage.push({ mappingId: mapping.id, source: evidence });

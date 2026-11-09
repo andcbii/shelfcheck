@@ -18,11 +18,16 @@ export async function POST(request: Request) {
     });
     if (!body || typeof body !== "object")
       throw new CoverageError("Supply a valid request.");
-    if (body.action === "resolve")
-      return Response.json(await resolveCoverageUrls(body.urls), { headers });
-    const mapping = saveCoverageMapping(reviewedCoverageMembers(body.preview));
+    if (body.action === "resolve") {
+      const resolved = await resolveCoverageUrls(body.urls);
+      const existingMapping = body.id === undefined ? listCoverageMappings().find(mapping => mapping.members.some(member => resolved.members.some(candidate => candidate.provider === member.provider && candidate.id === member.id))) : undefined;
+      return Response.json({ ...resolved, ...(existingMapping ? { existingMapping } : {}) }, { headers });
+    }
+    if (body.id !== undefined && (typeof body.id !== "string" || !body.id))
+      throw new CoverageError("Supply the mapping identity to edit.");
+    const mapping = saveCoverageMapping(reviewedCoverageMembers(body.preview), body.id === undefined ? undefined : { id: body.id, revision: body.revision });
     requestCoverageRecheck();
-    return Response.json({ mapping, ...coverageState() }, { status: 201, headers });
+    return Response.json({ mapping, ...coverageState() }, { status: body.id === undefined ? 201 : 200, headers });
   } catch (error) {
     return failure(error);
   }

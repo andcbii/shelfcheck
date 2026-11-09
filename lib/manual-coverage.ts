@@ -21,21 +21,30 @@ export function listCoverageMappings(): CoverageMapping[] {
   }[]).map(row => JSON.parse(row.payload));
 }
 
-export function saveCoverageMapping(members: CoverageMember[]): CoverageMapping {
+export function saveCoverageMapping(members: CoverageMember[], edit?: { id: string; revision: number }): CoverageMapping {
   if (members.length !== 2 || members.filter(m => m.provider === "TMDB").length !== 1 || members.filter(m => m.provider === "TVDB").length !== 1)
     throw new CoverageError("Review one TMDB episode and one TVDB episode.");
   const db = coverageDatabase();
   db.exec("BEGIN IMMEDIATE");
   try {
+    let existing: CoverageMapping | undefined;
+    if (edit) {
+      const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(edit.id) as { payload: string } | undefined;
+      if (!row) throw new CoverageError("This mapping was deleted. Reload the manager.", 404, "not-found", edit.id);
+      existing = JSON.parse(row.payload);
+      if (!Number.isInteger(edit.revision) || edit.revision !== existing!.revision)
+        throw new CoverageError("This mapping changed since you opened it. Reopen it and review the latest records.", 409, "stale-revision", edit.id);
+    }
     for (const m of members) {
       const row = db.prepare("SELECT mapping_id FROM shelfcheck_coverage_members WHERE provider=? AND episode_id=?").get(m.provider, m.id) as {
         mapping_id: string;
       } | undefined;
-      if (row)
+      if (row && row.mapping_id !== existing?.id)
         throw new CoverageError("This episode already belongs to a mapping. Open the existing mapping.", 409, "membership-conflict", row.mapping_id);
     }
-    const mapping: CoverageMapping = { id: randomUUID(), revision: coverageState().revision + 1, members, createdAt: new Date().toISOString() };
-    db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run(mapping.id, JSON.stringify(mapping));
+    const mapping: CoverageMapping = { id: existing?.id || randomUUID(), revision: coverageState().revision + 1, members, createdAt: existing?.createdAt || new Date().toISOString() };
+    db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(mapping.id, JSON.stringify(mapping));
+    if (existing) db.prepare("DELETE FROM shelfcheck_coverage_members WHERE mapping_id=?").run(existing.id);
     for (const m of members)
       db.prepare("INSERT INTO shelfcheck_coverage_members VALUES(?,?,?)").run(m.provider, m.id, mapping.id);
     db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(mapping.revision);

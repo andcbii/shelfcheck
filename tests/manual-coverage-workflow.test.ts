@@ -41,6 +41,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   let unavailableSource = false;
   let reverse = false;
   let owned = true;
+  let sourceId = 200;
   let automatic = false;
   let blockSeason = false;
   let unblock!: () => void;
@@ -64,7 +65,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
       else if (u.pathname.includes("/sections/"))
         body = { MediaContainer: { Metadata: u.pathname.includes("/sections/1/") ? [show] : [source] } };
       else if (u.pathname.includes("allLeaves"))
-        body = { MediaContainer: { Metadata: u.pathname.includes("/2/") && owned ? [{ ratingKey: "owned", updatedAt: 1, parentIndex: 8, index: 8, Guid: [{ id: reverse ? "tmdb://100" : "tvdb://200" }] }] : automatic ? [{ ratingKey: "automatic", parentIndex: 99, index: 99, Guid: [{ id: "tmdb://100" }] }] : [{ ratingKey: "unrelated", updatedAt: 1, parentIndex: 99, index: 99 }] } };
+        body = { MediaContainer: { Metadata: u.pathname.includes("/2/") && owned ? [{ ratingKey: "owned", updatedAt: 1, parentIndex: 8, index: 8, Guid: [{ id: reverse ? "tmdb://100" : `tvdb://${sourceId}` }] }] : automatic ? [{ ratingKey: "automatic", parentIndex: 99, index: 99, Guid: [{ id: "tmdb://100" }] }] : [{ ratingKey: "unrelated", updatedAt: 1, parentIndex: 99, index: 99 }] } };
       else
         body = { MediaContainer: { Metadata: [show] } };
     }
@@ -81,6 +82,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
       body = { id: 100, season_number: 1, episode_number: 1, name: "Missing" };
     else if (u.pathname === "/3/tv/10/season/1/episode/2")
       body = { id: 101, season_number: 1, episode_number: 2, name: "Independent" };
+    else if (u.pathname === "/v4/episodes/202/extended")
+      body = { data: { id: 202, seriesId: 20, seasonNumber: 10, number: 10, name: "Replacement equivalent" } };
     else if (u.pathname === "/v4/episodes/201/extended")
       body = { data: { id: 201, seriesId: 20, seasonNumber: 9, number: 9, name: "Independent equivalent" } };
     else if (u.pathname === "/v4/login")
@@ -135,6 +138,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   assert.deepEqual(covered.report.shows[0].missing, []);
   assert.equal(covered.report.shows.length, 1);
   assert.equal(covered.report.shows[0].manualCoverage[0].mappingId, saved.mapping.id);
+  const selected = await (await api.POST(request({ action: "resolve", urls: ["https://www.themoviedb.org/tv/10/season/1/episode/1", "https://thetvdb.com/series/other-show/episodes/202"] }))).json();
+  assert.equal(selected.existingMapping.id, saved.mapping.id);
   const conflict = await api.POST(request({ action: "save", preview: preview.preview }));
   assert.equal(conflict.status, 409);
   assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 1);
@@ -145,6 +150,38 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   assert.equal(otherSavedResponse.status, 201);
   const independent = await otherSavedResponse.json();
   await wait();
+  // Edits retain identity, atomically claim members, and withdraw old coverage.
+  const replacementPreview = await (await api.POST(request({ action: "resolve", urls: ["https://www.themoviedb.org/tv/10/season/1/episode/1", "https://thetvdb.com/series/other-show/episodes/202"] }))).json();
+  const editedResponse = await api.POST(request({ action: "save", id: saved.mapping.id, revision: saved.mapping.revision, preview: replacementPreview.preview }));
+  assert.equal(editedResponse.status, 200);
+  const edited = await editedResponse.json();
+  assert.equal(edited.mapping.id, saved.mapping.id);
+  assert.equal(edited.mapping.createdAt, saved.mapping.createdAt);
+  assert.ok(edited.mapping.revision > saved.mapping.revision);
+  assert.equal((await wait()).report.shows[0].missing[0].tmdbEpisodeId, 100);
+  const competingEdits = await Promise.all([0, 1].map(() => api.POST(request({ action: "save", id: saved.mapping.id, revision: edited.mapping.revision, preview: replacementPreview.preview }))));
+  assert.deepEqual(competingEdits.map(response => response.status).sort(), [200, 409]);
+  edited.mapping = (await competingEdits.find(response => response.status === 200)!.json()).mapping;
+  await wait();
+  const stale = await api.POST(request({ action: "save", id: saved.mapping.id, revision: saved.mapping.revision, preview: preview.preview }));
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).code, "stale-revision");
+  const competing = await api.POST(request({ action: "save", id: saved.mapping.id, revision: edited.mapping.revision, preview: otherPreview.preview }));
+  assert.equal(competing.status, 409);
+  assert.equal((await competing.json()).mappingId, independent.mapping.id);
+  const rejected = await api.POST(request({ action: "save", id: saved.mapping.id, revision: edited.mapping.revision, preview: "forged" }));
+  assert.equal(rejected.status, 400);
+  const intact = (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage?id=" + saved.mapping.id))).json()).mappings[0];
+  assert.equal(intact.revision, edited.mapping.revision);
+  assert.deepEqual(intact.members.map((m: {id:number}) => m.id), [100, 202]);
+  sourceId = 202;
+  await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
+  assert.deepEqual((await wait()).report.shows[0].missing, []);
+  const restored = await api.POST(request({ action: "save", id: saved.mapping.id, revision: edited.mapping.revision, preview: preview.preview }));
+  assert.equal(restored.status, 200);
+  saved.mapping = (await restored.json()).mapping;
+  await wait();
+  sourceId = 200;
   sqlite.clearPlexReport();
   cache.__shelfcheckDatabase?.close();
   delete cache.__shelfcheckDatabase;
@@ -177,7 +214,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   const absent = await wait();
   assert.equal(absent.report.shows[0].missing[0].tvdbEpisodeId, 200);
-  // A deletion during a provider request queues a fresh scan and cannot publish the old revision.
+  // An edit during a provider request queues a fresh scan and cannot publish the old revision.
   reverse = false;
   owned = true;
   show.Guid = [{ id: "tmdb://10" }];
@@ -192,8 +229,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   await scan.DELETE(new Request("http://localhost/api/plex/scan", { method: "DELETE" }));
   await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   await started;
-  const deleted = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage?id=" + saved.mapping.id, { method: "DELETE" }));
-  assert.equal(deleted.status, 200);
+  const activeEdit = await api.POST(request({ action: "save", id: saved.mapping.id, revision: saved.mapping.revision, preview: replacementPreview.preview }));
+  assert.equal(activeEdit.status, 200);
   const pending = await (await scan.GET()).json();
   assert.equal(pending.coverage.pending, 1);
   assert.equal(pending.report, null);
@@ -202,6 +239,9 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   const missing = await wait();
   assert.equal(missing.scan.status, "completed", missing.scan.error);
   assert.equal(missing.report.shows[0].missing[0].tmdbEpisodeId, 100);
+  const deleted = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage?id=" + saved.mapping.id, { method: "DELETE" }));
+  assert.equal(deleted.status, 200);
+  await wait();
   const remaining = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   assert.deepEqual(remaining.mappings.map((mapping: {id:string})=>mapping.id), [independent.mapping.id]);
 });

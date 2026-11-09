@@ -174,9 +174,14 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   let deleted: string[] = [];
   let fail = false;
   let changed = 0;
-  for (const [key,value] of Object.entries({window:browser,document:browser.document,HTMLElement:browser.HTMLElement,IS_REACT_ACT_ENVIRONMENT:true,fetch:async (_input:unknown, init?:RequestInit)=>{
+  for (const [key,value] of Object.entries({window:browser,document:browser.document,HTMLElement:browser.HTMLElement,IS_REACT_ACT_ENVIRONMENT:true,fetch:async (input:unknown, init?:RequestInit)=>{
     if(init?.method==="DELETE") {
       if(fail) return Response.json({error:"Please retry cleanup."},{status:503});
+      if (!init.body) {
+        const id = new URL(String(input), "http://localhost").searchParams.get("id");
+        mappings = mappings.filter(m => m.id !== id && m.id !== "mapping-0").map(m => m.id === "mapping-1" ? {...m, health:"healthy"} : m);
+        return Response.json({deleted:[id],revision:2});
+      }
       deleted = JSON.parse(String(init.body)).ids;
       mappings=mappings.filter(m=>!deleted.includes(m.id));
       return Response.json({deleted,missing:[],revision:2});
@@ -215,25 +220,31 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   assert.match(container.querySelector('[aria-label="Confirm mapping deletion"]')?.textContent||"",/Delete 11 selected mappings/);
   await click("Cancel bulk deletion");
   assert.deepEqual(deleted,[]);
+  // A refresh after a row deletion also removes vanished and newly healthy
+  // identities from the selection and clamps the former last page.
+  await click("Delete mapping");
+  assert.match(container.textContent||"",/9 mappings selected/);
+  assert.match(container.textContent||"",/Showing 1.9 of 9/);
+  assert.equal(container.querySelectorAll("article").length,9);
+  changed=0;
   await changeFilter("all");
   assert.match(container.textContent||"",/0 mappings selected/);
   assert.match(container.textContent||"",/Selection cleared/);
   await changeFilter("needs-review");
-  await click("Select all 12 matching mappings");
-  await next();
+  await click("Select all 9 matching mappings");
   await click("Delete selected mappings");
   fail=true;
-  await click("Confirm delete 12 mappings");
+  await click("Confirm delete 9 mappings");
   assert.match(container.querySelector('[role="alert"]')?.textContent||"",/Please retry/);
   assert.equal(changed,0);
   fail=false;
-  await click("Confirm delete 12 mappings");
-  assert.deepEqual(deleted,Array.from({length:12},(_,i)=>`mapping-${i}`));
+  await click("Confirm delete 9 mappings");
+  assert.deepEqual(deleted,[...Array.from({length:8},(_,i)=>`mapping-${i+2}`),"mapping-11"]);
   assert.equal(changed,1);
-  assert.match(container.textContent||"",/Deleted 12 mappings/);
+  assert.match(container.textContent||"",/Deleted 9 mappings/);
   assert.match(container.textContent||"",/0 mappings selected/);
   assert.equal(container.querySelectorAll("article").length,0);
   await changeFilter("all");
-  assert.equal(container.querySelectorAll("article").length,1);
-  assert.match(container.textContent||"",/Showing 1.1 of 1/);
+  assert.equal(container.querySelectorAll("article").length,2);
+  assert.match(container.textContent||"",/Showing 1.2 of 2/);
 });

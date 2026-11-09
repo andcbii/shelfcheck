@@ -86,6 +86,10 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
     }
     else if (u.pathname === "/3/tv/10/season/1/episode/1")
       body = { id: 100, season_number: 1, episode_number: 1, name: "Missing" };
+    else if (u.pathname === "/3/tv/10/season/1/episode/3")
+      body = { id: 102, season_number: 1, episode_number: 3, name: "Cleanup" };
+    else if (u.pathname === "/v4/episodes/203/extended")
+      body = { data: { id: 203, seriesId: 20, seasonNumber: 10, number: 11, name: "Cleanup equivalent" } };
     else if (u.pathname === "/3/tv/10/season/1/episode/2")
       body = { id: 101, season_number: 1, episode_number: 2, name: "Independent" };
     else if (u.pathname === "/v4/episodes/202/extended")
@@ -322,9 +326,44 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   const missing = await wait();
   assert.equal(missing.scan.status, "completed", missing.scan.error);
   assert.equal(missing.report.shows[0].missing[0].tmdbEpisodeId, 100);
-  const deleted = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage?id=" + saved.mapping.id, { method: "DELETE" }));
-  assert.equal(deleted.status, 200);
+  // Bulk cleanup captures explicit identities, withdraws coverage during an active
+  // scan, and advances the batch revision once without touching unselected rows.
+  const cleanupPreview = await (await api.POST(request({action:"resolve",urls:["tmdb:102 show:10 season:1 episode:3","tvdb:203"]}))).json();
+  const cleanup = await (await api.POST(request({action:"save",preview:cleanupPreview.preview}))).json();
   await wait();
+  const beforeRestore = (await mappingList()).find((m: {id:string})=>m.id===saved.mapping.id);
+  await api.POST(request({action:"save",id:beforeRestore.id,revision:beforeRestore.revision,preview:preview.preview}));
+  assert.deepEqual((await wait()).report.shows[0].missing, []);
+  const beforeBatch = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  blockSeason = true;
+  blocked = new Promise<void>(resolve => { unblock = resolve; });
+  started = new Promise<void>(resolve => { entered = resolve; });
+  await scan.DELETE(new Request("http://localhost/api/plex/scan", { method: "DELETE" }));
+  await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
+  await started;
+  const deleted = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage", { method: "DELETE",body:JSON.stringify({ids:[saved.mapping.id,cleanup.mapping.id,"already-gone",saved.mapping.id]}) }));
+  assert.equal(deleted.status, 200);
+  const batch = await deleted.json();
+  assert.deepEqual(batch.deleted,[saved.mapping.id,cleanup.mapping.id]);
+  assert.deepEqual(batch.missing,["already-gone"]);
+  assert.equal(batch.revision,beforeBatch.revision+1);
+  const duringBatch = await (await scan.GET()).json();
+  assert.equal(duringBatch.coverage.pending,1);
+  assert.equal(duringBatch.report,null);
+  blockSeason = false;
+  unblock();
+  const withdrawn = await wait();
+  assert.equal(withdrawn.report.shows[0].missing[0].tmdbEpisodeId,100);
+  assert.equal(withdrawn.report.coverageRevision,batch.revision);
+  (cache.__shelfcheckDatabase as DatabaseSync | undefined)?.close();
+  delete cache.__shelfcheckDatabase;
   const remaining = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   assert.deepEqual(remaining.mappings.map((mapping: {id:string})=>mapping.id), [independent.mapping.id]);
+  const gone = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage", {method:"DELETE",body:JSON.stringify({ids:["already-gone"]})}));
+  assert.deepEqual((await gone.json()).deleted,[]);
+  const malformed = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage", {method:"DELETE",body:JSON.stringify({filter:"needs-review"})}));
+  assert.equal(malformed.status,400);
+  const afterInvalid = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  assert.equal(afterInvalid.revision,batch.revision);
+  assert.deepEqual(afterInvalid.mappings.map((mapping: {id:string})=>mapping.id),[independent.mapping.id]);
 });

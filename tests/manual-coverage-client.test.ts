@@ -11,11 +11,16 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   let deleted = "";
   let changed = 0;
   let savedPreview = "";
+  let resolvedInputs: string[] = [];
+  let rejectSave = true;
   for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch: async (input: unknown, init?: RequestInit) => {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
-        if (body.action === "resolve")
+        if (body.action === "resolve") {
+          resolvedInputs = body.urls;
           return Response.json({ preview: "reviewed", members });
+        }
+        if (rejectSave) return Response.json({error:"This episode already belongs to a mapping."},{status:409});
         savedPreview = body.preview;
         return Response.json({ revision: 3 });
       }
@@ -40,7 +45,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         Reflect.deleteProperty(globalThis, key);
     }
   });
-  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["https://www.themoviedb.org/tv/10/season/1/episode/1", "https://thetvdb.com/series/other/episodes/200"], onClose: () => {
+  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"], onClose: () => {
     }, onChanged: () => {
       changed++;
     } })));
@@ -63,6 +68,18 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
   await act(async () => save.click());
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /already belongs/);
+  assert.ok(container.querySelector('[aria-label="Resolved episode preview"]'));
+  assert.equal(changed, 1, "Rejected save does not publish a mapping change");
+  rejectSave = false;
+  await act(async () => save.click());
   assert.equal(savedPreview, "reviewed");
   assert.equal(changed, 2);
+  const create = [...container.querySelectorAll("button")].find(button => button.textContent === "Create mapping");
+  assert.ok(create, "The manager provides a standalone create action");
+  await act(async () => create.click());
+  assert.deepEqual([...container.querySelectorAll("input")].map(input => input.value), ["", ""]);
+  assert.match(container.textContent || "", /tmdb:100 show:10 season:1 episode:2/);
+  assert.match(container.textContent || "", /tvdb:200/);
+  assert.deepEqual(resolvedInputs, ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"]);
 });

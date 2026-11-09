@@ -40,7 +40,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
   let unavailableSource = false;
   let reverse = false;
-  let owned = true;
+  let owned = false;
   let automatic = false;
   let blockSeason = false;
   let unblock!: () => void;
@@ -110,7 +110,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   const invalid = await api.POST(request({ action: "resolve", urls: ["https://www.themoviedb.org/tv/10", "https://thetvdb.com/series/other-show/episodes/200"] }));
   assert.equal(invalid.status, 400);
   assert.deepEqual((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings, []);
-  const previewResponse = await api.POST(request({ action: "resolve", urls: ["https://www.themoviedb.org/tv/10/season/1/episode/1", "https://thetvdb.com/series/other-show/episodes/200"] }));
+  const previewResponse = await api.POST(request({ action: "resolve", urls: ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"] }));
   assert.equal(previewResponse.status, 200);
   const preview = await previewResponse.json();
   assert.deepEqual(preview.members.map((m: {
@@ -130,6 +130,13 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
     }
     throw new Error("scan timeout");
   };
+  const beforeOwnership = await wait();
+  assert.equal(beforeOwnership.scan.status, "completed", beforeOwnership.scan.error);
+  assert.equal(beforeOwnership.report.shows[0].missing[0].tmdbEpisodeId, 100);
+  assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 1);
+  // A standalone mapping created with neither side held applies after holdings change.
+  owned = true;
+  await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   const covered = await wait();
   assert.equal(covered.scan.status, "completed", covered.scan.error);
   assert.deepEqual(covered.report.shows[0].missing, []);

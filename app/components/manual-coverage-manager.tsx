@@ -125,12 +125,12 @@ export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props
   function itemCorrection(mapping: CoverageMapping, item: CoverageEvidence) {
     const key=`${mapping.id}:${item.showKey}:${item.ratingKey}`;
     const correction=mapping.corrections?.find(c=>c.ratingKey===item.ratingKey && c.showKey===item.showKey);
-    return <fieldset key={key}><legend>Plex item {item.ratingKey} · {item.showKey}</legend>
+    return <fieldset key={key}><legend>Plex item {item.ratingKey} Â· {item.showKey}</legend>
       <p>Provider identities: {item.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}</p>
       <p>{correction ? `Declared content: ${correction.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}` : "No ownership correction. Conflicting combined/split identities cannot add manual coverage."}</p>
       {(["TMDB","TVDB"] as const).map(provider=><div key={provider}>
         <button disabled={busy} onClick={()=>void action({action:"correct",mappingId:mapping.id,revision,item,identities:mapping.members.filter(m=>m.provider===provider).map(m=>({provider:m.provider,id:m.id}))})}>Declare complete {provider} set</button>
-        {mapping.members.filter(m=>m.provider===provider).map(member=><label key={member.id}><input type="checkbox" checked={(selectedParts[key]||[]).includes(`${provider}:${member.id}`)} onChange={event=>setSelectedParts(current=>({...current,[key]:event.target.checked ? [...(current[key]||[]).filter(v=>v.startsWith(provider+":")),`${provider}:${member.id}`] : (current[key]||[]).filter(v=>v!==`${provider}:${member.id}`)}))}/>{member.title} · {provider} {member.id} · S{member.season} E{member.episode}</label>)}
+        {mapping.members.filter(m=>m.provider===provider).map(member=><label key={member.id}><input type="checkbox" checked={(selectedParts[key]||[]).includes(`${provider}:${member.id}`)} onChange={event=>setSelectedParts(current=>({...current,[key]:event.target.checked ? [...(current[key]||[]).filter(v=>v.startsWith(provider+":")),`${provider}:${member.id}`] : (current[key]||[]).filter(v=>v!==`${provider}:${member.id}`)}))}/>{member.title} Â· {provider} {member.id} Â· S{member.season} E{member.episode}</label>)}
       </div>)}
       <button disabled={busy || !selectedParts[key]?.length} onClick={()=>void action({action:"correct",mappingId:mapping.id,revision,item,identities:mapping.members.filter(m=>selectedParts[key]?.includes(`${m.provider}:${m.id}`)).map(m=>({provider:m.provider,id:m.id}))})}>Declare selected parts</button>
     </fieldset>;

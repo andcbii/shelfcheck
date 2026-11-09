@@ -112,8 +112,16 @@ export function ManualCoverageManager({ initialUrls, onClose, onChanged }: Props
   }
   return <div className="modal-backdrop"><section className="modal manual-coverage-manager" role="dialog" aria-modal="true" aria-label="Manual Coverage"><header><h2>Manual Coverage</h2><button onClick={onClose} aria-label="Close manual coverage">Close</button></header>
  {editing && <p>Editing mapping {editing.id} � Revision {editing.revision}</p>}
+ <button disabled={busy} onClick={() => {
+    setEditing(null);
+    setUrls(["", ""]);
+    setPreview(null);
+    setError("");
+    setMessage("");
+  }}>Create mapping</button>
+ <p>You can create a mapping before owning either episode. Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context; show IDs alone cannot identify episodes.</p>
  <p>Link one TMDB episode to one TVDB episode representing the same content. Review both records before saving.</p>
- {urls.map((url, index) => <label key={index}>Episode URL {index + 1}<input aria-label={`Episode URL ${index + 1}`} value={url} onChange={event => {
+ {urls.map((url, index) => <label key={index}>Episode URL or provider-qualified ID {index + 1}<input aria-label={`Episode URL or provider-qualified ID ${index + 1}`} value={url} onChange={event => {
     setUrls(current => current.map((value, i) => i === index ? event.target.value : value));
     setPreview(null);
   }}/></label>)}

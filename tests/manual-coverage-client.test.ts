@@ -14,12 +14,17 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   let savedId = "";
   let savedRevision = 0;
   let rejectEdit = false;
+  let resolvedInputs: string[] = [];
+  let rejectSave = true;
   for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch: async (input: unknown, init?: RequestInit) => {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
-        if (body.action === "resolve")
+        if (body.action === "resolve") {
+          resolvedInputs = body.urls;
           return Response.json({ preview: "reviewed", members });
+        }
         if (rejectEdit) return Response.json({ error: "This mapping changed. Reopen it.", code: "stale-revision", mappingId: "saved" }, { status: 409 });
+        if (rejectSave) return Response.json({error:"This episode already belongs to a mapping."},{status:409});
         savedPreview = body.preview;
         savedId = body.id;
         savedRevision = body.revision;
@@ -46,13 +51,17 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         Reflect.deleteProperty(globalThis, key);
     }
   });
-  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["https://www.themoviedb.org/tv/10/season/1/episode/1", "https://thetvdb.com/series/other/episodes/200"], onClose: () => {
+  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"], onClose: () => {
     }, onChanged: () => {
       changed++;
     } })));
   assert.match(container.textContent || "", /Target/);
   assert.match(container.textContent || "", /Other/);
   assert.match(container.textContent || "", /200/);
+  const initialResolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
+  assert.ok(initialResolve);
+  await act(async () => initialResolve.click());
+  assert.deepEqual(resolvedInputs, ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"]);
   const edit = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit mapping");
   assert.ok(edit);
   await act(async () => edit.click());
@@ -82,10 +91,22 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.equal(changed, 1);
   rejectEdit = false;
   await act(async () => save.click());
+  assert.match(container.querySelector('[role="alert"]')?.textContent || "", /already belongs/);
+  assert.ok(container.querySelector('[aria-label="Resolved episode preview"]'));
+  assert.equal(changed, 1, "Rejected save does not publish a mapping change");
+  rejectSave = false;
+  await act(async () => save.click());
   assert.equal(savedPreview, "reviewed");
   assert.equal(savedId, "saved");
   assert.equal(savedRevision, 1);
   assert.equal(changed, 2);
+  const create = [...container.querySelectorAll("button")].find(button => button.textContent === "Create mapping");
+  assert.ok(create, "The manager provides a standalone create action");
+  await act(async () => create.click());
+  assert.deepEqual([...container.querySelectorAll("input")].map(input => input.value), ["", ""]);
+  assert.match(container.textContent || "", /tmdb:100 show:10 season:1 episode:2/);
+  assert.match(container.textContent || "", /tvdb:200/);
+  assert.deepEqual(resolvedInputs, members.map(member => member.url));
 });
 
 
@@ -121,7 +142,7 @@ test("selecting an existing member opens its mapping for editing instead of offe
   assert.ok(resolve);
   await act(async () => resolve.click());
   assert.match(container.textContent || "", /Editing mapping existing · Revision 4/);
-  assert.equal(container.querySelector('[aria-label="Episode URL 1"]')?.getAttribute("value"), "https://example.com/100");
+  assert.equal(container.querySelector('[aria-label="Episode URL or provider-qualified ID 1"]')?.getAttribute("value"), "https://example.com/100");
   assert.equal(container.querySelector('[aria-label="Resolved episode preview"]'), null);
   assert.equal(saves, 0);
 });

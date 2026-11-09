@@ -4,6 +4,24 @@ Shelfcheck identifies aired TV episodes missing from a Trakt collection or Plex 
 
 ## Language
 
+**Episode coverage**:
+The content represented by an episode record, which may correspond to one or several records at another provider. A complete combined episode covers each of its parts; an individual part covers only that part.
+
+**Combined episode**:
+An episode record containing content that another provider lists as multiple episodes.
+
+**Split episode**:
+One of the parts of a combined episode, listed as a separate episode by a provider.
+
+**Coverage mapping**:
+A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content.
+
+**Show mapping**:
+An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.
+
+**Ownership correction**:
+A user's declaration of the content actually contained in a Plex item whose provider identities describe conflicting episode coverage.
+
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.
 _Avoid_: Dismiss, snooze

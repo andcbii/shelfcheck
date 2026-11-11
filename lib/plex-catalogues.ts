@@ -29,10 +29,12 @@ export type PlexGeneratedInputs = {
   comparisons: Record<string, SavedPlexComparison>;
   inventory?: { capturedAt:string; complete:boolean; groups:PlexShowGroup[]; items:Record<string,PlexMetadata[]>; evidence:CoverageEvidence[] };
   fullScanStartedAt?: string;
+  deferredTmdbChanges: Record<string, true>;
 };
 export function readPlexInputs(): PlexGeneratedInputs {
   return {
     version: 1,
+    deferredTmdbChanges: readPlexGeneratedInputs<Record<string, true>>("deferred-tmdb") || {},
     tmdb: listPlexGeneratedInputs("tmdb:"),
     tvdb: listPlexGeneratedInputs("tvdb:"),
     comparisons: listPlexGeneratedInputs("comparison:"),
@@ -48,6 +50,9 @@ export function savePlexComparison(ratingKey: string, input: SavedPlexComparison
 }
 export function savePlexInventory(inventory: NonNullable<PlexGeneratedInputs["inventory"]>) {
   writePlexGeneratedInputs("inventory", inventory);
+}
+export function saveDeferredTmdbChanges(changes: Record<string, true>) {
+  writePlexGeneratedInputs("deferred-tmdb", changes);
 }
 export function savePlexScanBaseline(startedAt: string) {
   writePlexGeneratedInputs("full-scan", {startedAt});

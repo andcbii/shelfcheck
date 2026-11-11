@@ -88,13 +88,13 @@ test("full scans reuse catalogues while comparing current holdings across databa
   feedFailure = false;
   await run();
   assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
-  // Provider change feeds refresh their own catalogue independently.
+  // A TMDB daily flag defers another same-day download.
   tmdbChanged = [10];
   requests.length = 0;
   await run();
-  assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1);
+  assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,0);
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,0);
-  assert.notEqual(catalogues.readPlexInputs().tmdb["10"].downloadedAt,initialTimes[0]);
+  assert.equal(catalogues.readPlexInputs().tmdb["10"].downloadedAt,initialTimes[0]);
   assert.equal(catalogues.readPlexInputs().tvdb["20"].downloadedAt,initialTimes[1]);
   tmdbChanged = []; tvdbChanged = [20];
   requests.length = 0;
@@ -105,6 +105,7 @@ test("full scans reuse catalogues while comparing current holdings across databa
   tvdbChanged = [];
   tmdbChanged = [10];
   malformedTmdb = true;
+  t.mock.timers.tick(86400_000);
   tvdbChanged = [20];
   const beforePartial = catalogues.readPlexInputs().tmdb["10"].downloadedAt;
   t.mock.timers.tick(60_000);
@@ -114,7 +115,7 @@ test("full scans reuse catalogues while comparing current holdings across databa
   (globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync}).__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
   assert.equal(catalogues.readPlexInputs().comparisons["ratingKey:1"].refresh?.tmdb,true,"failed refresh remains required across restart and comparison writes");
   assert.equal(catalogues.readPlexInputs().tmdb["10"].downloadedAt,beforePartial,"failed TMDB download preserves its previous success timestamp");
-  assert.equal(catalogues.readPlexInputs().tvdb["20"].downloadedAt,"2026-11-11T12:02:00.000Z","TVDB succeeds independently of the TMDB failure");
+  assert.equal(catalogues.readPlexInputs().tvdb["20"].downloadedAt,"2026-11-12T12:02:00.000Z","TVDB succeeds independently of the TMDB failure");
   tvdbChanged = [];
   tmdbChanged = [];
   malformedTmdb = false;

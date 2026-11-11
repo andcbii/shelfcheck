@@ -255,3 +255,78 @@ test("saved identity relationships revalidate ownership and retain aliases and i
   assert.equal(requests.filter(p=>p==="/v4/series/21/episodes/default").length,1);
   assert.equal(requests.filter(p=>p==="/3/tv/30/season/1").length,0);
 });
+
+test("explicit zero-sized Plex collections withdraw previous ownership while incomplete responses retain last-good results", async t => {
+  const dir = mkdtempSync(path.join(tmpdir(),"plex-empty-collections-"));
+  const previous = [process.env.SHELFCHECK_DATA_DIR,process.env.SHELFCHECK_CONFIG_DIR];
+  process.env.SHELFCHECK_DATA_DIR = dir; process.env.SHELFCHECK_CONFIG_DIR = dir;
+  const global = globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync};
+  t.after(() => { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
+    for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
+    rmSync(dir,{recursive:true,force:true}); });
+  await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
+  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  const responses = new Map<string,unknown>();
+  const show = {ratingKey:"1",title:"Example",Guid:[{id:"tmdb://10"}]};
+  t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
+    const u = new URL(String(input));
+    if(u.hostname === "plex") {
+      if(responses.has(u.pathname)) return Response.json(responses.get(u.pathname));
+      if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
+      if(u.pathname === "/library/metadata/1/allLeaves") return Response.json({MediaContainer:{Metadata:[{ratingKey:"ep",parentIndex:1,index:1,Guid:[{id:"tmdb://100"}]}]}});
+      return Response.json({MediaContainer:{Metadata:[show]}});
+    }
+    if(u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
+    if(u.pathname === "/3/tv/changes") return Response.json({results:[],total_pages:1});
+    if(u.pathname === "/v4/updates") return Response.json({data:[]});
+    if(u.pathname === "/3/tv/10") return Response.json({id:10,name:"Example",seasons:[{season_number:1}]});
+    if(u.pathname === "/3/tv/10/season/1") return Response.json({episodes:[{id:100,season_number:1,episode_number:1,name:"Pilot",air_date:"2020-01-01"}]});
+    throw new Error("Unexpected HTTP: "+u);
+  });
+  const run = async () => {
+    await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
+    for(let i=0;i<500;i++) { const state = await (await scan.GET()).json(); if(state.scan.status !== "running") return state; await new Promise(r=>setTimeout(r,10)); }
+    throw new Error("Scan timed out");
+  };
+  const initial = await run();
+  assert.equal(initial.scan.status,"completed",initial.scan.error);
+  assert.deepEqual(initial.report.shows[0].missing,[]);
+  responses.set("/library/metadata/1/allLeaves",{MediaContainer:{size:0}});
+  const empty = await run();
+  assert.equal(empty.scan.status,"completed",empty.scan.error);
+  assert.equal(empty.report.shows[0].missing.length,1,"a valid empty collection removes previous ownership");
+  assert.equal(empty.report.shows[0].missing[0].tmdbEpisodeId,100);
+  assert.deepEqual(empty.coverage.issues,[]);
+  assert.equal(empty.coverage.pending,0);
+  responses.clear();
+  for (const endpoint of ["/library/sections/1/all","/library/sections"]) {
+    assert.deepEqual((await run()).report.shows[0].missing,[]);
+    responses.set(endpoint,{MediaContainer:{size:0}});
+    const emptyLibrary = await run();
+    assert.equal(emptyLibrary.scan.status,"completed",emptyLibrary.scan.error);
+    assert.deepEqual(emptyLibrary.report.shows,[],"an explicitly empty library must remove its former shows");
+    assert.deepEqual(emptyLibrary.coverage.issues,[]);
+    assert.equal(emptyLibrary.coverage.pending,0);
+    responses.clear();
+  }
+  for (const endpoint of ["/library/sections","/library/sections/1/all","/library/metadata/1/allLeaves","/library/metadata/1"]) {
+    const field = endpoint === "/library/sections" ? "Directory" : "Metadata";
+    const incompleteBodies = [
+      {}, {MediaContainer:{}}, {MediaContainer:{size:1}}, {MediaContainer:{size:"0"}},
+      {MediaContainer:{size:0,[field]:null}}, {MediaContainer:{size:0,[field]:{}}},
+      ...(endpoint === "/library/metadata/1" ? [{MediaContainer:{size:0}}] : []),
+    ];
+    for (const body of incompleteBodies) {
+      const restored = await run();
+      assert.equal(restored.scan.status,"completed",restored.scan.error);
+      assert.deepEqual(restored.coverage.issues,[]);
+      responses.set(endpoint,body);
+      const unavailable = await run();
+      const message = `${endpoint}: ${JSON.stringify(body)}`;
+      assert.deepEqual(unavailable.report.shows[0].missing,[],"incomplete inventory retains last-good ownership: "+message);
+      assert.ok(unavailable.coverage.issues.some((issue:{provider:string;operation:string})=>issue.provider === "Plex" && issue.operation === "inventory"),"incomplete responses produce a Plex inventory issue: "+message);
+      assert.equal(unavailable.coverage.pending,1,message);
+      responses.clear();
+    }
+  }
+});

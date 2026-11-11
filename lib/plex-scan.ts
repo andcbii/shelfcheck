@@ -40,7 +40,7 @@ type PlexCacheEntry = PlexScanCacheEntry;
 export type PlexReport = { shows: PlexShowResult[]; coverageGroups?: CoverageGroup[]; lastScan: string; startedAt?: string; finishedAt?: string; scanCache?: Record<string, PlexCacheEntry>; cacheVersion?: number; autoCompoundEpisodes?: boolean; coverageRevision?: number };
 type PlexCheckpoint = { shows: PlexShowResult[]; scanCache: Record<string, PlexCacheEntry>; cacheVersion: number; savedAt: string; autoCompoundEpisodes?: boolean; coverageRevision?: number };
 
-type PlexContainer = { MediaContainer?: { Directory?: PlexMetadata[]; Metadata?: PlexMetadata[] } };
+type PlexContainer = { MediaContainer?: { size?: number; Directory?: PlexMetadata[]; Metadata?: PlexMetadata[] } };
 type TmdbShow = { id: number; name?: string; first_air_date?: string | null; seasons?: { season_number: number }[]; external_ids?: { tvdb_id?: number | null } };
 type TvdbShow = { id: number; name?: string; slug?: string; year?: string };
 type TmdbEpisodeFindResult = TmdbFindEpisode;
@@ -102,8 +102,14 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
 
 async function plexJson(path: string, url: string, token: string): Promise<PlexContainer> {
   const body = await checkedJson<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex");
-  const field = path === "/library/sections" ? "Directory" : "Metadata";
-  if (!Array.isArray(body.MediaContainer?.[field])) throw new Error(`Plex returned incomplete ${field === "Directory" ? "library sections" : "inventory"}.`);
+  const pathname = path.split("?")[0];
+  const field = pathname === "/library/sections" ? "Directory" : "Metadata";
+  const collection = /^\/library\/(?:sections(?:\/[^/]+\/all)?|metadata\/[^/]+\/allLeaves)$/.test(pathname);
+  const container = body?.MediaContainer;
+  // Plex may omit children on explicitly empty collections, but never certify
+  // incomplete singleton lookups or malformed child fields as empty inventory.
+  if (collection && container?.size === 0 && !Object.hasOwn(container, field)) container[field] = [];
+  if (!Array.isArray(container?.[field])) throw new Error(`Plex returned incomplete ${field === "Directory" ? "library sections" : "inventory"}.`);
   return body;
 }
 

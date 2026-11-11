@@ -1,6 +1,7 @@
-import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause } from "@/lib/coverage-issues";
+import { reuseProviderCatalogue } from "@/lib/plex-catalogue-policy";
+import { listCoverageIssues, setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, savePlexScanBaseline, clearPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, savePlexScanBaseline, saveDeferredTmdbChanges, clearPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { correctedCoverageInventory, listCoverageCorrections, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
@@ -458,6 +459,7 @@ async function runPlexScan(targetRatingKey?: string) {
     if (checkpoint) logger.info("plex.checkpoint.resume", { savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length });
     else if (rawCheckpoint && !targetRatingKey) { logger.warn("plex.checkpoint.discarded", { savedAt: rawCheckpoint.savedAt, cacheVersion: rawCheckpoint.cacheVersion, reason: "expired-or-incompatible" }); clearPlexCheckpoint(); }
     const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
+    const downloadedTmdb = new Set<number>();
     let tmdbChanges: Set<number> | null = null;
     let tvdbChanges: Set<number> | null = null;
     if (!targetRatingKey && inputs.fullScanStartedAt) {
@@ -476,6 +478,7 @@ async function runPlexScan(targetRatingKey?: string) {
     if (tmdbChanges !== null) resolveCoverageIssue("provider-verification:TMDB");
     else if (!targetRatingKey && inputs.fullScanStartedAt && !getCoverageIssue("provider-verification:TMDB")) setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",cause:"The saved TMDB verification baseline is invalid or outside the provider change-feed window; catalogue freshness is unverified.",action:"Run a Plex scan to refresh and verify provider catalogues."});
     if (tvdbChanges !== null) resolveCoverageIssue("provider-verification:TVDB");
+    const tmdbCatalogueChanges = new Set([...(tmdbChanges || []), ...Object.keys(inputs.deferredTmdbChanges).map(Number)]);
     const results: PlexShowResult[] = [];
     const scanCache: Record<string, PlexCacheEntry> = {};
     if (targetRatingKey) {
@@ -585,11 +588,17 @@ async function runPlexScan(targetRatingKey?: string) {
       const refresh = {...savedComparison?.refresh};
       inputs.comparisons[ratingKey] = savedComparison ? {...savedComparison,refresh} : {group, details, localMetadata, tmdbId, tvdbId, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
       savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
+      let tmdbCatalogueReused = false;
       const savedTmdb = inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
       try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
         phaseStarted = Date.now();
-        const reuseTmdb = !targetRatingKey && !refresh.tmdb && usableProviderCatalogue(savedTmdb) && (tmdbChanges === null || !tmdbChanges.has(savedTmdb.show.id));
+        const reuseTmdb = reuseProviderCatalogue({provider:"tmdb",now:startedAt,downloadedAt:savedTmdb?.downloadedAt,usable:usableProviderCatalogue(savedTmdb),mandatory:!!refresh.tmdb,targeted:!!targetRatingKey,changed:!!savedTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id),previousFullScan:inputs.fullScanStartedAt});
+        tmdbCatalogueReused = reuseTmdb;
+        if (reuseTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id)) {
+          inputs.deferredTmdbChanges[String(savedTmdb.show.id)] = true;
+          saveDeferredTmdbChanges(inputs.deferredTmdbChanges);
+        }
         tmdbShow = reuseTmdb ? savedTmdb.show : await getTmdbShow(tmdbId, tvdbId, config.tmdbToken);
         if (tmdbShow) {
           tmdbId = tmdbShow.id;
@@ -598,8 +607,11 @@ async function runPlexScan(targetRatingKey?: string) {
           providerEpisodes.push(...episodes);
           if (!reuseTmdb) {
             inputs.tmdb[String(tmdbShow.id)] = {version:1, downloadedAt:new Date().toISOString(), show:tmdbShow, episodes};
-            delete refresh.tmdb;
+            downloadedTmdb.add(tmdbShow.id);
             savePlexCatalogue("tmdb", tmdbShow.id, inputs.tmdb[String(tmdbShow.id)]);
+            delete refresh.tmdb;
+            delete inputs.deferredTmdbChanges[String(tmdbShow.id)];
+            saveDeferredTmdbChanges(inputs.deferredTmdbChanges);
             savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           }
         }
@@ -621,7 +633,7 @@ async function runPlexScan(targetRatingKey?: string) {
           setHeartbeat(ratingKey, primary.title || "Unknown show", "tvdb-series-and-episodes");
           phaseStarted = Date.now();
           const savedTvdb = inputs.tvdb[String(tvdbId)];
-          const reuseTvdb = !targetRatingKey && !refresh.tvdb && usableProviderCatalogue(savedTvdb) && (tvdbChanges === null || !tvdbChanges.has(tvdbId));
+          const reuseTvdb = reuseProviderCatalogue({provider:"tvdb",now:startedAt,downloadedAt:savedTvdb?.downloadedAt,usable:usableProviderCatalogue(savedTvdb),mandatory:!!refresh.tvdb,targeted:!!targetRatingKey,changed:!!tvdbChanges?.has(tvdbId),previousFullScan:inputs.fullScanStartedAt});
           if (!reuseTvdb && tvdbAuthenticationError) throw tvdbAuthenticationError;
           const tvdb = reuseTvdb ? {episodes:savedTvdb.episodes,slug:savedTvdb.show.slug,name:savedTvdb.show.name} : await tvdbSeries(tvdbId, token, undefined, primary.title || "Unknown show");
           if (!reuseTvdb) {
@@ -656,7 +668,7 @@ async function runPlexScan(targetRatingKey?: string) {
       resolveCoverageIssue(`comparison-inputs:${ratingKey}`);
       const tmdbAliases = savedComparison?.tmdbAliases || [];
       const tvdbAliases = savedComparison?.tvdbAliases || [];
-      const reuseTmdbRelationships = !targetRatingKey && (tmdbChanges === null || !tmdbAliases.some(id => tmdbChanges.has(id))) && tvdbId === savedComparison?.tvdbId;
+      const reuseTmdbRelationships = !targetRatingKey && (tmdbChanges === null || !tmdbAliases.some(id => tmdbChanges.has(id) && !(id === tmdbShow?.id && tmdbCatalogueReused))) && tvdbId === savedComparison?.tvdbId;
       const reuseTvdbRelationships = !targetRatingKey && (tvdbChanges === null || !tvdbAliases.some(id => tvdbChanges.has(id)));
       const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
@@ -696,9 +708,14 @@ async function runPlexScan(targetRatingKey?: string) {
     const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
     if (coverageState().revision !== coverageRevision) return;
     writePlexReport(report);
-    if (!targetRatingKey) savePlexScanBaseline(startedAt);
     const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
     if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
+    const tmdbWindowUnavailable = !Number.isFinite(Date.parse(inputs.fullScanStartedAt || "")) || Date.parse(startedAt) - Date.parse(inputs.fullScanStartedAt!) > 14 * 86400_000;
+    if (!targetRatingKey && tmdbWindowUnavailable && candidates.every(group => {
+      const id = inputs.comparisons[group.identity]?.tmdbId;
+      return !id || downloadedTmdb.has(id);
+    })) resolveCoverageIssue("provider-verification:TMDB");
+    if (!targetRatingKey && inputs.inventory?.complete && !results.some(show => show.warning) && !listCoverageIssues().some(issue => issue.id !== "scan-failure")) savePlexScanBaseline(startedAt);
     completeCoverageRecheck(coverageRevision);
     if (!targetRatingKey) clearPlexCheckpoint();
     else if (rawCheckpoint) {

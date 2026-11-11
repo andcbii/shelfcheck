@@ -21,7 +21,7 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
   sqlite.writePlexSettings({ignoredShows:[{ratingKey:"ratingKey:source",title:"Ignored source"}],diagnosticsEnabled:false});
   const requests:string[]=[];
-  let blockSave=false,blockCatalogue=false;
+  let blockSave=false,blockCatalogue=false,changeFeedUnavailable=false;
   let enterSave!:()=>void,releaseSave!:()=>void,releaseCatalogue!:()=>void;
   const saveEntered=new Promise<void>(resolve=>{enterSave=resolve;});
   const saveBlocked=new Promise<void>(resolve=>{releaseSave=resolve;});
@@ -31,6 +31,7 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
     const u=new URL(String(input));requests.push(String(u));
     if(blockSave && u.pathname.endsWith("/episode/18")){blockSave=false;enterSave();await saveBlocked;}
     if(blockCatalogue && u.pathname.match(/\/season\/3$/))await catalogueBlocked;
+    if(changeFeedUnavailable && u.pathname==="/3/tv/changes")return Response.json({}, {status:401});
     const id=Number(u.pathname.match(/\/tv\/(\d+)/)?.[1]);
     let body:unknown;
     if(u.hostname==="plex"){
@@ -117,5 +118,14 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   blockCatalogue=false;releaseCatalogue();
   for(let i=0;i<300 && (await report()).scan.status==="running";i++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.equal((await report()).scan.status,"completed");
+  changeFeedUnavailable=true;
+  const unverified=await rerun();
+  assert.ok(unverified.coverage.issues.some((issue:{id:string})=>issue.id==="provider-verification:TMDB"));
+  const afterUnrelatedFailure=await api.POST(request({action:"save",preview:racePreview}));
+  assert.equal(afterUnrelatedFailure.status,201);
+  const reconciled=await report();
+  assert.ok(reconciled.coverage.issues.some((issue:{id:string})=>issue.id==="provider-verification:TMDB"),"A local comparison preserves unrelated freshness issues");
+  assert.ok(!reconciled.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-pending"),"Successful local reconciliation retires legacy pending even while other issues remain");
+  assert.equal(reconciled.coverage.pending,1);
 });
 

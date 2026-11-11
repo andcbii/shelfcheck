@@ -1,6 +1,6 @@
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
-import { requestCoverageRecheck } from "@/lib/plex-scan";
-import { CoverageError, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping, listCoverageCorrections, saveOwnershipCorrection } from "@/lib/manual-coverage";
+import { captureCoverageImpact, requestCoverageRecheck } from "@/lib/plex-scan";
+import { assertCoverageMutationAllowed, CoverageError, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping, listCoverageCorrections, saveOwnershipCorrection } from "@/lib/manual-coverage";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const headers = { "Cache-Control": "private, no-store" };
@@ -18,9 +18,11 @@ export async function POST(request: Request) {
     });
     if (!body || typeof body !== "object")
       throw new CoverageError("Supply a valid request.");
+    if (body.action !== "resolve") assertCoverageMutationAllowed();
     if (body.action === "correct") {
+      const impact=captureCoverageImpact([body.mappingId]);
       const correction=saveOwnershipCorrection(body.mappingId,body.revision,body.item,body.identities);
-      requestCoverageRecheck();
+      await requestCoverageRecheck({...impact,showKeys:[...impact.showKeys,correction.showKey]});
       return Response.json({correction,...coverageState()},{headers});
     }
     if (body.action === "resolve") {
@@ -34,8 +36,10 @@ export async function POST(request: Request) {
     // Revalidate the exact reviewed canonical identities. Coordinates can locate a
     // different TMDB record since preview, but must never replace that identity.
     await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
+    assertCoverageMutationAllowed();
+    const impact=captureCoverageImpact(body.id ? [body.id] : []);
     const mapping = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision });
-    requestCoverageRecheck();
+    await requestCoverageRecheck({members:[...impact.members,...mapping.members],showKeys:impact.showKeys});
     return Response.json({ mapping, ...coverageState() }, { status: body.id === undefined ? 201 : 200, headers });
   } catch (error) {
     return failure(error);
@@ -44,16 +48,19 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    assertCoverageMutationAllowed();
     const id = new URL(request.url).searchParams.get("id");
+    let impact=captureCoverageImpact(id ? [id] : []);
     let result: { deleted: string[]; missing: string[] };
     if (id !== null) {
       deleteCoverageMapping(id);
       result = { deleted: [id], missing: [] };
     } else {
       const body = await request.json().catch(() => { throw new CoverageError("Supply selected mapping identities as JSON."); });
+      impact=captureCoverageImpact(Array.isArray(body?.ids) ? body.ids : []);
       result = deleteCoverageMappings(body?.ids);
     }
-    if (result.deleted.length) requestCoverageRecheck();
+    if (result.deleted.length) await requestCoverageRecheck(impact);
     return Response.json({ ...result, ...coverageState() }, { headers });
   } catch (error) {
     return failure(error);

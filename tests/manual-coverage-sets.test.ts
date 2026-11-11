@@ -110,6 +110,7 @@ test("complete sets require corrected direct inventory and corrections survive o
   const response=await api.POST(request({action:"save",preview:preview.preview}));
   assert.equal(response.status,201);
   const mapping=(await response.json()).mapping;
+  await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
   await wait();
   owned=true;
   const rescan=async()=>{await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"})); return wait();};
@@ -191,7 +192,7 @@ test("complete sets require corrected direct inventory and corrections survive o
   const manySave=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:manyToOne.preview}));
   assert.equal(manySave.status,200); mapping.revision=(await manySave.json()).mapping.revision; await wait();
   parts=[11551379]; assert.deepEqual((await rescan()).report.shows[0].missing,[]);
-  // A correction during an active scan withdraws its old evidence and queues a recheck.
+  // A correction during an active scan is rejected without changing saved evidence.
   parts=[11551379]; ambiguous=true; await rescan();
   await correct([{provider:"TVDB",id:11551379}]);
   const blocked=new Promise<void>(resolve=>{unblock=resolve;});
@@ -200,10 +201,16 @@ test("complete sets require corrected direct inventory and corrections survive o
   await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"})); await started;
   const current=await state();
   const revised=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TMDB",id:6741845}]}));
-  assert.equal(revised.status,200);
-  const pending=await (await scan.GET()).json(); assert.equal(pending.coverage.pending,1); assert.equal(pending.report,null);
+  assert.equal(revised.status,409);
+  assert.equal((await revised.json()).code,"scan-active");
+  const unchangedDuringScan=await state();
+  assert.equal(unchangedDuringScan.revision,current.revision);
+  assert.deepEqual(unchangedDuringScan.mappings,current.mappings);
   const stale=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TVDB",id:11551379}]})); assert.equal(stale.status,409);
   blockSeason=false;unblock();
+  await wait();
+  const acceptedCorrection=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TMDB",id:6741845}]}));
+  assert.equal(acceptedCorrection.status,200);
   assert.deepEqual((await wait()).report.shows[0].missing.map((e:{tmdbEpisodeId:number})=>e.tmdbEpisodeId),[6741845,101],"partial TMDB declaration cannot complete a two-member side");
 
 

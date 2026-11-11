@@ -143,8 +143,13 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
     }
     throw new Error("scan timeout");
   };
+  const initialPending=await (await scan.GET()).json();
+  assert.notEqual(initialPending.scan.status,"running","Saving before initial inventory must not start a scan");
+  assert.ok(initialPending.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-inputs:initial"));
+  await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   const beforeOwnership = await wait();
   assert.equal(beforeOwnership.scan.status, "completed", beforeOwnership.scan.error);
+  assert.ok(!beforeOwnership.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-inputs:initial"));
   assert.equal(beforeOwnership.report.shows[0].missing[0].tmdbEpisodeId, 100);
   assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 1);
   // A standalone mapping created with neither side held applies after holdings change.
@@ -252,7 +257,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   assert.equal(repairResponse.status,200);
   saved.mapping = (await repairResponse.json()).mapping;
   sourceId = 202;
-  assert.deepEqual((await wait()).report.shows[0].missing, []);
+  assert.deepEqual((await rerun()).report.shows[0].missing, []);
   assert.ok(saved.mapping.revision > broken.revision);
   assert.notEqual(saved.mapping.health,"needs-review");
   // Coordinates returning another ID cannot silently replace the saved canonical TMDB member.
@@ -273,7 +278,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   const current = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
   saved.mapping = (await (await api.POST(request({action:"save",id:current.id,revision:current.revision,preview:returnPreview.preview}))).json()).mapping;
   sourceId = 200;
-  await wait();
+  await rerun();
   // Automatic ownership keeps its existing result and is not relabelled manual.
   automatic = true;
   owned = false;
@@ -302,7 +307,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   const absent = await wait();
   assert.equal(absent.report.shows[0].missing[0].tvdbEpisodeId, 200);
-  // An edit during a provider request queues a fresh scan and cannot publish the old revision.
+  // Mutations opened before a scan are rejected without applying or queueing work.
   reverse = false;
   owned = true;
   show.Guid = [{ id: "tmdb://10" }];
@@ -318,12 +323,16 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   await started;
   const activeEdit = await api.POST(request({ action: "save", id: saved.mapping.id, revision: saved.mapping.revision, preview: replacementPreview.preview }));
-  assert.equal(activeEdit.status, 200);
+  assert.equal(activeEdit.status, 409);
+  assert.equal((await activeEdit.json()).code,"scan-active");
   const pending = await (await scan.GET()).json();
   assert.equal(pending.coverage.pending, 1);
-  assert.equal(pending.report, null);
+  assert.equal((await mappingList()).find((m: {id:string})=>m.id===saved.mapping.id).revision,saved.mapping.revision);
   blockSeason = false;
   unblock();
+  await wait();
+  const acceptedEdit=await api.POST(request({ action:"save",id:saved.mapping.id,revision:saved.mapping.revision,preview:replacementPreview.preview }));
+  assert.equal(acceptedEdit.status,200);
   const missing = await wait();
   assert.equal(missing.scan.status, "completed", missing.scan.error);
   assert.equal(missing.report.shows[0].missing[0].tmdbEpisodeId, 100);
@@ -342,15 +351,21 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   await scan.DELETE(new Request("http://localhost/api/plex/scan", { method: "DELETE" }));
   await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
   await started;
-  const deleted = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage", { method: "DELETE",body:JSON.stringify({ids:[saved.mapping.id,cleanup.mapping.id,"already-gone",saved.mapping.id]}) }));
+  const deleteRequest=()=>new Request("http://localhost/api/plex/manual-coverage", {method:"DELETE",body:JSON.stringify({ids:[saved.mapping.id,cleanup.mapping.id,"already-gone",saved.mapping.id]})});
+  assert.equal((await api.DELETE(deleteRequest())).status,409);
+  assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).revision,beforeBatch.revision);
+  blockSeason=false;
+  unblock();
+  await wait();
+  const deleted = await api.DELETE(deleteRequest());
   assert.equal(deleted.status, 200);
   const batch = await deleted.json();
   assert.deepEqual(batch.deleted,[saved.mapping.id,cleanup.mapping.id]);
   assert.deepEqual(batch.missing,["already-gone"]);
   assert.equal(batch.revision,beforeBatch.revision+1);
   const duringBatch = await (await scan.GET()).json();
-  assert.equal(duringBatch.coverage.pending,1);
-  assert.equal(duringBatch.report,null);
+  assert.equal(duringBatch.scan.status,"completed");
+  assert.ok(duringBatch.report);
   blockSeason = false;
   unblock();
   const withdrawn = await wait();
@@ -394,7 +409,9 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   let itemRevision = 1;
   let ambiguous = false;
   let catalogueDownloads = 0;
+  let httpRequests=0;
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    httpRequests++;
     const u = new URL(String(input));
     if (u.hostname === "plex") {
       if (u.pathname === "/library/sections") return Response.json({ MediaContainer: { Directory: [{ key: "1", type: "show" }, { key: "2", type: "show" }] } });
@@ -441,7 +458,7 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   const savedResponse = await api.POST(request({ action: "save", preview: preview.preview }));
   assert.equal(savedResponse.status, 201);
   const saved = await savedResponse.json();
-  const complete = await wait();
+  const complete = await rerun();
   assert.deepEqual(complete.report.shows.map((show: { title: string }) => show.title), ["Combined target"]);
   assert.deepEqual(complete.report.shows[0].missing, []);
   assert.deepEqual(complete.report.shows[0].manualCoverage[0].source.map((item: { ratingKey: string }) => item.ratingKey), ["part1", "part2"]);
@@ -457,8 +474,10 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   assert.equal((await rerun()).report.shows[0].missing.length, 1, "Conflicting combined/split identities cannot complete the source set");
   const state = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   const item = state.mappings[0].evidence.find((entry: { ratingKey: string }) => entry.ratingKey === "part1");
+  const beforeCorrection=httpRequests;
   const corrected = await api.POST(request({ action: "correct", mappingId: saved.mapping.id, revision: state.revision, item, identities: [{ provider: "TVDB", id: 200 }] }));
   assert.equal(corrected.status, 200);
+  assert.equal(httpRequests,beforeCorrection,"Ownership correction rechecks must perform no HTTP");
   assert.deepEqual((await wait()).report.shows[0].missing, []);
   itemRevision++;
   const changedItem = await rerun();

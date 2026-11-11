@@ -352,11 +352,19 @@ export default function PlexPage() {
 
   function coverageChanged(revision: number) {
     minimumCoverageRevision.current = Math.max(minimumCoverageRevision.current, revision);
-    setCoveragePending(true);
     reportInvalidations.current = new Set(reportInvalidations.current);
-    setReport(null);
+    const invalidations=reportInvalidations.current;
     abort();
-    void poll().catch(error => {
+    void fetch("/api/plex/scan",{cache:"no-store"}).then(async response=>{
+      const body=await response.json();
+      if(!response.ok || !body.scan) throw new Error(body.error || "Coverage recheck could not be loaded.");
+      if(invalidations!==reportInvalidations.current || (body.coverage?.revision || 0)<minimumCoverageRevision.current) return;
+      minimumCoverageRevision.current=body.coverage?.revision || 0;
+      setCoveragePending(Boolean(body.coverage?.pending));
+      setStatus(body.scan);
+      setReport(body.report ? pruneClientReport(body.report,invalidations) : null);
+      if(body.scan.status==="running") await poll();
+    }).catch(error=>{
       if (!(error instanceof DOMException && error.name === "AbortError")) setError(error instanceof Error ? error.message : "Coverage recheck failed.");
     });
   }

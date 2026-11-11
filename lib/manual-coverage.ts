@@ -23,7 +23,12 @@ export function listCoverageMappings(): CoverageMapping[] {
   }[]).map(row => JSON.parse(row.payload));
 }
 
+export function assertCoverageMutationAllowed() {
+  if ((globalThis as typeof globalThis & {__shelfcheckPlexScan?:Promise<void>}).__shelfcheckPlexScan) throw new CoverageError("Wait for the current Plex scan to finish before changing Manual Matches or ownership corrections.",409,"scan-active");
+}
+
 export function saveCoverageMapping(members: CoverageMember[], edit?: { id: string; revision: number }): CoverageMapping {
+  assertCoverageMutationAllowed();
   if (!members.some(m => m.provider === "TMDB") || !members.some(m => m.provider === "TVDB") || new Set(members.map(m => `${m.provider}:${m.id}`)).size !== members.length)
     throw new CoverageError("Review nonempty complete sets of distinct TMDB and TVDB episodes.");
   const db = coverageDatabase();
@@ -78,6 +83,7 @@ export function deleteCoverageMapping(id: string) {
 }
 
 export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missing: string[] } {
+  assertCoverageMutationAllowed();
   if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== "string" || !id.trim()))
     throw new CoverageError("Select explicit mapping identities to delete.");
   const db = coverageDatabase();
@@ -131,6 +137,7 @@ export function listCoverageCorrections(): CoverageCorrection[] {
   return (correctionTable().prepare("SELECT payload FROM shelfcheck_coverage_corrections").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
 }
 export function saveOwnershipCorrection(mappingId: unknown, revision: unknown, item: CoverageEvidence, identities: CoverageEvidence["identities"]) {
+  assertCoverageMutationAllowed();
   const db=correctionTable();
   db.exec("BEGIN IMMEDIATE");
   try {

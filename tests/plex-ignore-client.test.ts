@@ -327,3 +327,20 @@ test("a completed poll keeps coverage pending when an older initial response arr
   await act(async () => initial.resolve(json({ ...completed, coverage: { revision: 3, pending: 0 } })));
   assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
 });
+
+test("a cached mapping mutation before the first Plex scan refreshes once and leaves New Plex search available",async t=>{
+  let revision=1,scanReads=0;
+  const defaults=configuredFetch(async()=>{scanReads++;return json({scan:{status:"idle",processed:0,total:0},report:null,coverage:{revision,pending:1}});});
+  const {container,click}=await mountPage(t,async(input,init)=>{
+    if(String(input).startsWith("/api/plex/manual-coverage")){
+      if(init?.method==="DELETE"){revision=2;return json({deleted:["saved"],revision,pending:1});}
+      return json({revision,pending:1,mappings:revision===1 ? [{id:"saved",revision:1,members:[]}] : []});
+    }
+    return defaults(input,init);
+  });
+  await click("Manual Coverage");await click("Delete mapping");await click("Close manual coverage");
+  const search=[...container.querySelectorAll("button")].find(button=>button.textContent?.includes("New Plex search"));
+  assert.ok(search,"A local recheck must not put the page into scan polling");
+  assert.equal(search.disabled,false);
+  assert.equal(scanReads,2,"Refresh the local comparison once");
+});

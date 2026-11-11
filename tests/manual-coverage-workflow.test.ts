@@ -392,6 +392,7 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   let secondPart = true;
   let itemRevision = 1;
   let ambiguous = false;
+  let catalogueDownloads = 0;
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     if (u.hostname === "plex") {
@@ -406,7 +407,7 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
     }
     if (u.pathname === "/v4/login") return Response.json({ data: { token: "test" } });
     if (u.pathname === "/3/tv/10") return Response.json({ id: 10, name: "Combined target", seasons: [{ season_number: 3 }] });
-    if (u.pathname === "/3/tv/10/season/3") return Response.json({ episodes: [{ id: 100, season_number: 3, episode_number: 18, name: "Complete episode", air_date: "2020-01-01" }] });
+    if (u.pathname === "/3/tv/10/season/3") { catalogueDownloads++; return Response.json({ episodes: [{ id: 100, season_number: 3, episode_number: 18, name: "Complete episode", air_date: "2020-01-01" }] }); }
     if (u.pathname === "/3/tv/10/season/3/episode/18") return Response.json({ id: 100, season_number: 3, episode_number: 18, name: "Complete episode" });
     if (u.pathname === "/v4/series/20") return Response.json({ data: { id: 20, name: "Split source", slug: "split-source" } });
     if (u.pathname === "/v4/episodes/200/extended" || u.pathname === "/v4/episodes/201/extended") {
@@ -444,10 +445,12 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   assert.deepEqual(complete.report.shows[0].missing, []);
   assert.deepEqual(complete.report.shows[0].manualCoverage[0].source.map((item: { ratingKey: string }) => item.ratingKey), ["part1", "part2"]);
 
+  assert.equal(catalogueDownloads, 1);
   secondPart = false;
   const incomplete = await rerun();
   assert.deepEqual(incomplete.report.shows[0].missing, [{ season: 3, episode: 18, title: "Complete episode", airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"] }]);
   assert.equal(incomplete.report.shows[0].manualCoverage, undefined);
+  assert.equal(catalogueDownloads, 1, "Manual Match existence and changed source holdings do not invalidate complete provider catalogues");
   secondPart = true;
   ambiguous = true;
   assert.equal((await rerun()).report.shows[0].missing.length, 1, "Conflicting combined/split identities cannot complete the source set");

@@ -289,3 +289,27 @@ export function coverageDatabase() {
     CREATE TABLE IF NOT EXISTS shelfcheck_coverage_evidence(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);`);
   return db;
 }
+
+// Generated provider catalogues and inputs do not pass through report ignore pruning.
+function plexInputsDatabase() {
+  const db = database();
+  db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_plex_generated_inputs (cache_key TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)");
+  return db;
+}
+export function readPlexGeneratedInputs<T>(key: string): T | null {
+  const row = plexInputsDatabase().prepare("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").get(key) as {payload:string}|undefined;
+  return parseStoredJson<T|null>(row?.payload, null);
+}
+export function listPlexGeneratedInputs<T>(prefix: string): Record<string, T> {
+  const rows = plexInputsDatabase().prepare("SELECT cache_key,payload FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE ?").all(`${prefix}%`) as {cache_key:string;payload:string}[];
+  return Object.fromEntries(rows.flatMap(row => {
+    const value = parseStoredJson<T|null>(row.payload, null);
+    return value === null ? [] : [[row.cache_key.slice(prefix.length), value]];
+  }));
+}
+export function writePlexGeneratedInputs<T>(key: string, inputs: T) {
+  plexInputsDatabase().prepare("INSERT INTO shelfcheck_plex_generated_inputs(cache_key,payload) VALUES(?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload").run(key, JSON.stringify(inputs));
+}
+export function deletePlexGeneratedInputs() {
+  plexInputsDatabase().exec("DELETE FROM shelfcheck_plex_generated_inputs");
+}

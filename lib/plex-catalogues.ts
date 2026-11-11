@@ -29,6 +29,7 @@ export type PlexGeneratedInputs = {
   comparisons: Record<string, SavedPlexComparison>;
   inventory?: { capturedAt:string; complete:boolean; groups:PlexShowGroup[]; items:Record<string,PlexMetadata[]>; evidence:CoverageEvidence[] };
   fullScanStartedAt?: string;
+  successfulFullScans?: {utcDate: string; count: number};
   deferredTmdbChanges: Record<string, true>;
 };
 export function readPlexInputs(): PlexGeneratedInputs {
@@ -40,6 +41,7 @@ export function readPlexInputs(): PlexGeneratedInputs {
     comparisons: listPlexGeneratedInputs("comparison:"),
     inventory: readPlexGeneratedInputs<PlexGeneratedInputs["inventory"]>("inventory") || undefined,
     fullScanStartedAt: readPlexGeneratedInputs<{startedAt:string}>("full-scan")?.startedAt,
+    successfulFullScans: readPlexGeneratedInputs<{successfulFullScans?: PlexGeneratedInputs["successfulFullScans"]}>("full-scan")?.successfulFullScans,
   };
 }
 export function savePlexCatalogue<P extends "tmdb" | "tvdb">(provider: P, id: number, catalogue: PlexGeneratedInputs[P][string]) {
@@ -54,8 +56,9 @@ export function savePlexInventory(inventory: NonNullable<PlexGeneratedInputs["in
 export function saveDeferredTmdbChanges(changes: Record<string, true>) {
   writePlexGeneratedInputs("deferred-tmdb", changes);
 }
-export function savePlexScanBaseline(startedAt: string) {
-  writePlexGeneratedInputs("full-scan", {startedAt});
+export function savePlexScanBaseline(startedAt: string, successfulFullScans: NonNullable<PlexGeneratedInputs["successfulFullScans"]>) {
+  // One durable row commits both successful-full-scan policies at the same boundary.
+  writePlexGeneratedInputs("full-scan", {startedAt, successfulFullScans});
 }
 /** Snapshot writer for local rechecks. Full scans write only their changed rows. */
 export function savePlexInputs(inputs: PlexGeneratedInputs) {
@@ -63,7 +66,6 @@ export function savePlexInputs(inputs: PlexGeneratedInputs) {
   for (const [id,catalogue] of Object.entries(inputs.tvdb)) savePlexCatalogue("tvdb", Number(id), catalogue);
   for (const [key,input] of Object.entries(inputs.comparisons)) savePlexComparison(key, input);
   if (inputs.inventory) savePlexInventory(inputs.inventory);
-  if (inputs.fullScanStartedAt) savePlexScanBaseline(inputs.fullScanStartedAt);
 }
 export function clearPlexInputs(ratingKey?: string) {
   if (!ratingKey) { deletePlexGeneratedInputs(); return; }

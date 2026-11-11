@@ -311,5 +311,6 @@ export function writePlexGeneratedInputs<T>(key: string, inputs: T) {
   plexInputsDatabase().prepare("INSERT INTO shelfcheck_plex_generated_inputs(cache_key,payload) VALUES(?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload").run(key, JSON.stringify(inputs));
 }
 export function deletePlexGeneratedInputs() {
-  plexInputsDatabase().exec("DELETE FROM shelfcheck_plex_generated_inputs");
+  // Successful scan bookkeeping survives explicit catalogue/report clearing.
+  plexInputsDatabase().exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key != 'full-scan'");
 }

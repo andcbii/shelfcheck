@@ -4,6 +4,22 @@ Shelfcheck identifies aired TV episodes missing from a Trakt collection or Plex 
 
 ## Language
 
+**Provider catalogue**:
+A provider's description of a show and its episodes, including their identities, numbering, and air dates. TMDB and TVDB may describe the same content differently.
+
+**Library inventory**:
+The shows and episode items present in the Plex libraries included in a scan, together with the identities Plex assigns to them.
+
+**Manual Match**:
+A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes.
+_Avoid_: Manual Coverage, Link Episodes (as names for the saved match)
+
+**Auto Match**:
+A match determined and controlled by Shelfcheck through automatic matching.
+
+**Coverage Issue**:
+An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists.
+
 **Episode coverage**:
 The content represented by an episode record, which may correspond to one or several records at another provider. A complete combined episode covers each of its parts; an individual part covers only that part.
 

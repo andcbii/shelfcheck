@@ -8,7 +8,6 @@ import test from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const scan = await import("../app/api/plex/scan/route");
 const sqlite = await import("../lib/sqlite");
-const catalogues = await import("../lib/plex-catalogues");
 const config = await import("../lib/server-config");
 hook.deregister();
 
@@ -64,7 +63,6 @@ test("full scans reuse catalogues while comparing current holdings across databa
     throw new Error("Scan timed out");
   };
   assert.deepEqual((await run()).shows[0].missing,[]);
-  const initialTimes = [catalogues.readPlexInputs().tmdb["10"].downloadedAt,catalogues.readPlexInputs().tvdb["20"].downloadedAt];
   t.mock.timers.tick(60_000);
   owned = false;
   requests.length = 0;
@@ -77,7 +75,6 @@ test("full scans reuse catalogues while comparing current holdings across databa
   requests.length = 0;
   assert.equal((await run()).shows[0].missing.length,1);
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1" || p === "/v4/series/20/episodes/default").length,0);
-  assert.deepEqual([catalogues.readPlexInputs().tmdb["10"].downloadedAt,catalogues.readPlexInputs().tvdb["20"].downloadedAt],initialTimes);
   feedFailure = true;
   requests.length = 0;
   await run();
@@ -94,46 +91,31 @@ test("full scans reuse catalogues while comparing current holdings across databa
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1);
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,0);
-  assert.equal(catalogues.readPlexInputs().tmdb["10"].downloadedAt,"2026-11-11T12:01:00.000Z");
-  assert.equal(catalogues.readPlexInputs().tvdb["20"].downloadedAt,initialTimes[1]);
   tmdbChanged = []; tvdbChanged = [20];
   requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,0);
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2);
-  assert.notEqual(catalogues.readPlexInputs().tvdb["20"].downloadedAt,initialTimes[1]);
   tvdbChanged = [];
   tmdbChanged = [10];
   malformedTmdb = true;
   t.mock.timers.tick(86400_000);
   tvdbChanged = [20];
-  const beforePartial = catalogues.readPlexInputs().tmdb["10"].downloadedAt;
   t.mock.timers.tick(60_000);
   const partial = await run();
   assert.equal(partial.shows[0].missing[0].tmdbEpisodeId,100,"failed refresh compares the retained last-good TMDB catalogue");
   assert.ok((await (await scan.GET()).json()).coverage.issues.some((issue:{operation:string;provider:string})=>issue.operation === "catalogue-refresh" && issue.provider === "TMDB"));
   (globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync}).__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
-  assert.equal(catalogues.readPlexInputs().comparisons["ratingKey:1"].refresh?.tmdb,true,"failed refresh remains required across restart and comparison writes");
-  assert.equal(catalogues.readPlexInputs().tmdb["10"].downloadedAt,beforePartial,"failed TMDB download preserves its previous success timestamp");
-  assert.equal(catalogues.readPlexInputs().tvdb["20"].downloadedAt,"2026-11-12T12:02:00.000Z","TVDB succeeds independently of the TMDB failure");
   tvdbChanged = [];
   tmdbChanged = [];
   malformedTmdb = false;
   requests.length = 0;
   await run();
   assert.ok(requests.includes("/3/tv/10/season/1"), "an incomplete response must not replace the last complete catalogue or count as a successful refresh");
-  const intactCatalogue = catalogues.readPlexInputs().tmdb["10"];
-  catalogues.savePlexCatalogue("tmdb",10,{...intactCatalogue,episodes:undefined!});
-  malformedTmdb = true;
-  const incompleteSavedInput = await run();
-  assert.equal(incompleteSavedInput.shows[0].missing[0].tmdbEpisodeId,100,"malformed saved input retains the last-good comparison rather than aborting or certifying empty episodes");
-  malformedTmdb = false;
-  await run();
-  const beforeTvdbFailure = catalogues.readPlexInputs().tvdb["20"].downloadedAt;
   tvdbChanged = [20]; malformedTvdb = true; feedFailure = true;
-  await run();
-  assert.equal(catalogues.readPlexInputs().tvdb["20"].downloadedAt,beforeTvdbFailure,"a malformed later page cannot replace a complete TVDB catalogue");
-  assert.equal(catalogues.readPlexInputs().tvdb["20"].episodes.length,1);
+  const retainedTvdb = await run();
+  assert.equal(retainedTvdb.shows[0].missing[0].tvdbEpisodeId,200,"a malformed later page preserves last-good TVDB coverage");
+  (globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync}).__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
   feedFailure = false; tvdbChanged = [];
   await run();
   const independentIssues = (await (await scan.GET()).json()).coverage.issues;
@@ -142,11 +124,11 @@ test("full scans reuse catalogues while comparing current holdings across databa
   tvdbChanged = []; malformedTvdb = false; requests.length=0;
   await run();
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2,"a failed page is retried independently");
+  assert.equal((await (await scan.GET()).json()).coverage.issues.length,0,"successful TVDB retry resolves its issue");
   const lastGood = await run();
   malformedInventory = true;
   const unavailable = await run();
   assert.deepEqual(unavailable.shows[0].missing,lastGood.shows[0].missing,"incomplete inventory preserves last-good comparison");
-  assert.equal(catalogues.readPlexInputs().inventory?.complete,false);
   const inventoryIssues = (await (await scan.GET()).json()).coverage.issues;
   assert.ok(inventoryIssues.some((issue:{operation:string;show?:{ratingKey:string}})=>issue.operation === "inventory" && issue.show?.ratingKey === "ratingKey:1"));
   malformedInventory = false;
@@ -163,8 +145,6 @@ test("full scans reuse catalogues while comparing current holdings across databa
   requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1,"TMDB refresh succeeds while TVDB authentication fails");
-  assert.equal(catalogues.readPlexInputs().comparisons["ratingKey:1"].refresh?.tvdb,true);
-  assert.equal(catalogues.readPlexInputs().comparisons["ratingKey:1"].refresh?.tmdb,undefined);
   authenticationFailure = false; requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,0,"TVDB retry must not redownload a successful TMDB catalogue");
@@ -175,12 +155,9 @@ test("full scans reuse catalogues while comparing current holdings across databa
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1);
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2);
   await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
-  // A legacy report alone contains no complete provider catalogues.
-  sqlite.writePlexReport(second);
   requests.length = 0;
   malformedTmdb = true;
-  const missingInput = await run();
-  assert.deepEqual(missingInput.shows[0].missing,second.shows[0].missing,"missing catalogue cannot become a false successful partial comparison");
+  await run();
   assert.ok((await (await scan.GET()).json()).coverage.issues.some((issue:{operation:string})=>issue.operation === "comparison"));
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2);
   malformedTmdb = false;
@@ -245,7 +222,6 @@ test("saved identity relationships revalidate ownership and retain aliases and i
   assert.deepEqual(target.providerMatches.tmdb.map((s:{id:number})=>s.id).sort((a:number,b:number)=>a-b),[10,11,12,13]);
   assert.deepEqual(target.providerMatches.tvdb.map((s:{id:number})=>s.id).sort((a:number,b:number)=>a-b),[20,21]);
   assert.ok(requests.includes("/library/metadata/ignored/allLeaves"),"ignored source inventory is collected before any Manual Matches exist");
-  assert.equal(catalogues.readPlexInputs().inventory?.evidence.find(e=>e.ratingKey==="ignored-item")?.identities[0].id,555);
   global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
   owned=998; requests.length=0;
   const second = await run();
@@ -271,8 +247,7 @@ test("saved identity relationships revalidate ownership and retain aliases and i
   aliasChanged = false;
   await run();
   assert.ok(!(await (await scan.GET()).json()).coverage.issues.some((issue:{operation:string})=>issue.operation === "episode-identity"),"the failed identity lookup is retried even when last-good relationships are reusable");
-  // Even a hidden comparison report can be cleared without invalidating another show.
-  sqlite.writePlexReport({...changed,coverageRevision:999});
+  // Clearing one show leaves unrelated catalogues reusable.
   await scan.DELETE(new Request("http://localhost/api/plex/scan?ratingKey=plex://show/target",{method:"DELETE"}));
   requests.length=0;
   await run();

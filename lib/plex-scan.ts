@@ -239,6 +239,23 @@ type LoadedComparison = {
   tvdbChanges: Set<number> | null; logger: Pick<ScanLogger,"info"|"warn">;
   addWarning: (message:string)=>void; setHeartbeat: (key:string,title:string,phase:string)=>void;
 };
+/** Ordinary automatic ownership excludes ignored shows; manual evidence keeps all items. */
+function libraryInventoryIndex(groups: PlexShowGroup[], items: Record<string, PlexMetadata[]>, ignored: Set<string>) {
+  const libraryTmdbEpisodeIds = new Set<number>();
+  const libraryTvdbEpisodeIds = new Set<number>();
+  const libraryImdbEpisodeIds = new Set<string>();
+  for (const group of groups) {
+    if (ignored.has(group.identity)) continue;
+    for (const record of group.records) for (const episode of items[record.ratingKey || ""] || []) {
+      const ids = idsFromGuids(episode.Guid);
+      if (ids.tmdbId) libraryTmdbEpisodeIds.add(ids.tmdbId);
+      if (ids.tvdbId) libraryTvdbEpisodeIds.add(ids.tvdbId);
+      if (ids.imdbId) libraryImdbEpisodeIds.add(ids.imdbId);
+    }
+  }
+  return {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds};
+}
+
 function localComparisonInventory(localMetadata: PlexMetadata[]) {
   const localEpisodes = new Set(localMetadata.filter(hasPlexEpisodeCoordinate).map(episode => `${episode.parentIndex}:${episode.index}`));
   const localProviderEpisodes: LocalCompoundEpisode[] = localMetadata.flatMap(episode => {
@@ -497,9 +514,6 @@ async function runPlexScan(targetRatingKey?: string) {
       results.push(...carried.shows);
       Object.assign(scanCache, carried.cache);
     }
-    const libraryTmdbEpisodeIds = new Set<number>();
-    const libraryTvdbEpisodeIds = new Set<number>();
-    const libraryImdbEpisodeIds = new Set<string>();
     const queue: PlexShowGroup[] = [];
     const localResponsesByRatingKey = new Map<string, PlexContainer>();
     currentTotal = candidates.length;
@@ -540,12 +554,7 @@ async function runPlexScan(targetRatingKey?: string) {
     queue.push(...candidates);
     logger.info("plex.scan.plan", { total: candidates.length, reused: processed, refreshing: queue.length, tmdbChanged: tmdbChanges?.size, tvdbChanged: tvdbChanges?.size, cacheUsable, targetRatingKey });
     updateStatus({ status: "running", processed, total: candidates.length });
-    for (const group of shows) for (const record of group.records) for (const episode of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
-      const ids = idsFromGuids(episode.Guid);
-      if (ids.tmdbId) libraryTmdbEpisodeIds.add(ids.tmdbId);
-      if (ids.tvdbId) libraryTvdbEpisodeIds.add(ids.tvdbId);
-      if (ids.imdbId) libraryImdbEpisodeIds.add(ids.imdbId);
-    }
+    const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(allShows, inputs.inventory.items, ignoredKeys);
     logger.info("plex.library.episode-identities", { tmdb: libraryTmdbEpisodeIds.size, tvdb: libraryTvdbEpisodeIds.size, imdb: libraryImdbEpisodeIds.size });
     let lastCheckpointProcessed = processed;
     let lastCheckpointAt = Date.now();
@@ -822,8 +831,16 @@ function coverageGroupsForResults(results: PlexShowResult[], manualInventory: Co
     })}];
   });
 }
+let coverageRecheckQueue: Promise<void> = Promise.resolve();
 /** Reconcile only affected comparisons. No client credentials, enumeration or HTTP is permitted here. */
-export async function requestCoverageRecheck(impact: CoverageImpact) {
+export function requestCoverageRecheck(impact: CoverageImpact): Promise<void> {
+  // Every mutation must finish its comparison against the preceding published report.
+  // Keep later work runnable even when an earlier recheck fails.
+  const recheck = coverageRecheckQueue.then(() => recheckCoverage(impact));
+  coverageRecheckQueue = recheck.catch(() => {});
+  return recheck;
+}
+async function recheckCoverage(impact: CoverageImpact) {
   const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
   const settings=parsePlexPreferences(readPlexSettings());
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
@@ -846,13 +863,7 @@ export async function requestCoverageRecheck(impact: CoverageImpact) {
     return;
   }
   const inventory=inputs.inventory;
-  const libraryTmdbEpisodeIds=new Set<number>(),libraryTvdbEpisodeIds=new Set<number>(),libraryImdbEpisodeIds=new Set<string>();
-  for (const group of inventory.groups.filter(group=>!ignored.has(group.identity))) for (const record of group.records) for (const episode of inventory.items[record.ratingKey || ""] || []) {
-    const ids=idsFromGuids(episode.Guid);
-    if (ids.tmdbId) libraryTmdbEpisodeIds.add(ids.tmdbId);
-    if (ids.tvdbId) libraryTvdbEpisodeIds.add(ids.tvdbId);
-    if (ids.imdbId) libraryImdbEpisodeIds.add(ids.imdbId);
-  }
+  const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(inventory.groups, inventory.items, ignored);
   const results=[...prior.shows];
   for (const key of targets) {
     if (ignored.has(key)) continue;

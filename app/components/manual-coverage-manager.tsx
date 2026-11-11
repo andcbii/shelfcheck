@@ -107,6 +107,14 @@ export function ManualCoverageManager({ initialUrls, initialMappingId, onClose, 
       }
       if (result.existingMapping) {
         openMapping(result.existingMapping);
+        // A submitted episode may be another part of a saved combined episode.
+        // Keep the submitted records first, then include the saved complete set.
+        const members: CoverageMember[] = [...result.members];
+        for (const member of result.existingMapping.members as CoverageMember[]) {
+          if (!members.some(candidate => candidate.provider === member.provider && candidate.id === member.id)) members.push(member);
+        }
+        setUrls(members.map(member => member.url));
+        setMessage("This episode already belongs to a mapping. Kept your resolved episodes and included its saved members. Check the complete sets, then resolve and review before saving.");
         return;
       }
       if (result.preview)

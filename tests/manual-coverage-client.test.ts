@@ -129,17 +129,27 @@ test("manual coverage manager presents reviewed identities and deletes the selec
 });
 
 
-test("selecting an existing member opens its mapping for editing instead of offering a competing save", async (t) => {
+test("linking another split episode retains the selected episode when opening an existing coverage mapping", async (t) => {
   const browser = new Window({ url: "http://localhost/plex" });
   const old = new Map<string, PropertyDescriptor | undefined>();
-  const members = [{ provider: "TMDB", id: 100, show: "Target", title: "Missing", season: 1, episode: 1, url: "https://example.com/100" }, { provider: "TVDB", id: 200, show: "Other", title: "Equivalent", season: 8, episode: 8, url: "https://example.com/200" }];
+  const members = [{ provider: "TMDB", id: 100, show: "Target", title: "Combined episode", season: 1, episode: 1, url: "https://www.themoviedb.org/tv/10/season/1/episode/1" }, { provider: "TVDB", id: 200, show: "Other", title: "Part 1", season: 8, episode: 8, url: "https://thetvdb.com/series/other/episodes/200" }];
   const mapping = { id: "existing", revision: 4, members };
+  const added = { ...members[1], id: 201, title: "Part 2", episode: 9, url: "https://thetvdb.com/series/other/episodes/201" };
+  const submitted = [added, members[0]];
   let saves = 0;
+  let saved: { id: string; revision: number; preview: string } | undefined;
   for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch: async (_input: unknown, init?: RequestInit) => {
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body));
-      if (body.action === "resolve") return Response.json({ preview: "reviewed", members, existingMapping: mapping });
+      if (body.action === "resolve") {
+        if (!body.id) return Response.json({ preview: "partial", members: submitted, existingMapping: mapping });
+        assert.equal(body.id, mapping.id);
+        assert.deepEqual(body.urls, [added.url, members[0].url, members[1].url]);
+        return Response.json({ preview: "complete", members: [...submitted, members[1]] });
+      }
       saves++;
+      saved = body;
+      return Response.json({ revision: 5 });
     }
     return Response.json({ mappings: [mapping], pending: 0 });
   } })) {
@@ -156,14 +166,22 @@ test("selecting an existing member opens its mapping for editing instead of offe
       else Reflect.deleteProperty(globalThis, key);
     }
   });
-  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["https://www.themoviedb.org/tv/10/season/1/episode/1", "https://thetvdb.com/series/other/episodes/200"], onClose() {}, onChanged() {} })));
+  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: [added.url, "https://www.themoviedb.org/tv/10-target/season/1/episode/1?language=en-US"], onClose() {}, onChanged() {} })));
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
   await act(async () => resolve.click());
   assert.match(container.textContent || "", /Editing mapping existing · Revision 4/);
-  assert.equal(container.querySelector('[aria-label="Episode URL or provider-qualified ID 1"]')?.getAttribute("value"), "https://example.com/100");
+  assert.deepEqual([...container.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])')].map(input => input.value), [added.url, members[0].url, members[1].url]);
+  assert.match(container.textContent || "", /kept.*resolve and review/i);
   assert.equal(container.querySelector('[aria-label="Resolved episode preview"]'), null);
   assert.equal(saves, 0);
+  await act(async () => resolve.click());
+  assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /Episode ID 201/);
+  assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /Episode ID 200/);
+  const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
+  assert.ok(save);
+  await act(async () => save.click());
+  assert.deepEqual(saved, { action: "save", id: "existing", revision: 4, preview: "complete" });
 });
 
 

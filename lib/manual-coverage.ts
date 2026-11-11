@@ -1,3 +1,4 @@
+import { applyCoverageCorrections } from "@/lib/manual-coverage-inventory";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { coverageDatabase } from "@/lib/sqlite";
@@ -143,14 +144,7 @@ export function saveOwnershipCorrection(mappingId: unknown, revision: unknown, i
   } catch(error) {db.exec("ROLLBACK");throw error;}
 }
 export function correctedCoverageInventory(mapping: CoverageMapping, inventory: CoverageEvidence[]): CoverageEvidence[] {
-  const corrections=listCoverageCorrections().filter(c=>c.mappingId===mapping.id);
-  return inventory.map(item=>{
-    const correction=corrections.find(c=>c.showKey===item.showKey && c.ratingKey===item.ratingKey && c.fingerprint===item.fingerprint);
-    if (correction) return {...item,identities:item.identities.filter(i=>!mapping.members.some(m=>sameIdentity(m,i))).concat(correction.identities)};
-    const claimed=mapping.members.filter(m=>item.identities.some(i=>sameIdentity(m,i)));
-    const ambiguous=mapping.members.length>2 && new Set(claimed.map(m=>m.provider)).size===2;
-    return ambiguous ? {...item,identities:item.identities.filter(i=>!mapping.members.some(m=>sameIdentity(m,i)))} : item;
-  });
+  return applyCoverageCorrections(mapping, inventory, listCoverageCorrections());
 }
 
 // Lookup results must never overwrite a mapping repaired or deleted during an HTTP request.

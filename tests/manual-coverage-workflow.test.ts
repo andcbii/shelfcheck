@@ -367,3 +367,98 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   assert.equal(afterInvalid.revision,batch.revision);
   assert.deepEqual(afterInvalid.mappings.map((mapping: {id:string})=>mapping.id),[independent.mapping.id]);
 });
+
+test("full Plex scans withdraw complete-set Manual Match coverage when a source item or its correction changes", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "coverage-comparator-"));
+  const previousData = process.env.SHELFCHECK_DATA_DIR;
+  const previousConfig = process.env.SHELFCHECK_CONFIG_DIR;
+  process.env.SHELFCHECK_DATA_DIR = dir;
+  process.env.SHELFCHECK_CONFIG_DIR = dir;
+  const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+  t.after(() => {
+    cache.__shelfcheckDatabase?.close();
+    delete cache.__shelfcheckDatabase;
+    if (previousData === undefined) delete process.env.SHELFCHECK_DATA_DIR;
+    else process.env.SHELFCHECK_DATA_DIR = previousData;
+    if (previousConfig === undefined) delete process.env.SHELFCHECK_CONFIG_DIR;
+    else process.env.SHELFCHECK_CONFIG_DIR = previousConfig;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-11T12:00:00Z") });
+  await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
+  sqlite.writePlexSettings({ ignoredShows: [{ ratingKey: "ratingKey:source", title: "Ignored source" }], diagnosticsEnabled: false });
+  const target = { ratingKey: "target", title: "Combined target", Guid: [{ id: "tmdb://10" }] };
+  const source = { ratingKey: "source", title: "Ignored source", Guid: [{ id: "tvdb://20" }] };
+  let secondPart = true;
+  let itemRevision = 1;
+  let ambiguous = false;
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const u = new URL(String(input));
+    if (u.hostname === "plex") {
+      if (u.pathname === "/library/sections") return Response.json({ MediaContainer: { Directory: [{ key: "1", type: "show" }, { key: "2", type: "show" }] } });
+      if (u.pathname.includes("/sections/")) return Response.json({ MediaContainer: { Metadata: u.pathname.includes("/1/") ? [target] : [source] } });
+      if (u.pathname.includes("allLeaves")) {
+        const parts = [{ ratingKey: "part1", updatedAt: itemRevision, parentIndex: 8, index: 8, Guid: [{ id: "tvdb://200" }, ...(ambiguous ? [{ id: "tmdb://100" }] : [])] },
+          ...(secondPart ? [{ ratingKey: "part2", updatedAt: 1, parentIndex: 8, index: 9, Guid: [{ id: "tvdb://201" }] }] : [])];
+        return Response.json({ MediaContainer: { Metadata: u.pathname.includes("/source/") ? parts : [] } });
+      }
+      return Response.json({ MediaContainer: { Metadata: [target] } });
+    }
+    if (u.pathname === "/v4/login") return Response.json({ data: { token: "test" } });
+    if (u.pathname === "/3/tv/10") return Response.json({ id: 10, name: "Combined target", seasons: [{ season_number: 3 }] });
+    if (u.pathname === "/3/tv/10/season/3") return Response.json({ episodes: [{ id: 100, season_number: 3, episode_number: 18, name: "Complete episode", air_date: "2020-01-01" }] });
+    if (u.pathname === "/3/tv/10/season/3/episode/18") return Response.json({ id: 100, season_number: 3, episode_number: 18, name: "Complete episode" });
+    if (u.pathname === "/v4/series/20") return Response.json({ data: { id: 20, name: "Split source", slug: "split-source" } });
+    if (u.pathname === "/v4/episodes/200/extended" || u.pathname === "/v4/episodes/201/extended") {
+      const id = u.pathname.includes("/200/") ? 200 : 201;
+      return Response.json({ data: { id, seriesId: 20, seasonNumber: 8, number: id === 200 ? 8 : 9, name: id === 200 ? "Part one" : "Part two" } });
+    }
+    if (u.pathname === "/3/tv/changes") return Response.json({ results: [], total_pages: 1 });
+    if (u.pathname === "/v4/updates") return Response.json({ data: [] });
+    throw new Error("Unexpected HTTP: " + u);
+  });
+  const request = (body: unknown) => new Request("http://localhost/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const wait = async () => {
+    for (let i = 0; i < 300; i++) {
+      const result = await (await scan.GET()).json();
+      if (result.scan.status !== "running") {
+        assert.equal(result.scan.status, "completed", result.scan.error);
+        return result;
+      }
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error("scan timeout");
+  };
+  const rerun = async () => {
+    await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
+    return wait();
+  };
+  const previewResponse = await api.POST(request({ action: "resolve", urls: ["tmdb:100 show:10 season:3 episode:18", "tvdb:200", "tvdb:201"] }));
+  assert.equal(previewResponse.status, 200);
+  const preview = await previewResponse.json();
+  const savedResponse = await api.POST(request({ action: "save", preview: preview.preview }));
+  assert.equal(savedResponse.status, 201);
+  const saved = await savedResponse.json();
+  const complete = await wait();
+  assert.deepEqual(complete.report.shows.map((show: { title: string }) => show.title), ["Combined target"]);
+  assert.deepEqual(complete.report.shows[0].missing, []);
+  assert.deepEqual(complete.report.shows[0].manualCoverage[0].source.map((item: { ratingKey: string }) => item.ratingKey), ["part1", "part2"]);
+
+  secondPart = false;
+  const incomplete = await rerun();
+  assert.deepEqual(incomplete.report.shows[0].missing, [{ season: 3, episode: 18, title: "Complete episode", airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"] }]);
+  assert.equal(incomplete.report.shows[0].manualCoverage, undefined);
+  secondPart = true;
+  ambiguous = true;
+  assert.equal((await rerun()).report.shows[0].missing.length, 1, "Conflicting combined/split identities cannot complete the source set");
+  const state = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  const item = state.mappings[0].evidence.find((entry: { ratingKey: string }) => entry.ratingKey === "part1");
+  const corrected = await api.POST(request({ action: "correct", mappingId: saved.mapping.id, revision: state.revision, item, identities: [{ provider: "TVDB", id: 200 }] }));
+  assert.equal(corrected.status, 200);
+  assert.deepEqual((await wait()).report.shows[0].missing, []);
+  itemRevision++;
+  const changedItem = await rerun();
+  assert.equal(changedItem.report.shows[0].missing[0].tmdbEpisodeId, 100, "Changed Plex content invalidates the saved correction");
+  const changedState = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  assert.deepEqual(changedState.mappings[0].corrections, []);
+});

@@ -1,3 +1,4 @@
+import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
 import { applyCoverageCorrections } from "@/lib/manual-coverage-inventory";
 import "server-only";
 import { randomUUID } from "node:crypto";
@@ -10,10 +11,10 @@ export class CoverageError extends Error {
 }
 
 export function coverageState() {
-  return coverageDatabase().prepare("SELECT revision,pending FROM shelfcheck_coverage_state WHERE id=1").get() as {
-    revision: number;
-    pending: number;
-  };
+  const state = coverageDatabase().prepare("SELECT revision,pending FROM shelfcheck_coverage_state WHERE id=1").get() as {revision:number;pending:number};
+  const issues = listCoverageIssues();
+  if (state.pending) issues.push({id:"comparison-pending",operation:"comparison",scope:"library",cause:"Coverage changes need to be compared against the saved library inventory.",action:"Retry the comparison or run a Plex scan."} satisfies CoverageIssue);
+  return {revision:state.revision,pending:issues.length ? 1 : 0,issues};
 }
 
 export function listCoverageMappings(): CoverageMapping[] {
@@ -61,6 +62,7 @@ export function saveCoverageMapping(members: CoverageMember[], edit?: { id: stri
     for (const m of members)
       db.prepare("INSERT INTO shelfcheck_coverage_members VALUES(?,?,?)").run(m.provider, m.id, mapping.id);
     db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(mapping.revision);
+    if (existing) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === existing.id)) resolveCoverageIssue(issue.id);
     db.exec("COMMIT");
     return mapping;
   } catch (error) {
@@ -85,6 +87,7 @@ export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missi
     const missing: string[] = [];
     for (const id of new Set<string>(ids)) {
       const result = db.prepare("DELETE FROM shelfcheck_coverage_mappings WHERE id=?").run(id);
+      if (result.changes) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === id)) resolveCoverageIssue(issue.id);
       if (result.changes) correctionTable().prepare("DELETE FROM shelfcheck_coverage_corrections WHERE mapping_id=?").run(id);
       (result.changes ? deleted : missing).push(id);
     }

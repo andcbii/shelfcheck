@@ -6,6 +6,10 @@ import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInp
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
 export type ProviderCatalogue<T> = { version: 1; downloadedAt: string; show: T; episodes: ProviderEpisode[] };
+/** Only complete downloaded inputs can be reused or used as last-good fallback. */
+export function usableProviderCatalogue<T extends {id:number}>(catalogue: ProviderCatalogue<T> | undefined): catalogue is ProviderCatalogue<T> {
+  return catalogue?.version === 1 && Number.isFinite(catalogue.show?.id) && Array.isArray(catalogue.episodes) && Number.isFinite(Date.parse(catalogue.downloadedAt));
+}
 export type SavedPlexComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];
   tmdbId?: number; tvdbId?: number;

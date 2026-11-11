@@ -212,6 +212,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   healthFailure = 401;
   const outage = await rerun();
   assert.equal(outage.coverage.pending, 1);
+  assert.ok(outage.coverage.issues.some((issue:{operation:string;mappingId:string;provider:string;episode?:{id:number;provider:string};cause:string})=>issue.operation === "member-verification" && issue.mappingId === saved.mapping.id && issue.provider === "TVDB" && issue.episode?.provider === "TVDB" && issue.episode.id === 200 && issue.cause.includes("401")));
   assert.equal((await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id).health, "pending");
   assert.equal(outage.report.shows[0].missing[0].tmdbEpisodeId, 100);
   healthFailure = 429;

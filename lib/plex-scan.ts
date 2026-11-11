@@ -1,5 +1,6 @@
+import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, savePlexScanBaseline, clearPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, savePlexScanBaseline, clearPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { correctedCoverageInventory, listCoverageCorrections, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
@@ -66,22 +67,44 @@ const providerClient = new PlexProviderClient(
   },
 );
 
+const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number}>();
 const relationshipScope = new AsyncLocalStorage<SavedPlexComparison["relationships"]>();
-async function checkedJson<T>(url: string, init: RequestInit, provider: ProviderName): Promise<T> {
+async function checkedJson<T>(url: string, init: RequestInit, provider: ProviderName, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}): Promise<T> {
   const relationships = relationshipScope.getStore();
   const key = `${provider}:${url}`;
-  if (relationships && Object.hasOwn(relationships, key)) return relationships[key].value as T;
-  const value = await providerClient.json<T>(url, init, provider);
+  const show = comparisonIssueScope.getStore();
+  const issueId = `episode-identity:${show?.ratingKey}:${key}`;
+  if (relationships && Object.hasOwn(relationships, key) && !getCoverageIssue(issueId)) return relationships[key].value as T;
+  const endpoint = new URL(url);
+  const tvdbEpisodeId = endpoint.pathname.match(/\/(?:episodes|search\/tvdb)\/(\d+)/)?.[1];
+  const findId = endpoint.pathname.match(/\/find\/(\d+)/)?.[1];
+  const coordinate = endpoint.pathname.match(/\/tv\/(\d+)\/season\/(\d+)\/episode\/(\d+)/);
+  const matching = Boolean(tvdbEpisodeId || findId || coordinate || provider === "Trakt");
+  let value: T;
+  try { value = await providerClient.json<T>(url, init, provider); }
+  catch (error) {
+    if (show && matching) {
+      const externalId = episodeIdentity?.id;
+      setCoverageIssue({id:issueId,operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show,
+        ...(tvdbEpisodeId || externalId ? {episode:{provider:"TVDB" as const,id:Number(tvdbEpisodeId || externalId)}} : coordinate ? {episode:{provider:"TMDB" as const,showId:Number(coordinate[1]),season:Number(coordinate[2]),episode:Number(coordinate[3])}} : {}),
+        cause:coverageIssueCause(error),action:"Retry the Plex scan to verify this provider identity relationship."});
+    }
+    throw error;
+  }
+  if (show && matching) resolveCoverageIssue(issueId);
   if (relationships) relationships[key] = {provider, value};
   return value;
 }
 
 async function plexJson(path: string, url: string, token: string): Promise<PlexContainer> {
-  return checkedJson<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex");
+  const body = await checkedJson<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex");
+  const field = path === "/library/sections" ? "Directory" : "Metadata";
+  if (!Array.isArray(body.MediaContainer?.[field])) throw new Error(`Plex returned incomplete ${field === "Directory" ? "library sections" : "inventory"}.`);
+  return body;
 }
 
-async function tmdbJson<T>(path: string, token: string): Promise<T> {
-  return checkedJson<T>(`${TMDB}${path}`, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, "TMDB");
+async function tmdbJson<T>(path: string, token: string, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}): Promise<T> {
+  return checkedJson<T>(`${TMDB}${path}`, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, "TMDB", episodeIdentity);
 }
 
 async function traktJson<T>(path: string, credentials: TraktCredentials): Promise<T> {
@@ -111,7 +134,7 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<ProviderEpis
 }
 
 async function findTmdbEpisodeByTvdbId(tvdbEpisodeId: number, token: string): Promise<TmdbEpisodeFindResult[]> {
-  const found = await tmdbJson<{ tv_episode_results?: TmdbEpisodeFindResult[] }>(`/find/${tvdbEpisodeId}?external_source=tvdb_id`, token);
+  const found = await tmdbJson<{ tv_episode_results?: TmdbEpisodeFindResult[] }>(`/find/${tvdbEpisodeId}?external_source=tvdb_id`, token, {provider:"TVDB",id:tvdbEpisodeId});
   return found.tv_episode_results || [];
 }
 
@@ -173,6 +196,7 @@ async function tmdbChangedShows(since: string, token: string): Promise<Set<numbe
   let pages = 1;
   do {
     const body = await tmdbJson<{ results?: { id?: number }[]; total_pages?: number }>(`/tv/changes?start_date=${startDate}&end_date=${endDate}&page=${page}`, token);
+    if (!Array.isArray(body.results)) throw new Error("TMDB returned an incomplete change feed.");
     for (const item of body.results || []) if (item.id) changed.add(item.id);
     if ((body.total_pages || 1) > 500) throw new Error("TMDB change feed exceeded the safe pagination limit.");
     pages = Math.max(1, body.total_pages || 1);
@@ -189,7 +213,8 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
   let complete = false;
   while (page < 500) {
     const body = await checkedJson<{ data?: { entityType?: string; recordId?: number; seriesId?: number }[]; links?: { next?: string | null } }>(`${TVDB}/updates?since=${timestamp}&page=${page}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
-    for (const update of body.data || []) {
+    if (!Array.isArray(body.data)) throw new Error("TVDB returned an incomplete update feed.");
+    for (const update of body.data) {
       if (update.seriesId) changed.add(update.seriesId);
       else if (update.entityType === "series" && update.recordId) changed.add(update.recordId);
     }
@@ -244,7 +269,12 @@ async function runPlexScan(targetRatingKey?: string) {
     if (targetRatingKey && !shows.some((show) => show.identity === targetRatingKey)) throw new Error("That show is not available in the current Plex libraries.");
     const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
     logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
-    const token = await authenticateTvdb(providerClient, config.tvdbApiKey, config.tvdbPin);
+    let tvdbAuthenticationError: unknown;
+    const token = await authenticateTvdb(providerClient, config.tvdbApiKey, config.tvdbPin).then(token=>{resolveCoverageIssue("provider-authentication:TVDB");return token;}).catch(error=>{
+      tvdbAuthenticationError = error;
+      setCoverageIssue({id:"provider-authentication:TVDB",operation:"provider-authentication",provider:"TVDB",scope:"library",cause:coverageIssueCause(error),action:"Check TVDB credentials and retry the Plex scan."});
+      return "";
+    });
     const traktCredentials = await validTraktCredentials().catch((error) => {
       logger.warn("plex.crosswalk.trakt-unavailable", { error: error instanceof Error ? error.message : String(error) });
       return null;
@@ -262,14 +292,19 @@ async function runPlexScan(targetRatingKey?: string) {
     if (!targetRatingKey && inputs.fullScanStartedAt) {
       const changeBaseline = inputs.fullScanStartedAt;
       tmdbChanges = await tmdbChangedShows(changeBaseline, config.tmdbToken).catch((error) => {
+        setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",cause:coverageIssueCause(error),action:"Retry the next Plex scan to verify catalogue freshness."});
         logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
         return null;
       });
-      tvdbChanges = await tvdbChangedShows(changeBaseline, token).catch((error) => {
+      tvdbChanges = await (tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : tvdbChangedShows(changeBaseline, token)).catch((error) => {
+        setCoverageIssue({id:"provider-verification:TVDB",operation:"provider-verification",provider:"TVDB",scope:"library",cause:coverageIssueCause(error),action:"Retry the next Plex scan to verify catalogue freshness."});
         logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
         return null;
       });
     }
+    if (tmdbChanges !== null) resolveCoverageIssue("provider-verification:TMDB");
+    else if (!targetRatingKey && inputs.fullScanStartedAt && !getCoverageIssue("provider-verification:TMDB")) setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",cause:"The saved TMDB verification baseline is invalid or outside the provider change-feed window; catalogue freshness is unverified.",action:"Run a Plex scan to refresh and verify provider catalogues."});
+    if (tvdbChanges !== null) resolveCoverageIssue("provider-verification:TVDB");
     const results: PlexShowResult[] = [];
     const scanCache: Record<string, PlexCacheEntry> = {};
     if (targetRatingKey) {
@@ -288,11 +323,16 @@ async function runPlexScan(targetRatingKey?: string) {
         ratingKey: record.ratingKey,
         response: await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken),
       })));
-      for (const result of responses) {
+      for (const [index,result] of responses.entries()) {
+        const issueId = `inventory:${group.identity}:${group.records[index].ratingKey}`;
         if (result.status === "fulfilled") {
           const { ratingKey, response } = result.value;
           if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);
-        } else logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: result.reason instanceof Error ? result.reason.message : String(result.reason) });
+          resolveCoverageIssue(issueId);
+        } else {
+          setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},cause:coverageIssueCause(result.reason),action:"Retry the Plex scan after restoring access to this library record."});
+          logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
+        }
       }
     });
     const manualInventory: CoverageEvidence[] = [];
@@ -327,6 +367,13 @@ async function runPlexScan(targetRatingKey?: string) {
     await runTrackedWorkerPool(queue, PLEX_SCAN_WORKERS, activeWork, (group) => ({ key: group.identity, show: group.records[0]?.title || "Unknown show" }), async (group) => {
       const primary = group.records[0];
       const ratingKey = group.identity;
+      const retainComparison = (message: string) => {
+        const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
+        results.push(previous ? {...previous,warning:message} : {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[],warning:message});
+        if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];
+        processed += 1;
+        updateStatus({status:"running",processed,total:candidates.length});
+      };
       const priorCacheEntry = checkpoint?.scanCache[ratingKey] || prior?.scanCache?.[ratingKey];
       let cachedTvdbEpisodeImdbIds = { ...(inputs.comparisons[ratingKey]?.tvdbEpisodeImdbIds || priorCacheEntry?.tvdbEpisodeImdbIds || {}) };
       const showStarted = Date.now();
@@ -338,13 +385,14 @@ async function runPlexScan(targetRatingKey?: string) {
       let localResponses: PlexContainer[];
       try {
         details = await Promise.all(group.records.map(async (record) => (await plexJson(`/library/metadata/${record.ratingKey}?includeGuids=1`, config.plexUrl, config.plexToken)).MediaContainer?.Metadata?.[0] || record));
-        localResponses = await Promise.all(group.records.map((record) => localResponsesByRatingKey.get(record.ratingKey || "") || plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken)));
+        if (!inputs.inventory?.complete) throw new Error("The library inventory is incomplete; coverage cannot be verified against unavailable items.");
+        localResponses = group.records.map(record=>localResponsesByRatingKey.get(record.ratingKey || "")!);
+        resolveCoverageIssue(`inventory-details:${ratingKey}`);
       } catch (error) {
         const message = `Plex inventory could not be loaded: ${error instanceof Error ? error.message : String(error)} This show will be checked again next scan.`;
-        results.push({ ratingKey, plexGuid: group.plexGuid, plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: primary.thumb, plexEpisodes: 0, missing: [], warning: message });
-        logger.warn("plex.show.inventory-unavailable", { ratingKey, title: primary.title, error: message });
-        processed += 1;
-        updateStatus({ status: "running", processed, total: candidates.length });
+        setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
+        if (inputs.inventory?.complete) setCoverageIssue({id:`inventory-details:${ratingKey}`,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},cause:message,action:"Retry the Plex scan after restoring access to this show."});
+        retainComparison(message);
         return;
       }
       const plexGuids = [...new Set(details.flatMap((detail) => detail.guid?.startsWith("plex://show/") ? [detail.guid] : []))];
@@ -375,13 +423,13 @@ async function runPlexScan(targetRatingKey?: string) {
       let tvdbSlug: string | undefined;
       const savedComparison = inputs.comparisons[ratingKey];
       const refresh = {...savedComparison?.refresh};
-      inputs.comparisons[ratingKey] = {group, details, localMetadata, tmdbId, tvdbId, relationships:savedComparison?.relationships || {}, tmdbAliases:savedComparison?.tmdbAliases || [], tvdbAliases:savedComparison?.tvdbAliases || [], complete:false, refresh};
+      inputs.comparisons[ratingKey] = savedComparison ? {...savedComparison,refresh} : {group, details, localMetadata, tmdbId, tvdbId, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
       savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
+      const savedTmdb = inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
       try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
         phaseStarted = Date.now();
-        const savedTmdb = inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
-        const reuseTmdb = !targetRatingKey && !refresh.tmdb && savedTmdb?.version === 1 && tmdbChanges !== null && !tmdbChanges.has(savedTmdb.show.id);
+        const reuseTmdb = !targetRatingKey && !refresh.tmdb && usableProviderCatalogue(savedTmdb) && (tmdbChanges === null || !tmdbChanges.has(savedTmdb.show.id));
         tmdbShow = reuseTmdb ? savedTmdb.show : await getTmdbShow(tmdbId, tvdbId, config.tmdbToken);
         if (tmdbShow) {
           tmdbId = tmdbShow.id;
@@ -396,9 +444,17 @@ async function runPlexScan(targetRatingKey?: string) {
             savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           }
         }
+        resolveCoverageIssue(`catalogue-refresh:TMDB:${ratingKey}`);
         phaseTimings.tmdbMs = Date.now() - phaseStarted;
       } catch (error) {
         refresh.tmdb = true;
+        setCoverageIssue({id:`catalogue-refresh:TMDB:${ratingKey}`,operation:"catalogue-refresh",provider:"TMDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause:coverageIssueCause(error),action:"Retry the Plex scan to download this catalogue; last-good data is retained."});
+        if (usableProviderCatalogue(savedTmdb)) {
+          tmdbShow = savedTmdb.show; tmdbId = tmdbShow.id;
+          tvdbId ||= tmdbShow.external_ids?.tvdb_id || undefined;
+          providerEpisodes.push(...savedTmdb.episodes);
+          equivalentTmdbIds = equivalentTmdbShowIds(tmdbShow.id);
+        } else tmdbShow = null;
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
       }
@@ -407,7 +463,8 @@ async function runPlexScan(targetRatingKey?: string) {
           setHeartbeat(ratingKey, primary.title || "Unknown show", "tvdb-series-and-episodes");
           phaseStarted = Date.now();
           const savedTvdb = inputs.tvdb[String(tvdbId)];
-          const reuseTvdb = !targetRatingKey && !refresh.tvdb && savedTvdb?.version === 1 && tvdbChanges !== null && !tvdbChanges.has(tvdbId);
+          const reuseTvdb = !targetRatingKey && !refresh.tvdb && usableProviderCatalogue(savedTvdb) && (tvdbChanges === null || !tvdbChanges.has(tvdbId));
+          if (!reuseTvdb && tvdbAuthenticationError) throw tvdbAuthenticationError;
           const tvdb = reuseTvdb ? {episodes:savedTvdb.episodes,slug:savedTvdb.show.slug,name:savedTvdb.show.name} : await tvdbSeries(tvdbId, token, undefined, primary.title || "Unknown show");
           if (!reuseTvdb) {
             inputs.tvdb[String(tvdbId)] = {version:1, downloadedAt:new Date().toISOString(), show:{id:tvdbId, name:tvdb.name, slug:tvdb.slug}, episodes:tvdb.episodes};
@@ -420,20 +477,33 @@ async function runPlexScan(targetRatingKey?: string) {
           providerEpisodes.push(...tvdb.episodes);
           phaseTimings.tvdbMs = Date.now() - phaseStarted;
         }
+        resolveCoverageIssue(`catalogue-refresh:TVDB:${ratingKey}`);
         if (!tmdbId && !tvdbId) addWarning("No TMDB or TVDB ID was exposed by Plex.");
       } catch (error) {
         refresh.tvdb = true;
+        setCoverageIssue({id:`catalogue-refresh:TVDB:${ratingKey}`,operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause:coverageIssueCause(error),action:"Retry the Plex scan to download this catalogue; last-good data is retained."});
+        const savedTvdb = inputs.tvdb[String(tvdbId)];
+        if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); }
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");
         logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       }
+      if ((tmdbId && !tmdbShow) || (tvdbId && !tvdbResolved) || (!tmdbId && !tvdbId)) {
+        const cause = "Complete provider catalogue inputs are unavailable. Last-good comparison results are retained.";
+        setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry the Plex scan after restoring provider access."});
+        if (savedComparison) { inputs.comparisons[ratingKey] = {...savedComparison,refresh}; savePlexComparison(ratingKey,inputs.comparisons[ratingKey]); }
+        retainComparison(warning || cause);
+        return;
+      }
+      resolveCoverageIssue(`comparison-inputs:${ratingKey}`);
       const tmdbAliases = savedComparison?.tmdbAliases || [];
       const tvdbAliases = savedComparison?.tvdbAliases || [];
-      const reuseTmdbRelationships = !targetRatingKey && tmdbChanges !== null && !tmdbAliases.some(id => tmdbChanges.has(id)) && tvdbId === savedComparison?.tvdbId;
-      const reuseTvdbRelationships = !targetRatingKey && tvdbChanges !== null && !tvdbAliases.some(id => tvdbChanges.has(id));
+      const reuseTmdbRelationships = !targetRatingKey && (tmdbChanges === null || !tmdbAliases.some(id => tmdbChanges.has(id))) && tvdbId === savedComparison?.tvdbId;
+      const reuseTvdbRelationships = !targetRatingKey && (tvdbChanges === null || !tvdbAliases.some(id => tvdbChanges.has(id)));
       const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
-      await relationshipScope.run(relationships, async () => {
+      try {
+      await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId}, () => relationshipScope.run(relationships, async () => {
         if (tvdbId) {
           tmdbSeriesMatches = await tmdbShowsForTvdbId(tvdbId, config.tmdbToken).catch((error) => {
             logger.warn("plex.show.tmdb-equivalent-series-unavailable", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, error: error instanceof Error ? error.message : String(error) });
@@ -566,9 +636,17 @@ async function runPlexScan(targetRatingKey?: string) {
           tvdb: tvdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, slug: show.slug, ...(show.year && Number.isFinite(Number(show.year)) ? { year: Number(show.year) } : {}) })),
         };
         results.push({ ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, coverageOutcomes, missing, ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) });
-        inputs.comparisons[ratingKey] = {group,details,localMetadata,tmdbId,tvdbId,relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
+        inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? {...savedComparison,refresh} : {group,details,localMetadata,tmdbId,tvdbId,relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
-      });
+      }));
+      resolveCoverageIssue(`comparison-failure:${ratingKey}`);
+      } catch (error) {
+        const cause = coverageIssueCause(error);
+        setCoverageIssue({id:`comparison-failure:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry this comparison; run a Plex scan if saved inputs are incomplete."});
+        if (savedComparison) {inputs.comparisons[ratingKey] = {...savedComparison,refresh};savePlexComparison(ratingKey,inputs.comparisons[ratingKey]);}
+        retainComparison(cause);
+        return;
+      }
       const fingerprint = plexFingerprint(group);
       const episodeFingerprint = plexEpisodeFingerprint(localMetadata);
       cachedTvdbEpisodeImdbIds = pruneEpisodeIdentityCache(cachedTvdbEpisodeImdbIds, providerEpisodes.filter((episode) => episode.source === "TVDB").flatMap((episode) => episode.providerEpisodeId ? [episode.providerEpisodeId] : []));
@@ -608,9 +686,11 @@ async function runPlexScan(targetRatingKey?: string) {
       const nextCheckpoint = checkpointWithoutRatingKey(rawCheckpoint, targetRatingKey);
       if (nextCheckpoint) writePlexCheckpoint(nextCheckpoint); else clearPlexCheckpoint();
     }
+    resolveCoverageIssue("scan-failure");
     replaceStatus({ status: "completed", processed, total: candidates.length, startedAt, finishedAt });
     logger.info("plex.scan.complete", { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: providerClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) });
   } catch (error) {
+    setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",cause:coverageIssueCause(error),action:"Restore library/provider access and retry the Plex scan."});
     updateStatus({ status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The Plex scan failed.", rateLimitPaused: false, rateLimitProvider: undefined });
     logger.error("plex.scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, providerMetrics: providerClient.metrics() });
   } finally {
@@ -626,6 +706,7 @@ export function getPlexScanStatus(): PlexScanStatus {
     const lastActivity = Date.parse(status.heartbeatAt || status.startedAt || "");
     if (Number.isFinite(lastActivity) && Date.now() - lastActivity > 90_000) {
       const interrupted: PlexScanStatus = { ...status, status: "error", finishedAt: new Date().toISOString(), error: `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.` };
+      setCoverageIssue({id:"scan-failure",operation:"scan",scope:"library",cause:interrupted.error!,action:"Start a new Plex scan to resume verification."});
       writePlexScanStatus(interrupted);
       return interrupted;
     }

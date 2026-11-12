@@ -29,7 +29,9 @@ async function fixture(t: test.TestContext) {
     // Changes the feed returns only when its requested interval includes their UTC date.
     dated:[] as {id:number;date:string}[],
     // Fails only single-day feed requests, such as a separate fifth-scan safeguard list.
-    oneDayFeedFailure:false};
+    oneDayFeedFailure:false,
+    // Season downloads that wait until released, to interrupt a scan mid-library.
+    heldTmdb:new Map<number,()=>void>()};
   const requests: URL[] = [];
   const shows = [10,30].map(id=>({ratingKey:String(id),title:`Show ${id}`,Guid:[{id:`tmdb://${id}`},{id:`tvdb://${id+10}`}],updatedAt:1}));
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
@@ -55,6 +57,8 @@ async function fixture(t: test.TestContext) {
     if(u.pathname === "/3/tv/10/season/1/episode/1") return Response.json({id:100,name:"Pilot",season_number:1,episode_number:1});
     if(u.pathname.endsWith("/external_ids")) return Response.json({});
     if(u.pathname === "/v4/episodes/200/extended") return Response.json({data:{id:200,seriesId:20,seasonNumber:2,number:1,name:"Pilot part",remoteIds:[]}});
+    const held = u.pathname.match(/^\/3\/tv\/(\d+)\/season\/1$/);
+    if(held && state.heldTmdb.has(Number(held[1]))) { await new Promise<void>(release=>state.heldTmdb.set(Number(held[1]),release)); return Response.json({},{status:404}); }
     if(u.pathname === "/3/tv/10/season/1" && state.advanceClock) { t.mock.timers.tick(state.advanceClock); state.advanceClock = 0; }
     if(u.pathname === "/3/tv/10/season/1" && state.downloadFailure) return Response.json({});
     if(/^\/3\/tv\/\d+\/season\/1$/.test(u.pathname) && state.failedTmdb.has(Number(u.pathname.split("/")[3]))) return Response.json({},{status:404});
@@ -329,6 +333,85 @@ test("overdue and newly due safeguards coexist and each completed download resol
   for(let i=8;i<=9;i++) { await f.run(); assert.deepEqual(f.tmdbDownloads(),[],"fulfilled safeguards are not repeated because an unrelated issue persists"); }
   await f.run();
   assert.deepEqual(f.tmdbDownloads(),[],"the new day's tenth completed scan has no changed shows to refresh");
+});
+
+test("Manual Match and single-show clearing refresh obligations are fulfilled alongside an outstanding pending safeguard without consuming it", async t => {
+  const f = await fixture(t);
+  f.state.ownsTvdb = true;
+  f.state.today = [];
+  for(let i=1;i<=4;i++) await f.run();
+  f.state.feedFailure = true;
+  let result = await f.run(); // Completed scan five leaves its safeguard pending.
+  assert.ok(hasIssue(result,"provider-verification:TMDB"));
+  const post = (body:unknown) => matches.POST(new Request("http://localhost/api/plex/manual-coverage",{method:"POST",body:JSON.stringify(body)}));
+  const preview = await (await post({action:"resolve",urls:["tmdb:100 show:10 season:1 episode:1","tvdb:200"]})).json();
+  assert.equal((await post({action:"save",preview:preview.preview})).status,201);
+  assert.equal((await scan.DELETE(new Request("http://localhost/api/plex/scan?ratingKey=ratingKey:30",{method:"DELETE"}))).status,200);
+  f.restart();
+  result = await f.run(); // Completed scan six: the safeguard list is still unavailable.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1","/v4/series/20/episodes/default","/v4/series/40/episodes/default"],"the Manual Match and the cleared show refresh both providers despite the feed outage");
+  assert.ok(hasIssue(result,"provider-verification:TMDB"),"the pending safeguard stays visible");
+  f.state.feedFailure = false;
+  f.state.today = [10,30];
+  f.restart();
+  result = await f.run(); // Completed scan seven fulfils the safeguard.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1"],"fulfilled refresh obligations did not consume the safeguard, which bypasses same-day reuse for TMDB only");
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
+  await f.run();
+  assert.deepEqual(f.downloads(),[],"each obligation is consumed once");
+});
+
+test("a real scan interrupted mid-library does not count toward the fifth-scan cadence", async t => {
+  const f = await fixture(t);
+  for(let i=1;i<=4;i++) await f.run();
+  // Scan five reaches show 10's safeguard download and the process ends there.
+  f.state.heldTmdb.set(10,()=>{});
+  f.requests.length = 0;
+  await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
+  for(let i=0; i<500 && !f.downloads().length; i++) await new Promise(r=>setTimeout(r,10));
+  const global = globalThis as typeof globalThis & {__shelfcheckPlexScan?: Promise<void>};
+  const interrupted = global.__shelfcheckPlexScan!;
+  const release = f.state.heldTmdb.get(10)!;
+  f.state.heldTmdb.delete(10); // Later scans download normally.
+  try {
+    assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"the scan was interrupted mid-library");
+    assert.equal((await (await scan.GET()).json()).scan.status,"running");
+    // Simulate the process ending: the stuck scan is abandoned and the database reopened.
+    delete global.__shelfcheckPlexScan;
+    f.restart();
+    t.mock.timers.tick(120_000); // No heartbeat since the process ended.
+    const status = await (await scan.GET()).json();
+    assert.equal(status.scan.status,"error");
+    assert.ok(hasIssue(status,"scan-failure"));
+    let result = await f.run(); // Still completed scan five.
+    assert.deepEqual(f.downloads(),["/3/tv/10/season/1"]);
+    assert.deepEqual(result.coverage.issues,[]);
+    for(let i=6;i<=9;i++) { await f.run(); assert.deepEqual(f.downloads(),[],`completed scan ${i}`); }
+    result = await f.run();
+    assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"the tenth completed scan, so the interrupted attempt was not counted");
+  } finally {
+    release();
+    await interrupted;
+  }
+});
+
+test("explicit full cache clearing forces fresh downloads but keeps an outstanding pending safeguard", async t => {
+  const f = await fixture(t);
+  f.state.today = [];
+  for(let i=1;i<=4;i++) await f.run();
+  f.state.feedFailure = true;
+  await f.run(); // Completed scan five leaves its safeguard pending.
+  assert.equal((await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}))).status,200);
+  f.restart();
+  await f.run(); // Completed scan six downloads every catalogue again.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1","/v4/series/20/episodes/default","/v4/series/40/episodes/default"]);
+  f.state.feedFailure = false;
+  f.state.today = [10];
+  const result = await f.run(); // Completed scan seven.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"the pending safeguard survived the clear and bypasses same-day reuse for its changed show");
+  assert.deepEqual(result.coverage.issues,[]);
+  await f.run();
+  assert.deepEqual(f.downloads(),[]);
 });
 
 /**

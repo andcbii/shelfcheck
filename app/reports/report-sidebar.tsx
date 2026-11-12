@@ -15,7 +15,7 @@ export function ReportSidebar({ active, autoCount, unmatchedCount, providerCount
       <Link className={active === "auto-matches" ? "active" : ""} href="/reports/auto-matches"><b>02</b><span>Auto Matches</span><small>{autoCount}</small></Link>
       <Link className={active === "unmatched-shows" ? "active" : ""} href="/reports/unmatched-shows"><b>03</b><span>Unmatched Shows</span><small>{unmatchedCount}</small></Link>
       <Link className={active === "provider-matches" ? "active" : ""} href="/reports/provider-matches"><b>04</b><span>Provider Matches</span><small>{providerCount}</small></Link>
-      <Link className={active === "coverage-issues" ? "active" : ""} href="/reports/coverage-issues"><b>05</b><span>Coverage Issues</span><small>{issueCount}</small></Link>
+      <Link className={active === "coverage-issues" ? "active" : ""} href="/reports/coverage-issues"><b>05</b><span>Scan Issues</span><small>{issueCount}</small></Link>
     </nav>
   </aside>;
 }

@@ -165,8 +165,10 @@ test("pre-isolation databases keep valid verification history without fabricatin
   f.at(2);
   await f.run();
   assert.equal(f.feed("TMDB"),date(0),"absent TMDB history is recovered from its catalogues' own successful downloads, not fabricated");
-  assert.equal(f.feed("TVDB"),undefined,"absent TVDB history is not fabricated");
-  assert.deepEqual(f.downloads(),[],"usable catalogues downloaded before the fix stay reusable");
+  assert.equal(f.feed("TVDB"),tvdbSince(day(0)),"absent TVDB history is verified from its catalogues' own successful downloads, not fabricated");
+  // The update feed is checked from the earliest catalogue download, so the already-handled day 0 change
+  // reappears and is conservatively rechecked once; no other catalogue is downloaded.
+  assert.deepEqual(f.downloads(),["/v4/series/20/episodes/default"],"usable catalogues downloaded before the fix stay reusable");
   f.at(2,"13:00:00");
   await f.run();
   assert.equal(f.feed("TMDB"),date(2));
@@ -306,4 +308,28 @@ test("interrupted TMDB verification recovery resumes after restart without repea
   assert.deepEqual(result.coverage.issues,[]);
   release();
   await interrupted;
+});
+
+test("absent TVDB history verifies from its catalogues' own successful downloads and stays visibly unverified while the feed fails", async t => {
+  const f = await fixture(t);
+  await f.run();
+  f.legacy();
+  // A TVDB correction after the catalogues were downloaded, before verification history was lost.
+  f.state.tvdbChanges.push({id:40,at:day(0,"18:00:00")});
+  f.at(1);
+  f.state.tvdbFeedFailure = true;
+  let result = await f.run();
+  assert.deepEqual(f.downloads(),[],"last-good catalogues are kept while the feed is unavailable, and TMDB is not forced");
+  assert.ok(result.coverage.issues.some((issue:Issue)=>issue.id === "provider-verification:TVDB"),"TVDB freshness is visibly unverified");
+  f.restart();
+  f.at(2);
+  f.state.tvdbFeedFailure = false;
+  result = await f.run();
+  assert.equal(f.feed("TVDB"),tvdbSince(day(0)),"neither the failed attempt nor the completed scan fabricated a verification position");
+  assert.deepEqual(f.downloads(),["/v4/series/40/episodes/default"],"the change since the catalogue's own download is refreshed");
+  assert.ok(!result.coverage.issues.some((issue:Issue)=>issue.id === "provider-verification:TVDB"));
+  f.at(2,"13:00:00");
+  await f.run();
+  assert.equal(f.feed("TVDB"),tvdbSince(day(2)),"verified history continues from the successful check");
+  assert.deepEqual(f.downloads(),[]);
 });

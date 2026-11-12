@@ -1,4 +1,4 @@
-import { reuseProviderCatalogue, tmdbFeedCovers, tmdbVerificationPlan } from "@/lib/plex-catalogue-policy";
+import { reuseProviderCatalogue, tmdbFeedCovers, tmdbVerificationPlan, tvdbVerificationFrom } from "@/lib/plex-catalogue-policy";
 import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
@@ -585,8 +585,10 @@ async function runPlexScan(targetRatingKey?: string) {
         return null;
       });
     }
-    if (!targetRatingKey && tvdbPosition) {
-      tvdbChanges = await (tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : tvdbChangedShows(tvdbPosition, token)).catch((error) => {
+    // Without TVDB history, verification starts at each saved catalogue's own successful download.
+    const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
+    if (!targetRatingKey) {
+      tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : tvdbChangedShows(tvdbFeedFrom, token)).catch((error) => {
         setCoverageIssue({id:"provider-verification:TVDB",...(tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:"provider-verification",provider:"TVDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TVDB",kind:"series update feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
         logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
         return null;
@@ -865,8 +867,7 @@ async function runPlexScan(targetRatingKey?: string) {
       saveProviderVerification({
         ...inputs.verification,
         ...(tmdbChanges !== null ? {tmdb: startedAt} : {}),
-        // TVDB has no recovery path: without history, verification starts at a completed full scan.
-        ...(tvdbChanges !== null || (!tvdbPosition && inputs.inventory?.complete && !tvdbAuthenticationError) ? {tvdb: startedAt} : {}),
+        ...(tvdbChanges !== null ? {tvdb: startedAt} : {}),
       });
       // Isolated download, comparison, and verification issues do not prevent a Completed full scan from counting.
       if (inputs.inventory?.complete) saveCompletedFullScan(startedAt, upcomingFullScan);

@@ -1,3 +1,5 @@
+const CATALOGUE_AGE_LIMIT = 60 * 86400_000;
+
 /** A complete catalogue download is the only event that renews provider age. */
 export function reuseProviderCatalogue(input: {
   provider: "tmdb" | "tvdb"; now: string; downloadedAt?: string;
@@ -7,7 +9,7 @@ export function reuseProviderCatalogue(input: {
 }): boolean {
   if (!input.usable || input.mandatory || input.targeted) return false;
   const downloaded = Date.parse(input.downloadedAt || "");
-  if (!Number.isFinite(downloaded) || Date.parse(input.now) - downloaded > 60 * 86400_000) return false;
+  if (!Number.isFinite(downloaded) || Date.parse(input.now) - downloaded > CATALOGUE_AGE_LIMIT) return false;
   if (!input.changed) return true;
   return input.provider === "tmdb" && input.downloadedAt?.slice(0, 10) === input.now.slice(0, 10);
 }
@@ -32,4 +34,17 @@ export function tmdbVerificationPlan(position: string | undefined, catalogues: {
   const covered = catalogues.filter(catalogue => tmdbFeedCovers(catalogue.downloadedAt, now));
   const feedFrom = covered.map(catalogue => catalogue.downloadedAt).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
   return {feedFrom, recover: catalogues.filter(catalogue => !covered.includes(catalogue)).map(catalogue => catalogue.id)};
+}
+
+/**
+ * Where a full scan's TVDB update check starts.
+ *
+ * TVDB's update feed is timestamp-based and has no recovery window, so absent verification
+ * history is never fabricated: each saved catalogue is current as of its own successful download,
+ * and the feed starts at the earliest one still within its age limit (older ones refresh by age).
+ * With no such catalogue there is nothing to verify, so no feed request is needed.
+ */
+export function tvdbVerificationFrom(position: string | undefined, downloads: string[], now: string): string | undefined {
+  if (Number.isFinite(Date.parse(position || ""))) return position;
+  return downloads.filter(downloadedAt => Date.parse(now) - Date.parse(downloadedAt) <= CATALOGUE_AGE_LIMIT).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
 }

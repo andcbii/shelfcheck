@@ -83,9 +83,10 @@ test("deferred TMDB changes survive advancing verification, UTC midnight and res
   assert.deepEqual(f.counts(),[0,0],"successful download consumes the deferred correction");
 });
 
-// Superseded: this gap was measured from the last clean full scan. It is now TMDB's own
-// verification position, which only full scans with a successful TMDB feed advance.
-test("TMDB verification gaps refresh only TMDB strictly beyond the fourteen-day change-feed window", async t => {
+// Superseded: this gap was measured from the last clean full scan, and refreshed every TMDB
+// catalogue. It is now TMDB's own verification position; recovery refreshes only catalogues
+// whose own successful download the change feed cannot cover.
+test("TMDB verification recovery refreshes only TMDB catalogues strictly beyond the fourteen-day change-feed window", async t => {
   const f = await fixture(t); await f.run();
   // Targeted work must not advance provider verification positions.
   f.at("2026-11-25T11:59:59Z"); await f.run("ratingKey:1");
@@ -135,9 +136,12 @@ test("independent sixty-day provider ages expire strictly, retain last-good data
   f.requests.length=0; await f.run(); assert.deepEqual(f.counts(),[1,2],"explicit clearing beats same-day reuse");
 });
 
-test("targeted checks do not advance the TMDB verification position", async t => {
+// The targeted check leaves the position unadvanced; the isolation suite proves that with
+// several shows. Its own complete download is current, so only the change feed must verify it.
+test("targeted downloads are verified by the TMDB change feed once the verification position is out of window", async t => {
   const f = await fixture(t); await f.run();
   f.at("2026-11-25T11:59:59Z"); await f.run("ratingKey:1");
   f.at("2026-11-25T12:00:00.001Z"); f.restart(); await f.run();
-  assert.deepEqual(f.counts(),[1,0],"targeted fresh catalogues do not mask the full-scan gap or force TVDB");
+  assert.deepEqual(f.counts(),[0,0],"a catalogue downloaded within the feed window is not refreshed again, and TVDB is not forced");
+  assert.ok(f.requests.includes("/3/tv/changes"),"its freshness is verified by the change feed rather than assumed");
 });

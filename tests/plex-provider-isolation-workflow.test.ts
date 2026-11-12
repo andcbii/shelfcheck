@@ -34,6 +34,8 @@ async function fixture(t: test.TestContext) {
     tmdbChanges:[] as {id:number;date:string}[], tvdbChanges:[] as {id:number;at:string}[],
     failedTmdb:new Set<number>(), failedTvdb:new Set<number>(), failedInventory:new Set<string>(),
     owned:new Set([10,30,50]),
+    // Season downloads that wait until released, to interrupt a scan mid-library.
+    heldTmdb:new Map<number,()=>void>(),
   };
   const requests: URL[] = [];
   const shows = [10,30,50].map(id=>({ratingKey:String(id),title:`Show ${id}`,Guid:[{id:`tmdb://${id}`},{id:`tvdb://${id+10}`}],updatedAt:1}));
@@ -60,6 +62,7 @@ async function fixture(t: test.TestContext) {
       return Response.json({data:state.tvdbChanges.filter(c=>Date.parse(c.at) / 1000 >= since).map(c=>({entityType:"series",recordId:c.id}))});
     }
     const tmdb = u.pathname.match(/^\/3\/tv\/(\d+)(\/season\/1)?$/);
+    if(tmdb && tmdb[2] && state.heldTmdb.has(Number(tmdb[1]))) { await new Promise<void>(release=>state.heldTmdb.set(Number(tmdb[1]),release)); return Response.json({},{status:404}); }
     if(tmdb && tmdb[2] && state.failedTmdb.has(Number(tmdb[1]))) return Response.json({},{status:404});
     if(tmdb && tmdb[2]) return Response.json({episodes:[{id:Number(tmdb[1])*10,season_number:1,episode_number:1,name:"Pilot",air_date:"2020-01-01"}]});
     if(tmdb) return Response.json({id:Number(tmdb[1]),name:`Show ${tmdb[1]}`,seasons:[{season_number:1}],external_ids:{tvdb_id:Number(tmdb[1])+10}});
@@ -70,9 +73,9 @@ async function fixture(t: test.TestContext) {
     if(u.pathname.includes("/find/")) return Response.json({tv_results:[],tv_episode_results:[]});
     throw new Error("Unexpected HTTP: "+u);
   });
-  const run = async () => {
+  const run = async (ratingKey?: string) => {
     requests.length = 0;
-    await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
+    await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:JSON.stringify({ratingKey})}));
     for(let i=0;i<500;i++) { const result = await (await scan.GET()).json(); if(result.scan.status !== "running") { assert.equal(result.scan.status,"completed",result.scan.error); return result; } await new Promise(r=>setTimeout(r,10)); }
     throw new Error("Scan timed out");
   };
@@ -82,7 +85,14 @@ async function fixture(t: test.TestContext) {
     return provider === "TMDB" ? request?.searchParams.get("start_date") : request?.searchParams.get("since");
   };
   const at = (n: number, time?: string) => t.mock.timers.setTime(Date.parse(day(n, time)));
-  return {state,requests,run,downloads,feed,at,restart};
+  // Rewrite bookkeeping into the pre-isolation layout: one clean-scan baseline row, or none.
+  // Saved provider catalogues and their successful-download timestamps are kept.
+  const legacy = (startedAt?: string) => {
+    global.__shelfcheckDatabase!.exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key IN ('full-scan','completed-full-scan','provider-verification','pending-tvdb')");
+    if (startedAt) sqlite.writePlexGeneratedInputs("full-scan",{startedAt,successfulFullScans:{utcDate:startedAt.slice(0,10),count:1}});
+    restart();
+  };
+  return {state,requests,run,downloads,feed,at,restart,legacy};
 }
 
 const missing = (result: {report:{shows:{title:string;missing:unknown[]}[]}}, id: number) => result.report.shows.find(s=>s.title === `Show ${id}`)!.missing.length;
@@ -143,13 +153,7 @@ test("a failed change feed keeps its own missed interval while the other provide
 test("pre-isolation databases keep valid verification history without fabricating absent history", async t => {
   const f = await fixture(t);
   await f.run();
-  // Rewrite bookkeeping into the pre-isolation layout: one clean-scan baseline row, or none.
-  const legacy = (startedAt?: string) => {
-    (globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync}).__shelfcheckDatabase!
-      .exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key IN ('full-scan','completed-full-scan','provider-verification','pending-tvdb')");
-    if (startedAt) sqlite.writePlexGeneratedInputs("full-scan",{startedAt,successfulFullScans:{utcDate:startedAt.slice(0,10),count:1}});
-    f.restart();
-  };
+  const legacy = f.legacy;
   legacy(day(0));
   f.at(1);
   f.state.tvdbChanges.push({id:20,at:day(0,"18:00:00")});
@@ -160,10 +164,9 @@ test("pre-isolation databases keep valid verification history without fabricatin
   legacy();
   f.at(2);
   await f.run();
-  assert.equal(f.feed("TMDB"),undefined,"absent TMDB history is not fabricated");
+  assert.equal(f.feed("TMDB"),date(0),"absent TMDB history is recovered from its catalogues' own successful downloads, not fabricated");
   assert.equal(f.feed("TVDB"),undefined,"absent TVDB history is not fabricated");
-  // Interim blanket TMDB recovery; the sibling recovery ticket replaces it.
-  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1","/3/tv/50/season/1"]);
+  assert.deepEqual(f.downloads(),[],"usable catalogues downloaded before the fix stay reusable");
   f.at(2,"13:00:00");
   await f.run();
   assert.equal(f.feed("TMDB"),date(2));
@@ -206,4 +209,101 @@ test("identified changes stay due after verification advances, an empty later fe
   f.at(3,"13:00:00");
   await f.run();
   assert.deepEqual(f.downloads(),[],"successful retries consume only their own obligations");
+});
+
+const tmdbCatalogueRequests = (f: {requests: URL[]}) => f.requests.filter(u=>/^\/3\/tv\/\d+(\/season\/\d+)?$/.test(u.pathname)).map(u=>u.pathname).sort();
+
+test("upgrading with today's catalogues and no verification history reuses them while a persistent TVDB 404 retries", async t => {
+  const f = await fixture(t);
+  f.state.failedTvdb.add(40);
+  await f.run();
+  // The observed upgrade state: usable catalogues downloaded today, but no saved scan baseline.
+  f.legacy();
+  for (const time of ["12:10:00","12:20:00"]) {
+    f.at(0,time);
+    f.restart();
+    const result = await f.run();
+    assert.deepEqual(tmdbCatalogueRequests(f),[],`${time}: successful TMDB show and season catalogues are not downloaded again`);
+    assert.deepEqual(f.downloads(),["/v4/series/40/episodes/default"],`${time}: the failed TVDB lookup is retried`);
+    assert.equal(f.feed("TMDB"),date(0),`${time}: TMDB verifies changes since its catalogues were downloaded`);
+    assert.ok(f.requests.some(u=>u.pathname === "/library/metadata/50/allLeaves"),"full scans still read current inventory");
+    assert.ok(result.coverage.issues.some((issue:Issue)=>issue.id === "catalogue-refresh:TVDB:ratingKey:30"),"the isolated failure stays visible");
+    assert.ok(!result.coverage.issues.some((issue:Issue)=>issue.id === "provider-verification:TMDB"),"the TMDB gap is covered by its change feed");
+  }
+});
+
+test("absent TMDB history uses available feed history and stays visibly unverified while the feed fails", async t => {
+  const f = await fixture(t);
+  await f.run();
+  f.legacy();
+  f.at(1);
+  f.state.tmdbChanges.push({id:30,date:date(1)});
+  f.state.tmdbFeedFailure = true;
+  let result = await f.run();
+  assert.deepEqual(f.downloads(),[],"last-good catalogues are kept while the feed is unavailable, and TVDB is not forced");
+  assert.ok(result.coverage.issues.some((issue:Issue)=>issue.id === "provider-verification:TMDB"),"TMDB freshness is visibly unverified");
+  f.restart();
+  f.at(2);
+  f.state.tmdbFeedFailure = false;
+  result = await f.run();
+  assert.equal(f.feed("TMDB"),date(0),"the failed attempt did not fabricate a verification position");
+  assert.deepEqual(f.downloads(),["/3/tv/30/season/1"],"only the change found in the available history is refreshed");
+  assert.ok(!result.coverage.issues.some((issue:Issue)=>issue.id === "provider-verification:TMDB"));
+});
+
+test("out-of-window TMDB history recovers only uncovered catalogues and keeps successful recovery downloads", async t => {
+  const f = await fixture(t);
+  await f.run();
+  f.at(15);
+  await f.run("ratingKey:10");
+  f.at(15,"13:00:00");
+  f.state.failedTmdb.add(50);
+  let result = await f.run();
+  assert.equal(f.feed("TMDB"),date(15),"the feed verifies the catalogue downloaded within its window");
+  assert.equal(f.feed("TVDB"),tvdbSince(day(0)),"TVDB keeps verifying from its own position");
+  assert.deepEqual(f.downloads(),["/3/tv/30/season/1","/3/tv/50/season/1"],"the targeted check advanced no position; only uncovered TMDB catalogues are refreshed and TVDB is not forced");
+  assert.equal(missing(result,50),0,"last-good results survive the failed recovery download");
+  assert.ok(result.coverage.issues.some((issue:Issue)=>issue.id === "catalogue-refresh:TMDB:ratingKey:50"),"the failed recovery download stays visible");
+  assert.ok(!result.coverage.issues.some((issue:Issue)=>issue.id === "provider-verification:TMDB"),"the remaining recovery work is durably retained");
+  for (const [n,from] of [[16,15],[29,16]]) {
+    f.restart();
+    f.at(n);
+    result = await f.run();
+    assert.equal(f.feed("TMDB"),date(from),`day ${n}: verification advanced past the retained recovery work`);
+    assert.deepEqual(f.downloads(),["/3/tv/50/season/1"],`day ${n}: only the permanently failing show retries; successful recovery downloads are not repeated`);
+    assert.ok(result.coverage.issues.some((issue:Issue)=>issue.id === "catalogue-refresh:TMDB:ratingKey:50"));
+  }
+  f.state.failedTmdb.clear();
+  f.at(29,"13:00:00");
+  await f.run();
+  f.at(29,"14:00:00");
+  result = await f.run();
+  assert.deepEqual(f.downloads(),[],"a successful retry fulfils the last recovery obligation");
+  assert.deepEqual(result.coverage.issues,[]);
+});
+
+test("interrupted TMDB verification recovery resumes after restart without repeating its successful downloads", async t => {
+  const f = await fixture(t);
+  await f.run();
+  f.at(20);
+  f.state.heldTmdb.set(50,()=>{});
+  f.requests.length = 0;
+  await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
+  for (let i=0; i<500 && (await (await scan.GET()).json()).scan.processed < 2; i++) await new Promise(r=>setTimeout(r,10));
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1","/3/tv/50/season/1"],"recovery started for every uncovered catalogue");
+  // Simulate a process restart while the scan is stuck on its last show.
+  const global = globalThis as typeof globalThis & {__shelfcheckPlexScan?: Promise<void>};
+  const interrupted = global.__shelfcheckPlexScan!;
+  delete global.__shelfcheckPlexScan;
+  const release = f.state.heldTmdb.get(50)!;
+  f.state.heldTmdb.delete(50);
+  f.restart();
+  f.at(20,"13:00:00");
+  const result = await f.run();
+  assert.equal(f.feed("TMDB"),date(20),"downloads saved before the interruption are verified from their own download");
+  assert.deepEqual(f.downloads(),["/3/tv/50/season/1"],"only the unfinished recovery download is repeated");
+  assert.equal(missing(result,50),0);
+  assert.deepEqual(result.coverage.issues,[]);
+  release();
+  await interrupted;
 });

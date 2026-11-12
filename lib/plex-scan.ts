@@ -1,4 +1,4 @@
-import { reuseProviderCatalogue, tmdbFeedCovers } from "@/lib/plex-catalogue-policy";
+import { reuseProviderCatalogue, tmdbFeedCovers, tmdbVerificationPlan } from "@/lib/plex-catalogue-policy";
 import { listCoverageIssues, setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, savePlexScanBaseline, saveDeferredTmdbChanges, savePendingTvdbChanges, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
@@ -534,13 +534,15 @@ async function runPlexScan(targetRatingKey?: string) {
     if (checkpoint) logger.info("plex.checkpoint.resume", { savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length });
     else if (rawCheckpoint && !targetRatingKey) { logger.warn("plex.checkpoint.discarded", { savedAt: rawCheckpoint.savedAt, cacheVersion: rawCheckpoint.cacheVersion, reason: "expired-or-incompatible" }); clearPlexCheckpoint(); }
     const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
-    const downloadedTmdb = new Set<number>();
     let tmdbChanges: Set<number> | null = null;
     let tvdbChanges: Set<number> | null = null;
     // Each provider verifies from its own position; targeted scans never consult or advance them.
     const {tmdb: tmdbPosition, tvdb: tvdbPosition} = inputs.verification;
-    if (!targetRatingKey && tmdbPosition) {
-      tmdbChanges = await tmdbChangedShows(tmdbPosition, config.tmdbToken, startedAt).catch((error) => {
+    // TMDB verification recovery: catalogues its change feed cannot cover are treated as changed.
+    const tmdbPlan = targetRatingKey ? {recover: []} : tmdbVerificationPlan(tmdbPosition, Object.values(inputs.tmdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [{id: catalogue.show.id, downloadedAt: catalogue.downloadedAt}] : []), startedAt);
+    const tmdbRecovery = new Set(tmdbPlan.recover);
+    if (!targetRatingKey) {
+      tmdbChanges = await (tmdbPlan.feedFrom ? tmdbChangedShows(tmdbPlan.feedFrom, config.tmdbToken, startedAt) : Promise.resolve(new Set<number>())).then(changes => changes && new Set([...changes, ...tmdbRecovery])).catch((error) => {
         setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TMDB",kind:"show change feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
         logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
         return null;
@@ -553,9 +555,9 @@ async function runPlexScan(targetRatingKey?: string) {
         return null;
       });
     }
-    retainVerifiedChanges(inputs, tmdbChanges, tvdbChanges);
+    // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
+    retainVerifiedChanges(inputs, tmdbChanges ?? tmdbRecovery, tvdbChanges);
     if (tmdbChanges !== null) resolveCoverageIssue("provider-verification:TMDB");
-    else if (!targetRatingKey && tmdbPosition && !getCoverageIssue("provider-verification:TMDB")) setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",cause:"The saved TMDB verification baseline is invalid or outside the provider change-feed window; catalogue freshness is unverified.",action:"Run a Plex scan to refresh and verify provider catalogues."});
     if (tvdbChanges !== null) resolveCoverageIssue("provider-verification:TVDB");
     // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
     const fifthScanChanges = fifthFullScan
@@ -692,7 +694,7 @@ async function runPlexScan(targetRatingKey?: string) {
       try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
         phaseStarted = Date.now();
-        const reuseTmdb = reuseProviderCatalogue({provider:"tmdb",now:startedAt,downloadedAt:savedTmdb?.downloadedAt,usable:usableProviderCatalogue(savedTmdb),mandatory:!!refresh.tmdb || (!!savedTmdb && !!fifthScanChanges?.has(savedTmdb.show.id)),targeted:!!targetRatingKey,changed:!!savedTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id),tmdbVerifiedThrough:tmdbPosition});
+        const reuseTmdb = reuseProviderCatalogue({provider:"tmdb",now:startedAt,downloadedAt:savedTmdb?.downloadedAt,usable:usableProviderCatalogue(savedTmdb),mandatory:!!refresh.tmdb || (!!savedTmdb && !!fifthScanChanges?.has(savedTmdb.show.id)),targeted:!!targetRatingKey,changed:!!savedTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id)});
         tmdbCatalogueReused = reuseTmdb;
         if (reuseTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id)) {
           inputs.deferredTmdbChanges[String(savedTmdb.show.id)] = true;
@@ -708,7 +710,6 @@ async function runPlexScan(targetRatingKey?: string) {
           providerEpisodes.push(...episodes);
           if (!reuseTmdb) {
             inputs.tmdb[String(tmdbShow.id)] = {version:1, downloadedAt:new Date().toISOString(), show:tmdbShow, episodes};
-            downloadedTmdb.add(tmdbShow.id);
             savePlexCatalogue("tmdb", tmdbShow.id, inputs.tmdb[String(tmdbShow.id)]);
             delete refresh.tmdb;
             delete inputs.deferredTmdbChanges[String(tmdbShow.id)];
@@ -818,17 +819,11 @@ async function runPlexScan(targetRatingKey?: string) {
     writePlexReport(report);
     const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
     if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
-    // Without feed coverage, TMDB is verified only by downloading every library catalogue.
-    const tmdbRefreshedLibrary = !targetRatingKey && !tmdbFeedCovers(tmdbPosition, startedAt) && Boolean(inputs.inventory?.complete) && candidates.every(group => {
-      const id = inputs.comparisons[group.identity]?.tmdbId;
-      return !id || downloadedTmdb.has(id);
-    });
-    if (tmdbRefreshedLibrary) resolveCoverageIssue("provider-verification:TMDB");
     if (!targetRatingKey) {
-      // Verified changes were retained before processing, so isolated failures cannot hold a position back.
+      // Verified changes and recovery work were retained before processing, so isolated failures cannot hold a position back.
       saveProviderVerification({
         ...inputs.verification,
-        ...(tmdbChanges !== null || tmdbRefreshedLibrary ? {tmdb: startedAt} : {}),
+        ...(tmdbChanges !== null ? {tmdb: startedAt} : {}),
         // TVDB has no recovery path: without history, verification starts at a completed full scan.
         ...(tvdbChanges !== null || (!tvdbPosition && inputs.inventory?.complete && !tvdbAuthenticationError) ? {tvdb: startedAt} : {}),
       });

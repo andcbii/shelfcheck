@@ -172,7 +172,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         if (result.mapping) openMapping(result.mapping);
         else if (!episodeScope) setEditing(null);
         onChanged(result.revision);
-        setMessage(result.pending ? "Saved. Some coverage checks need attention. See Coverage Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+        setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
         await load();
       }
     } catch (error) {
@@ -197,7 +197,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setPreview(null);
       }
       onChanged(body.revision);
-      setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Coverage Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+      setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Scan Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
       await load();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not delete mapping.");
@@ -263,7 +263,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     changeSelection([]);
     setMessage("Selection cleared because the health filter changed.");
   }}><option value="all">All mappings</option><option value="healthy">Healthy</option><option value="needs-review">Needs review</option><option value="pending">Pending</option></select></label>
- <p role="status">{pending ? <>Some coverage checks need attention. <a href="/reports/coverage-issues">See Coverage Issues</a> for details.</> : ""}</p><h3>{report ? "Manual Matches" : "Saved mappings"} ({mappings.length})</h3>{!mappings.length && <div className="empty auto-match-empty"><h3>{report ? "No Manual Matches" : "No manual coverage mappings saved."}</h3><p>Create a Manual Match to link complete episode sets, even before either set is owned.</p></div>}
+ <p role="status">{pending ? <>Some coverage checks need attention. <a href="/reports/coverage-issues">See Scan Issues</a> for details.</> : ""}</p><h3>{report ? "Manual Matches" : "Saved mappings"} ({mappings.length})</h3>{!mappings.length && <div className="empty auto-match-empty"><h3>{report ? "No Manual Matches" : "No manual coverage mappings saved."}</h3><p>Create a Manual Match to link complete episode sets, even before either set is owned.</p></div>}
  <section aria-label="Mapping selection"><p role="status">{selectedIds.length} mappings selected. Selection spans pages; changing the health filter clears it.</p><button disabled={locked || !visibleMappings.length} onClick={() => changeSelection(visibleMappings.map(mapping => mapping.id))}>Select all {visibleMappings.length} matching mappings</button><button disabled={locked || !selectedIds.length} onClick={() => changeSelection([])}>Clear selection</button><button disabled={locked || !selectedIds.length} onClick={() => setConfirmation([...selectedIds])}>Delete selected mappings</button></section>
  {confirmation && <section role="alertdialog" aria-label="Confirm mapping deletion"><p>Delete {confirmation.length} selected mappings? Plex comparisons will be rechecked.</p><button disabled={locked} onClick={() => void removeSelected(confirmation)}>Confirm delete {confirmation.length} mappings</button><button disabled={locked} onClick={() => setConfirmation(null)}>Cancel bulk deletion</button></section>}
  <ReportPagination total={visibleMappings.length} page={currentPage} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1); }}/>

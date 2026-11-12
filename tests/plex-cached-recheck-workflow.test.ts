@@ -109,6 +109,10 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   const incomplete=await report();
   assert.deepEqual(incomplete.report.shows,lastGood.report.shows,"Incomplete saved inputs preserve last-good comparisons");
   assert.equal(incomplete.report.lastScan,lastGood.report.lastScan);
+  const missingInput = incomplete.coverage.issues.find((issue:{id:string})=>issue.id === "comparison-inputs:ratingKey:12");
+  assert.match(missingInput.cause,/Saved show comparison inputs/);
+  assert.equal(missingInput.category,undefined);
+  assert.match(missingInput.action,/Plex scan.*saved comparison inputs/);
   assert.ok(incomplete.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-inputs:ratingKey:12"));
   assert.ok(!incomplete.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-pending"));
   const repaired=await rerun();

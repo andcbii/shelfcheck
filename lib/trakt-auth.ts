@@ -1,6 +1,7 @@
 import "server-only";
 
 import { readTraktApplication, readTraktCredentials, writeTraktCredentials, type TraktCredentials } from "@/lib/server-config";
+import { ProviderHttpError, ProviderNetworkError, ProviderResponseError } from "@/lib/plex-provider-client";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 
 const TOKEN_URL = "https://auth.trakt.tv/oauth/token";
@@ -27,6 +28,7 @@ async function saveToken(application: { clientId: string; clientSecret: string }
 }
 
 async function tokenRequest(body: Record<string, string>, application: { clientId: string; clientSecret: string }, redirectUri: string) {
+  const requested = {provider:"Trakt" as const,kind:"authentication"};
   const response = await fetch(TOKEN_URL, {
     method: "POST",
     headers: {
@@ -36,12 +38,12 @@ async function tokenRequest(body: Record<string, string>, application: { clientI
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),
-  });
+  }).catch(()=>{throw new ProviderNetworkError("Trakt",requested);});
   if (!response.ok) {
-    const detail = await response.json().catch(() => ({})) as { error_description?: string };
-    throw new Error(detail.error_description || `Trakt authorization failed (${response.status}).`);
+    throw new ProviderHttpError("Trakt",response.status,requested);
   }
-  return saveToken(application, await response.json() as TokenResponse, redirectUri);
+  const token = await response.json().catch(()=>{throw new ProviderResponseError("Trakt",requested);}) as TokenResponse;
+  return saveToken(application, token, redirectUri);
 }
 
 export async function exchangeAuthorizationCode(code: string, redirectUri: string) {

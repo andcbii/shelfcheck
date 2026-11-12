@@ -311,8 +311,8 @@ test("completed Plex reports show pending coverage and offer a fresh scan retry"
     if (init?.method === "POST") { pending = 0; return json({}); }
     return json({ ...completed, coverage: { revision: 3, pending, issues:pending?issues:[] } });
   }));
-  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
-  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage Issues/);
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Some scan checks need attention/);
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Scan Issues/);
   assert.equal(container.querySelectorAll(".show-list article").length, 1);
   await click("New Plex search");
   assert.equal(container.querySelector('[role="status"]'), null);
@@ -328,9 +328,9 @@ test("a completed poll keeps coverage pending when an older initial response arr
     return json({ ...completed, coverage: { revision: 4, pending: 1, issues } });
   }));
   await click("New Plex search");
-  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Some scan checks need attention/);
   await act(async () => initial.resolve(json({ ...completed, coverage: { revision: 3, pending: 0 } })));
-  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Some scan checks need attention/);
 });
 
 test("a cached episode mapping mutation refreshes results once and leaves New Plex search available",async t=>{

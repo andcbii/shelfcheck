@@ -1,52 +1,30 @@
-# Shelfcheck 2.5.0
+# Shelfcheck 2.5.1
 
-Shelfcheck 2.5.0 brings Manual Matches into Reports, adds actionable Coverage
-Issues, and makes local matching changes faster with targeted cached rechecks.
+Shelfcheck 2.5.1 makes failed scan checks easier to investigate.
 
-## Manual Matches and Matching Episodes
+## Scan Issues
 
-Open **01 — Manual Matches** to view every saved user-controlled match, including
-fully collected content and matches where neither side is owned. Each complete
-match appears once, with all TMDB and TVDB episodes grouped in provider panels.
-Add, edit, filter, or delete matches, including bulk deletion, and inspect coverage
-evidence or ownership corrections from the report.
+The former Coverage Issues report is now **05 — Scan Issues**. The Plex results
+warning links to the report and shows the number of current grouped issues.
 
-Use **Matching Episodes** on a missing Plex episode to create a match or edit its
-complete existing match without seeing unrelated matches. Saving keeps the dialog
-open. Close or click outside to discard unsaved edits and return to the same Plex
-results position. The former Manual Coverage header entry is removed.
+Provider Lookup issues explain where a requested ID came from, the provider and
+record whose lookup failed, the response, the impact on verification, and a
+relevant next step. Saved provider data is identified when it supplied the ID.
+Failure-time provenance survives restarts and later metadata changes; older
+issues without recorded provenance show **Source unknown**.
 
-## Faster rechecks and provider catalogue reuse
+Missing records are distinguished from rejected access, connectivity problems,
+and provider outages. A 404 is reported as **record not found**, without assuming
+that the record was deleted or merged. A failed lookup and the comparison it
+blocks appear together as one issue, while independent failures remain visible.
 
-Saving, editing, or deleting Manual Matches and changing ownership corrections
-immediately rechecks only affected shows using saved provider and library data.
-These changes do not start a full scan or refetch unrelated shows. The next
-user-run full Plex scan downloads fresh provider data for affected shows.
-
-Full scans continue to check all included Plex libraries. Provider catalogues are
-reused independently of comparison results, with separate TMDB and TVDB freshness
-checks. Catalogues older than 60 days are refreshed; a full-scan gap over 14 days
-forces a TMDB refresh. Every fifth successful full scan of the UTC day refreshes
-TMDB library shows changed that day, even when already downloaded that day.
-
-## Coverage Issues
-
-The Plex coverage warning links to **05 — Coverage Issues**, showing known
-affected shows and episodes, the provider or operation, a readable cause, and
-recovery guidance. Library-wide failures appear separately. Provider freshness
-issues are included even for shows without Manual Matches. The report remains
-available when there are no issues, and resolved causes clear from the warning.
-
-Last-good data and required refreshes survive provider outages and restarts.
-Mutation controls are protected during scans, concurrent cached rechecks retain
-their results, and explicitly empty Plex collections are handled correctly.
+Existing last-good results, provider refresh requirements, matching behavior,
+and request retry and rate-limit policies are preserved. Reading the report does
+not start scans or provider requests.
 
 ## Upgrading
 
-Use Docker image `andcbii/shelfcheck:2.5.0` or `andcbii/shelfcheck:latest` and retain
+Use Docker image `andcbii/shelfcheck:2.5.1` or `andcbii/shelfcheck:latest` and keep
 your existing `/config` and `/data` mounts. No configuration or database reset is
-required. Older caches without complete saved provider inputs may require an
-explicit full Plex scan before cached rechecks can complete.
-
-Reverse-proxy installations using Trakt OAuth must continue to set
-`SHELFCHECK_PUBLIC_URL` to Shelfcheck's exact externally visible origin.
+required. Run a new Plex scan to capture detailed context for current failures.
+This release does not correct external provider IDs or alter Plex metadata.

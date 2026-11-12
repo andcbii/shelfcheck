@@ -227,6 +227,11 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   const deletedMember = await rerun();
   let broken = (await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id);
   assert.equal(broken.health, "needs-review");
+  const missingMember = (await (await scan.GET()).json()).coverage.issues.find((issue:{operation:string;provider:string;episode?:{id:number}})=>issue.operation === "member-verification" && issue.provider === "TVDB" && issue.episode?.id === 200);
+  assert.equal(missingMember.category,"Provider Lookup");
+  assert.equal(missingMember.lookup.status,404);
+  assert.match(missingMember.cause,/record not found/);
+  assert.doesNotMatch(missingMember.cause,/no longer exists|deleted|merged/);
   assert.deepEqual(broken.members.map((m: {id:number;title:string}) => [m.id,m.title]), [[100,"Missing"],[200,"Equivalent"]]);
   assert.equal(deletedMember.report.shows[0].missing[0].tmdbEpisodeId, 100);
   (cache.__shelfcheckDatabase as DatabaseSync | undefined)?.close();

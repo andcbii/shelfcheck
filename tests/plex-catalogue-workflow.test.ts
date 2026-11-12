@@ -82,6 +82,11 @@ test("full scans reuse catalogues while comparing current holdings across databa
   const failedFeed = await (await scan.GET()).json();
   assert.ok(failedFeed.coverage.issues.some((issue:{operation:string;provider:string})=>issue.operation === "provider-verification" && issue.provider === "TMDB"));
   assert.equal(failedFeed.coverage.pending,1);
+  const feedIssue = failedFeed.coverage.issues.find((issue:{id:string})=>issue.id === "provider-verification:TMDB");
+  assert.equal(feedIssue.category,"Provider Lookup");
+  assert.deepEqual(feedIssue.lookup.requested,{provider:"TMDB",kind:"show change feed"});
+  assert.match(feedIssue.lookup.impact,/freshness.*could not be verified/);
+  assert.match(feedIssue.action,/credentials or permissions/);
   feedFailure = false;
   await run();
   assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
@@ -136,7 +141,7 @@ test("full scans reuse catalogues while comparing current holdings across databa
   assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
   fatalInventory = true;
   await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
-  for(let i=0;i<500;i++) { const state=await (await scan.GET()).json(); if(state.scan.status!=="running") { assert.equal(state.scan.status,"error"); assert.ok(state.coverage.issues.some((issue:{scope:string})=>issue.scope==="library")); assert.deepEqual(state.report.shows[0].missing,lastGood.shows[0].missing); break; } await new Promise(r=>setTimeout(r,10)); }
+  for(let i=0;i<500;i++) { const state=await (await scan.GET()).json(); if(state.scan.status!=="running") { assert.equal(state.scan.status,"error"); const libraryIssue = state.coverage.issues.find((i:{id:string})=>i.id === "scan-failure"); assert.equal(libraryIssue.category,"Provider Lookup"); assert.deepEqual(libraryIssue.lookup.requested,{provider:"Plex",kind:"library sections"}); assert.equal(libraryIssue.show,undefined); assert.match(libraryIssue.action,/Plex credentials or permissions/); assert.ok(state.coverage.issues.some((issue:{scope:string})=>issue.scope==="library")); assert.deepEqual(state.report.shows[0].missing,lastGood.shows[0].missing); break; } await new Promise(r=>setTimeout(r,10)); }
   fatalInventory = false;
   await run();
   assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
@@ -145,6 +150,12 @@ test("full scans reuse catalogues while comparing current holdings across databa
   requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1,"TMDB refresh succeeds while TVDB authentication fails");
+  const authIssue = (await (await scan.GET()).json()).coverage.issues.find((i:{id:string})=>i.id === "provider-authentication:TVDB");
+  assert.equal(authIssue.category,"Provider Lookup");
+  assert.deepEqual(authIssue.lookup.requested,{provider:"TVDB",kind:"authentication"});
+  assert.deepEqual(authIssue.lookup.source,[]);
+  assert.equal((await (await scan.GET()).json()).coverage.issues.length,1,"one authentication failure groups its blocked downloads and freshness checks");
+  assert.match(authIssue.action,/credentials or permissions/);
   authenticationFailure = false; requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,0,"TVDB retry must not redownload a successful TMDB catalogue");
@@ -158,7 +169,9 @@ test("full scans reuse catalogues while comparing current holdings across databa
   requests.length = 0;
   malformedTmdb = true;
   await run();
-  assert.ok((await (await scan.GET()).json()).coverage.issues.some((issue:{operation:string})=>issue.operation === "comparison"));
+  const blocked = (await (await scan.GET()).json()).coverage.issues;
+  assert.equal(blocked.length,1,"failed TMDB catalogue and its blocked comparison are one cause");
+  assert.match(blocked[0].impacts.join(" "),/comparison could not be checked/);
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2);
   malformedTmdb = false;
   requests.length = 0;

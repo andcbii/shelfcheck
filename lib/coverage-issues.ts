@@ -36,6 +36,10 @@ export type CoverageIssue = {
   action: string;
   category?: "Provider Lookup";
   lookup?: ProviderLookup;
+  /** Failure IDs captured when this operation establishes its blocked inputs. */
+  causedBy?: string[];
+  /** Dependent impacts projected from the same durable current issue state. */
+  impacts?: string[];
   show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number };
   episode?: { provider?: "TMDB" | "TVDB"; id?: number; showId?: number; season?: number; episode?: number; title?: string };
   mappingId?: string;
@@ -46,7 +50,27 @@ function store() {
   return db;
 }
 export function listCoverageIssues(): CoverageIssue[] {
-  return (store().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
+  const issues: CoverageIssue[] = (store().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
+  const byId = new Map(issues.map(issue=>[issue.id,issue]));
+  const rootsFor = (id:string, seen:Set<string>): CoverageIssue[] | undefined => {
+    const issue = byId.get(id);
+    if (!issue || seen.has(id)) return undefined;
+    if (!issue.causedBy?.length) return [issue];
+    const next = new Set([...seen,id]);
+    const parents = issue.causedBy.map(parent=>rootsFor(parent,next));
+    return parents.every(parent=>parent !== undefined) ? parents.flat() : undefined;
+  };
+  return issues.filter(issue=>{
+    // Legacy issues and missing causes remain visible; never guess from show IDs.
+    if (!issue.causedBy?.length) return true;
+    const roots = rootsFor(issue.id,new Set());
+    if (!roots) return true;
+    const impact = `${issue.show?.title ? `${issue.show.title}: ` : ""}${issue.cause}${issue.lookup ? ` ${issue.lookup.impact}` : ""}`;
+    for (const root of roots) {
+      root.impacts = [...new Set([...(root.impacts || []),impact])];
+    }
+    return false;
+  });
 }
 export function getCoverageIssue(id: string): CoverageIssue | undefined {
   const row = store().prepare("SELECT payload FROM shelfcheck_coverage_issues WHERE id=?").get(id) as {payload:string} | undefined;

@@ -19,6 +19,7 @@ function Issue({ issue }: { issue: CoverageIssue }) {
     {issue.lookup?.requested && <p><strong>Failed lookup: </strong>{issue.lookup.requested.provider} {issue.lookup.requested.kind}{issue.lookup.requested.id !== undefined ? ` ${issue.lookup.requested.id}` : ""}</p>}
     <p>{issue.category === "Provider Lookup" && <strong>Response: </strong>}{issue.cause}</p>
     {issue.lookup && <p><strong>Impact: </strong>{issue.lookup.impact}</p>}
+    {issue.impacts?.map(impact=><p key={impact}><strong>Impact: </strong>{impact}</p>)}
     <p className="coverage-issue-action"><strong>Next step: </strong>{issue.action}</p>
   </article>;
 }

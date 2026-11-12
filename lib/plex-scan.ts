@@ -629,6 +629,7 @@ async function runPlexScan(targetRatingKey?: string) {
       inputs.comparisons[ratingKey] = savedComparison ? {...savedComparison,refresh} : {group, details, localMetadata, tmdbId, tvdbId, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
       savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
       let tmdbCatalogueReused = false;
+      const unavailableCatalogueCauses: string[] = [];
       const savedTmdb = inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
       try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
@@ -666,7 +667,7 @@ async function runPlexScan(targetRatingKey?: string) {
           tmdbShow = savedTmdb.show;
           selectTmdbIdentity(tmdbShow,true);
           providerEpisodes.push(...savedTmdb.episodes);
-        } else tmdbShow = null;
+        } else { tmdbShow = null; unavailableCatalogueCauses.push(`catalogue-refresh:TMDB:${ratingKey}`); }
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
       }
@@ -696,13 +697,14 @@ async function runPlexScan(targetRatingKey?: string) {
         setCoverageIssue({id:`catalogue-refresh:TVDB:${ratingKey}`,operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...providerLookupContext(error,{source:tvdbSource,requested:{provider:"TVDB",kind:"series",id:tvdbId},impact:`TVDB episode coverage could not be fully verified. ${usableProviderCatalogue(inputs.tvdb[String(tvdbId)]) ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${savedComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`})});
         const savedTvdb = inputs.tvdb[String(tvdbId)];
         if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); }
+        else unavailableCatalogueCauses.push(`catalogue-refresh:TVDB:${ratingKey}`);
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");
         logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       }
       if ((tmdbId && !tmdbShow) || (tvdbId && !tvdbResolved) || (!tmdbId && !tvdbId)) {
-        const cause = "Complete provider catalogue inputs are unavailable. Last-good comparison results are retained.";
-        setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry the Plex scan after restoring provider access."});
+        const cause = `Episode comparison could not be checked because complete provider catalogue inputs are unavailable. ${savedComparison?.complete ? "Last-good comparison results were retained." : "No previous comparison results are available."}`;
+        setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action:"Run a Plex scan to refresh the missing provider catalogue inputs; check any reported lookup failure first."});
         if (savedComparison) { inputs.comparisons[ratingKey] = {...savedComparison,refresh}; savePlexComparison(ratingKey,inputs.comparisons[ratingKey]); }
         retainComparison(warning || cause);
         return;
@@ -908,6 +910,10 @@ async function recheckCoverage(impact: CoverageImpact) {
       resolveCoverageIssue(`comparison-inputs:${key}`);
       resolveCoverageIssue(`comparison-failure:${key}`);
     } catch (error) {
+      // A cached recheck cannot reevaluate a failed download. Preserve the
+      // dependency established by that scan until its inputs can be evaluated.
+      const previous = getCoverageIssue(`comparison-inputs:${key}`);
+      if (!input?.complete && previous?.causedBy?.length && previous.causedBy.every(id=>getCoverageIssue(id))) continue;
       setCoverageIssue({id:`comparison-inputs:${key}`,operation:"comparison",scope:"show",show:{ratingKey:key,title:input?.group.records[0]?.title,tmdbId:input?.tmdbId,tvdbId:input?.tvdbId},cause:coverageIssueCause(error),action:"Run an explicit Plex scan to rebuild saved comparison inputs."});
     }
   }

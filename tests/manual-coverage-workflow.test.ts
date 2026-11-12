@@ -463,6 +463,9 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   assert.deepEqual(complete.report.shows[0].missing, []);
   assert.deepEqual(complete.report.shows[0].manualCoverage[0].source.map((item: { ratingKey: string }) => item.ratingKey), ["part1", "part2"]);
 
+  const reportMatches = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  assert.equal(reportMatches.mappings.length, 1, "The all-match report retains a fully collected complete set as one record");
+  assert.deepEqual(reportMatches.mappings[0].members.map((member: {provider:string;id:number}) => [member.provider,member.id]), [["TMDB",100],["TVDB",200],["TVDB",201]]);
   assert.equal(catalogueDownloads, 1);
   secondPart = false;
   const incomplete = await rerun();
@@ -484,4 +487,17 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   assert.equal(changedItem.report.shows[0].missing[0].tmdbEpisodeId, 100, "Changed Plex content invalidates the saved correction");
   const changedState = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   assert.deepEqual(changedState.mappings[0].corrections, []);
+  ambiguous = false;
+  assert.deepEqual((await rerun()).report.shows[0].missing, []);
+  const beforeReportDelete = httpRequests;
+  const removed = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage", {method:"DELETE",body:JSON.stringify({ids:[saved.mapping.id]})}));
+  assert.equal(removed.status,200);
+  assert.equal(httpRequests,beforeReportDelete,"Report bulk deletion uses cached rechecks with no Plex enumeration or provider downloads");
+  const afterReportDelete=await (await scan.GET()).json();
+  assert.equal(afterReportDelete.scan.status,"completed","Report mutations do not start or queue a full scan");
+  assert.equal(afterReportDelete.report.shows[0].missing[0].tmdbEpisodeId,100,"Deleting the complete match immediately withdraws its cached coverage");
+  assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length,0);
+  const downloadsBeforeExplicitScan=catalogueDownloads;
+  await rerun();
+  assert.equal(catalogueDownloads,downloadsBeforeExplicitScan+1,"The report cached recheck retains the next explicit scan provider refresh obligation");
 });

@@ -21,7 +21,7 @@ export type SavedPlexComparison = {
   tvdbEpisodeImdbIds?: Record<string, string[]>;
   complete: boolean;
   refresh?: {tmdb?: boolean; tvdb?: boolean};
-  // A verified provider change to an alias whose relationships this comparison has not yet rebuilt.
+  /** A verified provider change to an alias whose relationships this comparison has not yet rebuilt. */
   staleRelationships?: {tmdb?: true; tvdb?: true};
 };
 /** The point through which each provider's change feed has been checked, with identified changes handled or retained. */

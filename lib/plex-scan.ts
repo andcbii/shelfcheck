@@ -260,6 +260,11 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
   return changed;
 }
 
+/** Visibly mark a provider's catalogue freshness as unverified after its change check fails. */
+function setProviderVerificationIssue(provider: "TMDB" | "TVDB", error: unknown, causedBy?: string[]) {
+  setCoverageIssue({id:`provider-verification:${provider}`,...(causedBy ? {causedBy} : {}),operation:"provider-verification",provider,scope:"library",...providerLookupContext(error,{source:[],requested:{provider,kind:provider === "TMDB" ? "show change feed" : "series update feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
+}
+
 /**
  * Durably retain verified changes before any processing, so a provider's verification
  * position can advance even when a changed show cannot be handled during this scan.
@@ -580,7 +585,7 @@ async function runPlexScan(targetRatingKey?: string) {
     const tmdbRecovery = new Set(tmdbPlan.recover);
     if (!targetRatingKey) {
       tmdbChanges = await (tmdbPlan.feedFrom ? tmdbChangedShows(tmdbPlan.feedFrom, config.tmdbToken, startedAt) : Promise.resolve(new Set<number>())).then(changes => changes && new Set([...changes, ...tmdbRecovery])).catch((error) => {
-        setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TMDB",kind:"show change feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
+        setProviderVerificationIssue("TMDB", error);
         logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
         return null;
       });
@@ -589,7 +594,7 @@ async function runPlexScan(targetRatingKey?: string) {
     const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
     if (!targetRatingKey) {
       tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : tvdbChangedShows(tvdbFeedFrom, token)).catch((error) => {
-        setCoverageIssue({id:"provider-verification:TVDB",...(tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:"provider-verification",provider:"TVDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TVDB",kind:"series update feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
+        setProviderVerificationIssue("TVDB", error, tvdbAuthenticationError && error === tvdbAuthenticationError ? ["provider-authentication:TVDB"] : undefined);
         logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
         return null;
       });
@@ -605,7 +610,7 @@ async function runPlexScan(targetRatingKey?: string) {
     const safeguardChanges = safeguardDue
       ? tmdbPosition?.slice(0, 10) === utcDate ? tmdbChanges
         : await tmdbChangedShows(startedAt, config.tmdbToken, startedAt).catch(error => {
-          setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TMDB",kind:"show change feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
+          setProviderVerificationIssue("TMDB", error);
           return null;
         })
       : null;

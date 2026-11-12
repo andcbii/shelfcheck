@@ -126,3 +126,25 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .coverage-result-group li strong { display: block; font-size: .8rem; margin-top: .25rem; }
 
 .manual-coverage-manager label:has(input[type="checkbox"]){display:flex;align-items:center;gap:8px}.manual-coverage-manager label input[type="checkbox"]{display:inline-block;flex:0 0 auto;width:16px;height:16px;margin:0;padding:0}
+
+.coverage-issues-report { max-width: 1080px; }
+.coverage-issues-count { color: var(--muted); margin: 0 0 24px; }
+.coverage-issues-report section { margin: 0 0 36px; }
+.coverage-issues-report h2 { font-size: 18px; margin: 0 0 14px; }
+.coverage-issue { padding: 22px 0; border-top: 1px solid var(--line, #deded8); overflow-wrap: anywhere; }
+.coverage-issue h3 { font-size: 17px; margin: 0 0 8px; }
+.coverage-issue p { margin: 7px 0; line-height: 1.6; }
+.coverage-issue-identities, .coverage-issue-operation { color: var(--muted); font-size: 13px; }
+.coverage-issue-action { font-weight: 600; }
+.plex-warning a { font-weight: 700; text-decoration: underline; }
+.manual-match-report .manual-match-form { border: 1px solid var(--line, #deded8); padding: 20px; margin-bottom: 24px; border-radius: 12px; }
+.manual-match-report button, .manual-match-report select { cursor: pointer; }
+.manual-match-report textarea { width: 100%; min-height: 80px; padding: 12px; border: 1px solid var(--line, #deded8); border-radius: 8px; background: var(--surface, #fff); color: inherit; }
+.manual-match-report .provider-record { overflow-wrap: anywhere; min-width: 0; }
+.manual-match-report .provider-record a, .manual-match-report .provider-record p { overflow-wrap: anywhere; }
+.manual-match-report input[type="checkbox"] { cursor: pointer; accent-color: #24856b; }
+@media (max-width: 760px) {
+  .manual-match-report .provider-match-columns { grid-template-columns: 1fr; }
+  .manual-match-report .provider-match-row { padding: 16px 0; }
+  .manual-match-report .manual-match-form { padding: 14px; }
+}

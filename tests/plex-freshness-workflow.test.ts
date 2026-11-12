@@ -1,3 +1,6 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { CoverageIssueReport, CoverageWarning } from "../app/reports/components/coverage-issue-report";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
@@ -108,8 +111,19 @@ test("independent sixty-day provider ages expire strictly, retain last-good data
   assert.deepEqual(f.counts(),[1,0],"age mandates a TMDB attempt despite unavailable changes");
   assert.equal(stale.shows[0].missing.length,0,"last-good coverage remains visible");
   assert.ok((await f.state()).coverage.issues.some((issue:{operation:string})=>issue.operation === "catalogue-refresh"));
+  const failedIssues=(await f.state()).coverage.issues;
+  const failedView=renderToStaticMarkup(createElement(CoverageIssueReport,{issues:failedIssues}));
+  assert.match(failedView,/catalogue refresh/);
+  assert.match(failedView,/TMDB/);
+  assert.match(failedView,/Library-wide and unassigned issues/);
+  assert.match(renderToStaticMarkup(createElement(CoverageWarning,{issues:failedIssues})),/View Coverage Issues/);
   f.restart(); f.fail(true); f.requests.length = 0; await f.run();
   assert.deepEqual(f.counts(),[1,0],"a failed mandatory download retries across restart");
+  const repairedIssues=(await f.state()).coverage.issues;
+  const repairedView=renderToStaticMarkup(createElement(CoverageIssueReport,{issues:repairedIssues}));
+  assert.doesNotMatch(repairedView,/catalogue refresh/);
+  assert.ok(repairedIssues.some((issue:{operation:string})=>issue.operation === "provider-verification"),"unrelated freshness verification remains visible");
+  assert.match(renderToStaticMarkup(createElement(CoverageWarning,{issues:repairedIssues})),/View Coverage Issues/);
   f.fail(false); f.at("2027-01-11T11:59:59.999Z"); await f.run(); assert.deepEqual(f.counts(),[0,0]);
   f.at("2027-01-11T12:00:00Z"); await f.run(); assert.deepEqual(f.counts(),[0,0],"TVDB has its own exact sixty-day boundary");
   f.at("2027-01-11T12:00:00.001Z"); await f.run(); assert.deepEqual(f.counts(),[0,2],"only TVDB expires after its independent download");

@@ -92,3 +92,63 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   assert.equal(incomplete.lookup.failureKind,"invalid-response");
   assert.deepEqual(incomplete.lookup.requested,{provider:"TMDB",kind:"show 300594 season",id:1});
 });
+
+
+test("episode failures explain catalogue identity sources and persist safe parser evidence until recovery", async t => {
+  const dir=mkdtempSync(path.join(tmpdir(),"episode-lookup-"));
+  const previous=[process.env.SHELFCHECK_DATA_DIR,process.env.SHELFCHECK_CONFIG_DIR];
+  process.env.SHELFCHECK_DATA_DIR=dir;process.env.SHELFCHECK_CONFIG_DIR=dir;
+  const global=globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync};
+  t.after(()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;for(const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()){if(previous[i]===undefined)delete process.env[key];else process.env[key]=previous[i];}rmSync(dir,{recursive:true,force:true});});
+  await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
+  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  let failure=true;
+  let traktFailure=false;
+  t.mock.method(globalThis,"fetch",async(input:string|URL|Request)=>{
+    const u=new URL(String(input));
+    if(u.hostname==="plex") {
+      if(u.pathname==="/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
+      if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[{ratingKey:"ep",parentIndex:1,index:2,Guid:[{id:"tmdb://101"},{id:"imdb://tt123"}]}]}});
+      return Response.json({MediaContainer:{Metadata:[{ratingKey:"1",title:"Episode example",Guid:[{id:"tmdb://10"},{id:"tvdb://20"}]}]}});
+    }
+    if(u.pathname==="/search/tvdb/200") return Response.json([{type:"episode",episode:{season:1,number:1,ids:{tvdb:200,tmdb:101}},show:{ids:{tmdb:10,tvdb:20}}}]);
+    if(u.pathname==="/3/tv/10/season/1/episode/1") return traktFailure ? Response.json({},{status:403}) : Response.json({id:101});
+    if(u.pathname==="/v4/login")return Response.json({data:{token:"secret-token"}});
+    if(u.pathname==="/3/tv/changes")return Response.json({results:[],total_pages:1});
+    if(u.pathname==="/v4/updates")return Response.json({data:[]});
+    if(u.pathname==="/3/tv/10")return Response.json({id:10,seasons:[],external_ids:{tvdb_id:20}});
+    if(u.pathname==="/v4/series/20")return Response.json({data:{id:20}});
+    if(u.pathname.includes("/episodes/default"))return Response.json({data:{episodes:[{id:200,seasonNumber:1,number:1,name:"Pilot",aired:"2020-01-01"}]}});
+    if(u.pathname==="/v4/episodes/200/extended")return failure ? new Response('{"secret-token":broken',{headers:{"Content-Type":"application/json"}}) : Response.json({data:{remoteIds:[]}});
+    if(u.pathname==="/3/find/200")return failure ? Response.json({},{status:404}) : Response.json({tv_episode_results:[]});
+    if(u.pathname.includes("/find/"))return Response.json({tv_results:[]});
+    throw new Error("Unexpected HTTP");
+  });
+  const run=async()=>{await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));for(let i=0;i<500;i++){const state=await(await scan.GET()).json();if(state.scan.status!=="running"){assert.equal(state.scan.status,"completed",state.scan.error);return state;}await new Promise(r=>setTimeout(r,10));}throw new Error("Timeout");};
+  const state=await run();
+  const episode=state.coverage.issues.find((i:{provider:string;scope:string})=>i.provider==="TVDB"&&i.scope==="episode");
+  assert.equal(episode.category,"Provider Lookup");
+  assert.deepEqual(episode.episode,{provider:"TVDB",id:200,showId:20,season:1,episode:1,title:"Pilot"});
+  assert.deepEqual(episode.lookup.requested,{provider:"TVDB",kind:"episode",id:200});
+  assert.equal(episode.lookup.failureKind,"invalid-response");
+  assert.deepEqual(episode.lookup.source,[{provider:"Plex",kind:"TVDB series",id:20},{provider:"TVDB",kind:"catalogue episode",id:200,cached:false}]);
+  const reverse=state.coverage.issues.find((i:{provider:string;scope:string})=>i.provider==="TMDB"&&i.scope==="episode");
+  assert.equal(reverse.lookup.status,404);
+  assert.deepEqual(reverse.lookup.source,episode.lookup.source);
+  assert.deepEqual(reverse.lookup.requested,{provider:"TMDB",kind:"external ID search",id:200});
+  assert.ok(!JSON.stringify(state.coverage).includes("secret-"));
+  global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;
+  assert.deepEqual((await(await scan.GET()).json()).coverage.issues,state.coverage.issues);
+  failure=false;
+  assert.deepEqual((await run()).coverage.issues,[]);
+  await config.writeTraktCredentials({clientId:"secret-client",clientSecret:"secret-client-secret",accessToken:"secret-access",refreshToken:"secret-refresh",expiresAt:Date.now()+86400_000,redirectUri:"http://localhost/callback"});
+  await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
+  traktFailure=true;
+  const rejected=(await run()).coverage.issues.find((i:{provider:string;scope:string;lookup?:{status:number}})=>i.provider==="TMDB"&&i.scope==="episode"&&i.lookup?.status===403);
+  assert.deepEqual(rejected.lookup.source,[{provider:"Plex",kind:"TVDB series",id:20},{provider:"TVDB",kind:"catalogue episode",id:200,cached:false},{provider:"Trakt",kind:"external TMDB show ID",id:10,cached:false},{provider:"Trakt",kind:"external TMDB episode ID",id:101,cached:false}]);
+  assert.deepEqual(rejected.episode,{provider:"TMDB",id:101,showId:10,season:1,episode:1});
+  assert.match(rejected.action,/TMDB credentials or permissions/);
+  assert.ok(!JSON.stringify(rejected).includes("secret-"));
+  traktFailure=false;
+  assert.deepEqual((await run()).coverage.issues,[]);
+});

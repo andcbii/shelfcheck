@@ -15,13 +15,25 @@ export class ProviderHttpError extends Error {
 
 export type ProviderRequestIdentity = {provider:PlexProviderName;kind:string;id?:number};
 export class ProviderResponseError extends Error {
-  constructor(readonly provider:PlexProviderName, readonly requested:ProviderRequestIdentity) { super(`${provider} returned an incomplete or unreadable response.`); }
+  constructor(readonly provider:PlexProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} returned an incomplete or unreadable response.`); }
 }
 export class ProviderNetworkError extends Error {
   constructor(readonly provider:PlexProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} network request failed after retries.`); }
 }
 function requestIdentity(url:string, provider:PlexProviderName):ProviderRequestIdentity | undefined {
   const path = new URL(url).pathname;
+  if (path === "/v4/login") return {provider,kind:"authentication"};
+  if (path === "/library/sections") return {provider,kind:"library sections"};
+  if (path.startsWith("/library/sections/")) return {provider,kind:"library inventory"};
+  if (path.startsWith("/library/metadata/")) return {provider,kind:path.includes("allLeaves") ? "show episode inventory" : "show metadata"};
+  if (path === "/3/tv/changes") return {provider,kind:"show change feed"};
+  if (path === "/v4/updates") return {provider,kind:"series update feed"};
+  const episode = path.match(/\/episodes\/(\d+)\/extended$/);
+  if (episode) return {provider,kind:"episode",id:Number(episode[1])};
+  const search = path.match(/\/search\/tvdb\/(\d+)$/);
+  if (search) return {provider,kind:"TVDB episode search",id:Number(search[1])};
+  const coordinate = path.match(/\/tv\/(\d+)\/season\/(\d+)\/episode\/(\d+)$/);
+  if (coordinate) return {provider,kind:`show ${coordinate[1]} season ${coordinate[2]} episode`,id:Number(coordinate[3])};
   const season = path.match(/\/tv\/(\d+)\/season\/(\d+)$/);
   if (season) return {provider,kind:`show ${season[1]} season`,id:Number(season[2])};
   const catalogue = path.match(/\/series\/(\d+)\/episodes\/default$/);
@@ -93,7 +105,7 @@ export class PlexProviderClient {
             this.rateLimitedUntil.delete(provider);
             this.onRateLimit(provider, false);
           }
-          return response.json() as Promise<T>;
+          try { return await response.json() as T; } catch { throw new ProviderResponseError(provider, requested); }
         }
         this.logger()?.warn("plex.request.response", details);
         if (response.status !== 429 && response.status < 500) throw new ProviderHttpError(provider, response.status, requested);
@@ -121,7 +133,7 @@ export class PlexProviderClient {
         await wait(delay);
       } catch (error) {
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
-        if (error instanceof ProviderHttpError) { metric.failures += 1; throw error; }
+        if (error instanceof ProviderHttpError || error instanceof ProviderResponseError) { metric.failures += 1; throw error; }
         if (attempt === 4) { metric.failures += 1; throw new ProviderNetworkError(provider,requested); }
         const delay = Math.min(30_000, 1000 * 2 ** attempt);
         metric.retries += 1;

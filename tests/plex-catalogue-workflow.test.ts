@@ -82,6 +82,11 @@ test("full scans reuse catalogues while comparing current holdings across databa
   const failedFeed = await (await scan.GET()).json();
   assert.ok(failedFeed.coverage.issues.some((issue:{operation:string;provider:string})=>issue.operation === "provider-verification" && issue.provider === "TMDB"));
   assert.equal(failedFeed.coverage.pending,1);
+  const feedIssue = failedFeed.coverage.issues.find((issue:{id:string})=>issue.id === "provider-verification:TMDB");
+  assert.equal(feedIssue.category,"Provider Lookup");
+  assert.deepEqual(feedIssue.lookup.requested,{provider:"TMDB",kind:"show change feed"});
+  assert.match(feedIssue.lookup.impact,/freshness.*could not be verified/);
+  assert.match(feedIssue.action,/credentials or permissions/);
   feedFailure = false;
   await run();
   assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
@@ -145,6 +150,11 @@ test("full scans reuse catalogues while comparing current holdings across databa
   requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1,"TMDB refresh succeeds while TVDB authentication fails");
+  const authIssue = (await (await scan.GET()).json()).coverage.issues.find((i:{id:string})=>i.id === "provider-authentication:TVDB");
+  assert.equal(authIssue.category,"Provider Lookup");
+  assert.deepEqual(authIssue.lookup.requested,{provider:"TVDB",kind:"authentication"});
+  assert.deepEqual(authIssue.lookup.source,[]);
+  assert.match(authIssue.action,/credentials or permissions/);
   authenticationFailure = false; requests.length = 0;
   await run();
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,0,"TVDB retry must not redownload a successful TMDB catalogue");

@@ -10,6 +10,12 @@ A provider's description of a show and its episodes, including their identities,
 **Library inventory**:
 The shows and episode items present in the Plex libraries included in a scan, together with the identities Plex assigns to them.
 
+**Completed full scan**:
+A scan that obtains the complete library inventory and finishes processing the library, even when individual checks leave unresolved issues. Interrupted scans and scans with incomplete library inventory do not qualify.
+
+**Provider verification position**:
+The point through which a provider's catalogue changes have been checked, with identified changes either handled or retained for follow-up. TMDB and TVDB have independent verification positions.
+
 **Manual Match**:
 A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes.
 _Avoid_: Manual Coverage, Link Episodes (as names for the saved match)

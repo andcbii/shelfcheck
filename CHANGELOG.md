@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.5.1 - 2026-11-11
+
+### Changed
+
+- Rename Coverage Issues to Scan Issues and clarify the Plex results warning.
+- Explain provider lookup failures with the requested record, failing provider,
+  ID source chain, cached-data provenance, response, impact, and recovery guidance.
+- Group a failed lookup and its dependent comparison impact into one counted issue,
+  while retaining independent failures and consistent report and warning counts.
+
+### Fixed
+
+- Distinguish missing provider records from access and connectivity failures.
+- Preserve failure-time ID sources across restarts and metadata changes; older
+  issues without recorded provenance explicitly show Source unknown.
+
 ## 2.5.0 - 2026-11-11
 
 ### Added

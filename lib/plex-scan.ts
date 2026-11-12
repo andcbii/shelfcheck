@@ -300,6 +300,23 @@ function retainSafeguard(inputs: PlexGeneratedInputs, utcDate: string, changes: 
   if (inputs.pendingSafeguards[utcDate]) { delete inputs.pendingSafeguards[utcDate]; savePendingSafeguards(inputs.pendingSafeguards); }
 }
 
+/**
+ * Fulfil safeguards left pending on earlier UTC days once TMDB verification succeeds.
+ *
+ * A safeguard is left pending only on its own day, while TMDB's verification position is no later
+ * than that day, and the position advances only after verification succeeds. So the first later
+ * successful verification covers the safeguard's whole original day. Either its change feed starts
+ * on or before that day, and the changes are retained as deferred changes that cannot use same-day
+ * reuse after midnight, or TMDB verification recovery refreshes every catalogue the feed cannot
+ * cover. The new day's list does not replace the missed interval, and the new day's count stays
+ * independent. Today's pending safeguard still needs today's own list (see retainSafeguard).
+ */
+function fulfilOverdueSafeguards(inputs: PlexGeneratedInputs, utcDate: string) {
+  const overdue = Object.keys(inputs.pendingSafeguards).filter(day => day < utcDate);
+  for (const day of overdue) delete inputs.pendingSafeguards[day];
+  if (overdue.length) savePendingSafeguards(inputs.pendingSafeguards);
+}
+
 type LoadedComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];
   tmdbId?: number; tvdbId?: number; tmdbShow: TmdbShow | null; tvdbResolved: boolean; tvdbSlug?: string;
@@ -577,7 +594,10 @@ async function runPlexScan(targetRatingKey?: string) {
     }
     // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
     retainVerifiedChanges(inputs, tmdbChanges ?? tmdbRecovery, tvdbChanges);
-    if (tmdbChanges !== null) resolveCoverageIssue("provider-verification:TMDB");
+    if (tmdbChanges !== null) {
+      resolveCoverageIssue("provider-verification:TMDB");
+      fulfilOverdueSafeguards(inputs, utcDate);
+    }
     if (tvdbChanges !== null) resolveCoverageIssue("provider-verification:TVDB");
     // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
     const safeguardChanges = safeguardDue

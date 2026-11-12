@@ -25,7 +25,9 @@ async function fixture(t: test.TestContext) {
   sqlite.writePlexSettings({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   const state = {feedFailure:false,downloadFailure:false,inventoryFailure:false, ownsTvdb:false, advanceClock:0, today:[10,999], older:[] as number[],
-    tvdbFeedFailure:false, failedTvdb:new Set<number>(), failedTmdb:new Set<number>(), failedInventory:new Set<string>(), failedFind:new Set<number>()};
+    tvdbFeedFailure:false, failedTvdb:new Set<number>(), failedTmdb:new Set<number>(), failedInventory:new Set<string>(), failedFind:new Set<number>(),
+    // Changes the feed returns only when its requested interval includes their UTC date.
+    dated:[] as {id:number;date:string}[]};
   const requests: URL[] = [];
   const shows = [10,30].map(id=>({ratingKey:String(id),title:`Show ${id}`,Guid:[{id:`tmdb://${id}`},{id:`tvdb://${id+10}`}],updatedAt:1}));
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
@@ -39,7 +41,10 @@ async function fixture(t: test.TestContext) {
     }
     if(u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
     if(u.pathname === "/3/tv/changes" && state.feedFailure) return Response.json({},{status:401});
-    if(u.pathname === "/3/tv/changes") return Response.json({results:[...state.today,...(u.searchParams.get("start_date") === u.searchParams.get("end_date") ? [] : state.older)].map(id=>({id})),total_pages:1});
+    if(u.pathname === "/3/tv/changes") {
+      const start = u.searchParams.get("start_date")!, end = u.searchParams.get("end_date")!;
+      return Response.json({results:[...state.today,...(start === end ? [] : state.older),...state.dated.filter(c=>c.date >= start && c.date <= end).map(c=>c.id)].map(id=>({id})),total_pages:1});
+    }
     if(u.pathname === "/v4/updates" && state.tvdbFeedFailure) return Response.json({},{status:401});
     if(u.pathname === "/v4/updates") return Response.json({data:[]});
     const tmdb = u.pathname.match(/^\/3\/tv\/(10|30)$/);
@@ -230,4 +235,95 @@ test("completed full scans with isolated issues count toward the fifth-scan safe
   for(let i=6;i<=9;i++) { await f.run(); assert.deepEqual(f.tmdbDownloads(),[]); }
   await f.run();
   assert.deepEqual(f.tmdbDownloads(),["/3/tv/10/season/1"],"the tenth completed scan");
+});
+
+const tmdbFeeds = (requests: URL[]) => requests.filter(u=>u.pathname === "/3/tv/changes").map(u=>`${u.searchParams.get("start_date")}..${u.searchParams.get("end_date")}`);
+
+test("a pending safeguard survives UTC midnight and restart and still covers the original day's change when the new day's feed is empty", async t => {
+  const f = await fixture(t);
+  f.state.today = [];
+  for(let i=1;i<=4;i++) await f.run();
+  f.state.dated.push({id:10,date:"2026-11-11"}); // A correction unique to the original UTC day, after scan four.
+  f.state.feedFailure = true;
+  let result = await f.run(); // Completed scan five cannot retrieve its change list.
+  assert.ok(hasIssue(result,"provider-verification:TMDB"));
+  f.restart();
+  t.mock.timers.tick(86400_000);
+  f.state.feedFailure = false;
+  f.state.today = [30]; // The new day's own changes.
+  result = await f.run(); // New day, completed scan one.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1"],"the original day's change is refreshed alongside the new day's verified change, without TVDB downloads");
+  assert.ok(tmdbFeeds(f.requests).some(range=>range.startsWith("2026-11-11..")),"the original missed interval is verified");
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
+  for(let i=2;i<=4;i++) { result = await f.run(); assert.deepEqual(f.downloads(),[],"the fulfilled overdue safeguard is not repeated"); }
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
+  f.restart();
+  await f.run();
+  assert.deepEqual(f.downloads(),["/3/tv/30/season/1"],"the new day's fifth completed scan refreshes only its own changed show");
+  assert.deepEqual(tmdbFeeds(f.requests),["2026-11-12..2026-11-12"]);
+});
+
+test("an overdue safeguard beyond the change-feed window is satisfied by TMDB verification recovery that keeps successful downloads", async t => {
+  const f = await fixture(t);
+  f.state.today = [];
+  for(let i=1;i<=4;i++) await f.run();
+  f.state.dated.push({id:10,date:"2026-11-11"});
+  f.state.feedFailure = true;
+  await f.run(); // Completed scan five leaves its safeguard pending.
+  f.restart();
+  t.mock.timers.tick(16 * 86400_000); // The original day is now outside the fourteen-day change-feed window.
+  f.state.feedFailure = false;
+  f.state.failedTmdb.add(10);
+  let result = await f.run();
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1"],"recovery refreshes the catalogues the feed cannot vouch for, without TVDB downloads");
+  assert.deepEqual(tmdbFeeds(f.requests),[],"no catalogue is inside the feed window, so nothing is claimed from the feed");
+  assert.equal(result.report.shows.find((s:{title:string})=>s.title === "Show 10").missing.length,1,"last-good results survive the failed recovery download");
+  assert.ok(hasIssue(result,"catalogue-refresh:TMDB:ratingKey:10"));
+  assert.ok(!hasIssue(result,"catalogue-refresh:TMDB:ratingKey:30"));
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"),"the overdue interval is satisfied through recovery, not reported as unverified");
+  f.restart();
+  result = await f.run();
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"only the failed recovery download retries; the successful peer is not repeated");
+  assert.deepEqual(tmdbFeeds(f.requests),["2026-11-27..2026-11-27"]);
+  assert.ok(hasIssue(result,"catalogue-refresh:TMDB:ratingKey:10"));
+  f.state.failedTmdb.clear();
+  f.restart();
+  result = await f.run();
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1"]);
+  assert.deepEqual(result.coverage.issues,[]);
+  await f.run();
+  assert.deepEqual(f.downloads(),[],"after recovery completes, later scans return to ordinary reuse");
+});
+
+test("overdue and newly due safeguards coexist and each completed download resolves only its own obligation", async t => {
+  const f = await fixture(t);
+  f.state.today = [];
+  f.state.failedTvdb.add(40); // An unrelated, persistent TVDB failure on every scan.
+  for(let i=1;i<=4;i++) await f.run();
+  f.state.dated.push({id:10,date:"2026-11-11"});
+  f.state.feedFailure = true;
+  await f.run(); // Original day, completed scan five: pending.
+  f.restart();
+  t.mock.timers.tick(86400_000);
+  for(let i=1;i<=5;i++) { const result = await f.run(); assert.equal(result.scan.status,"completed"); assert.deepEqual(f.tmdbDownloads(),[],`new day scan ${i}`); }
+  // New day, completed scan five is now pending too, alongside the overdue original-day safeguard.
+  f.state.feedFailure = false;
+  f.state.dated.push({id:30,date:"2026-11-12"});
+  f.state.failedTmdb.add(30);
+  f.restart();
+  let result = await f.run(); // New day, completed scan six fulfils both.
+  assert.deepEqual(f.tmdbDownloads(),["/3/tv/10/season/1","/3/tv/30/season/1"]);
+  assert.ok(tmdbFeeds(f.requests).some(range=>range.startsWith("2026-11-11..")),"the overdue interval is verified, not replaced by the new day's list");
+  assert.ok(tmdbFeeds(f.requests).includes("2026-11-12..2026-11-12"),"the newly due safeguard uses its own day's list");
+  assert.ok(hasIssue(result,"catalogue-refresh:TMDB:ratingKey:30"));
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
+  f.restart();
+  f.state.dated = [];
+  f.state.failedTmdb.clear();
+  result = await f.run();
+  assert.deepEqual(f.tmdbDownloads(),["/3/tv/30/season/1"],"only the unfinished download retries after an empty feed");
+  assert.ok(hasIssue(result,"catalogue-refresh:TVDB:ratingKey:30"),"the unrelated issue stays visible");
+  for(let i=8;i<=9;i++) { await f.run(); assert.deepEqual(f.tmdbDownloads(),[],"fulfilled safeguards are not repeated because an unrelated issue persists"); }
+  await f.run();
+  assert.deepEqual(f.tmdbDownloads(),[],"the new day's tenth completed scan has no changed shows to refresh");
 });

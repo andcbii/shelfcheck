@@ -76,6 +76,14 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setError("");
     setMessage("Editing mapping. Add or remove episodes, then resolve and review before saving.");
   }
+  function createMapping() {
+    setFormOpen(true);
+    setEditing(null);
+    setUrls(["", ""]);
+    setPreview(null);
+    setError("");
+    setMessage("");
+  }
   async function load() {
     const response = await fetch("/api/plex/manual-coverage", { cache: "no-store" });
     const body = await response.json();
@@ -230,20 +238,14 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     </fieldset>;
   }
   function records(members: CoverageMember[]) {
-    return members.map(member => <div className="provider-record" key={`${member.provider}:${member.id}`}><strong>{member.provider} / {member.show}</strong><p>{member.title} / {report ? `S${String(member.season).padStart(2,"0")}E${String(member.episode).padStart(2,"0")}` : `S${member.season} E${member.episode}`} / Episode ID {member.id}</p>{report && <p>Show ID {member.showId}</p>}<a href={member.url} target="_blank" rel="noreferrer">{member.url}</a></div>);
+    return members.map(member => <div className="provider-record manual-match-record" key={`${member.provider}:${member.id}`}><strong>{member.provider} / {member.show}</strong><p>{member.title} / {report ? `S${String(member.season).padStart(2,"0")}E${String(member.episode).padStart(2,"0")}` : `S${member.season} E${member.episode}`} / Episode ID {member.id}</p>{report && <p>Show ID {member.showId}</p>}<a href={member.url} target="_blank" rel="noreferrer">{member.url}</a></div>);
   }
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
  {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches or ownership corrections.</p> : null}
- {report && <button className="primary" disabled={locked} onClick={() => {setFormOpen(true);setEditing(null);setUrls(["", ""]);setPreview(null);setError("");setMessage("");}}>Add Manual Match</button>}
+ {report && <button className="primary" disabled={locked} onClick={createMapping}>Add Manual Match</button>}
  {formOpen && <section className="manual-match-form" aria-label="Manual Match editor">
  {editing && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
- {!episodeScope && <button disabled={locked} onClick={() => {
-    setEditing(null);
-    setUrls(["", ""]);
-    setPreview(null);
-    setError("");
-    setMessage("");
-  }}>Create mapping</button>}
+ {!episodeScope && <button disabled={locked} onClick={createMapping}>Create mapping</button>}
  <p>You can create a mapping before owning either set. Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context; show IDs alone cannot identify episodes.</p>
  <p>Link complete TMDB and TVDB episode sets representing the same content. Each side needs at least one episode. Review every record before saving.</p>
  {urls.map((url, index) => <label key={index}>Episode URL or provider-qualified ID {index + 1}<input disabled={locked} aria-label={`Episode URL or provider-qualified ID ${index + 1}`} value={url} onChange={event => {

@@ -137,12 +137,30 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .coverage-issue-identities, .coverage-issue-operation { color: var(--muted); font-size: 13px; }
 .coverage-issue-action { font-weight: 600; }
 .plex-warning a { font-weight: 700; text-decoration: underline; }
-.manual-match-report .manual-match-form { border: 1px solid var(--line, #deded8); padding: 20px; margin-bottom: 24px; border-radius: 12px; }
-.manual-match-report button, .manual-match-report select { cursor: pointer; }
-.manual-match-report textarea { width: 100%; min-height: 80px; padding: 12px; border: 1px solid var(--line, #deded8); border-radius: 8px; background: var(--surface, #fff); color: inherit; }
-.manual-match-report .provider-record { overflow-wrap: anywhere; min-width: 0; }
-.manual-match-report .provider-record a, .manual-match-report .provider-record p { overflow-wrap: anywhere; }
-.manual-match-report input[type="checkbox"] { cursor: pointer; accent-color: #24856b; }
+/* Shared by the Manual Matches report and Matching Episodes dialog. */
+.manual-match-editor { min-width: 0; }
+.manual-match-editor p { margin: 12px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.manual-match-editor h3 { margin: 24px 0 12px; }
+.manual-match-editor button { max-width: 100%; border: 1px solid var(--line); padding: 8px 12px; margin: 8px 8px 8px 0; background: var(--paper); color: var(--ink); cursor: pointer; line-height: 1.4; }
+.manual-match-editor button.primary { background: var(--ink); color: var(--paper); }
+.manual-match-editor button:disabled { opacity: .5; cursor: not-allowed; }
+.manual-match-editor button:focus-visible, .manual-match-editor input:focus-visible, .manual-match-editor select:focus-visible, .manual-match-editor summary:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.manual-match-editor label { display: block; margin: 16px 0; font: 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; overflow-wrap: anywhere; }
+.manual-match-editor label input:not([type="checkbox"]) { display: block; width: 100%; min-width: 0; height: 48px; margin-top: 8px; padding: 0 12px; background: white; border: 1px solid #b9bbb3; color: var(--ink); font: 13px var(--font-sans); text-transform: none; letter-spacing: normal; }
+.manual-match-editor select { display: block; max-width: 100%; min-height: 40px; margin-top: 8px; padding: 8px 28px 8px 10px; border: 1px solid #b9bbb3; background: var(--paper); color: var(--ink); font: 11px var(--font-mono); cursor: pointer; }
+.manual-match-editor label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: 8px; }
+.manual-match-editor label input[type="checkbox"] { display: inline-block; flex: 0 0 auto; width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--ink); cursor: pointer; }
+.manual-match-editor [role="alert"] { color: #a5342c; }
+.manual-match-editor details { margin: 12px 0; font-size: 12px; }
+.manual-match-editor summary { cursor: pointer; }
+.manual-match-editor fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--line); }
+.manual-match-editor legend { max-width: 100%; overflow-wrap: anywhere; }
+.manual-match-editor .manual-match-record { display: block; min-width: 0; margin: 10px 0; }
+.manual-match-editor .manual-match-record > strong, .manual-match-editor .manual-match-record > p { overflow: visible; white-space: normal; overflow-wrap: anywhere; }
+.manual-match-editor .manual-match-record > a { display: block; min-height: 0; padding: 0; border: 0; color: inherit; font-size: 12px; line-height: 1.5; text-decoration: underline; overflow-wrap: anywhere; }
+.manual-match-report .show-provider-matches .manual-match-record { margin: 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; }
+.manual-match-report .show-provider-matches .manual-match-record:last-child { border-bottom: 0; }
+.manual-match-report .manual-match-form { border: 1px solid var(--line); padding: 20px; margin: 16px 0 24px; }
 @media (max-width: 760px) {
   .manual-match-report .provider-match-columns { grid-template-columns: 1fr; }
   .manual-match-report .provider-match-row { padding: 16px 0; }

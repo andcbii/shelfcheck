@@ -23,13 +23,13 @@ publish port `3000` directly to the public internet.
 - Apply a configurable 0–30 day airing grace period to Trakt results.
 - Recognize conservative compound-episode mappings where one owned,
   double-length TMDB episode represents multiple split TVDB episodes.
-- Link complete TMDB and TVDB episode sets with persistent manual coverage,
+- Link complete TMDB and TVDB episode sets with persistent Manual Matches,
   including cross-show mappings and corrections for ambiguous Plex items.
 - Review incomplete coverage groups, repair broken mappings, and bulk-delete
-  selected mappings from the Manual Coverage manager.
+  selected mappings from the Manual Matches report.
 - Retain downloadable, credential-safe diagnostic logs for the latest 10 scans.
-- Inspect auto-matched episodes, unmatched shows, and unusual TMDB/TVDB show
-  relationships in dedicated Plex reports.
+- Inspect Auto Matches, unmatched shows, unusual TMDB/TVDB show relationships,
+  and Coverage Issues in dedicated Plex reports.
 
 ## Run with Docker Compose
 

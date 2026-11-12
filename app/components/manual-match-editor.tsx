@@ -6,10 +6,30 @@ type Props = {
   initialUrls: string[];
   initialMappingId?: string;
   report?: boolean;
+  episodeScope?: boolean;
   scanActive?: boolean;
   onChanged: (revision: number) => void;
 };
-export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, scanActive = false }: Props) {
+// URL paths identify provider episodes independently of slugs, locale, and query strings.
+function identifiesMember(input: string, member: CoverageMember) {
+  const qualified = input.trim().match(/^(tmdb|tvdb):(\d+)(?:\s+show:\d+\s+season:\d+\s+episode:\d+)?$/i);
+  if (qualified) return qualified[1].toUpperCase() === member.provider && Number(qualified[2]) === member.id;
+  try {
+    const url = new URL(input);
+    if (!["http:", "https:"].includes(url.protocol)) return false;
+    const host = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "thetvdb.com" && member.provider === "TVDB") {
+      const episode = url.pathname.match(/^\/(?:series\/[^/]+\/episodes|dereferrer\/episode)\/(\d+)\/?$/);
+      return Boolean(episode && Number(episode[1]) === member.id);
+    }
+    if (host === "themoviedb.org" && member.provider === "TMDB") {
+      const episode = url.pathname.match(/^\/tv\/(\d+)(?:-[^/]*)?\/season\/(\d+)\/episode\/(\d+)\/?$/);
+      return Boolean(episode && Number(episode[1]) === member.showId && Number(episode[2]) === member.season && Number(episode[3]) === member.episode);
+    }
+  } catch { /* Unresolved or incomplete draft input has no saved membership. */ }
+  return false;
+}
+export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, episodeScope = false, scanActive = false }: Props) {
   const [formOpen, setFormOpen] = useState(!report);
   const [scanning, setScanning] = useState(scanActive);
   const [urls, setUrls] = useState(initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""]);
@@ -32,7 +52,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmation, setConfirmation] = useState<string[] | null>(null);
   const locked = busy || scanActive || scanning;
-  const visibleMappings = mappings.filter(mapping => healthFilter === "all" || (mapping.health || "healthy") === healthFilter);
+  const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
+  const visibleMappings = scopedMappings.filter(mapping => healthFilter === "all" || (mapping.health || "healthy") === healthFilter);
   const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleMappings.length / pageSize)));
   const selectedIds = selected.filter(id => visibleMappings.some(mapping => mapping.id === id));
   const pageMappings = visibleMappings.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -80,7 +101,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setConfirmation(null);
         setPage(1);
         setRevision(body.revision);
-        const existing = body.mappings.find((mapping: CoverageMapping) => initialMappingId ? mapping.id === initialMappingId : mapping.members.some(member => initialUrls.includes(member.url)));
+        const existing = body.mappings.find((mapping: CoverageMapping) => initialMappingId ? mapping.id === initialMappingId : mapping.members.some(member => initialUrls.some(input => identifiesMember(input, member))));
         if (existing) openMapping(existing);
         setPending(Boolean(body.pending));
       }
@@ -140,7 +161,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setPreview(result);
       else {
         setPreview(null);
-        setEditing(null);
+        if (result.mapping) openMapping(result.mapping);
+        else if (!episodeScope) setEditing(null);
         onChanged(result.revision);
         setMessage(result.pending ? "Saved. Some coverage checks need attention. See Coverage Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
         await load();
@@ -215,13 +237,13 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
  {report && <button className="primary" disabled={locked} onClick={() => {setFormOpen(true);setEditing(null);setUrls(["", ""]);setPreview(null);setError("");setMessage("");}}>Add Manual Match</button>}
  {formOpen && <section className="manual-match-form" aria-label="Manual Match editor">
  {editing && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
- <button disabled={locked} onClick={() => {
+ {!episodeScope && <button disabled={locked} onClick={() => {
     setEditing(null);
     setUrls(["", ""]);
     setPreview(null);
     setError("");
     setMessage("");
-  }}>Create mapping</button>
+  }}>Create mapping</button>}
  <p>You can create a mapping before owning either set. Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context; show IDs alone cannot identify episodes.</p>
  <p>Link complete TMDB and TVDB episode sets representing the same content. Each side needs at least one episode. Review every record before saving.</p>
  {urls.map((url, index) => <label key={index}>Episode URL or provider-qualified ID {index + 1}<input disabled={locked} aria-label={`Episode URL or provider-qualified ID ${index + 1}`} value={url} onChange={event => {
@@ -233,7 +255,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
  {preview && <section aria-label="Resolved episode preview">{records(preview.members)}<button disabled={locked} onClick={() => void action({ action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision })}>Save coverage mapping</button></section>}
  </section>}
  {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
- <label>Mapping health<select aria-label="Mapping health" value={healthFilter} disabled={locked} onChange={event => {
+ {!episodeScope && <><label>Mapping health<select aria-label="Mapping health" value={healthFilter} disabled={locked} onChange={event => {
     setHealthFilter(event.target.value);
     setPage(1);
     changeSelection([]);
@@ -243,7 +265,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
  <section aria-label="Mapping selection"><p role="status">{selectedIds.length} mappings selected. Selection spans pages; changing the health filter clears it.</p><button disabled={locked || !visibleMappings.length} onClick={() => changeSelection(visibleMappings.map(mapping => mapping.id))}>Select all {visibleMappings.length} matching mappings</button><button disabled={locked || !selectedIds.length} onClick={() => changeSelection([])}>Clear selection</button><button disabled={locked || !selectedIds.length} onClick={() => setConfirmation([...selectedIds])}>Delete selected mappings</button></section>
  {confirmation && <section role="alertdialog" aria-label="Confirm mapping deletion"><p>Delete {confirmation.length} selected mappings? Plex comparisons will be rechecked.</p><button disabled={locked} onClick={() => void removeSelected(confirmation)}>Confirm delete {confirmation.length} mappings</button><button disabled={locked} onClick={() => setConfirmation(null)}>Cancel bulk deletion</button></section>}
  <ReportPagination total={visibleMappings.length} page={currentPage} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1); }}/>
- {pageMappings.map(mapping => <article className="provider-match-row" key={mapping.id}><label><input type="checkbox" aria-label={`Select mapping ${mapping.id}`} disabled={locked} checked={selectedIds.includes(mapping.id)} onChange={event => changeSelection(event.target.checked ? [...selectedIds, mapping.id] : selectedIds.filter(id => id !== mapping.id))}/>Select mapping</label><p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{report ? <div className="provider-match-columns">{(["TMDB", "TVDB"] as const).map(provider => <section className="show-provider-matches" key={provider}><header><span className={`provider-badge ${provider.toLowerCase()}`}>{provider}</span><strong>{mapping.members.filter(member => member.provider === provider).length} episodes</strong></header>{records(mapping.members.filter(member => member.provider === provider))}</section>)}</div> : records(mapping.members)}<button disabled={locked} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => itemCorrection(mapping,item)) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={locked} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
+ </>}
+ {pageMappings.map(mapping => <article className="provider-match-row" key={mapping.id}>{!episodeScope && <label><input type="checkbox" aria-label={`Select mapping ${mapping.id}`} disabled={locked} checked={selectedIds.includes(mapping.id)} onChange={event => changeSelection(event.target.checked ? [...selectedIds, mapping.id] : selectedIds.filter(id => id !== mapping.id))}/>Select mapping</label>}<p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{report ? <div className="provider-match-columns">{(["TMDB", "TVDB"] as const).map(provider => <section className="show-provider-matches" key={provider}><header><span className={`provider-badge ${provider.toLowerCase()}`}>{provider}</span><strong>{mapping.members.filter(member => member.provider === provider).length} episodes</strong></header>{records(mapping.members.filter(member => member.provider === provider))}</section>)}</div> : records(mapping.members)}<button disabled={locked} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => itemCorrection(mapping,item)) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={locked} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
  </section>;
 }
-

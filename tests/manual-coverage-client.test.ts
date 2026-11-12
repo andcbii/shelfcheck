@@ -3,7 +3,7 @@ import test from "node:test";
 import { Window } from "happy-dom";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { ManualCoverageManager } from "../app/components/manual-coverage-manager";
+import { ManualMatchEditor } from "../app/components/manual-match-editor";
 test("manual coverage manager presents reviewed identities and deletes the selected mapping", async (t) => {
   const browser = new Window({ url: "http://localhost/plex" });
   const old = new Map<string, PropertyDescriptor | undefined>();
@@ -53,8 +53,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         Reflect.deleteProperty(globalThis, key);
     }
   });
-  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"], onClose: () => {
-    }, onChanged: () => {
+  await act(async () => root.render(createElement(ManualMatchEditor, { initialUrls: ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"], onChanged: () => {
       changed++;
     } })));
   assert.match(container.textContent || "", /Target/);
@@ -80,7 +79,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const initialResolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(initialResolve);
   await act(async () => initialResolve.click());
-  assert.deepEqual(resolvedInputs, ["tmdb:100 show:10 season:1 episode:1", "tvdb:200"]);
+  assert.deepEqual(resolvedInputs, members.map(member => member.url));
   const edit = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit mapping");
   assert.ok(edit);
   await act(async () => edit.click());
@@ -166,7 +165,7 @@ test("linking another split episode retains the selected episode when opening an
       else Reflect.deleteProperty(globalThis, key);
     }
   });
-  await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: [added.url, "https://www.themoviedb.org/tv/10-target/season/1/episode/1?language=en-US"], onClose() {}, onChanged() {} })));
+  await act(async () => root.render(createElement(ManualMatchEditor, { initialUrls: [added.url, "https://www.themoviedb.org/tv/10/season/1/episode/2"], onChanged() {} })));
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
   await act(async () => resolve.click());
@@ -216,7 +215,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
     await browser.happyDOM.close();
     for(const [key,value] of old) {if(value) Object.defineProperty(globalThis,key,value); else Reflect.deleteProperty(globalThis,key);}
   });
-  await act(async()=>root.render(createElement(ManualCoverageManager,{initialUrls:[],onClose(){},onChanged(){changed++;}})));
+  await act(async()=>root.render(createElement(ManualMatchEditor,{initialUrls:[],onChanged(){changed++;}})));
   const click=async(label:string)=>{
     const button=[...container.querySelectorAll("button")].find(b=>b.textContent===label);
     assert.ok(button,`button ${label}`);

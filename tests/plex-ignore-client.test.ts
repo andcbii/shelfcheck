@@ -16,6 +16,9 @@ const report = {
   lastScan: "2026-11-06T12:00:00.000Z",
   scanCache: { one: { fingerprint: "example" } },
 };
+const matchingMember = {provider:"TMDB",id:100,showId:10,show:"Example Show",title:"Combined",season:1,episode:2,url:"https://www.themoviedb.org/tv/10/season/1/episode/2"};
+const matchingReport = {...report, shows: report.shows.map(show => ({...show,tmdbId:10,missing:show.missing.map(episode=>({...episode,tmdbEpisodeId:100}))}))};
+const issues = [{id:"fixture",scope:"library",operation:"provider-verification",provider:"TMDB",reason:"Provider freshness could not be verified"}];
 const completed = { scan: { status: "completed", processed: 1, total: 1 }, report };
 const json = (body: unknown) => Response.json(body);
 
@@ -215,7 +218,8 @@ test("manual mapping deletion cannot be overwritten by an older initial Plex rep
   let saved = true;
   const fresh = { ...report, shows: report.shows.map(show => ({ ...show, title: "Fresh coverage revision" })) };
   const defaults = configuredFetch(async () => {
-    if (++scanReads === 1) return initialReport.promise;
+    if (++scanReads === 1) return json({...completed,report:matchingReport,coverage:{revision:1}});
+    if (scanReads === 2) return initialReport.promise;
     return json({ scan: completed.scan, report: fresh, coverage: { revision: 2, pending: 0 } });
   });
   const { container, click } = await mountPage(t, async (input, init) => {
@@ -224,14 +228,15 @@ test("manual mapping deletion cannot be overwritten by an older initial Plex rep
         saved = false;
         return json({ deleted: ["saved"], revision: 2, pending: 1 });
       }
-      return json({ revision: saved ? 1 : 2, pending: 0, mappings: saved ? [{ id: "saved", revision: 1, members: [] }] : [] });
+      return json({ revision: saved ? 1 : 2, pending: 0, mappings: saved ? [{ id: "saved", revision: 1, members: [matchingMember] }] : [] });
     }
     return defaults(input, init);
-  });
-  await click("Manual Coverage");
+  }, true);
+  await click("S01E02");
+  await click("Matching Episodes");
   await click("Delete mapping");
   await act(async () => { initialReport.resolve(json({ ...completed, coverage: { revision: 1, pending: 0 } })); });
-  await click("Close manual coverage");
+  await click("Close Matching Episodes");
   assert.equal(container.querySelector(".show-name-button")?.textContent, "Fresh coverage revision");
 });
 
@@ -304,10 +309,10 @@ test("completed Plex reports show pending coverage and offer a fresh scan retry"
   let pending = 1;
   const { container, click } = await mountPage(t, configuredFetch(async (_input, init) => {
     if (init?.method === "POST") { pending = 0; return json({}); }
-    return json({ ...completed, coverage: { revision: 3, pending } });
+    return json({ ...completed, coverage: { revision: 3, pending, issues:pending?issues:[] } });
   }));
   assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
-  assert.match(container.querySelector('[role="status"]')?.textContent || "", /New Plex search/);
+  assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage Issues/);
   assert.equal(container.querySelectorAll(".show-list article").length, 1);
   await click("New Plex search");
   assert.equal(container.querySelector('[role="status"]'), null);
@@ -320,7 +325,7 @@ test("a completed poll keeps coverage pending when an older initial response arr
   const { container, click } = await mountPage(t, configuredFetch(async (_input, init) => {
     if (init?.method === "POST") return json({});
     if (++reads === 1) return initial.promise;
-    return json({ ...completed, coverage: { revision: 4, pending: 1 } });
+    return json({ ...completed, coverage: { revision: 4, pending: 1, issues } });
   }));
   await click("New Plex search");
   assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
@@ -328,19 +333,77 @@ test("a completed poll keeps coverage pending when an older initial response arr
   assert.match(container.querySelector('[role="status"]')?.textContent || "", /Coverage pending/);
 });
 
-test("a cached mapping mutation before the first Plex scan refreshes once and leaves New Plex search available",async t=>{
+test("a cached episode mapping mutation refreshes results once and leaves New Plex search available",async t=>{
   let revision=1,scanReads=0;
-  const defaults=configuredFetch(async()=>{scanReads++;return json({scan:{status:"idle",processed:0,total:0},report:null,coverage:{revision,pending:1}});});
+  const defaults=configuredFetch(async()=>{scanReads++;return json({scan:completed.scan,report:matchingReport,coverage:{revision,pending:1}});});
   const {container,click}=await mountPage(t,async(input,init)=>{
     if(String(input).startsWith("/api/plex/manual-coverage")){
       if(init?.method==="DELETE"){revision=2;return json({deleted:["saved"],revision,pending:1});}
-      return json({revision,pending:1,mappings:revision===1 ? [{id:"saved",revision:1,members:[]}] : []});
+      return json({revision,pending:1,mappings:revision===1 ? [{id:"saved",revision:1,members:[matchingMember]}] : []});
     }
     return defaults(input,init);
   });
-  await click("Manual Coverage");await click("Delete mapping");await click("Close manual coverage");
+  await click("S01E02");await click("Matching Episodes");await click("Delete mapping");await click("Close Matching Episodes");
   const search=[...container.querySelectorAll("button")].find(button=>button.textContent?.includes("New Plex search"));
   assert.ok(search,"A local recheck must not put the page into scan polling");
   assert.equal(search.disabled,false);
-  assert.equal(scanReads,2,"Refresh the local comparison once");
+  assert.equal(scanReads,3,"Initial page load, dialog lock check, then one local comparison refresh");
+});
+
+for (const mutation of ["save", "correct"]) test(`Matching Episodes ${mutation} refreshes affected results and preserves unrelated results in place`,async t=>{
+  const members=[matchingMember,{provider:"TVDB",id:200,showId:20,show:"Parts",title:"Equivalent",season:8,episode:8,url:"https://thetvdb.com/series/parts/episodes/200"}];
+  const item={ratingKey:"file",showKey:"one",fingerprint:"v1",identities:[{provider:"TMDB",id:100},{provider:"TVDB",id:200}]};
+  const unrelated={ratingKey:"two",title:"Unrelated show",plexEpisodes:2,missing:[{season:2,episode:3,sources:["TMDB"]}]};
+  const before={...matchingReport,shows:[...matchingReport.shows,unrelated]};
+  let changed=false;let scanPosts=0;let submitted:Record<string,unknown>|undefined;
+  const defaults=configuredFetch(async(_input,init)=>{
+    if(init?.method==="POST")scanPosts++;
+    return json({...completed,report:changed?{...before,shows:[{...before.shows[0],missing:[]},unrelated]}:before,coverage:{revision:changed?2:1,issues:[]}});
+  });
+  const {container,click}=await mountPage(t,async(input,init)=>{
+    if(String(input).startsWith("/api/plex/manual-coverage")){
+      if(init?.method==="POST"){
+        const body=JSON.parse(String(init.body));
+        if(body.action==="resolve")return json({preview:"reviewed",members});
+        changed=true;submitted=body;return json({revision:2,mapping:{id:"saved",revision:2,members}});
+      }
+      return json({revision:changed?2:1,mappings:[{id:"saved",revision:changed?2:1,members,evidence:[item]}]});
+    }
+    return defaults(input,init);
+  });
+  const unrelatedBefore=[...container.querySelectorAll(".show-list article")].find(row=>row.textContent?.includes("Unrelated show"))!.querySelector(".show-info")!.textContent;
+  await click("S01E02");await click("Matching Episodes");
+  if(mutation==="save"){await click("Resolve and review");await click("Save coverage mapping");}
+  else await click("Declare complete TVDB set");
+  assert.equal(submitted?.action,mutation);
+  assert.ok(container.querySelector('[role="dialog"]'),"The dialog stays open after the cached recheck");
+  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing mapping saved/);
+  await click("Close Matching Episodes");
+  assert.equal(container.querySelectorAll('.plex-episode-item').length,1,"Affected episode coverage is refreshed");
+  assert.equal([...container.querySelectorAll(".show-list article")].find(row=>row.textContent?.includes("Unrelated show"))!.querySelector(".show-info")!.textContent,unrelatedBefore);
+  assert.equal(scanPosts,0,"Matching operations never start or queue a full scan");
+});
+
+test("Matching Episodes retains its reviewed draft when the API rejects a scan-time save",async t=>{
+  let scanPosts=0;
+  const members=[matchingMember,{...matchingMember,provider:"TVDB",id:200,url:"https://thetvdb.com/series/parts/episodes/200"}];
+  const defaults=configuredFetch(async(_input,init)=>{if(init?.method==="POST")scanPosts++;return json({...completed,report:matchingReport});});
+  const {container,click}=await mountPage(t,async(input,init)=>{
+    if(String(input).startsWith("/api/plex/manual-coverage")){
+      if(init?.method==="POST"){
+        const body=JSON.parse(String(init.body));
+        if(body.action==="resolve")return json({preview:"reviewed",members});
+        return Response.json({error:"A Plex scan is running. Wait before saving.",code:"scan-active"},{status:409});
+      }
+      return json({revision:1,mappings:[{id:"saved",revision:1,members}]});
+    }
+    return defaults(input,init);
+  });
+  await click("S01E02");await click("Matching Episodes");await click("Resolve and review");await click("Save coverage mapping");
+  assert.match(container.querySelector('[role="alert"]')?.textContent||"",/Plex scan is running/);
+  assert.ok(container.querySelector('[aria-label="Resolved episode preview"]'));
+  assert.doesNotMatch(container.querySelector('[role="dialog"]')?.textContent||"",/Saved\./);
+  assert.equal(scanPosts,0);
+  await click("Close Matching Episodes");
+  assert.equal(container.querySelectorAll('.plex-episode-item').length,1);
 });

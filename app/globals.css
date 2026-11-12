@@ -148,3 +148,5 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
   .manual-match-report .provider-match-row { padding: 16px 0; }
   .manual-match-report .manual-match-form { padding: 14px; }
 }
+
+.plex-episode-trigger, .plex-episode-menu button { cursor: pointer; }

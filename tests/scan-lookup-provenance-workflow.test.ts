@@ -9,6 +9,7 @@ const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {ur
 const scan = await import("../app/api/plex/scan/route");
 const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
+const savedIssues = await import("../lib/coverage-issues");
 hook.deregister();
 
 test("show lookup failures preserve selected fresh and cached identity sources through reload and recovery", async t => {
@@ -16,12 +17,15 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   const previous = [process.env.SHELFCHECK_DATA_DIR,process.env.SHELFCHECK_CONFIG_DIR];
   process.env.SHELFCHECK_DATA_DIR = dir; process.env.SHELFCHECK_CONFIG_DIR = dir;
   const global = globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync};
-  t.after(() => { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
+  const closeDatabase = () => { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase; };
+  t.after(() => { closeDatabase();
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
   sqlite.writePlexSettings({diagnosticsEnabled:false});
   const show = {ratingKey:"1",title:"Is It Cake? Halloween",Guid:[{id:"tmdb://300594"}]};
+  const independent = {ratingKey:"2",title:"Independent saved inputs",Guid:[] as {id:string}[]};
+  let includeIndependent = false;
   let status = 404;
   let tmdbStatus = 0;
   let seasonStatus = 0;
@@ -30,7 +34,7 @@ test("show lookup failures preserve selected fresh and cached identity sources t
     if(u.hostname === "plex") {
       if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
       if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[]}});
-      return Response.json({MediaContainer:{Metadata:[show]}});
+      return Response.json({MediaContainer:{Metadata:u.pathname.startsWith("/library/metadata/2") ? [independent] : [show,...(includeIndependent ? [independent] : [])]}});
     }
     if(u.pathname === "/v4/login") return Response.json({data:{token:"secret-token"}});
     if(u.pathname === "/3/tv/changes") return Response.json({results:[],total_pages:1});
@@ -50,6 +54,8 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   };
   const first = await run();
   const issue = first.coverage.issues.find((i:{id:string})=>i.id==="catalogue-refresh:TVDB:ratingKey:1");
+  assert.equal(first.coverage.issues.length,1,"lookup and its blocked comparison count as one cause");
+  assert.match(issue.impacts.join(" "),/comparison.*could not be checked/i);
   assert.equal(issue.category,"Provider Lookup");
   assert.deepEqual(issue.lookup.source,[{provider:"Plex",kind:"TMDB show",id:300594},{provider:"TMDB",kind:"external TVDB ID",id:484205,cached:false}]);
   assert.deepEqual(issue.lookup.requested,{provider:"TVDB",kind:"series",id:484205});
@@ -58,11 +64,20 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   assert.match(issue.action,/TMDB.*external ID reference/);
   assert.match(issue.lookup.impact,/No previous comparison results/);
   assert.ok(!JSON.stringify(first.coverage).includes("secret-"));
-  global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
+  closeDatabase();
   show.Guid.push({id:"tvdb://123"});
   assert.deepEqual((await (await scan.GET()).json()).coverage.issues.find((i:{id:string})=>i.id===issue.id),issue,"reading saved issues never reconstructs provenance from changed metadata");
   show.Guid.pop();
+  includeIndependent = true;
+  const separate = await run();
+  assert.equal(separate.coverage.issues.length,2,"an independently missing provider identity remains separately counted");
+  assert.ok(separate.coverage.issues.some((i:{id:string})=>i.id === "comparison-inputs:ratingKey:2"));
   status = 0;
+  const partial = await run();
+  assert.deepEqual(partial.coverage.issues.map((i:{id:string})=>i.id),["comparison-inputs:ratingKey:2"],"lookup recovery clears only its dependent impact");
+  closeDatabase();
+  assert.deepEqual((await (await scan.GET()).json()).coverage.issues,partial.coverage.issues);
+  independent.Guid.push({id:"tmdb://300594"});
   assert.deepEqual((await run()).coverage.issues,[]);
   status = 404;
   const cached = (await run()).coverage.issues.find((i:{id:string})=>i.id===issue.id);
@@ -111,6 +126,7 @@ test("episode failures explain catalogue identity sources and persist safe parse
       if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[{ratingKey:"ep",parentIndex:1,index:2,Guid:[{id:"tmdb://101"},{id:"imdb://tt123"}]}]}});
       return Response.json({MediaContainer:{Metadata:[{ratingKey:"1",title:"Episode example",Guid:[{id:"tmdb://10"},{id:"tvdb://20"}]}]}});
     }
+    if(u.pathname==="/oauth/token") return Response.json({error_description:"secret-access"},{status:401});
     if(u.pathname==="/search/tvdb/200") return Response.json([{type:"episode",episode:{season:1,number:1,ids:{tvdb:200,tmdb:101}},show:{ids:{tmdb:10,tvdb:20}}}]);
     if(u.pathname==="/3/tv/10/season/1/episode/1") return traktFailure ? Response.json({},{status:403}) : Response.json({id:101});
     if(u.pathname==="/v4/login")return Response.json({data:{token:"secret-token"}});
@@ -151,4 +167,37 @@ test("episode failures explain catalogue identity sources and persist safe parse
   assert.ok(!JSON.stringify(rejected).includes("secret-"));
   traktFailure=false;
   assert.deepEqual((await run()).coverage.issues,[]);
+  await config.writeTraktCredentials({clientId:"secret-client",clientSecret:"secret-client-secret",accessToken:"secret-access",refreshToken:"secret-refresh",expiresAt:Date.now()-1000,redirectUri:"http://localhost/callback"});
+  const auth=(await run()).coverage.issues.find((i:{id:string})=>i.id === "provider-authentication:Trakt");
+  assert.equal(auth.category,"Provider Lookup");
+  assert.equal(auth.lookup.status,401);
+  assert.deepEqual(auth.lookup.requested,{provider:"Trakt",kind:"authentication"});
+  assert.ok(!JSON.stringify(auth).includes("secret-"));
+  await config.writeTraktCredentials({clientId:"secret-client",clientSecret:"secret-client-secret",accessToken:"secret-access",refreshToken:"secret-refresh",expiresAt:Date.now()+86400_000,redirectUri:"http://localhost/callback"});
+  assert.deepEqual((await run()).coverage.issues,[]);
+});
+
+test("shared scan state preserves independent legacy causes and groups explicit nested impacts after reload", async t => {
+  const dir = mkdtempSync(path.join(tmpdir(),"grouped-issues-"));
+  const previous = process.env.SHELFCHECK_DATA_DIR;
+  process.env.SHELFCHECK_DATA_DIR = dir;
+  const global = globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync};
+  const close = () => {global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;};
+  t.after(()=>{close();if(previous === undefined) delete process.env.SHELFCHECK_DATA_DIR;else process.env.SHELFCHECK_DATA_DIR=previous;rmSync(dir,{recursive:true,force:true});});
+  // Seed failure-time payloads from an earlier session, including pre-provenance records.
+  const show = {ratingKey:"ratingKey:1",title:"Is It Cake? Halloween",tmdbId:300594,tvdbId:484205};
+  savedIssues.setCoverageIssue({id:"authentication",scope:"library",provider:"TVDB",operation:"provider-authentication",cause:"401 — TVDB login failed",action:"Check TVDB credentials."});
+  savedIssues.setCoverageIssue({id:"catalogue",scope:"show",provider:"TVDB",operation:"catalogue-refresh",show,causedBy:["authentication"],cause:"TVDB catalogue could not be downloaded.",action:"Check TVDB credentials."});
+  savedIssues.setCoverageIssue({id:"dependent",scope:"show",operation:"comparison",show,causedBy:["catalogue"],cause:"Episode comparison could not be checked.",action:"Run a scan."});
+  savedIssues.setCoverageIssue({id:"legacy-input",scope:"show",operation:"comparison",show,cause:"Saved library inventory is unavailable.",action:"Run a scan."});
+  savedIssues.setCoverageIssue({id:"unrelated-comparison",scope:"show",operation:"comparison",show,cause:"Independent comparison failure.",action:"Run a scan."});
+  savedIssues.setCoverageIssue({id:"unrelated-library",scope:"library",operation:"inventory",cause:"Independent Plex enumeration failure.",action:"Run a scan."});
+  close();
+  const state = (await (await scan.GET()).json()).coverage;
+  assert.equal(state.issues.length,4);
+  assert.deepEqual(state.issues.map((i:{id:string})=>i.id),["authentication","legacy-input","unrelated-comparison","unrelated-library"]);
+  const impacts = state.issues[0].impacts.join(" ");
+  assert.match(impacts,/Halloween: TVDB catalogue/);
+  assert.match(impacts,/Halloween: Episode comparison/);
+  assert.equal(state.pending,1);
 });

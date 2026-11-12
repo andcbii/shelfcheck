@@ -29,7 +29,7 @@ publish port `3000` directly to the public internet.
   selected mappings from the Manual Matches report.
 - Retain downloadable, credential-safe diagnostic logs for the latest 10 scans.
 - Inspect Auto Matches, unmatched shows, unusual TMDB/TVDB show relationships,
-  and Coverage Issues in dedicated Plex reports.
+  and Scan Issues in dedicated Plex reports.
 
 ## Run with Docker Compose
 

@@ -137,7 +137,7 @@ export class PlexProviderClient {
         if (attempt === 4) { metric.failures += 1; throw new ProviderNetworkError(provider,requested); }
         const delay = Math.min(30_000, 1000 * 2 ** attempt);
         metric.retries += 1;
-        this.logger()?.warn("plex.request.network-retry", { provider, attempt: attempt + 1, delayMs: delay, error: error instanceof Error ? error.message : String(error) });
+        this.logger()?.warn("plex.request.network-retry", { provider, attempt: attempt + 1, delayMs: delay, error: `${provider} network request failed` });
         this.gate.delayUntil(provider, Date.now() + delay);
         await wait(delay);
       }

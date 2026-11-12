@@ -31,15 +31,17 @@ export async function recheckCoverageHealth(client: PlexProviderClient, config: 
       let state: NonNullable<CoverageMapping["health"]>;
       let cause: string | undefined;
       let explanation: Pick<CoverageIssue,"category"|"lookup"|"cause"|"action"> | undefined;
+      let causedBy: string[] | undefined;
       try {
         state = await memberHealth(member);
       } catch (error) {
         state = error instanceof ProviderHttpError && error.provider === "TVDB" && error.status === 404 && error.requested?.kind === "episode" ? "needs-review" : "pending";
         explanation = providerLookupContext(error,{source:[],requested:{provider:member.provider,kind:"episode",id:member.id},impact:"This Manual Match member’s episode identity and additional coverage could not be verified. The saved match was retained for review."});
         cause = explanation.cause;
+        if (error instanceof ProviderHttpError && error.requested?.kind === "authentication") causedBy = ["provider-authentication:TVDB"];
         if (state === "needs-review") explanation.action = "Review the saved episode reference and edit this Manual Match to repair the missing member.";
       }
-      if (cause) setCoverageIssue({id,operation:"member-verification",provider:member.provider,scope:"episode",mappingId:mapping.id,show:{title:member.show,...(member.provider === "TMDB" ? {tmdbId:member.showId} : {tvdbId:member.showId})},episode:{provider:member.provider,id:member.id,showId:member.showId,season:member.season,episode:member.episode,title:member.title},cause,action:state === "needs-review" ? "Edit and review this Manual Match to repair the missing member." : "Retry the Plex scan or review this Manual Match's episode context.",...explanation});
+      if (cause) setCoverageIssue({id,operation:"member-verification",provider:member.provider,scope:"episode",mappingId:mapping.id,show:{title:member.show,...(member.provider === "TMDB" ? {tmdbId:member.showId} : {tvdbId:member.showId})},episode:{provider:member.provider,id:member.id,showId:member.showId,season:member.season,episode:member.episode,title:member.title},...(causedBy ? {causedBy} : {}),cause,action:state === "needs-review" ? "Edit and review this Manual Match to repair the missing member." : "Retry the Plex scan or review this Manual Match's episode context.",...explanation});
       else resolveCoverageIssue(id);
       return state;
     }));

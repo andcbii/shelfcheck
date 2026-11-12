@@ -1,4 +1,6 @@
 "use client";
+import { CoverageWarning } from "@/app/reports/components/coverage-issue-report";
+import type { CoverageIssue } from "@/lib/coverage-issues";
 
 /* Plex artwork is served through an authenticated app-owned proxy. */
 /* eslint-disable @next/next/no-img-element */
@@ -60,7 +62,7 @@ export default function PlexPage() {
   const [coverageMappingId, setCoverageMappingId] = useState<string | undefined>();
   const [coverageUrls, setCoverageUrls] = useState<string[] | null>(null);
   const minimumCoverageRevision = useRef(0);
-  const [coveragePending, setCoveragePending] = useState(false);
+  const [coverageIssues, setCoverageIssues] = useState<CoverageIssue[]>([]);
   const [configured, setConfigured] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
@@ -94,14 +96,14 @@ export default function PlexPage() {
   const [fields, setFields] = useState({ plexUrl: "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
   const [changedFields, setChangedFields] = useState<Partial<Record<FieldKey, boolean>>>({});
   const [configStatus, setConfigStatus] = useState<ConfigStatus>(EMPTY_CONFIG);
-  const { poll, abort } = useScanPoller<{ scan?: Status; report?: Report | null; coverage?: { revision: number; pending: number }; error?: string }>({
+  const { poll, abort } = useScanPoller<{ scan?: Status; report?: Report | null; coverage?: { revision: number; pending: number; issues: CoverageIssue[] }; error?: string }>({
     url: "/api/plex/scan",
     onPollingChange: setScanning,
     onResponse: (body) => {
       if (!body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
       if ((body.coverage?.revision || 0) < minimumCoverageRevision.current) return false;
       minimumCoverageRevision.current = body.coverage?.revision || 0;
-      setCoveragePending(Boolean(body.coverage?.pending));
+      setCoverageIssues(body.coverage?.issues || []);
       setStatus(body.scan);
       if (body.scan.status === "completed") { setReport(body.report ? pruneClientReport(body.report, reportInvalidations.current) : null); return true; }
       if (body.scan.status === "error") throw new Error(body.scan.error || "The Plex scan failed.");
@@ -128,7 +130,7 @@ export default function PlexPage() {
     void fetch("/api/plex/scan", { cache: "no-store" }).then((response) => response.json()).then((body) => {
       if (initialInvalidations !== reportInvalidations.current || (body.coverage?.revision || 0) < minimumCoverageRevision.current) return;
       minimumCoverageRevision.current = body.coverage?.revision || 0;
-      setCoveragePending(Boolean(body.coverage?.pending));
+      setCoverageIssues(body.coverage?.issues || []);
       setStatus(body.scan); setReport(body.report ? pruneClientReport(body.report, initialInvalidations) : null);
       if (body.scan?.status === "running") void poll().catch((pollError) => { if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded."); });
     }).catch(() => setError("The previous Plex scan status could not be loaded."));
@@ -360,7 +362,7 @@ export default function PlexPage() {
       if(!response.ok || !body.scan) throw new Error(body.error || "Coverage recheck could not be loaded.");
       if(invalidations!==reportInvalidations.current || (body.coverage?.revision || 0)<minimumCoverageRevision.current) return;
       minimumCoverageRevision.current=body.coverage?.revision || 0;
-      setCoveragePending(Boolean(body.coverage?.pending));
+      setCoverageIssues(body.coverage?.issues || []);
       setStatus(body.scan);
       setReport(body.report ? pruneClientReport(body.report,invalidations) : null);
       if(body.scan.status==="running") await poll();
@@ -375,7 +377,7 @@ export default function PlexPage() {
   return <main>
     <header className="topbar">
       <div className="header-left"><Link className="brand" href="/"><span className="brandmark">S</span><span>Shelfcheck</span></Link><nav className="mode-switch" aria-label="Search source"><Link href="/trakt">Trakt</Link><Link className="active" href="/plex" aria-current="page">Plex</Link></nav></div>
-      <div className="header-actions"><button onClick={() => { setCoverageMappingId(undefined); setCoverageUrls([]); }}>Manual Coverage</button><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
+      <div className="header-actions"><button className={`status ${configured ? "online" : ""}`} onClick={() => setConnectionOpen(true)}><i />{configured ? "Plex configured" : "Configure Plex Scan"}</button><button className="icon-button" onClick={() => setPreferencesOpen(true)} aria-label="Plex preferences" disabled={!settingsLoaded}>⚙</button></div>
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
@@ -387,7 +389,7 @@ export default function PlexPage() {
     <div className="episode-reports-nav"><Link className="episode-reports-link" href="/reports">Reports <span>→</span></Link></div>
     <section className="report"><div className="report-heading"><p className="eyebrow">PLEX MISSING REPORT</p><div className="report-primary-row"><h2>{missingCount} missing episodes</h2><ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} /></div><div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllShows(false)}>Expand all</button><button onClick={() => setAllShows(true)}>Collapse all</button></div></div></div>
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
-      {coveragePending && <p role="status" className="plex-warning">Coverage pending. Episode coverage or provider catalogue freshness could not be verified. Use New Plex search to retry after checking Plex and provider connections.</p>}
+      <CoverageWarning issues={coverageIssues} />
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
       {!scanning && coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>

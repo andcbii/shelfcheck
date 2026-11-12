@@ -312,5 +312,5 @@ export function writePlexGeneratedInputs<T>(key: string, inputs: T) {
 }
 export function deletePlexGeneratedInputs() {
   // Scan accounting and provider verification positions survive explicit catalogue/report clearing.
-  plexInputsDatabase().exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key NOT IN ('full-scan','completed-full-scan','provider-verification')");
+  plexInputsDatabase().exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key NOT IN ('full-scan','completed-full-scan','provider-verification','pending-safeguards')");
 }

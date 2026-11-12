@@ -1,7 +1,7 @@
 import { reuseProviderCatalogue, tmdbFeedCovers } from "@/lib/plex-catalogue-policy";
-import { listCoverageIssues, setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
+import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, savePlexScanBaseline, saveDeferredTmdbChanges, savePendingTvdbChanges, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { correctedCoverageInventory, listCoverageCorrections, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
@@ -282,6 +282,24 @@ function retainVerifiedChanges(inputs: PlexGeneratedInputs, tmdb: Set<number> | 
   }
 }
 
+/**
+ * A safeguard is fulfilled once its change list is retrieved and each changed library show with a
+ * saved TMDB catalogue holds a durable refresh obligation; otherwise it stays pending.
+ */
+function retainSafeguard(inputs: PlexGeneratedInputs, utcDate: string, changes: Set<number> | null, candidates: PlexShowGroup[]) {
+  if (changes === null) {
+    if (!inputs.pendingSafeguards[utcDate]) { inputs.pendingSafeguards[utcDate] = true; savePendingSafeguards(inputs.pendingSafeguards); }
+    return;
+  }
+  for (const group of candidates) {
+    const comparison = inputs.comparisons[group.identity];
+    if (!comparison?.tmdbId || !changes.has(comparison.tmdbId) || !inputs.tmdb[String(comparison.tmdbId)] || comparison.refresh?.tmdb) continue;
+    comparison.refresh = {...comparison.refresh, tmdb: true};
+    savePlexComparison(group.identity, comparison);
+  }
+  if (inputs.pendingSafeguards[utcDate]) { delete inputs.pendingSafeguards[utcDate]; savePendingSafeguards(inputs.pendingSafeguards); }
+}
+
 type LoadedComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];
   tmdbId?: number; tvdbId?: number; tmdbShow: TmdbShow | null; tvdbResolved: boolean; tvdbSlug?: string;
@@ -526,8 +544,10 @@ async function runPlexScan(targetRatingKey?: string) {
     logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktCredentials), tmdbFallback: true });
     const inputs = readPlexInputs();
     const utcDate = startedAt.slice(0, 10);
-    const upcomingFullScan = {utcDate, count: (inputs.successfulFullScans?.utcDate === utcDate ? inputs.successfulFullScans.count : 0) + 1};
-    const fifthFullScan = !targetRatingKey && upcomingFullScan.count % 5 === 0;
+    // A scan belongs to its planned UTC start date, even when it finishes after midnight.
+    const upcomingFullScan = {utcDate, count: (inputs.completedFullScans?.utcDate === utcDate ? inputs.completedFullScans.count : 0) + 1};
+    // Scans 5, 10, ... require today's TMDB change list; an earlier unfinished one stays due today.
+    const safeguardDue = !targetRatingKey && (upcomingFullScan.count % 5 === 0 || Boolean(inputs.pendingSafeguards[utcDate]));
     const prior = getPlexReport();
     const rawCheckpoint = readPlexCheckpoint() as PlexCheckpoint | null;
     const checkpoint = !targetRatingKey && (rawCheckpoint?.coverageRevision || 0) === coverageRevision && checkpointIsUsable(rawCheckpoint, autoCompoundEpisodes) ? rawCheckpoint : null;
@@ -558,13 +578,14 @@ async function runPlexScan(targetRatingKey?: string) {
     else if (!targetRatingKey && tmdbPosition && !getCoverageIssue("provider-verification:TMDB")) setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",cause:"The saved TMDB verification baseline is invalid or outside the provider change-feed window; catalogue freshness is unverified.",action:"Run a Plex scan to refresh and verify provider catalogues."});
     if (tvdbChanges !== null) resolveCoverageIssue("provider-verification:TVDB");
     // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
-    const fifthScanChanges = fifthFullScan
+    const safeguardChanges = safeguardDue
       ? tmdbPosition?.slice(0, 10) === utcDate ? tmdbChanges
         : await tmdbChangedShows(startedAt, config.tmdbToken, startedAt).catch(error => {
           setCoverageIssue({id:"provider-verification:TMDB",operation:"provider-verification",provider:"TMDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TMDB",kind:"show change feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
           return null;
         })
       : null;
+    if (safeguardDue) retainSafeguard(inputs, utcDate, safeguardChanges, candidates);
     const tmdbCatalogueChanges = new Set([...(tmdbChanges || []), ...Object.keys(inputs.deferredTmdbChanges).map(Number)]);
     // Retained TVDB changes stay due even while the feed itself is unavailable.
     const tvdbCatalogueChanges = new Set([...(tvdbChanges || []), ...Object.keys(inputs.pendingTvdbChanges).map(Number)]);
@@ -692,7 +713,7 @@ async function runPlexScan(targetRatingKey?: string) {
       try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
         phaseStarted = Date.now();
-        const reuseTmdb = reuseProviderCatalogue({provider:"tmdb",now:startedAt,downloadedAt:savedTmdb?.downloadedAt,usable:usableProviderCatalogue(savedTmdb),mandatory:!!refresh.tmdb || (!!savedTmdb && !!fifthScanChanges?.has(savedTmdb.show.id)),targeted:!!targetRatingKey,changed:!!savedTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id),tmdbVerifiedThrough:tmdbPosition});
+        const reuseTmdb = reuseProviderCatalogue({provider:"tmdb",now:startedAt,downloadedAt:savedTmdb?.downloadedAt,usable:usableProviderCatalogue(savedTmdb),mandatory:!!refresh.tmdb,targeted:!!targetRatingKey,changed:!!savedTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id),tmdbVerifiedThrough:tmdbPosition});
         tmdbCatalogueReused = reuseTmdb;
         if (reuseTmdb && tmdbCatalogueChanges.has(savedTmdb.show.id)) {
           inputs.deferredTmdbChanges[String(savedTmdb.show.id)] = true;
@@ -832,10 +853,10 @@ async function runPlexScan(targetRatingKey?: string) {
         // TVDB has no recovery path: without history, verification starts at a completed full scan.
         ...(tvdbChanges !== null || (!tvdbPosition && inputs.inventory?.complete && !tvdbAuthenticationError) ? {tvdb: startedAt} : {}),
       });
-      if (inputs.inventory?.complete) saveCompletedFullScan(startedAt);
+      // Isolated download, comparison, and verification issues do not prevent a Completed full scan from counting.
+      if (inputs.inventory?.complete) saveCompletedFullScan(startedAt, upcomingFullScan);
     }
     completeCoverageRecheck(coverageRevision);
-    if (!targetRatingKey && inputs.inventory?.complete && !results.some(show => show.warning) && !listCoverageIssues().some(issue => issue.id !== "scan-failure")) savePlexScanBaseline(startedAt, upcomingFullScan);
     if (!targetRatingKey) clearPlexCheckpoint();
     else if (rawCheckpoint) {
       const nextCheckpoint = checkpointWithoutRatingKey(rawCheckpoint, targetRatingKey);

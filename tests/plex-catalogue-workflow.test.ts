@@ -88,12 +88,12 @@ test("full scans reuse catalogues while comparing current holdings across databa
   assert.match(feedIssue.lookup.impact,/freshness.*could not be verified/);
   assert.match(feedIssue.action,/credentials or permissions/);
   feedFailure = false;
-  await run();
-  assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
-  // The fifth successful full scan overrides the daily flag's same-day suppression.
+  // The feed-failure scan still completed and counted, so this recovery scan is the fifth
+  // completed full scan, which overrides the daily flag's same-day suppression.
   tmdbChanged = [10];
   requests.length = 0;
   await run();
+  assert.equal((await (await scan.GET()).json()).coverage.issues.length,0);
   assert.equal(requests.filter(p=>p === "/3/tv/10/season/1").length,1);
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,0);
   tmdbChanged = []; tvdbChanged = [20];

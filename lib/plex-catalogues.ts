@@ -21,27 +21,46 @@ export type SavedPlexComparison = {
   tvdbEpisodeImdbIds?: Record<string, string[]>;
   complete: boolean;
   refresh?: {tmdb?: boolean; tvdb?: boolean};
+  // A verified provider change to an alias whose relationships this comparison has not yet rebuilt.
+  staleRelationships?: {tmdb?: true; tvdb?: true};
 };
+/** The point through which each provider's change feed has been checked, with identified changes handled or retained. */
+export type ProviderVerificationPositions = {tmdb?: string; tvdb?: string};
 export type PlexGeneratedInputs = {
   version: 1;
   tmdb: Record<string, ProviderCatalogue<TmdbCatalogueShow>>;
   tvdb: Record<string, ProviderCatalogue<{id:number; name?:string; slug?:string}>>;
   comparisons: Record<string, SavedPlexComparison>;
   inventory?: { capturedAt:string; complete:boolean; groups:PlexShowGroup[]; items:Record<string,PlexMetadata[]>; evidence:CoverageEvidence[] };
-  fullScanStartedAt?: string;
+  /** Start of the latest Completed full scan (complete inventory, library processing finished). */
+  completedFullScanAt?: string;
+  verification: ProviderVerificationPositions;
   successfulFullScans?: {utcDate: string; count: number};
+  /** Verified TMDB changes not yet satisfied by a catalogue download, including same-day reuse deferrals. */
   deferredTmdbChanges: Record<string, true>;
+  /** Verified TVDB changes not yet satisfied by a catalogue download. */
+  pendingTvdbChanges: Record<string, true>;
 };
+const validTime = (value?: string) => Number.isFinite(Date.parse(value || "")) ? value : undefined;
 export function readPlexInputs(): PlexGeneratedInputs {
+  // Before provider isolation, one clean-scan baseline served as scan activity and both providers' change baseline.
+  const legacy = readPlexGeneratedInputs<{startedAt?: string; successfulFullScans?: PlexGeneratedInputs["successfulFullScans"]}>("full-scan");
+  const legacyBaseline = validTime(legacy?.startedAt);
+  const verification = readPlexGeneratedInputs<ProviderVerificationPositions>("provider-verification") || {tmdb: legacyBaseline, tvdb: legacyBaseline};
   return {
     version: 1,
     deferredTmdbChanges: readPlexGeneratedInputs<Record<string, true>>("deferred-tmdb") || {},
+    pendingTvdbChanges: readPlexGeneratedInputs<Record<string, true>>("pending-tvdb") || {},
     tmdb: listPlexGeneratedInputs("tmdb:"),
     tvdb: listPlexGeneratedInputs("tvdb:"),
     comparisons: listPlexGeneratedInputs("comparison:"),
     inventory: readPlexGeneratedInputs<PlexGeneratedInputs["inventory"]>("inventory") || undefined,
-    fullScanStartedAt: readPlexGeneratedInputs<{startedAt:string}>("full-scan")?.startedAt,
-    successfulFullScans: readPlexGeneratedInputs<{successfulFullScans?: PlexGeneratedInputs["successfulFullScans"]}>("full-scan")?.successfulFullScans,
+    completedFullScanAt: validTime(readPlexGeneratedInputs<{startedAt?:string}>("completed-full-scan")?.startedAt) || legacyBaseline,
+    verification: {
+      ...(validTime(verification.tmdb) ? {tmdb: verification.tmdb} : {}),
+      ...(validTime(verification.tvdb) ? {tvdb: verification.tvdb} : {}),
+    },
+    successfulFullScans: legacy?.successfulFullScans,
   };
 }
 export function savePlexCatalogue<P extends "tmdb" | "tvdb">(provider: P, id: number, catalogue: PlexGeneratedInputs[P][string]) {
@@ -56,6 +75,16 @@ export function savePlexInventory(inventory: NonNullable<PlexGeneratedInputs["in
 export function saveDeferredTmdbChanges(changes: Record<string, true>) {
   writePlexGeneratedInputs("deferred-tmdb", changes);
 }
+export function savePendingTvdbChanges(changes: Record<string, true>) {
+  writePlexGeneratedInputs("pending-tvdb", changes);
+}
+export function saveProviderVerification(positions: ProviderVerificationPositions) {
+  writePlexGeneratedInputs("provider-verification", positions);
+}
+export function saveCompletedFullScan(startedAt: string) {
+  writePlexGeneratedInputs("completed-full-scan", {startedAt});
+}
+/** Daily clean-scan count. Its startedAt only seeds verification positions for pre-isolation databases. */
 export function savePlexScanBaseline(startedAt: string, successfulFullScans: NonNullable<PlexGeneratedInputs["successfulFullScans"]>) {
   // One durable row commits both successful-full-scan policies at the same boundary.
   writePlexGeneratedInputs("full-scan", {startedAt, successfulFullScans});

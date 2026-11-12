@@ -71,7 +71,7 @@ async function fixture(t: TestContext) {
   };
 }
 
-test("deferred TMDB changes survive successful baselines, UTC midnight and restart", async t => {
+test("deferred TMDB changes survive advancing verification, UTC midnight and restart", async t => {
   const f = await fixture(t);
   await f.run(); f.correction(); f.changed([10]); f.requests.length = 0;
   assert.equal((await f.run()).shows[0].missing.length,0,"a later same-day correction may wait"); assert.deepEqual(f.counts(),[0,0]);
@@ -83,9 +83,11 @@ test("deferred TMDB changes survive successful baselines, UTC midnight and resta
   assert.deepEqual(f.counts(),[0,0],"successful download consumes the deferred correction");
 });
 
-test("successful full-scan gaps refresh only TMDB strictly beyond fourteen elapsed days", async t => {
+// Superseded: this gap was measured from the last clean full scan. It is now TMDB's own
+// verification position, which only full scans with a successful TMDB feed advance.
+test("TMDB verification gaps refresh only TMDB strictly beyond the fourteen-day change-feed window", async t => {
   const f = await fixture(t); await f.run();
-  // Targeted work must not advance the full-library baseline.
+  // Targeted work must not advance provider verification positions.
   f.at("2026-11-25T11:59:59Z"); await f.run("ratingKey:1");
   f.at("2026-11-25T12:00:00Z"); await f.run();
   assert.deepEqual(f.counts(),[0,0],"exactly fourteen days is reusable");
@@ -133,7 +135,7 @@ test("independent sixty-day provider ages expire strictly, retain last-good data
   f.requests.length=0; await f.run(); assert.deepEqual(f.counts(),[1,2],"explicit clearing beats same-day reuse");
 });
 
-test("targeted checks do not renew the preceding successful full scan", async t => {
+test("targeted checks do not advance the TMDB verification position", async t => {
   const f = await fixture(t); await f.run();
   f.at("2026-11-25T11:59:59Z"); await f.run("ratingKey:1");
   f.at("2026-11-25T12:00:00.001Z"); f.restart(); await f.run();

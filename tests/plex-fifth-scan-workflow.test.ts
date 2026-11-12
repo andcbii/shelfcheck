@@ -27,7 +27,9 @@ async function fixture(t: test.TestContext) {
   const state = {feedFailure:false,downloadFailure:false,inventoryFailure:false, ownsTvdb:false, advanceClock:0, today:[10,999], older:[] as number[],
     tvdbFeedFailure:false, failedTvdb:new Set<number>(), failedTmdb:new Set<number>(), failedInventory:new Set<string>(), failedFind:new Set<number>(),
     // Changes the feed returns only when its requested interval includes their UTC date.
-    dated:[] as {id:number;date:string}[]};
+    dated:[] as {id:number;date:string}[],
+    // Fails only single-day feed requests, such as a separate fifth-scan safeguard list.
+    oneDayFeedFailure:false};
   const requests: URL[] = [];
   const shows = [10,30].map(id=>({ratingKey:String(id),title:`Show ${id}`,Guid:[{id:`tmdb://${id}`},{id:`tvdb://${id+10}`}],updatedAt:1}));
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
@@ -43,6 +45,7 @@ async function fixture(t: test.TestContext) {
     if(u.pathname === "/3/tv/changes" && state.feedFailure) return Response.json({},{status:401});
     if(u.pathname === "/3/tv/changes") {
       const start = u.searchParams.get("start_date")!, end = u.searchParams.get("end_date")!;
+      if(state.oneDayFeedFailure && start === end) return Response.json({},{status:401});
       return Response.json({results:[...state.today,...(start === end ? [] : state.older),...state.dated.filter(c=>c.date >= start && c.date <= end).map(c=>c.id)].map(id=>({id})),total_pages:1});
     }
     if(u.pathname === "/v4/updates" && state.tvdbFeedFailure) return Response.json({},{status:401});
@@ -326,4 +329,52 @@ test("overdue and newly due safeguards coexist and each completed download resol
   for(let i=8;i<=9;i++) { await f.run(); assert.deepEqual(f.tmdbDownloads(),[],"fulfilled safeguards are not repeated because an unrelated issue persists"); }
   await f.run();
   assert.deepEqual(f.tmdbDownloads(),[],"the new day's tenth completed scan has no changed shows to refresh");
+});
+
+/**
+ * Day 2026-11-12's fifth completed scan: TMDB's main feed (from the earlier day's position) succeeds,
+ * but the separate one-day safeguard list fails. Show 10's catalogue was downloaded that day, so its
+ * change can only bypass same-day reuse through the safeguard.
+ */
+async function fifthScanWithFailedSafeguardFeed(t: test.TestContext) {
+  const f = await fixture(t);
+  f.state.today = [];
+  await f.run(); // 2026-11-11 establishes catalogues and TMDB's verification position.
+  t.mock.timers.tick(86400_000);
+  f.state.feedFailure = true; // TMDB's position stays on the earlier day.
+  for(let i=1;i<=4;i++) { assert.equal((await f.run()).scan.status,"completed"); assert.deepEqual(f.tmdbDownloads(),[]); }
+  await f.run("ratingKey:10"); // A same-day catalogue download that does not count.
+  f.state.feedFailure = false;
+  f.state.oneDayFeedFailure = true;
+  f.state.dated.push({id:10,date:"2026-11-12"});
+  const result = await f.run();
+  assert.deepEqual(tmdbFeeds(f.requests),["2026-11-11..2026-11-12","2026-11-12..2026-11-12"],"the main feed succeeds; the safeguard's own list is requested separately and fails");
+  assert.deepEqual(f.downloads(),[],"ordinary same-day reuse applies while the safeguard list is unavailable");
+  assert.ok(hasIssue(result,"provider-verification:TMDB"),"the unfinished safeguard is visible although the main feed succeeded");
+  f.state.oneDayFeedFailure = false;
+  return f;
+}
+
+test("a pending safeguard whose own list failed after a successful main feed is fulfilled by a later same-day scan", async t => {
+  const f = await fifthScanWithFailedSafeguardFeed(t);
+  f.restart();
+  const result = await f.run(); // Completed scan six: not a multiple of five.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"the pending safeguard bypasses same-day reuse for its changed library show, without TVDB downloads");
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
+  await f.run();
+  assert.deepEqual(f.downloads(),[],"the fulfilled safeguard is consumed");
+});
+
+test("a pending safeguard whose own list failed after a successful main feed survives restart and UTC midnight", async t => {
+  const f = await fifthScanWithFailedSafeguardFeed(t);
+  f.restart();
+  t.mock.timers.tick(86400_000);
+  f.state.oneDayFeedFailure = true; // The overdue day's own list remains unavailable.
+  let result = await f.run(); // New day, completed scan one.
+  assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"the original day's safeguard change is refreshed, without TVDB downloads");
+  assert.deepEqual(tmdbFeeds(f.requests),["2026-11-12..2026-11-13"],"the verified interval covers the original day");
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
+  f.state.oneDayFeedFailure = false;
+  for(let i=2;i<=4;i++) { result = await f.run(); assert.deepEqual(f.downloads(),[],"the fulfilled overdue safeguard is not repeated"); }
+  assert.ok(!hasIssue(result,"provider-verification:TMDB"));
 });

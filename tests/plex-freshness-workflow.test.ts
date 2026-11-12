@@ -121,7 +121,8 @@ test("independent sixty-day provider ages expire strictly, retain last-good data
   assert.deepEqual(f.counts(),[1,0],"a failed mandatory download retries across restart");
   const repairedIssues=(await f.state()).coverage.issues;
   const repairedView=renderToStaticMarkup(createElement(CoverageIssueReport,{issues:repairedIssues}));
-  assert.doesNotMatch(repairedView,/Provider Lookup/);
+  assert.ok(!repairedIssues.some((issue:{operation:string})=>issue.operation === "catalogue-refresh"),"successful retry clears the failed catalogue lookup");
+  assert.match(repairedView,/Provider Lookup/,"independent provider feed failure remains visible");
   assert.ok(repairedIssues.some((issue:{operation:string})=>issue.operation === "provider-verification"),"unrelated freshness verification remains visible");
   assert.match(renderToStaticMarkup(createElement(CoverageWarning,{issues:repairedIssues})),/Scan Issues/);
   f.fail(false); f.at("2027-01-11T11:59:59.999Z"); await f.run(); assert.deepEqual(f.counts(),[0,0]);

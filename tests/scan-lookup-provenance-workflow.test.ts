@@ -29,11 +29,14 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   let status = 404;
   let tmdbStatus = 0;
   let seasonStatus = 0;
+  let metadataFailure = false;
+  let inventoryFailure = false;
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
     const u = new URL(String(input));
     if(u.hostname === "plex") {
       if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
-      if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[]}});
+      if(u.pathname.includes("allLeaves")) return inventoryFailure && u.pathname.includes("/1/") ? Response.json({},{status:403}) : Response.json({MediaContainer:{Metadata:[]}});
+      if(metadataFailure && u.pathname.startsWith("/library/metadata/1")) return Response.json({},{status:403});
       return Response.json({MediaContainer:{Metadata:u.pathname.startsWith("/library/metadata/2") ? [independent] : [show,...(includeIndependent ? [independent] : [])]}});
     }
     if(u.pathname === "/v4/login") return Response.json({data:{token:"secret-token"}});
@@ -79,6 +82,19 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   assert.deepEqual((await (await scan.GET()).json()).coverage.issues,partial.coverage.issues);
   independent.Guid.push({id:"tmdb://300594"});
   assert.deepEqual((await run()).coverage.issues,[]);
+  metadataFailure = true;
+  const metadataBlocked = await run();
+  assert.equal(metadataBlocked.coverage.issues.length,1,"metadata lookup and comparison impact count as one cause");
+  assert.equal(metadataBlocked.coverage.issues[0].id,"inventory-details:ratingKey:1");
+  assert.deepEqual(savedIssues.getCoverageIssue("comparison-inputs:ratingKey:1")?.causedBy,["inventory-details:ratingKey:1"]);
+  metadataFailure = false;
+  inventoryFailure = true;
+  const inventoryBlocked = await run();
+  assert.deepEqual(inventoryBlocked.coverage.issues.map((i:{id:string})=>i.id),["inventory:ratingKey:1:1"],"one failed inventory lookup blocks all dependent comparisons without adding causes");
+  assert.deepEqual(savedIssues.getCoverageIssue("comparison-inputs:ratingKey:2")?.causedBy,["inventory:ratingKey:1:1"]);
+  assert.equal(savedIssues.getCoverageIssue("inventory-details:ratingKey:1"),undefined,"successful metadata retry clears its old lookup failure even while inventory remains incomplete");
+  inventoryFailure = false;
+  assert.deepEqual((await run()).coverage.issues,[]);
   status = 404;
   const cached = (await run()).coverage.issues.find((i:{id:string})=>i.id===issue.id);
   assert.equal(cached.lookup.source[1].cached,true);
@@ -114,11 +130,14 @@ test("episode failures explain catalogue identity sources and persist safe parse
   const previous=[process.env.SHELFCHECK_DATA_DIR,process.env.SHELFCHECK_CONFIG_DIR];
   process.env.SHELFCHECK_DATA_DIR=dir;process.env.SHELFCHECK_CONFIG_DIR=dir;
   const global=globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync};
-  t.after(()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;for(const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()){if(previous[i]===undefined)delete process.env[key];else process.env[key]=previous[i];}rmSync(dir,{recursive:true,force:true});});
+  const closeDatabase=()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;};
+  t.after(()=>{closeDatabase();for(const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()){if(previous[i]===undefined)delete process.env[key];else process.env[key]=previous[i];}rmSync(dir,{recursive:true,force:true});});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
   sqlite.writePlexSettings({diagnosticsEnabled:false});
   let failure=true;
   let traktFailure=false;
+  let loginFailure=false;
+  let blockedEpisodeRequests=0;
   t.mock.method(globalThis,"fetch",async(input:string|URL|Request)=>{
     const u=new URL(String(input));
     if(u.hostname==="plex") {
@@ -129,13 +148,13 @@ test("episode failures explain catalogue identity sources and persist safe parse
     if(u.pathname==="/oauth/token") return Response.json({error_description:"secret-access"},{status:401});
     if(u.pathname==="/search/tvdb/200") return Response.json([{type:"episode",episode:{season:1,number:1,ids:{tvdb:200,tmdb:101}},show:{ids:{tmdb:10,tvdb:20}}}]);
     if(u.pathname==="/3/tv/10/season/1/episode/1") return traktFailure ? Response.json({},{status:403}) : Response.json({id:101});
-    if(u.pathname==="/v4/login")return Response.json({data:{token:"secret-token"}});
+    if(u.pathname==="/v4/login")return loginFailure ? Response.json({secret:"secret-token"},{status:401}) : Response.json({data:{token:"secret-token"}});
     if(u.pathname==="/3/tv/changes")return Response.json({results:[],total_pages:1});
     if(u.pathname==="/v4/updates")return Response.json({data:[]});
     if(u.pathname==="/3/tv/10")return Response.json({id:10,seasons:[],external_ids:{tvdb_id:20}});
     if(u.pathname==="/v4/series/20")return Response.json({data:{id:20}});
     if(u.pathname.includes("/episodes/default"))return Response.json({data:{episodes:[{id:200,seasonNumber:1,number:1,name:"Pilot",aired:"2020-01-01"}]}});
-    if(u.pathname==="/v4/episodes/200/extended")return failure ? new Response('{"secret-token":broken',{headers:{"Content-Type":"application/json"}}) : Response.json({data:{remoteIds:[]}});
+    if(u.pathname==="/v4/episodes/200/extended") { if(loginFailure) { blockedEpisodeRequests++; return Response.json({},{status:401}); } return failure ? new Response('{"secret-token":broken',{headers:{"Content-Type":"application/json"}}) : Response.json({data:{remoteIds:[]}}); }
     if(u.pathname==="/3/find/200")return failure ? Response.json({},{status:404}) : Response.json({tv_episode_results:[]});
     if(u.pathname.includes("/find/"))return Response.json({tv_results:[]});
     throw new Error("Unexpected HTTP");
@@ -153,8 +172,21 @@ test("episode failures explain catalogue identity sources and persist safe parse
   assert.deepEqual(reverse.lookup.source,episode.lookup.source);
   assert.deepEqual(reverse.lookup.requested,{provider:"TMDB",kind:"external ID search",id:200});
   assert.ok(!JSON.stringify(state.coverage).includes("secret-"));
-  global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;
+  closeDatabase();
   assert.deepEqual((await(await scan.GET()).json()).coverage.issues,state.coverage.issues);
+  loginFailure=true;
+  failure=false;
+  const authBlocked=await run();
+  assert.deepEqual(authBlocked.coverage.issues.map((i:{id:string})=>i.id),["provider-authentication:TVDB"],"cached catalogues and blocked episode verification share the established authentication cause");
+  assert.match(authBlocked.coverage.issues[0].impacts.join(" "),/Episode identity and coverage/);
+  assert.equal(blockedEpisodeRequests,0,"known authentication failure prevents doomed episode requests");
+  const blockedIssue=savedIssues.getCoverageIssue("episode-identity:ratingKey:1:TVDB:https://api4.thetvdb.com/v4/episodes/200/extended");
+  assert.deepEqual(blockedIssue?.causedBy,["provider-authentication:TVDB"]);
+  assert.ok(!JSON.stringify(authBlocked.coverage).includes("secret-"));
+  assert.match(authBlocked.report.shows[0].warning,/identity.*failed/);
+  closeDatabase();
+  assert.deepEqual((await(await scan.GET()).json()).coverage.issues,authBlocked.coverage.issues,"authentication dependencies survive a database reload");
+  loginFailure=false;
   failure=false;
   assert.deepEqual((await run()).coverage.issues,[]);
   await config.writeTraktCredentials({clientId:"secret-client",clientSecret:"secret-client-secret",accessToken:"secret-access",refreshToken:"secret-refresh",expiresAt:Date.now()+86400_000,redirectUri:"http://localhost/callback"});

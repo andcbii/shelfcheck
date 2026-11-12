@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SHELFCHECK_VERSION } from "../lib/version";
+import { ProviderHttpError } from "../lib/plex-provider-client";
 
 const serverOnlyHook = registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -107,12 +108,18 @@ test("Trakt OAuth token exchanges identify Shelfcheck and preserve managed crede
     assert.equal(configContents(), before);
   });
 
-  await t.test("JSON OAuth rejection retains its description and does not overwrite saved credentials", async (t) => {
+  await t.test("JSON OAuth rejection retains safe HTTP evidence and does not overwrite saved credentials", async (t) => {
     await config.writeTraktCredentials(credentials(Date.now() + 3_600_000));
     const before = configContents();
     t.mock.method(globalThis, "fetch", async () => Response.json({ error: "invalid_grant", error_description: "The authorization code is invalid." }, { status: 400 }));
 
-    await assert.rejects(auth.exchangeAuthorizationCode("invalid-code", redirectUri), { message: "The authorization code is invalid." });
+    await assert.rejects(auth.exchangeAuthorizationCode("invalid-code", redirectUri), (error:unknown) => {
+      assert.ok(error instanceof ProviderHttpError);
+      assert.equal(error.status,400);
+      assert.deepEqual(error.requested,{provider:"Trakt",kind:"authentication"});
+      assert.doesNotMatch(error.message,/authorization code is invalid/);
+      return true;
+    });
     assert.equal(configContents(), before);
   });
 
@@ -121,7 +128,12 @@ test("Trakt OAuth token exchanges identify Shelfcheck and preserve managed crede
     const before = configContents();
     t.mock.method(globalThis, "fetch", async () => new Response("<html><title>Attention Required! | Cloudflare</title></html>", { status: 403, headers: { "Content-Type": "text/html" } }));
 
-    await assert.rejects(auth.validTraktCredentials(), { message: "Trakt authorization failed (403)." });
+    await assert.rejects(auth.validTraktCredentials(), (error:unknown) => {
+      assert.ok(error instanceof ProviderHttpError);
+      assert.equal(error.status,403);
+      assert.doesNotMatch(error.message,/Cloudflare|<html>/);
+      return true;
+    });
     assert.equal(configContents(), before);
   });
 
@@ -135,7 +147,12 @@ test("Trakt OAuth token exchanges identify Shelfcheck and preserve managed crede
       return Response.json(tokenResponse);
     });
 
-    await assert.rejects(auth.validTraktCredentials(), { message: "Please retry the token refresh." });
+    await assert.rejects(auth.validTraktCredentials(), (error:unknown) => {
+      assert.ok(error instanceof ProviderHttpError);
+      assert.equal(error.status,503);
+      assert.doesNotMatch(error.message,/Please retry the token refresh/);
+      return true;
+    });
     assert.equal(configContents(), before);
     assert.deepEqual(await auth.validTraktCredentials(), renewedCredentials);
     assert.equal(request.mock.callCount(), 2);

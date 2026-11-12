@@ -68,7 +68,7 @@ const providerClient = new PlexProviderClient(
   },
 );
 
-const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean}>();
+const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
 const replayScope = new AsyncLocalStorage<{missing:Set<string>}>();
 const relationshipScope = new AsyncLocalStorage<SavedPlexComparison["relationships"]>();
@@ -91,11 +91,14 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
   const coordinate = endpoint.pathname.match(/\/tv\/(\d+)\/season\/(\d+)\/episode\/(\d+)/);
   const matching = Boolean(tvdbEpisodeId || findId || coordinate || provider === "Trakt");
   let value: T;
-  try { value = await providerClient.json<T>(url, init, provider); }
+  try {
+    if (provider === "TVDB" && show?.tvdbAuthenticationError) throw show.tvdbAuthenticationError;
+    value = await providerClient.json<T>(url, init, provider);
+  }
   catch (error) {
     if (show && matching) {
       const externalId = episodeIdentity?.id;
-      setCoverageIssue({id:issueId,operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
+      setCoverageIssue({id:issueId,...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
         ...(tvdbEpisodeId || externalId ? {episode:{provider:"TVDB" as const,id:Number(tvdbEpisodeId || externalId),showId:show.tvdbId,...((e)=>e ? {season:e.season,episode:e.episode,title:e.title} : {})(show.providerEpisodes?.find(e=>e.source === "TVDB" && e.providerEpisodeId === Number(tvdbEpisodeId || externalId)))}} : coordinate ? {episode:{provider:"TMDB" as const,...(lookupSourceScope.getStore()?.at(-1)?.kind === "external TMDB episode ID" ? {id:lookupSourceScope.getStore()!.at(-1)!.id} : {}),showId:Number(coordinate[1]),season:Number(coordinate[2]),episode:Number(coordinate[3])}} : {}),
         ...providerLookupContext(error,{
           source: lookupSourceScope.getStore() || (tvdbEpisodeId || externalId
@@ -546,6 +549,7 @@ async function runPlexScan(targetRatingKey?: string) {
     }
     const queue: PlexShowGroup[] = [];
     const localResponsesByRatingKey = new Map<string, PlexContainer>();
+    const inventoryFailureCauses: string[] = [];
     currentTotal = candidates.length;
     await runWorkerPool(allShows, PLEX_SCAN_WORKERS, async (group) => {
       const responses = await Promise.allSettled(group.records.map(async (record) => ({
@@ -559,6 +563,7 @@ async function runPlexScan(targetRatingKey?: string) {
           if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);
           resolveCoverageIssue(issueId);
         } else {
+          inventoryFailureCauses.push(issueId);
           setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
           logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
         }
@@ -607,15 +612,18 @@ async function runPlexScan(targetRatingKey?: string) {
       let phaseStarted = Date.now();
       let details: PlexMetadata[];
       let localResponses: PlexContainer[];
+      let metadataLoaded = false;
       try {
         details = await Promise.all(group.records.map(async (record) => (await plexJson(`/library/metadata/${record.ratingKey}?includeGuids=1`, config.plexUrl, config.plexToken)).MediaContainer?.Metadata?.[0] || record));
+        metadataLoaded = true;
+        resolveCoverageIssue(`inventory-details:${ratingKey}`);
         if (!inputs.inventory?.complete) throw new Error("The library inventory is incomplete; coverage cannot be verified against unavailable items.");
         localResponses = group.records.map(record=>localResponsesByRatingKey.get(record.ratingKey || "")!);
-        resolveCoverageIssue(`inventory-details:${ratingKey}`);
       } catch (error) {
         const message = `Plex inventory could not be loaded: ${error instanceof Error ? error.message : String(error)} This show will be checked again next scan.`;
-        setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
-        if (inputs.inventory?.complete) setCoverageIssue({id:`inventory-details:${ratingKey}`,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"show metadata"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
+        const causedBy = [...inventoryFailureCauses,...(!metadataLoaded ? [`inventory-details:${ratingKey}`] : [])];
+        setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...(causedBy.length ? {causedBy} : {}),cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
+        if (!metadataLoaded) setCoverageIssue({id:`inventory-details:${ratingKey}`,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"show metadata"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
         retainComparison(message);
         return;
       }
@@ -739,7 +747,7 @@ async function runPlexScan(targetRatingKey?: string) {
       const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
       try {
-      await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused}, () => relationshipScope.run(relationships, async () => {
+      await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError}, () => relationshipScope.run(relationships, async () => {
         const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,addWarning,setHeartbeat});
         ({tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds}=compared);
         results.push({...compared.result,...(warning ? {warning} : {})});

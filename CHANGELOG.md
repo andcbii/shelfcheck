@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.5.0 - 2026-11-11
+
+### Added
+
+- Manual Matches report with complete episode-set rows, provider panels, health
+  filtering, editing, bulk deletion, coverage evidence, and ownership corrections.
+- Coverage Issues report identifying affected content, provider failures, and
+  recovery guidance, linked directly from the Plex coverage warning.
+- Focused Matching Episodes dialog with complete existing-match editing,
+  outside-click dismissal, draft discard, and preserved Plex results position.
+
+### Changed
+
+- Move Manual Coverage management from the header to report 01, Manual Matches;
+  renumber existing reports and add report 05, Coverage Issues.
+- Reuse saved provider catalogues independently of Plex comparisons. Manual Match
+  and ownership-correction changes immediately recheck affected cached results
+  without rescanning unrelated shows, and require fresh provider data next full scan.
+- Apply independent provider freshness checks, maximum catalogue ages, and a
+  targeted TMDB refresh on every fifth successful full scan of the UTC day.
+
+### Fixed
+
+- Preserve last-good results and refresh obligations through provider failures
+  and restarts, with structured coverage and freshness diagnostics.
+- Protect mutations during active scans and preserve concurrent cached rechecks.
+- Accept explicitly empty Plex collections without retaining stale inventory.
+
 ## 2.4.0 - 2026-11-08
 
 ### Added

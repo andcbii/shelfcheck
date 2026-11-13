@@ -22,8 +22,10 @@ export type EpisodeCheckFailure = {
   /**
    * `request-failed`: the provider request was rejected (its own Provider Lookup cause is in `causedBy`).
    * `unreadable-response`: a successful response could not be interpreted.
+   * `relationship-unavailable`: an offline cached recheck has no saved response to replay;
+   * no request was attempted.
    */
-  kind: CompoundEvidenceFailure["kind"] | "request-failed" | "unreadable-response";
+  kind: CompoundEvidenceFailure["kind"] | "request-failed" | "unreadable-response" | "relationship-unavailable";
   reason: string;
   causedBy?: string[];
   /**

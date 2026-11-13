@@ -81,6 +81,8 @@ export function episodeCheckIssue(show: EpisodeCheckShow, failure: EpisodeCheckF
       ? `Retry the Plex scan after ${provider || "the provider"} availability recovers; ${failure.operation === "title-recovery" ? "its English title is" : "this crosswalk is"} requested again then.`
       : failure.kind === "unreadable-response"
       ? `Run a Plex scan to request this crosswalk again; if ${provider || "the provider"} keeps returning an unreadable response, report it with this Scan Issue.`
+      : failure.kind === "relationship-unavailable"
+      ? "Run a Plex scan to request this crosswalk again; cached rechecks make no provider requests."
       : "Run a Plex scan to check this episode again; if the problem continues, report it with this Scan Issue.",
   };
 }

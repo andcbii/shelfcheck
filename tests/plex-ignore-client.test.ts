@@ -445,3 +445,46 @@ test("Matching Episodes retains its reviewed draft when the API rejects a scan-t
   await click("Close Matching Episodes");
   assert.equal(container.querySelectorAll('.plex-episode-item').length,1);
 });
+
+test("Ignore hides explicitly and derivatively missing results in its scope", async (t) => {
+  const members = [
+    { provider: "TMDB", id: 100, showId: 10, show: "Example Show", title: "Whole", season: 1, episode: 1, url: "https://example.com/100", reportMissing: false, status: "incomplete", missingParts: [{ provider: "TVDB", id: 202 }] },
+    { provider: "TVDB", id: 202, showId: 20, show: "Example Show", title: "Part C", season: 2, episode: 3, url: "https://example.com/202", reportMissing: true, status: "reported-missing" },
+  ];
+  const flagged = { ...report, shows: [{ ...report.shows[0], missing: [
+    { season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"], incomplete: { TMDB: [{ provider: "TVDB", id: 202 }] } },
+    { season: 2, episode: 3, airDate: "2020-01-01", tvdbEpisodeId: 202, sources: ["TVDB"], reportedMissing: ["TVDB"] },
+  ] }], coverageGroups: [{ mappingId: "flagged", members, missing: [
+    { provider: "TMDB", id: 100, status: "missing", missingParts: [{ provider: "TVDB", id: 202 }], season: 1, airDate: "2020-01-01", showKey: "one" },
+    { provider: "TVDB", id: 202, status: "missing", reportedMissing: true, season: 2, airDate: "2020-01-01", showKey: "one" },
+  ] }] };
+  for (const settings of [
+    { ignoredShows: [{ ratingKey: "one", title: "Example Show" }], ignoredSeasons: [] },
+    { ignoredShows: [], ignoredSeasons: [{ ratingKey: "one", title: "Example Show", seasons: [1, 2] }] },
+  ]) await t.test(JSON.stringify(settings), async subtest => {
+    const defaults = configuredFetch(async () => json({ ...completed, report: flagged }));
+    const { container } = await mountPage(subtest, async (input, init) => input === "/api/plex/state" ? json({ settings }) : String(input).startsWith("/api/plex/manual-coverage") ? json({ revision: 1, mappings: [], pending: 0 }) : defaults(input, init));
+    assert.equal(container.querySelector('[aria-label="Incomplete coverage group"]'), null, "The coverage group is hidden");
+    assert.doesNotMatch(container.querySelector(".show-list")?.textContent || "", /Reported missing|Incomplete/, "Reported missing and incomplete episodes are hidden");
+  });
+});
+
+test("a rejected Ignore keeps the show visible and explains why", async (t) => {
+  let patched = 0;
+  const defaults = configuredFetch(async () => json(completed));
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (input === "/api/plex/state" && init?.method === "PATCH") {
+      patched++;
+      return Response.json({ error: "Wait for the current Plex scan to finish before changing Manual Matches.", code: "scan-active" }, { status: 409 });
+    }
+    return defaults(input, init);
+  });
+  await click("Example Show");
+  await click("Ignore this show");
+  await click("Forever");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(patched, 1);
+  assert.match(container.textContent || "", /Wait for the current Plex scan to finish/);
+  assert.equal(container.querySelector(".show-name-button")?.textContent, "Example Show", "The show's results stay visible");
+  assert.match(container.querySelector(".ignored-stat")?.textContent || "", /0/, "The rejected Ignore is not listed");
+});

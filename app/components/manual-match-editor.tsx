@@ -122,7 +122,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       ? { action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision, reportMissing }
       : { action: "save", id: editing?.id, revision: editing?.revision, reportMissing });
   }
-  async function load() {
+  async function load(): Promise<CoverageMapping[] | undefined> {
     const response = await fetch("/api/plex/manual-coverage", { cache: "no-store" });
     const body = await response.json();
     if (!response.ok)
@@ -131,6 +131,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     acceptedRevision.current = body.revision || acceptedRevision.current;
     acceptMappings(body.mappings);
     setPending(Boolean(body.pending));
+    return body.mappings;
   }
   useEffect(() => {
     let active = true;
@@ -178,7 +179,13 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       const response = await fetch("/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const result = await response.json();
       if (!response.ok) {
-        if (result.code === "stale-revision" || result.code === "not-found") await load();
+        if (result.code === "stale-revision" || result.code === "not-found") {
+          const latest = await load();
+          // Reopen the latest saved state (for example, flags deleted by Ignore)
+          // so the stale draft cannot be resubmitted and silently restore them.
+          const refreshed = result.code === "stale-revision" && latest?.find(mapping => mapping.id === editing?.id);
+          if (refreshed) openMapping(refreshed);
+        }
         if (result.mappingId && result.code === "membership-conflict") {
           const existing = mappings.find(mapping => mapping.id === result.mappingId);
           if (existing && !editing) openMapping(existing);

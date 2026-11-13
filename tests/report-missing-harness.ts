@@ -10,6 +10,7 @@ const hook = registerHooks({ resolve(s, c, next) {
 } });
 export const api = await import("../app/api/plex/manual-coverage/route");
 const scan = await import("../app/api/plex/scan/route");
+export const preferences = await import("../app/api/plex/state/route");
 const config = await import("../lib/server-config");
 hook.deregister();
 
@@ -18,10 +19,11 @@ hook.deregister();
 // from a provider catalogue.
 export type Provider = "TMDB" | "TVDB";
 export type Identity = { provider: Provider; id: number };
-export type Episode = Identity & { season: number; episode: number; name: string };
+/** A provider episode of "Target" unless `show` places it in the second Plex show, "Other" (TMDB 11 / TVDB 21). */
+export type Episode = Identity & { season: number; episode: number; name: string; show?: "other" };
 type Missing = { tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: Provider[]; reportedMissing?: Provider[]; incomplete?: Partial<Record<Provider, Identity[]>> };
 type Group = { mappingId: string; members: (Identity & { status: string; missingParts?: Identity[] })[] };
-type Result = { report: { shows: { missing: Missing[] }[]; coverageGroups?: Group[] } };
+type Result = { report: { shows: { ratingKey: string; missing: Missing[] }[]; coverageGroups?: Group[] } };
 
 export const key = (member: Identity) => `${member.provider}:${member.id}`;
 export const flag = (member: Identity) => ({ provider: member.provider, id: member.id });
@@ -40,14 +42,20 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     rmSync(dir, { recursive: true, force: true });
   });
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
-  const tmdb = catalogue.filter(episode => episode.provider === "TMDB");
-  const tvdb = catalogue.filter(episode => episode.provider === "TVDB");
+  const tmdbShowId = (episode: Episode) => episode.show ? 11 : 10;
+  const tvdbShowId = (episode: Episode) => episode.show ? 21 : 20;
+  const inShow = (id: number) => (episode: Episode) => (episode.provider === "TMDB" ? tmdbShowId(episode) : tvdbShowId(episode)) === id;
+  const tmdbAll = catalogue.filter(episode => episode.provider === "TMDB");
+  const tvdbAll = catalogue.filter(episode => episode.provider === "TVDB");
+  const hasOther = catalogue.some(episode => episode.show);
   // Plex owns each `owned` episode by provider identity and by Plex coordinates.
   const guid = (episode: Episode) => ({ id: `${episode.provider.toLowerCase()}://${episode.id}` });
   const state = { secondLibrary: false };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
+  const otherShow = { ratingKey: "other", title: "Other", Guid: [{ id: "tmdb://11" }, { id: "tvdb://21" }] };
+  const library = () => [show, ...(hasOther ? [otherShow] : [])];
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
@@ -55,25 +63,28 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     let match: RegExpMatchArray | null;
     if (u.hostname === "plex") {
       if (u.pathname === "/library/sections") body = { MediaContainer: { Directory: [{ key: "1", type: "show" }, ...(state.secondLibrary ? [{ key: "2", type: "show" }] : [])] } };
-      else if (u.pathname.includes("/sections/")) body = { MediaContainer: { Metadata: u.pathname.includes("/sections/2/") ? [copy] : [show] } };
+      else if (u.pathname.includes("/sections/")) body = { MediaContainer: { Metadata: u.pathname.includes("/sections/2/") ? [copy] : library() } };
       else if (u.pathname.includes("allLeaves")) body = { MediaContainer: { Metadata: u.pathname.includes("/copy/")
         // Another library also reports owning the first owned episode.
         ? [{ ratingKey: "copy-1", updatedAt: 1, parentIndex: 7, index: 7, Guid: [guid(owned[0])] }]
-        : owned.map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, Guid: [guid(episode)] })) } };
-      else body = { MediaContainer: { Metadata: [u.pathname.includes("/copy") ? copy : show] } };
+        : owned.filter(episode => Boolean(episode.show) === u.pathname.includes("/other/")).map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, Guid: [guid(episode)] })) } };
+      else body = { MediaContainer: { Metadata: [u.pathname.includes("/copy") ? copy : u.pathname.includes("/other") ? otherShow : show] } };
     }
     else if (u.pathname === "/v4/login") body = { data: { token: "test" } };
-    else if (u.pathname === "/3/tv/10") body = { id: 10, name: "Target", seasons: [...new Set(tmdb.map(episode => episode.season))].map(season_number => ({ season_number })) };
-    else if ((match = u.pathname.match(/^\/3\/tv\/10\/season\/(\d+)$/))) body = { episodes: tmdb.filter(episode => episode.season === Number(match![1])).map(episode => ({ id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name, air_date: "2020-01-01" })) };
-    else if ((match = u.pathname.match(/^\/3\/tv\/10\/season\/(\d+)\/episode\/(\d+)$/))) {
-      const episode = tmdb.find(item => item.season === Number(match![1]) && item.episode === Number(match![2]))!;
+    else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])$/))) {
+      const tmdb = tmdbAll.filter(inShow(Number(match[1])));
+      body = { id: Number(match[1]), name: match[1] === "10" ? "Target" : "Other", seasons: [...new Set(tmdb.map(episode => episode.season))].map(season_number => ({ season_number })) };
+    }
+    else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])\/season\/(\d+)$/))) body = { episodes: tmdbAll.filter(inShow(Number(match[1]))).filter(episode => episode.season === Number(match![2])).map(episode => ({ id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name, air_date: "2020-01-01" })) };
+    else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])\/season\/(\d+)\/episode\/(\d+)$/))) {
+      const episode = tmdbAll.filter(inShow(Number(match[1]))).find(item => item.season === Number(match![2]) && item.episode === Number(match![3]))!;
       body = { id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name };
     }
-    else if (u.pathname === "/v4/series/20") body = { data: { id: 20, name: "Target", slug: "target" } };
-    else if (u.pathname === "/v4/series/20/episodes/default") body = { data: { episodes: tvdb.map(episode => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: "2020-01-01" })) } };
+    else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])$/))) body = { data: { id: Number(match[1]), name: match[1] === "20" ? "Target" : "Other", slug: match[1] === "20" ? "target" : "other" } };
+    else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])\/episodes\/default$/))) body = { data: { episodes: tvdbAll.filter(inShow(Number(match[1]))).map(episode => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: "2020-01-01" })) } };
     else if ((match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/))) {
-      const episode = tvdb.find(item => item.id === Number(match![1]))!;
-      body = { data: { id: episode.id, seriesId: 20, seasonNumber: episode.season, number: episode.episode, name: episode.name } };
+      const episode = tvdbAll.find(item => item.id === Number(match![1]))!;
+      body = { data: { id: episode.id, seriesId: tvdbShowId(episode), seasonNumber: episode.season, number: episode.episode, name: episode.name } };
     }
     else if (u.pathname === "/3/tv/changes") body = { results: [], total_pages: 1 };
     else if (u.pathname === "/v4/updates") body = { data: [] };
@@ -95,7 +106,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   type Saved = { id: string; revision: number; members: (Identity & { reportMissing: boolean })[] };
   const mappings = async () => (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings as Saved[];
   const save = async (members: Episode[], extra: Record<string, unknown> = {}) => {
-    const resolved = await post({ action: "resolve", urls: members.map(member => member.provider === "TMDB" ? `tmdb:${member.id} show:10 season:${member.season} episode:${member.episode}` : `tvdb:${member.id}`) });
+    const resolved = await post({ action: "resolve", urls: members.map(member => member.provider === "TMDB" ? `tmdb:${member.id} show:${tmdbShowId(member)} season:${member.season} episode:${member.episode}` : `tvdb:${member.id}`) });
     assert.equal(resolved.status, 200, await resolved.clone().text());
     return post({ action: "save", preview: (await resolved.json()).preview, ...extra });
   };
@@ -108,7 +119,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   };
   const flags = async (id: string) => (await mappings()).find(mapping => mapping.id === id)!.members.filter(member => member.reportMissing).map(key);
   // Plex missing results: each missing provider record and why it is missing.
-  const missing = (result: Result) => Object.fromEntries(result.report.shows[0].missing.flatMap(episode => episode.sources.map(source => {
+  const missing = (result: Result, show: "target" | "other" = "target") => Object.fromEntries((result.report.shows.find(item => item.ratingKey === `ratingKey:${show}`)?.missing || []).flatMap(episode => episode.sources.map(source => {
     const parts = episode.incomplete?.[source];
     return [`${source}:${source === "TMDB" ? episode.tmdbEpisodeId : episode.tvdbEpisodeId}`, episode.reportedMissing?.includes(source) ? "reported-missing" : parts ? `incomplete because ${parts.map(key).join(",")}` : "missing"];
   })));
@@ -119,6 +130,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=0 WHERE mapping_id=?").run(id);
     for (const member of members) db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=1 WHERE mapping_id=? AND provider=? AND episode_id=?").run(id, member.provider, member.id);
   };
+  // Saves Plex preferences (Ignore rules) as the Plex page sends them.
+  const patchSettings = (patch: Record<string, unknown>) => preferences.PATCH(new Request("http://localhost/api/plex/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }));
   const restart = () => { cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase; };
-  return { state, requests, post, status, rerun, mappings, save, setFlags, flags, missing, group, restart, writeFlags };
+  return { state, requests, patchSettings, post, status, rerun, mappings, save, setFlags, flags, missing, group, restart, writeFlags };
 }

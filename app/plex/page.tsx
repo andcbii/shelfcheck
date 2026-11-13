@@ -229,17 +229,32 @@ export default function PlexPage() {
     finally { setSaving(false); }
   }
 
-  function saveSettings(next: PlexSettings, patch: Partial<PlexSettings>) {
+  function saveSettings(next: PlexSettings, patch: Partial<PlexSettings>, onRejected?: () => void) {
     if (!settingsLoaded) { setError("Wait for Plex preferences to finish loading."); return; }
     setSettings(next);
     void fetch("/api/plex/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
-      .then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Plex preferences could not be saved."); } })
+      .then(async (response) => {
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          // A rejected Ignore (for example, flag cleanup during a scan) saved nothing:
+          // show the saved preferences again instead of the optimistic ones.
+          const saved = await fetch("/api/plex/state", { cache: "no-store" }).then((reply) => reply.ok ? reply.json() : null).catch(() => null) as { settings?: PlexSettings } | null;
+          if (saved?.settings) setSettings(saved.settings);
+          onRejected?.();
+          throw new Error(body.error || "Plex preferences could not be saved.");
+        }
+      })
       .catch((saveError) => setError(saveError instanceof Error ? saveError.message : "Plex preferences could not be saved."));
   }
 
   function ignoreShow(show: Show, duration: IgnoreDuration) {
     const ignoredShows = [...activeIgnores(settings.ignoredShows).filter((item) => item.ratingKey !== show.ratingKey), { ratingKey: show.ratingKey, title: show.title, ...createIgnoreTiming(duration) }].sort((a, b) => a.title.localeCompare(b.title));
-    saveSettings({ ...settings, ignoredShows }, { ignoredShows });
+    const hidden = report?.shows.filter((item) => item.ratingKey === show.ratingKey) || [];
+    saveSettings({ ...settings, ignoredShows }, { ignoredShows }, () => {
+      // The Ignore was not saved, so its results were never invalid.
+      reportInvalidations.current.delete(show.ratingKey);
+      setReport((current) => current && !current.shows.some((item) => item.ratingKey === show.ratingKey) ? { ...current, shows: [...current.shows, ...hidden] } : current);
+    });
     reportInvalidations.current.add(show.ratingKey);
     setReport((current) => current ? pruneClientReport(current, reportInvalidations.current) : current);
     setShowToIgnore(null);

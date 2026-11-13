@@ -22,6 +22,7 @@ async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; re
       const body = JSON.parse(String(init.body));
       posts.push(body);
       if (body.action === "resolve") return Response.json({ preview: "reviewed", members: (options.resolved || mapping.members).map(member => ({ ...member, reportMissing: undefined })) });
+      if (body.id && body.revision !== mapping.revision) return Response.json({ error: "This mapping changed since you opened it. Reopen it and review the latest records.", code: "stale-revision", mappingId: mapping.id }, { status: 409 });
       const flags = (body.reportMissing || []) as { provider: string; id: number }[];
       const members = body.preview ? options.resolved || mapping.members : mapping.members;
       mapping = { ...mapping, revision: mapping.revision + 1, members: members.map(member => ({ ...member, reportMissing: flags.some(flag => flag.provider === member.provider && flag.id === member.id) })) };
@@ -42,7 +43,9 @@ async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; re
   const editor = () => container.querySelector('[aria-label="Manual Match editor"]')!;
   const checkboxes = () => [...editor().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
   const toggle = async (index: number) => { const box = checkboxes()[index]; box.focus(); await act(async () => box.click()); };
-  return { container, posts, last: () => posts.at(-1), render, button, click, editor, checkboxes, toggle, dismissed: () => dismissed };
+  // Server-side Ignore cleanup: deletes saved flags and gives the mapping a new revision.
+  const ignore = () => { mapping = { ...mapping, revision: mapping.revision + 1, members: mapping.members.map(member => ({ ...member, reportMissing: false })) }; };
+  return { container, posts, ignore, last: () => posts.at(-1), render, button, click, editor, checkboxes, toggle, dismissed: () => dismissed };
 }
 
 test("each one-to-one episode has a keyboard-usable Report Missing checkbox in its provider panel", async t => {
@@ -251,4 +254,19 @@ test("provider panels stack without clipping at narrow widths", () => {
   const rule = css.match(/\.manual-match-panels\s*\{[^}]*\}/)?.[0] || "";
   assert.match(rule, /grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(100%,\s*[^)]+\),\s*1fr\)\)/, "Panels wrap to one column inside narrow dialogs as well as narrow viewports");
   assert.match(css, /\.manual-match-panels\s*>\s*section\s*\{[^}]*min-width:\s*0/, "Panel content can shrink instead of overflowing");
+});
+
+test("Ignore applied while the editor is open rejects the stale draft and shows the refreshed saved state", async t => {
+  const ui = await mount(t, { members: [tmdb, { ...tvdb, reportMissing: true }] });
+  assert.match(ui.container.querySelector("article")?.textContent || "", /Reported missing/);
+  await ui.toggle(0);
+  ui.ignore();
+  await ui.click("Save coverage mapping");
+  assert.equal(ui.last()?.revision, 2, "The draft was opened at the pre-Ignore revision");
+  assert.match(ui.container.textContent || "", /changed since you opened it/, "The stale draft is rejected with a clear message");
+  assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing/, "Saved rows reload without the flag deleted by Ignore");
+  assert.deepEqual(ui.checkboxes().map(box => box.checked), [false, false], "The editor reopens the refreshed saved state, discarding the stale draft");
+  await ui.toggle(0);
+  await ui.click("Save coverage mapping");
+  assert.deepEqual(ui.last(), { action: "save", id: "match", revision: 3, reportMissing: [{ provider: "TMDB", id: 100 }] }, "The next save is based on the refreshed revision");
 });

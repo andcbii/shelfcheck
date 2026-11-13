@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import { missingPartsOf, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -974,6 +974,50 @@ function coverageGroupsForResults(results: PlexShowResult[], manualInventory: Co
     })}];
   });
 }
+/** Whether a Manual Match member belongs to a saved show comparison, by provider show or catalogue episode. */
+function memberInComparison(inputs: PlexGeneratedInputs, input: SavedPlexComparison, member: CoverageMember) {
+  return member.provider==="TMDB"
+    ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || Boolean(input.tmdbEpisodeAliases?.includes(member.showId)) || Boolean(inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
+    : input.tvdbId===member.showId || input.tvdbAliases.includes(member.showId) || Boolean(inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
+}
+
+/** A newly applied Plex Ignore: a whole show, or only the selected seasons of it. */
+export type IgnoreScope = {ratingKey: string; seasons?: number[]};
+
+/**
+ * Manual Match members inside an Ignore scope. A member belongs to the ignored
+ * show when that show's saved comparison lists its provider show or episode, or
+ * when one of the show's Plex items carries its identity. A season Ignore also
+ * requires the member's provider season (from the saved catalogue, else the
+ * saved member) to be one of the selected seasons.
+ */
+function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
+  if (!scopes.length) return [];
+  const inputs=readPlexInputs();
+  const season=(member: CoverageMember) => (member.provider==="TMDB" ? inputs.tmdb : inputs.tvdb)[String(member.showId)]?.episodes.find(episode=>episode.providerEpisodeId===member.id)?.season
+    ?? Object.values(member.provider==="TMDB" ? inputs.tmdb : inputs.tvdb).flatMap(catalogue=>catalogue.episodes).find(episode=>episode.providerEpisodeId===member.id)?.season
+    ?? member.season;
+  return listCoverageMappings().flatMap(mapping=>mapping.members).filter(member=>scopes.some(scope=>{
+    const input=inputs.comparisons[scope.ratingKey];
+    const inShow=(input && memberInComparison(inputs,input,member))
+      || Boolean(inputs.inventory?.evidence.some(item=>item.showKey===scope.ratingKey && item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id)));
+    return inShow && (!scope.seasons || scope.seasons.includes(season(member)));
+  }));
+}
+
+/**
+ * Apply Ignore authoritatively over Report Missing. Deletes explicit flags of
+ * Manual Match members inside the newly ignored scopes, saves the Ignore rule
+ * (`save`) in the same transaction, then rechecks the affected cached shows so
+ * derived effects elsewhere are withdrawn immediately. Flags outside the scopes
+ * and every other mapping are preserved. Restore or expiry never recreates them.
+ * Rejects while a Plex scan is running only when there are flags to delete.
+ */
+export async function applyIgnoreReportMissingCleanup(scopes: IgnoreScope[], save: () => void): Promise<void> {
+  const impact=clearReportMissingFlags(membersInIgnoreScopes(scopes),save);
+  if (impact.length) await requestCoverageRecheck({members:impact});
+}
+
 let coverageRecheckQueue: Promise<void> = Promise.resolve();
 /** Reconcile only affected comparisons. No client credentials, enumeration or HTTP is permitted here. */
 export function requestCoverageRecheck(impact: CoverageImpact): Promise<void> {
@@ -989,9 +1033,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {
-    if (impact.members.some(member=> member.provider==="TMDB"
-      ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || input.tmdbEpisodeAliases?.includes(member.showId) || inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id)
-      : input.tvdbId===member.showId || input.tvdbAliases.includes(member.showId) || inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))) targets.add(key);
+    if (impact.members.some(member=>memberInComparison(inputs,input,member))) targets.add(key);
   }
   // Persist obligations first. A failed local comparison must never consume them.
   for (const key of targets) {

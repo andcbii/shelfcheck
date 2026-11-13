@@ -54,6 +54,15 @@ Spec #30 deliberately reopens two parts of this decision.
 
 The shared backend, immediate cached recheck, next-scan refresh obligations, and active-scan mutation protection of ADR-0003 are unchanged.
 
+### Ignore clears Report Missing (#40)
+
+- Ignore is authoritative over Report Missing. Saving Plex preferences compares the active rules before and after the save. Each **newly applied** scope deletes the explicit flags of Manual Match members inside it, in the same transaction that saves the rule. A newly applied scope is a whole show, or seasons added to a show's season ignore. Changing an existing rule's duration applies nothing new. Temporary and permanent Ignore clean up the same way. Restore and expiry never recreate deleted flags.
+- A member is inside a show when that show's saved comparison lists its provider show or episode, or when one of the show's Plex items carries its identity. Members of cross-show mappings therefore follow the show their own episode belongs to. A season scope also requires the member's provider season (from the saved catalogue, else the saved member) to be selected. This is the same season number the Plex results use to hide season-ignored episodes. Flags outside the scope are kept.
+- Cleanup is not a manual save, so it skips the both-sides-or-none rule and may leave a many-to-many mapping one-sided (#39). Each mapping it changes gets a new revision. An editor opened before the Ignore therefore gets `stale-revision` on save and reopens the latest saved state, so the stale draft cannot silently restore the deleted flags.
+- After cleanup, the ADR-0003 cached recheck runs for every member of the affected mappings. Derived effects elsewhere, such as an incomplete combined episode in another show, are withdrawn immediately, with no Plex enumeration or provider downloads. Refresh obligations are recorded as usual.
+- When a Plex scan is running, applying an Ignore that would delete flags is rejected with `scan-active`, and neither the rule nor the cleanup is saved. The Plex page then shows the saved preferences again and restores the show's results. Preference saves that delete no flags are unaffected.
+- Visibility is unchanged. Ignored shows and seasons hide their missing results, including Reported missing and incomplete episodes. Ignored content's ownership evidence still satisfies mapped content elsewhere.
+
 ## Manual Matches and Matching Episodes
 
 Manual Matches are controlled by the user; Auto Matches are controlled by Shelfcheck. Remove the **Manual Coverage** entry from the top banner. Reports provide **01 — Manual Matches**, **02 — Auto Matches**, **03 — Unmatched Shows**, **04 — Provider Matches**, and **05 — Coverage Issues**.

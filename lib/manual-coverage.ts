@@ -2,7 +2,7 @@ import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { coverageDatabase } from "@/lib/sqlite";
-import { reportMissingSelectionProblem, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+import { reportMissingSelectionProblem, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 export class CoverageError extends Error {
   constructor(message: string, public status = 400, public code = "validation", public mappingId?: string) {
     super(message);
@@ -92,6 +92,44 @@ export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?
     if (existing && !flagsOnly) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === existing.id)) resolveCoverageIssue(issue.id);
     db.exec("COMMIT");
     return withFlags(db, mapping);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/**
+ * Automatic Ignore cleanup: delete the explicit Report Missing flags of these
+ * members, together with `alongside` (the Ignore rule itself), in one transaction.
+ * This is not a manual save, so it never applies the both-sides-or-none rule and
+ * may leave a many-to-many mapping with flags on one side. Each affected mapping
+ * gets a new revision, so an editor opened before the Ignore cannot save its
+ * stale draft and silently restore the deleted flags.
+ * Returns every member of the affected mappings, for the affected-show recheck.
+ */
+export function clearReportMissingFlags(members: CoverageIdentity[], alongside: () => void): CoverageMember[] {
+  const db = coverageDatabase();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const flagged = members.flatMap(member => {
+      const row = db.prepare("SELECT mapping_id FROM shelfcheck_coverage_members WHERE provider=? AND episode_id=? AND report_missing=1").get(member.provider, member.id) as { mapping_id: string } | undefined;
+      return row ? [{ ...member, mappingId: row.mapping_id }] : [];
+    });
+    if (flagged.length) assertCoverageMutationAllowed();
+    const affected = [...new Set(flagged.map(member => member.mappingId))];
+    const revision = coverageState().revision + 1;
+    for (const member of flagged) db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=0 WHERE provider=? AND episode_id=?").run(member.provider, member.id);
+    const impact: CoverageMember[] = [];
+    for (const id of affected) {
+      const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(id) as { payload: string };
+      const mapping: CoverageMapping = { ...JSON.parse(row.payload), revision };
+      db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify(mapping), id);
+      impact.push(...mapping.members);
+    }
+    if (affected.length) db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+    alongside();
+    db.exec("COMMIT");
+    return impact;
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;

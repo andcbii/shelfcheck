@@ -267,6 +267,44 @@ test("incomplete coverage displays one identity-preserving group and opens its s
 });
 
 
+test("a reported-missing episode stays in Plex results with Reported missing status", async (t) => {
+  const members = [
+    {provider:"TMDB",id:100,showId:10,show:"Example Show",title:"Pilot",season:1,episode:1,url:"https://www.themoviedb.org/tv/10/season/1/episode/1",reportMissing:true,status:"reported-missing"},
+    {provider:"TVDB",id:200,showId:20,show:"Example Show",title:"Pilot (TVDB)",season:2,episode:1,url:"https://thetvdb.com/series/example/episodes/200",reportMissing:false,status:"manual"},
+  ];
+  const groupedReport = {...report,shows:[{...report.shows[0],missing:[{season:1,episode:1,airDate:"2020-01-01",tmdbEpisodeId:100,sources:["TMDB"],reportedMissing:["TMDB"]}]}],coverageGroups:[{mappingId:"flagged",members,missing:[{provider:"TMDB",id:100,status:"missing",reportedMissing:true,season:1,airDate:"2020-01-01",showKey:"one"}]}]};
+  const defaults=configuredFetch(async()=>json({...completed,report:groupedReport}));
+  const {container}=await mountPage(t,async(input,init)=>String(input).startsWith("/api/plex/manual-coverage") ? json({revision:1,mappings:[{id:"flagged",revision:1,members}],pending:0}) : defaults(input,init));
+  const group=container.querySelector('[aria-label="Incomplete coverage group"]');
+  assert.ok(group);
+  assert.match(group.textContent||"",/Pilot · Episode ID 100Reported missing/);
+  assert.match(group.textContent||"",/Pilot \(TVDB\) · Episode ID 200Covered by complete alternative set/);
+  assert.equal(container.querySelectorAll('.show-list article').length,1,"The show stays visible in Plex missing results");
+});
+
+test("an incomplete combined episode reads differently from the reported-missing part responsible", async (t) => {
+  const members = [
+    {provider:"TMDB",id:100,showId:10,show:"Example Show",title:"Whole",season:1,episode:1,url:"https://www.themoviedb.org/tv/10/season/1/episode/1",reportMissing:false,status:"incomplete",missingParts:[{provider:"TVDB",id:202}]},
+    {provider:"TVDB",id:200,showId:20,show:"Example Show",title:"Part A",season:2,episode:1,url:"https://thetvdb.com/series/example/episodes/200",reportMissing:false,status:"manual"},
+    {provider:"TVDB",id:202,showId:20,show:"Example Show",title:"Part C",season:2,episode:3,url:"https://thetvdb.com/series/example/episodes/202",reportMissing:true,status:"reported-missing"},
+  ];
+  const groupedReport = {...report,shows:[{...report.shows[0],missing:[
+    {season:1,episode:1,airDate:"2020-01-01",tmdbEpisodeId:100,sources:["TMDB"],incomplete:{TMDB:[{provider:"TVDB",id:202}]}},
+    {season:2,episode:3,airDate:"2020-01-01",tvdbEpisodeId:202,sources:["TVDB"],reportedMissing:["TVDB"]},
+  ]}],coverageGroups:[{mappingId:"combined",members,missing:[
+    {provider:"TMDB",id:100,status:"missing",missingParts:[{provider:"TVDB",id:202}],season:1,airDate:"2020-01-01",showKey:"one"},
+    {provider:"TVDB",id:202,status:"missing",reportedMissing:true,season:2,airDate:"2020-01-01",showKey:"one"},
+  ]}]};
+  const defaults=configuredFetch(async()=>json({...completed,report:groupedReport}));
+  const {container}=await mountPage(t,async(input,init)=>String(input).startsWith("/api/plex/manual-coverage") ? json({revision:1,mappings:[{id:"combined",revision:1,members}],pending:0}) : defaults(input,init));
+  const group=container.querySelector('[aria-label="Incomplete coverage group"]');
+  assert.ok(group);
+  assert.match(group.textContent||"",/Whole · Episode ID 100Incomplete · mapped part missingContains TVDB Part C \(Episode ID 202\), which you reported missing/);
+  assert.match(group.textContent||"",/Part C · Episode ID 202Reported missing/);
+  assert.match(group.textContent||"",/Part A · Episode ID 200Covered by complete alternative set/);
+  assert.equal(container.querySelectorAll('.show-list article').length,1,"The show stays visible in Plex missing results");
+});
+
 test("coverage groups respect aired-date and season-ignore visibility", async (t) => {
   for (const settings of [{hideUnairedEpisodes:true}, {ignoredSeasons:[{ratingKey:"one",title:"Example Show",seasons:[1]}]}]) {
     await t.test(JSON.stringify(settings),async subtest=>{
@@ -350,9 +388,9 @@ test("a cached episode mapping mutation refreshes results once and leaves New Pl
   assert.equal(scanReads,3,"Initial page load, dialog lock check, then one local comparison refresh");
 });
 
-for (const mutation of ["save", "correct"]) test(`Matching Episodes ${mutation} refreshes affected results and preserves unrelated results in place`,async t=>{
+test("Matching Episodes save refreshes affected results and preserves unrelated results in place",async t=>{
   const members=[matchingMember,{provider:"TVDB",id:200,showId:20,show:"Parts",title:"Equivalent",season:8,episode:8,url:"https://thetvdb.com/series/parts/episodes/200"}];
-  const item={ratingKey:"file",showKey:"one",fingerprint:"v1",identities:[{provider:"TMDB",id:100},{provider:"TVDB",id:200}]};
+  const item={ratingKey:"file",showKey:"one",identities:[{provider:"TMDB",id:100},{provider:"TVDB",id:200}]};
   const unrelated={ratingKey:"two",title:"Unrelated show",plexEpisodes:2,missing:[{season:2,episode:3,sources:["TMDB"]}]};
   const before={...matchingReport,shows:[...matchingReport.shows,unrelated]};
   let changed=false;let scanPosts=0;let submitted:Record<string,unknown>|undefined;
@@ -373,9 +411,9 @@ for (const mutation of ["save", "correct"]) test(`Matching Episodes ${mutation} 
   });
   const unrelatedBefore=[...container.querySelectorAll(".show-list article")].find(row=>row.textContent?.includes("Unrelated show"))!.querySelector(".show-info")!.textContent;
   await click("S01E02");await click("Matching Episodes");
-  if(mutation==="save"){await click("Resolve and review");await click("Save coverage mapping");}
-  else await click("Declare complete TVDB set");
-  assert.equal(submitted?.action,mutation);
+  assert.equal([...container.querySelectorAll('[role="dialog"] button')].some(button=>/Declare/.test(button.textContent||"")),false,"Ownership declarations are retired");
+  await click("Resolve and review");await click("Save coverage mapping");
+  assert.equal(submitted?.action,"save");
   assert.ok(container.querySelector('[role="dialog"]'),"The dialog stays open after the cached recheck");
   assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing mapping saved/);
   await click("Close Matching Episodes");
@@ -406,4 +444,140 @@ test("Matching Episodes retains its reviewed draft when the API rejects a scan-t
   assert.equal(scanPosts,0);
   await click("Close Matching Episodes");
   assert.equal(container.querySelectorAll('.plex-episode-item').length,1);
+});
+
+test("Ignore hides explicitly and derivatively missing results in its scope", async (t) => {
+  const members = [
+    { provider: "TMDB", id: 100, showId: 10, show: "Example Show", title: "Whole", season: 1, episode: 1, url: "https://example.com/100", reportMissing: false, status: "incomplete", missingParts: [{ provider: "TVDB", id: 202 }] },
+    { provider: "TVDB", id: 202, showId: 20, show: "Example Show", title: "Part C", season: 2, episode: 3, url: "https://example.com/202", reportMissing: true, status: "reported-missing" },
+  ];
+  const flagged = { ...report, shows: [{ ...report.shows[0], missing: [
+    { season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"], incomplete: { TMDB: [{ provider: "TVDB", id: 202 }] } },
+    { season: 2, episode: 3, airDate: "2020-01-01", tvdbEpisodeId: 202, sources: ["TVDB"], reportedMissing: ["TVDB"] },
+  ] }], coverageGroups: [{ mappingId: "flagged", members, missing: [
+    { provider: "TMDB", id: 100, status: "missing", missingParts: [{ provider: "TVDB", id: 202 }], season: 1, airDate: "2020-01-01", showKey: "one" },
+    { provider: "TVDB", id: 202, status: "missing", reportedMissing: true, season: 2, airDate: "2020-01-01", showKey: "one" },
+  ] }] };
+  for (const settings of [
+    { ignoredShows: [{ ratingKey: "one", title: "Example Show" }], ignoredSeasons: [] },
+    { ignoredShows: [], ignoredSeasons: [{ ratingKey: "one", title: "Example Show", seasons: [1, 2] }] },
+  ]) await t.test(JSON.stringify(settings), async subtest => {
+    const defaults = configuredFetch(async () => json({ ...completed, report: flagged }));
+    const { container } = await mountPage(subtest, async (input, init) => input === "/api/plex/state" ? json({ settings }) : String(input).startsWith("/api/plex/manual-coverage") ? json({ revision: 1, mappings: [], pending: 0 }) : defaults(input, init));
+    assert.equal(container.querySelector('[aria-label="Incomplete coverage group"]'), null, "The coverage group is hidden");
+    assert.doesNotMatch(container.querySelector(".show-list")?.textContent || "", /Reported missing|Incomplete/, "Reported missing and incomplete episodes are hidden");
+  });
+});
+
+test("a rejected Ignore keeps the show visible and explains why", async (t) => {
+  let patched = 0;
+  const defaults = configuredFetch(async () => json(completed));
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (input === "/api/plex/state" && init?.method === "PATCH") {
+      patched++;
+      return Response.json({ error: "Wait for the current Plex scan to finish before changing Manual Matches.", code: "scan-active" }, { status: 409 });
+    }
+    return defaults(input, init);
+  });
+  await click("Example Show");
+  await click("Ignore this show");
+  await click("Forever");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(patched, 1);
+  assert.match(container.textContent || "", /Wait for the current Plex scan to finish/);
+  assert.equal(container.querySelector(".show-name-button")?.textContent, "Example Show", "The show's results stay visible");
+  assert.match(container.querySelector(".ignored-stat")?.textContent || "", /0/, "The rejected Ignore is not listed");
+});
+
+test("a failed save whose Ignore the server did keep leaves the show's results hidden", async (t) => {
+  let saved = false;
+  const defaults = configuredFetch(async () => json(completed));
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (input === "/api/plex/state" && init?.method === "PATCH") {
+      // The first save keeps the Ignore but fails afterwards; Restore then succeeds.
+      if (!saved) { saved = true; return Response.json({ error: "Plex preferences could not be saved." }, { status: 500 }); }
+      saved = false;
+      return json({ saved: true });
+    }
+    if (input === "/api/plex/state") return json({ settings: { ignoredShows: saved ? [{ ratingKey: "one", title: "Example Show" }] : [], ignoredSeasons: [] } });
+    return defaults(input, init);
+  });
+  await click("Example Show");
+  await click("Ignore this show");
+  await click("Forever");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(container.querySelector(".show-name-button"), null, "The saved Ignore keeps the show hidden");
+  assert.match(container.querySelector(".ignored-stat")?.textContent || "", /1/);
+  await click("IGNORED SHOWS");
+  await click("Restore Example Show");
+  await click("Close ignored shows");
+  assert.equal(container.querySelector(".show-name-button"), null, "Results invalidated by the saved Ignore stay removed after Restore until a new scan");
+});
+
+test("a successful Ignore that clears flags reloads rechecked results, withdrawing derived effects elsewhere", async (t) => {
+  // Show one's combined episode is incomplete because its part in show two is reported missing.
+  const members = [
+    { provider: "TMDB", id: 100, showId: 10, show: "Example Show", title: "Whole", season: 1, episode: 1, url: "https://example.com/100", reportMissing: false, status: "incomplete", missingParts: [{ provider: "TVDB", id: 202 }] },
+    { provider: "TVDB", id: 202, showId: 21, show: "Parts show", title: "Part C", season: 2, episode: 3, url: "https://example.com/202", reportMissing: true, status: "reported-missing" },
+  ];
+  const before = { ...report, shows: [
+    { ...report.shows[0], missing: [{ season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"], incomplete: { TMDB: [{ provider: "TVDB", id: 202 }] } }] },
+    { ratingKey: "two", title: "Parts show", plexEpisodes: 1, missing: [{ season: 2, episode: 3, airDate: "2020-01-01", tvdbEpisodeId: 202, sources: ["TVDB"], reportedMissing: ["TVDB"] }] },
+  ], coverageGroups: [{ mappingId: "cross", members, missing: [
+    { provider: "TMDB", id: 100, status: "missing", missingParts: [{ provider: "TVDB", id: 202 }], season: 1, airDate: "2020-01-01", showKey: "one" },
+    { provider: "TVDB", id: 202, status: "missing", reportedMissing: true, season: 2, airDate: "2020-01-01", showKey: "two" },
+  ] }] };
+  // After cleanup the server rechecked show one: the combined episode is collected.
+  const after = { ...report, shows: [{ ...report.shows[0], missing: [] }, before.shows[1]], coverageGroups: [] };
+  let cleaned = false;
+  let scanReads = 0;
+  const defaults = configuredFetch(async () => { scanReads++; return json(cleaned ? { ...completed, report: after, coverage: { revision: 2, pending: 0, issues: [] } } : { ...completed, report: before, coverage: { revision: 1, pending: 0, issues: [] } }); });
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (input === "/api/plex/state" && init?.method === "PATCH") { cleaned = true; return json({ saved: true, coverageRevision: 2 }); }
+    return defaults(input, init);
+  });
+  assert.match(container.querySelector('[aria-label="Incomplete coverage group"]')?.textContent || "", /Incomplete · mapped part missing/);
+  const reads = scanReads;
+  await click("Parts show");
+  await click("Ignore this show");
+  await click("Forever");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(scanReads, reads + 1, "The rechecked cached report is loaded once");
+  assert.equal(container.querySelector('[aria-label="Incomplete coverage group"]'), null, "The derived incomplete status is withdrawn without a reload or scan");
+  assert.doesNotMatch(container.querySelector(".show-list")?.textContent || "", /Incomplete/);
+});
+
+test("Ignore demotes Reported missing and incomplete members of a surviving coverage group to alternative context", async (t) => {
+  // Show one's combined episode is incomplete because show two's part C is reported missing;
+  // show two's part D is ordinarily missing, so the group survives either Ignore.
+  const members = [
+    { provider: "TMDB", id: 100, showId: 10, show: "Combined show", title: "Whole", season: 1, episode: 1, url: "https://example.com/100", reportMissing: false, status: "incomplete", missingParts: [{ provider: "TVDB", id: 202 }] },
+    { provider: "TVDB", id: 202, showId: 21, show: "Parts show", title: "Part C", season: 2, episode: 3, url: "https://example.com/202", reportMissing: true, status: "reported-missing" },
+    { provider: "TVDB", id: 203, showId: 21, show: "Parts show", title: "Part D", season: 3, episode: 1, url: "https://example.com/203", reportMissing: false, status: "missing" },
+  ];
+  const grouped = { ...report, shows: [
+    { ...report.shows[0], missing: [{ season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"], incomplete: { TMDB: [{ provider: "TVDB", id: 202 }] } }] },
+    { ratingKey: "two", title: "Parts show", plexEpisodes: 1, missing: [
+      { season: 2, episode: 3, airDate: "2020-01-01", tvdbEpisodeId: 202, sources: ["TVDB"], reportedMissing: ["TVDB"] },
+      { season: 3, episode: 1, airDate: "2020-01-01", tvdbEpisodeId: 203, sources: ["TVDB"] },
+    ] },
+  ], coverageGroups: [{ mappingId: "cross", members, missing: [
+    { provider: "TMDB", id: 100, status: "missing", missingParts: [{ provider: "TVDB", id: 202 }], season: 1, airDate: "2020-01-01", showKey: "one" },
+    { provider: "TVDB", id: 202, status: "missing", reportedMissing: true, season: 2, airDate: "2020-01-01", showKey: "two" },
+    { provider: "TVDB", id: 203, status: "missing", season: 3, airDate: "2020-01-01", showKey: "two" },
+  ] }] };
+  const label = (container: HTMLElement, id: number) => [...container.querySelectorAll('[aria-label="Incomplete coverage group"] li')].find(row => (row.querySelector("a")?.textContent || "").endsWith(`Episode ID ${id}`))?.querySelector("strong")?.textContent;
+  for (const [settings, expected] of [
+    [{ ignoredShows: [{ ratingKey: "one", title: "Combined show" }], ignoredSeasons: [] }, { 100: "Alternative · outside this comparison", 202: "Reported missing" }],
+    [{ ignoredShows: [], ignoredSeasons: [{ ratingKey: "one", title: "Combined show", seasons: [1] }] }, { 100: "Alternative · outside this comparison", 202: "Reported missing" }],
+    [{ ignoredShows: [], ignoredSeasons: [{ ratingKey: "two", title: "Parts show", seasons: [2] }] }, { 100: "Incomplete · mapped part missing", 202: "Alternative · outside this comparison" }],
+  ] as const) await t.test(JSON.stringify(settings), async subtest => {
+    const defaults = configuredFetch(async () => json({ ...completed, report: grouped }));
+    const { container } = await mountPage(subtest, async (input, init) => input === "/api/plex/state" ? json({ settings }) : String(input).startsWith("/api/plex/manual-coverage") ? json({ revision: 1, mappings: [], pending: 0 }) : defaults(input, init));
+    assert.ok(container.querySelector('[aria-label="Incomplete coverage group"]'), "The group survives through a visible member");
+    assert.equal(label(container, 100), expected[100]);
+    assert.equal(label(container, 202), expected[202]);
+    assert.equal(label(container, 203), "Missing");
+    if (expected[100] !== "Incomplete · mapped part missing") assert.doesNotMatch(container.querySelector('[aria-label="Incomplete coverage group"]')?.textContent || "", /which you reported missing/, "The hidden member's explanation is not shown");
+  });
 });

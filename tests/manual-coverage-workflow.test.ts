@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 const hook = registerHooks({ resolve(s, c, next) {
     return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c);
@@ -389,7 +389,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   assert.deepEqual(afterInvalid.mappings.map((mapping: {id:string})=>mapping.id),[independent.mapping.id]);
 });
 
-test("full Plex scans withdraw complete-set Manual Match coverage when a source item or its correction changes", async (t) => {
+test("full Plex scans withdraw complete-set Manual Match coverage when a source item changes", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "coverage-comparator-"));
   const previousData = process.env.SHELFCHECK_DATA_DIR;
   const previousConfig = process.env.SHELFCHECK_CONFIG_DIR;
@@ -479,21 +479,19 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   assert.equal(catalogueDownloads, 1, "Manual Match existence and changed source holdings do not invalidate complete provider catalogues");
   secondPart = true;
   ambiguous = true;
-  assert.equal((await rerun()).report.shows[0].missing.length, 1, "Conflicting combined/split identities cannot complete the source set");
+  assert.deepEqual((await rerun()).report.shows[0].missing, [], "A part also reporting the combined identity still completes the split source set");
   const state = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   const item = state.mappings[0].evidence.find((entry: { ratingKey: string }) => entry.ratingKey === "part1");
-  const beforeCorrection=httpRequests;
-  const corrected = await api.POST(request({ action: "correct", mappingId: saved.mapping.id, revision: state.revision, item, identities: [{ provider: "TVDB", id: 200 }] }));
-  assert.equal(corrected.status, 200);
-  assert.equal(httpRequests,beforeCorrection,"Ownership correction rechecks must perform no HTTP");
-  assert.deepEqual((await wait()).report.shows[0].missing, []);
+  assert.deepEqual(item.identities, [{ provider: "TMDB", id: 100 }, { provider: "TVDB", id: 200 }], "Inventory evidence remains available");
+  const beforeObsolete = httpRequests;
+  const obsolete = await api.POST(request({ action: "correct", mappingId: saved.mapping.id, revision: state.revision, item, identities: [{ provider: "TVDB", id: 200 }] }));
+  assert.equal(obsolete.status, 400);
+  assert.equal((await obsolete.json()).code, "unsupported-action");
+  assert.equal(httpRequests, beforeObsolete, "The rejected correction performs no recheck or HTTP");
+  assert.deepEqual(await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json(), state);
   itemRevision++;
-  const changedItem = await rerun();
-  assert.equal(changedItem.report.shows[0].missing[0].tmdbEpisodeId, 100, "Changed Plex content invalidates the saved correction");
-  const changedState = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
-  assert.deepEqual(changedState.mappings[0].corrections, []);
+  assert.deepEqual((await rerun()).report.shows[0].missing, [], "Changed Plex content needs no repeated ownership declaration");
   ambiguous = false;
-  assert.deepEqual((await rerun()).report.shows[0].missing, []);
   const beforeReportDelete = httpRequests;
   const removed = await api.DELETE(new Request("http://localhost/api/plex/manual-coverage", {method:"DELETE",body:JSON.stringify({ids:[saved.mapping.id]})}));
   assert.equal(removed.status,200);
@@ -505,4 +503,40 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   const downloadsBeforeExplicitScan=catalogueDownloads;
   await rerun();
   assert.equal(catalogueDownloads,downloadsBeforeExplicitScan+1,"The report cached recheck retains the next explicit scan provider refresh obligation");
+});
+
+test("upgrading discards saved ownership corrections and keeps every Manual Match unchanged", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "coverage-migration-"));
+  const previous = process.env.SHELFCHECK_DATA_DIR;
+  process.env.SHELFCHECK_DATA_DIR = dir;
+  const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+  t.after(() => {
+    cache.__shelfcheckDatabase?.close();
+    delete cache.__shelfcheckDatabase;
+    if (previous === undefined) delete process.env.SHELFCHECK_DATA_DIR;
+    else process.env.SHELFCHECK_DATA_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const member = (provider: string, id: number) => ({ provider, id, showId: 10, show: "Example", title: "Episode " + id, season: 1, episode: id, url: "https://example.com/" + id });
+  const mapping = { id: "kept", revision: 4, createdAt: "2026-01-01T00:00:00.000Z", members: [member("TMDB", 100), member("TVDB", 200), member("TVDB", 201)] };
+  // A database written by a release that still supported ownership corrections,
+  // before mapping members carried Report Missing flags.
+  const legacy = new DatabaseSync(path.join(dir, "shelfcheck.db"));
+  legacy.exec(`CREATE TABLE shelfcheck_coverage_state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO shelfcheck_coverage_state(id,revision,pending) VALUES(1,4,0);
+    CREATE TABLE shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+    CREATE TABLE shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, PRIMARY KEY(provider, episode_id));`);
+  legacy.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run(mapping.id, JSON.stringify(mapping));
+  for (const m of mapping.members) legacy.prepare("INSERT INTO shelfcheck_coverage_members VALUES(?,?,?)").run(m.provider, m.id, mapping.id);
+  legacy.exec("CREATE TABLE shelfcheck_coverage_corrections(mapping_id TEXT NOT NULL,show_key TEXT NOT NULL,item_key TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(mapping_id,show_key,item_key))");
+  legacy.prepare("INSERT INTO shelfcheck_coverage_corrections VALUES(?,?,?,?)").run("kept", "show", "file", JSON.stringify({ mappingId: "kept", ratingKey: "file", showKey: "show", fingerprint: "v1", identities: [{ provider: "TVDB", id: 200 }] }));
+  legacy.close();
+
+  const upgraded = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  assert.deepEqual(upgraded.mappings, [{ ...mapping, members: mapping.members.map(m => ({ ...m, reportMissing: false })), evidence: [] }], "Manual Matches survive unchanged with Report Missing off, with no inferred decisions");
+  assert.ok(upgraded.revision > 4, "Discarding corrections advances the coverage revision");
+  assert.ok(upgraded.issues.some((issue: { id: string }) => issue.id === "comparison-pending"), "Cached results shaped by corrections are flagged for comparison");
+  assert.equal(sqlite.coverageDatabase().prepare("SELECT 1 FROM sqlite_master WHERE name='shelfcheck_coverage_corrections'").get(), undefined, "Saved corrections are discarded");
+  const repeat = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
+  assert.equal(repeat.revision, upgraded.revision, "The migration runs once");
 });

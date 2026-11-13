@@ -1,7 +1,7 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ReportPagination } from "@/app/reports/report-pagination";
-import type { CoverageEvidence, CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
+import { INCOMPLETE_LABEL, memberKey, missingPartsExplanation, missingPartsOf, reportMissingSelectionProblem, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
   initialUrls: string[];
   initialMappingId?: string;
@@ -29,6 +29,9 @@ function identifiesMember(input: string, member: CoverageMember) {
   } catch { /* Unresolved or incomplete draft input has no saved membership. */ }
   return false;
 }
+const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
+const episodeCode = (member: CoverageMember) => `S${String(member.season).padStart(2, "0")}E${String(member.episode).padStart(2, "0")}`;
+const episodeName = (member: CoverageMember) => `${member.provider} ${member.title}`;
 export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, episodeScope = false, scanActive = false }: Props) {
   const [formOpen, setFormOpen] = useState(!report);
   const [scanning, setScanning] = useState(scanActive);
@@ -43,15 +46,28 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const acceptedRevision = useRef(0);
-  const [revision, setRevision] = useState(0);
-  const [selectedParts, setSelectedParts] = useState<Record<string, string[]>>({});
   const [pending, setPending] = useState(false);
   const [healthFilter, setHealthFilter] = useState("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmation, setConfirmation] = useState<string[] | null>(null);
+  // Report Missing selections are a draft until the Manual Match is saved.
+  const [draftFlags, setDraftFlags] = useState<string[]>([]);
+  const uid = useId();
   const locked = busy || scanActive || scanning;
+  const defaultUrls = initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""];
+  const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
+  // Saved members are editable in place; changed membership needs a reviewed preview first.
+  const draftMembers = preview?.members || (editing && savedUrls ? editing.members : null);
+  // The draft as it would be saved: explicit flags only. Derived status is recalculated from them.
+  const draftState = draftMembers?.map(member => ({ ...member, reportMissing: draftFlags.includes(memberKey(member)) })) || [];
+  // The server applies the same rule to every manual save; the draft is checked before sending it.
+  const selectionProblem = reportMissingSelectionProblem(draftState);
+  const draftFlagged = draftState.filter(member => member.reportMissing);
+  const draftIncomplete = draftState.filter(member => !member.reportMissing && missingPartsOf(draftState, member).length);
+  const flagsChanged = draftFlags.join() !== (editing ? flaggedKeys(editing.members) : []).join();
+  const dirty = flagsChanged || Boolean(preview) || (editing ? !savedUrls : urls.join() !== defaultUrls.join());
   const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
   const visibleMappings = scopedMappings.filter(mapping => healthFilter === "all" || (mapping.health || "healthy") === healthFilter);
   const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleMappings.length / pageSize)));
@@ -73,6 +89,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setEditing(mapping);
     setUrls(mapping.members.map(member => member.url));
     setPreview(null);
+    setDraftFlags(flaggedKeys(mapping.members));
     setError("");
     setMessage("Editing mapping. Add or remove episodes, then resolve and review before saving.");
   }
@@ -81,10 +98,30 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setEditing(null);
     setUrls(["", ""]);
     setPreview(null);
+    setDraftFlags([]);
     setError("");
     setMessage("");
   }
-  async function load() {
+  function cancelDraft() {
+    if (editing) return openMapping(editing);
+    setUrls(defaultUrls);
+    setPreview(null);
+    setDraftFlags([]);
+    setError("");
+    setMessage("");
+  }
+  function toggleFlag(member: CoverageMember, checked: boolean) {
+    const key = memberKey(member);
+    setDraftFlags(current => (checked ? [...current.filter(item => item !== key), key] : current.filter(item => item !== key)).sort());
+  }
+  function saveDraft() {
+    if (!draftMembers || selectionProblem) return;
+    const reportMissing = draftFlagged.map(({ provider, id }) => ({ provider, id }));
+    void action(preview
+      ? { action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision, reportMissing }
+      : { action: "save", id: editing?.id, revision: editing?.revision, reportMissing });
+  }
+  async function load(): Promise<CoverageMapping[] | undefined> {
     const response = await fetch("/api/plex/manual-coverage", { cache: "no-store" });
     const body = await response.json();
     if (!response.ok)
@@ -92,8 +129,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     if (typeof body.revision === "number" && body.revision < acceptedRevision.current) return;
     acceptedRevision.current = body.revision || acceptedRevision.current;
     acceptMappings(body.mappings);
-    setRevision(body.revision);
     setPending(Boolean(body.pending));
+    return body.mappings;
   }
   useEffect(() => {
     let active = true;
@@ -108,7 +145,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setSelected([]);
         setConfirmation(null);
         setPage(1);
-        setRevision(body.revision);
         const existing = body.mappings.find((mapping: CoverageMapping) => initialMappingId ? mapping.id === initialMappingId : mapping.members.some(member => initialUrls.some(input => identifiesMember(input, member))));
         if (existing) openMapping(existing);
         setPending(Boolean(body.pending));
@@ -142,7 +178,19 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       const response = await fetch("/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       const result = await response.json();
       if (!response.ok) {
-        if (result.code === "stale-revision" || result.code === "not-found") await load();
+        if (result.code === "stale-revision" || result.code === "not-found") {
+          const latest = await load();
+          // Reopen the latest saved state (for example, flags deleted by Ignore)
+          // so the stale draft cannot be resubmitted and silently restore them.
+          const refreshed = result.code === "stale-revision" && latest?.find(mapping => mapping.id === editing?.id);
+          if (refreshed) {
+            // Keep the typed episode list so a membership edit can be resolved again,
+            // but drop the old review and flags, which belong to the stale revision.
+            const typed = urls;
+            openMapping(refreshed);
+            setUrls(typed);
+          }
+        }
         if (result.mappingId && result.code === "membership-conflict") {
           const existing = mappings.find(mapping => mapping.id === result.mappingId);
           if (existing && !editing) openMapping(existing);
@@ -216,7 +264,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       if (editing && ids.includes(editing.id)) { setEditing(null); setPreview(null); }
       changeSelection([]);
       acceptedRevision.current = Math.max(acceptedRevision.current, body.revision);
-      setRevision(body.revision);
       onChanged(body.revision);
       setMessage(`Deleted ${body.deleted.length} mappings.${body.missing.length ? ` ${body.missing.length} selected mappings were already removed.` : ""} Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.`);
       await load();
@@ -224,24 +271,54 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       setError(error instanceof Error ? error.message : "Could not delete selected mappings.");
     } finally { setBusy(false); }
   }
-  function itemCorrection(mapping: CoverageMapping, item: CoverageEvidence) {
-    const key=`${mapping.id}:${item.showKey}:${item.ratingKey}`;
-    const correction=mapping.corrections?.find(c=>c.ratingKey===item.ratingKey && c.showKey===item.showKey);
-    return <fieldset key={key}><legend>Plex item {item.ratingKey} · {item.showKey}</legend>
-      <p>Provider identities: {item.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}</p>
-      <p>{correction ? `Declared content: ${correction.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}` : "No ownership correction. Conflicting combined/split identities cannot add manual coverage."}</p>
-      {(["TMDB","TVDB"] as const).map(provider=><div key={provider}>
-        <button disabled={locked} onClick={()=>void action({action:"correct",mappingId:mapping.id,revision,item,identities:mapping.members.filter(m=>m.provider===provider).map(m=>({provider:m.provider,id:m.id}))})}>Declare complete {provider} set</button>
-        {mapping.members.filter(m=>m.provider===provider).map(member=><label key={member.id}><input type="checkbox" disabled={locked} checked={(selectedParts[key]||[]).includes(`${provider}:${member.id}`)} onChange={event=>setSelectedParts(current=>({...current,[key]:event.target.checked ? [...(current[key]||[]).filter(v=>v.startsWith(provider+":")),`${provider}:${member.id}`] : (current[key]||[]).filter(v=>v!==`${provider}:${member.id}`)}))}/>{member.title} · {provider} {member.id} · S{member.season} E{member.episode}</label>)}
-      </div>)}
-      <button disabled={locked || !selectedParts[key]?.length} onClick={()=>void action({action:"correct",mappingId:mapping.id,revision,item,identities:mapping.members.filter(m=>selectedParts[key]?.includes(`${m.provider}:${m.id}`)).map(m=>({provider:m.provider,id:m.id}))})}>Declare selected parts</button>
-    </fieldset>;
+  function itemEvidence(mapping: CoverageMapping, item: CoverageEvidence) {
+    return <p key={`${mapping.id}:${item.showKey}:${item.ratingKey}`}>Plex item {item.ratingKey} · {item.showKey} · Provider identities: {item.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}</p>;
   }
-  function records(members: CoverageMember[]) {
-    return members.map(member => <div className="provider-record manual-match-record" key={`${member.provider}:${member.id}`}><strong>{member.provider} / {member.show}</strong><p>{member.title} / {report ? `S${String(member.season).padStart(2,"0")}E${String(member.episode).padStart(2,"0")}` : `S${member.season} E${member.episode}`} / Episode ID {member.id}</p>{report && <p>Show ID {member.showId}</p>}<a href={member.url} target="_blank" rel="noreferrer">{member.url}</a></div>);
+  // A combined episode is incomplete while any of its split episodes is reported missing.
+  // The status is derived from the given flags (saved, or the draft), never selected itself.
+  function derivedStatus(members: CoverageMember[], member: CoverageMember) {
+    const current = members.find(item => memberKey(item) === memberKey(member));
+    if (!current || current.reportMissing) return null;
+    const parts = missingPartsOf(members, current);
+    return parts.length ? <p className="report-missing-status report-missing-derived"><span>{INCOMPLETE_LABEL}</span> <small>{missingPartsExplanation(members, parts)}</small></p> : null;
+  }
+  // One presentation for saved rows, the Matching Episodes dialog and the editor:
+  // a panel per provider, preserving each provider's identities, numbering and links.
+  function panels(members: CoverageMember[], scope: string, editable = false) {
+    return <div className="manual-match-panels">{(["TMDB", "TVDB"] as const).map(provider => {
+      const side = members.filter(member => member.provider === provider);
+      return <section className="show-provider-matches" key={provider}><header><span className={`provider-badge ${provider.toLowerCase()}`}>{provider}</span><strong>{side.length} {side.length === 1 ? "episode" : "episodes"}</strong></header>
+        {side.map(member => {
+          const contextId = `${uid}-${scope}-${memberKey(member)}`;
+          return <div className="provider-record manual-match-record" key={memberKey(member)}>
+            <div id={contextId}><strong>{member.provider} / {member.show}</strong><p>{member.title} / {episodeCode(member)} / Episode ID {member.id}</p><p>Show ID {member.showId}</p></div>
+            <a href={member.url} target="_blank" rel="noreferrer">{member.url}</a>
+            {!editable && member.reportMissing && <p className="report-missing-status">Reported missing</p>}
+            {!member.reportMissing && derivedStatus(editable ? draftState : members, member)}
+            {editable && <label className="report-missing-toggle"><input type="checkbox" aria-describedby={contextId} disabled={locked} checked={draftFlags.includes(memberKey(member))} onChange={event => toggleFlag(member, event.target.checked)}/>Report Missing</label>}
+          </div>;
+        })}
+      </section>;
+    })}</div>;
+  }
+  function draftEditor(members: CoverageMember[]) {
+    return <section aria-label={preview ? "Resolved episode preview" : "Manual Match episodes"}>
+      <p className="report-missing-explanation"><strong>Report Missing</strong> keeps an episode missing in your Plex results when your local copy lacks its content, even if matching would mark it collected. Reporting a split episode missing also keeps its combined episode missing. When both sides list several episodes, report at least one episode missing on each side, or none. It is a local Shelfcheck override: Shelfcheck sends no report to Plex, TMDB, or TVDB.</p>
+      {panels(members, "draft", true)}
+      {selectionProblem
+        ? <p className="report-missing-validation" id={`${uid}-report-missing-validation`} aria-live="polite">{selectionProblem}</p>
+        : <p className="report-missing-impact" aria-live="polite"><strong>After saving</strong> {draftFlagged.length
+        ? <>{draftFlagged.map(episodeName).join(", ")} {draftFlagged.length === 1 ? "stays" : "stay"} missing as Reported missing in Plex results.
+          {draftIncomplete.map(member => ` ${episodeName(member)} stays missing as ${INCOMPLETE_LABEL} because it contains ${missingPartsOf(draftState, member).map(part => episodeName(draftState.find(item => memberKey(item) === memberKey(part))!)).join(" and ")}.`).join("")}
+          {members.length - draftFlagged.length - draftIncomplete.length === 1 ? " The other episode follows normal matching." : members.length > draftFlagged.length + draftIncomplete.length ? " The other episodes follow normal matching." : ""}</>
+        : "every episode follows normal matching."}</p>}
+      <p className="manual-match-draft-state">{dirty ? "Unsaved changes" : "No unsaved changes"}</p>
+      <button disabled={locked || !dirty} onClick={cancelDraft}>Cancel</button>
+      <button disabled={locked || (!preview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={saveDraft}>Save coverage mapping</button>
+    </section>;
   }
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
- {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches or ownership corrections.</p> : null}
+ {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
  {report && <button className="primary" disabled={locked} onClick={createMapping}>Add Manual Match</button>}
  {formOpen && <section className="manual-match-form" aria-label="Manual Match editor">
  {editing && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
@@ -254,7 +331,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }}/>{urls.length > 2 && <button disabled={locked} onClick={() => { setUrls(current => current.filter((_, i) => i !== index)); setPreview(null); }}>Remove episode {index + 1}</button>}</label>)}
  <button disabled={locked} onClick={() => { setUrls(current => [...current, ""]); setPreview(null); }}>Add episode</button>
  <button disabled={locked || urls.some(url => !url.trim())} onClick={() => void action({ action: "resolve", urls, id: editing?.id })}>Resolve and review</button>
- {preview && <section aria-label="Resolved episode preview">{records(preview.members)}<button disabled={locked} onClick={() => void action({ action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision })}>Save coverage mapping</button></section>}
+ {draftMembers && draftEditor(draftMembers)}
  </section>}
  {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
  {!episodeScope && <><label>Mapping health<select aria-label="Mapping health" value={healthFilter} disabled={locked} onChange={event => {
@@ -268,6 +345,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
  {confirmation && <section role="alertdialog" aria-label="Confirm mapping deletion"><p>Delete {confirmation.length} selected mappings? Plex comparisons will be rechecked.</p><button disabled={locked} onClick={() => void removeSelected(confirmation)}>Confirm delete {confirmation.length} mappings</button><button disabled={locked} onClick={() => setConfirmation(null)}>Cancel bulk deletion</button></section>}
  <ReportPagination total={visibleMappings.length} page={currentPage} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1); }}/>
  </>}
- {pageMappings.map(mapping => <article className="provider-match-row" key={mapping.id}>{!episodeScope && <label><input type="checkbox" aria-label={`Select mapping ${mapping.id}`} disabled={locked} checked={selectedIds.includes(mapping.id)} onChange={event => changeSelection(event.target.checked ? [...selectedIds, mapping.id] : selectedIds.filter(id => id !== mapping.id))}/>Select mapping</label>}<p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{report ? <div className="provider-match-columns">{(["TMDB", "TVDB"] as const).map(provider => <section className="show-provider-matches" key={provider}><header><span className={`provider-badge ${provider.toLowerCase()}`}>{provider}</span><strong>{mapping.members.filter(member => member.provider === provider).length} episodes</strong></header>{records(mapping.members.filter(member => member.provider === provider))}</section>)}</div> : records(mapping.members)}<button disabled={locked} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => itemCorrection(mapping,item)) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={locked} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
+ {pageMappings.map(mapping => <article className="provider-match-row" key={mapping.id}>{!episodeScope && <label><input type="checkbox" aria-label={`Select mapping ${mapping.id}`} disabled={locked} checked={selectedIds.includes(mapping.id)} onChange={event => changeSelection(event.target.checked ? [...selectedIds, mapping.id] : selectedIds.filter(id => id !== mapping.id))}/>Select mapping</label>}<p><strong>{mapping.health === "needs-review" ? "Needs review" : mapping.health === "pending" ? "Pending" : "Healthy"}</strong>{mapping.healthMessage && <> · {mapping.healthMessage}</>}</p>{panels(mapping.members, mapping.id)}<button disabled={locked} onClick={() => openMapping(mapping)}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {mapping.id} · Revision {mapping.revision}</p>{mapping.evidence?.length ? mapping.evidence.map(item => itemEvidence(mapping,item)) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={locked} onClick={() => void remove(mapping.id)}>Delete mapping</button></article>)}
  </section>;
 }

@@ -40,7 +40,7 @@ test("Manual Match editor locks an already open form and ownership controls when
   const previous = new Map<string, PropertyDescriptor | undefined>();
   let running = false;
   const member={provider:"TMDB",id:100,showId:10,show:"Target",title:"Combined",season:1,episode:1,url:"https://example.test/100"};
-  const mappings=[{id:"healthy",revision:1,members:[member],evidence:[{ratingKey:"item",showKey:"show",fingerprint:"file",identities:[{provider:"TMDB",id:100}]}]},{id:"pending",revision:1,health:"pending",members:[{...member,id:101}]}];
+  const mappings=[{id:"healthy",revision:1,members:[member],evidence:[{ratingKey:"item",showKey:"show",identities:[{provider:"TMDB",id:100}]}]},{id:"pending",revision:1,health:"pending",members:[{...member,id:101}]}];
   for (const [key,value] of Object.entries({window:browser,document:browser.document,HTMLElement:browser.HTMLElement,IS_REACT_ACT_ENVIRONMENT:true,fetch:async(input: unknown)=>Response.json(String(input) === "/api/plex/scan" ? {scan:{status:running ? "running" : "completed"}} : {mappings,revision:1,pending:0})})) {
     previous.set(key,Object.getOwnPropertyDescriptor(globalThis,key)); Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});
   }

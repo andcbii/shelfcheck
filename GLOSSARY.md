@@ -52,13 +52,26 @@ An episode record containing content that another provider lists as multiple epi
 One of the parts of a combined episode, listed as a separate episode by a provider.
 
 **Coverage mapping**:
-A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content.
+A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content. Directly owning every record in one set covers every record in the other, even when a Plex item also carries an identity from the other set; owning only part of a set adds no coverage.
 
 **Show mapping**:
 An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.
 
-**Ownership correction**:
-A user's declaration of the content actually contained in a Plex item whose provider identities describe conflicting episode coverage.
+**Report Missing**:
+A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It applies to the provider episode across all Plex libraries, not to a file or Plex item, and lasts until the user clears it or the member leaves its Manual Match. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.
+_Avoid_: Ownership correction, declared content
+
+**Reported missing**:
+The status of an episode whose Report Missing flag is set. It outranks every collected determination, so the episode and its show stay in Plex missing results. Flagging one member does not flag another member.
+_Avoid_: Keep missing, marked missing
+
+**Incomplete combined episode**:
+The derived status, shown as **Incomplete · mapped part missing**, of a combined episode whose Manual Match maps it alone to several split episodes when one or more of those split episodes is reported missing. It is recalculated from the currently saved Report Missing flags and is never saved as a flag itself, so it ends as soon as the last responsible flag is cleared or its member leaves the Manual Match. It has the same precedence as Reported missing, which it yields to when the combined episode is also flagged. Reporting the combined episode missing never makes its split episodes missing.
+_Avoid_: Derived flag, inferred missing
+
+**Many-to-many Manual Match**:
+A Manual Match whose TMDB and TVDB sides each list two or more episodes, so neither side is a single combined episode. Shelfcheck never guesses which opposite-side episode contains a reported-missing episode, so no status is derived: each Report Missing flag affects only its own episode. A manual save must leave either no flags or at least one explicit flag on each provider side (the **both-sides-or-none rule**); derived status never satisfies it. The rule checks manual saves, including membership edits that change the mapping into this shape, and never rejects reading or comparing saved flags, so a one-sided state left by automatic cleanup stays active until the next manual save repairs or clears it.
+_Avoid_: Partial selection, guessed correspondence
 
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.

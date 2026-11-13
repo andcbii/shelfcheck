@@ -285,9 +285,41 @@ export function coverageDatabase() {
   db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_coverage_state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0);
     INSERT OR IGNORE INTO shelfcheck_coverage_state(id) VALUES(1);
     CREATE TABLE IF NOT EXISTS shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, PRIMARY KEY(provider, episode_id));
+    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, report_missing INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(provider, episode_id));
     CREATE TABLE IF NOT EXISTS shelfcheck_coverage_evidence(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);`);
+  addReportMissingColumn(db);
+  retireOwnershipCorrections(db);
   return db;
+}
+
+// Report Missing is mapping-member state keyed by provider episode, so it
+// follows membership and is deleted with its mapping. Existing members start off.
+const reportMissingDatabases = new WeakSet<DatabaseSync>();
+function addReportMissingColumn(db: DatabaseSync) {
+  if (reportMissingDatabases.has(db)) return;
+  const columns = db.prepare("PRAGMA table_info(shelfcheck_coverage_members)").all() as { name: string }[];
+  if (!columns.some(column => column.name === "report_missing")) db.exec("ALTER TABLE shelfcheck_coverage_members ADD COLUMN report_missing INTEGER NOT NULL DEFAULT 0");
+  reportMissingDatabases.add(db);
+}
+
+// Ownership corrections were retired: complete-set Manual Matches stand alone.
+// Discard saved corrections without converting them into any other decision, and
+// ask for a comparison when they may have shaped the cached results.
+const retiredCorrectionDatabases = new WeakSet<DatabaseSync>();
+function retireOwnershipCorrections(db: DatabaseSync) {
+  if (retiredCorrectionDatabases.has(db)) return;
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shelfcheck_coverage_corrections'").get()) { retiredCorrectionDatabases.add(db); return; }
+  const saved = db.prepare("SELECT COUNT(*) AS count FROM shelfcheck_coverage_corrections").get() as { count: number };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec("DROP TABLE shelfcheck_coverage_corrections");
+    if (saved.count) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+    db.exec("COMMIT");
+    retiredCorrectionDatabases.add(db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 // Generated provider catalogues and inputs do not pass through report ignore pruning.

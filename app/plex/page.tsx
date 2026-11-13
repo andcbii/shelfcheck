@@ -6,7 +6,7 @@ import type { CoverageIssue } from "@/lib/coverage-issues";
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import type { CoverageGroup } from "@/lib/manual-coverage-model";
+import { INCOMPLETE_LABEL, missingPartsExplanation, type CoverageGroup } from "@/lib/manual-coverage-model";
 import { ManualCoverageManager } from "@/app/components/manual-coverage-manager";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
@@ -82,6 +82,7 @@ export default function PlexPage() {
   const [report, setReport] = useState<Report | null>(null);
   const reportInvalidations = useRef(new Set<string>());
   const scanRequestPending = useRef(false);
+  const settingsSaves = useRef(0);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [query, setQuery] = useState("");
@@ -183,7 +184,9 @@ export default function PlexPage() {
   const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => activeShows.some(show => show.ratingKey === member.showKey && matchesSearch(show.title, query) && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
   const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
     ...group,
-    members: group.members.map(member => member.status === "missing" && !group.missing.some(missing => missing.provider === member.provider && missing.id === member.id && visibleCoverageMissing(missing)) ? { ...member, status: "alternative" as const } : member),
+    // Every missing variant (missing, Reported missing, incomplete) obeys Ignore and aired-date
+    // visibility; hidden members stay as alternative context.
+    members: group.members.map(member => (member.status === "missing" || member.status === "reported-missing" || member.status === "incomplete") && !group.missing.some(missing => missing.provider === member.provider && missing.id === member.id && visibleCoverageMissing(missing)) ? { ...member, status: "alternative" as const } : member),
   }));
   const groupedIdentities = new Set(coverageGroups.flatMap(group => group.members.map(member => `${member.provider}:${member.id}`)));
   function ungroupedMissing(show: Show) {
@@ -229,17 +232,42 @@ export default function PlexPage() {
     finally { setSaving(false); }
   }
 
-  function saveSettings(next: PlexSettings, patch: Partial<PlexSettings>) {
+  function saveSettings(next: PlexSettings, patch: Partial<PlexSettings>, onRejected?: (saved: PlexSettings | undefined) => void) {
     if (!settingsLoaded) { setError("Wait for Plex preferences to finish loading."); return; }
+    const save = ++settingsSaves.current;
     setSettings(next);
     void fetch("/api/plex/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
-      .then(async (response) => { if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Plex preferences could not be saved."); } })
+      .then(async (response) => {
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          // A rejected Ignore (for example, flag cleanup during a scan) saved nothing:
+          // show the saved preferences again instead of the optimistic ones.
+          const saved = await fetch("/api/plex/state", { cache: "no-store" }).then((reply) => reply.ok ? reply.json() : null).catch(() => null) as { settings?: PlexSettings } | null;
+          // A newer save owns the displayed settings; never roll it back.
+          if (save === settingsSaves.current) {
+            if (saved?.settings) setSettings(saved.settings);
+            onRejected?.(saved?.settings);
+          }
+          throw new Error(body.error || "Plex preferences could not be saved.");
+        }
+        // Ignore cleanup rechecked cached comparisons on the server; show them now,
+        // through the same revision and stale-response guards as Manual Match saves.
+        const body = await response.json().catch(() => ({})) as { coverageRevision?: number };
+        if (typeof body.coverageRevision === "number") coverageChanged(body.coverageRevision);
+      })
       .catch((saveError) => setError(saveError instanceof Error ? saveError.message : "Plex preferences could not be saved."));
   }
 
   function ignoreShow(show: Show, duration: IgnoreDuration) {
     const ignoredShows = [...activeIgnores(settings.ignoredShows).filter((item) => item.ratingKey !== show.ratingKey), { ratingKey: show.ratingKey, title: show.title, ...createIgnoreTiming(duration) }].sort((a, b) => a.title.localeCompare(b.title));
-    saveSettings({ ...settings, ignoredShows }, { ignoredShows });
+    const hidden = report?.shows.filter((item) => item.ratingKey === show.ratingKey) || [];
+    const hiddenCache = report?.scanCache?.[show.ratingKey];
+    saveSettings({ ...settings, ignoredShows }, { ignoredShows }, (saved) => {
+      // Restore results only when the server confirms the Ignore was not saved.
+      if (!saved || activeIgnores(saved.ignoredShows).some((item) => item.ratingKey === show.ratingKey)) return;
+      reportInvalidations.current.delete(show.ratingKey);
+      setReport((current) => current && !current.shows.some((item) => item.ratingKey === show.ratingKey) ? { ...current, shows: [...current.shows, ...hidden], ...(hiddenCache === undefined ? {} : { scanCache: { ...current.scanCache, [show.ratingKey]: hiddenCache } }) } : current);
+    });
     reportInvalidations.current.add(show.ratingKey);
     setReport((current) => current ? pruneClientReport(current, reportInvalidations.current) : current);
     setShowToIgnore(null);
@@ -395,7 +423,7 @@ export default function PlexPage() {
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>
         <p>Every episode in either alternative complete set covers this content. Automatic matches keep their status and do not count as directly owned members.</p>
         {group.health && group.health !== "healthy" && <p>{group.health === "pending" ? "Coverage pending recheck" : "Mapping needs review"}</p>}
-        {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{member.season} E{member.episode} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong></li>)}</ul></section>)}
+        {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{String(member.season).padStart(2, "0")}E{String(member.episode).padStart(2, "0")} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "reported-missing" ? "Reported missing" : member.status === "incomplete" ? INCOMPLETE_LABEL : member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong>{member.status === "incomplete" && member.missingParts?.length ? <small>{missingPartsExplanation(group.members, member.missingParts)}</small> : null}</li>)}</ul></section>)}
       </section>)}
       {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);

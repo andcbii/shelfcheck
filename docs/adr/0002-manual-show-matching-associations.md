@@ -12,4 +12,4 @@ Show mappings control matching eligibility without adding the linked shows' epis
 
 Show mappings are distinct from the episode coverage mappings in ADR-0001. The Pokemon association must not require scanning every related catalogue or displaying a combined franchise comparison when the user only wants additional identities considered during existing episode matching.
 
-Show mappings are optional and are not prerequisites for direct episode coverage. Users may link episode identities across unrelated parent shows without configuring this association or choosing primary catalogues. Deleting a show mapping does not delete independent episode coverage mappings or compatible ownership corrections.
+Show mappings are optional and are not prerequisites for direct episode coverage. Users may link episode identities across unrelated parent shows without configuring this association or choosing primary catalogues. Deleting a show mapping does not delete independent episode coverage mappings.

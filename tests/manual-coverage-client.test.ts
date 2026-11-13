@@ -9,7 +9,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const old = new Map<string, PropertyDescriptor | undefined>();
   const members = [{ provider: "TMDB", id: 100, show: "Target", title: "Missing", season: 1, episode: 1, url: "https://example.com/100" }, { provider: "TVDB", id: 200, show: "Other", title: "Equivalent", season: 8, episode: 8, url: "https://example.com/200" }];
   let deleted = "";
-  let corrected: unknown;
+  const posted: string[] = [];
   let changed = 0;
   let savedPreview = "";
   let savedId = "";
@@ -20,7 +20,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch: async (input: unknown, init?: RequestInit) => {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body));
-        if (body.action === "correct") { corrected=body; return Response.json({revision:1}); }
+        posted.push(body.action);
         if (body.action === "resolve") {
           resolvedInputs = body.urls;
           return Response.json({ preview: "reviewed", members });
@@ -36,7 +36,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         deleted = String(input);
         return Response.json({ revision: 2 });
       }
-      return Response.json({ revision: 1, mappings: [{ id: "saved", revision: 1, health: "needs-review", healthMessage: "Provider confirmed deletion.", members, evidence:[{ratingKey:"file",showKey:"show",fingerprint:"content",identities:members.map(m=>({provider:m.provider,id:m.id}))}] }, {id:"healthy",revision:2,members}], pending: 0 });
+      return Response.json({ revision: 1, mappings: [{ id: "saved", revision: 1, health: "needs-review", healthMessage: "Provider confirmed deletion.", members, evidence:[{ratingKey:"file",showKey:"show",identities:members.map(m=>({provider:m.provider,id:m.id}))}] }, {id:"healthy",revision:2,members}], pending: 0 });
     } })) {
     old.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
@@ -66,15 +66,11 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(healthFilter);
   await act(async () => {healthFilter.value="needs-review";healthFilter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   assert.equal(container.querySelectorAll("article").length,1);
-  const correct=[...container.querySelectorAll("button")].find(button=>button.textContent==="Declare complete TMDB set");
-  assert.ok(correct);
-  await act(async()=>correct.click());
-  assert.deepEqual((corrected as {identities:unknown}).identities,[{provider:"TMDB",id:100}]);
-  const part=container.querySelectorAll<HTMLInputElement>('fieldset input[type="checkbox"]')[1];
-  await act(async()=>part.click());
-  const selected=[...container.querySelectorAll("button")].find(button=>button.textContent==="Declare selected parts");
-  assert.ok(selected); await act(async()=>selected.click());
-  assert.deepEqual((corrected as {identities:unknown}).identities,[{provider:"TVDB",id:200}]);
+  // Coverage evidence stays visible, but ownership declarations are retired.
+  assert.match(container.textContent || "", /TMDB 100, TVDB 200/);
+  assert.equal([...container.querySelectorAll("button")].some(button=>/Declare/.test(button.textContent || "")),false,"no ownership declaration controls");
+  assert.equal(container.querySelectorAll('fieldset input[type="checkbox"]').length,0,"no selected-parts controls");
+  assert.doesNotMatch(container.textContent || "", /ownership correction/i);
   changed=0;
   const initialResolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(initialResolve);
@@ -99,7 +95,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const preview = container.querySelector('[aria-label="Resolved episode preview"]');
   assert.ok(preview);
   assert.match(preview.textContent || "", /Episode ID 100/);
-  assert.match(preview.textContent || "", /S8 E8/);
+  assert.match(preview.textContent || "", /S08E08/, "Each provider keeps its own numbering");
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
   rejectEdit = true;
@@ -125,6 +121,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.match(container.textContent || "", /tmdb:100 show:10 season:1 episode:2/);
   assert.match(container.textContent || "", /tvdb:200/);
   assert.deepEqual(resolvedInputs, members.map(member => member.url));
+  assert.equal(posted.includes("correct"), false, "the manager never submits the retired correction mutation");
 });
 
 
@@ -180,7 +177,7 @@ test("linking another split episode retains the selected episode when opening an
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
   await act(async () => save.click());
-  assert.deepEqual(saved, { action: "save", id: "existing", revision: 4, preview: "complete" });
+  assert.deepEqual(saved, { action: "save", id: "existing", revision: 4, preview: "complete", reportMissing: [] }, "A larger match saves with Report Missing off");
 });
 
 

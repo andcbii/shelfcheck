@@ -4,8 +4,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { correctedCoverageInventory, listCoverageCorrections, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
-import type { CoverageMember, CoverageEvidence, CoverageOutcome, CoverageGroup } from "@/lib/manual-coverage-model";
+import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { missingPartsOf, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
@@ -30,7 +30,7 @@ export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error
 export type PlexProviderShowMatch = { id: number; name?: string; year?: number; slug?: string };
 export type PlexProviderMatches = { tmdb: PlexProviderShowMatch[]; tvdb: PlexProviderShowMatch[] };
 export type PlexShow = { ratingKey: string; plexGuid?: string; plexGuids?: string[]; plexRatingKeys?: string[]; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number };
-export type PlexMissingEpisode = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
+export type PlexMissingEpisode = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[]; reportedMissing?: ("TMDB" | "TVDB")[]; incomplete?: Partial<Record<"TMDB" | "TVDB", CoverageIdentity[]>> };
 export type PlexAutoMatchMethod = "Matched via IMDb" | "Matched via Trakt" | "Matched via TMDB External ID" | "Shelfcheck Compound Match";
 export type PlexAutoMatchEpisode = { id?: number; showId?: number; showSlug?: string; show: string; name?: string; season: number; episode: number; airDate?: string; url?: string };
 export type PlexAutoMatch = { method: PlexAutoMatchMethod; tmdb: PlexAutoMatchEpisode; tvdb: PlexAutoMatchEpisode };
@@ -206,8 +206,10 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
   while (page < 100) {
     const body = await checkedJson<{ data?: { episodes?: { id?: number; seasonNumber?: number; number?: number; name?: string; aired?: string; runtime?: number }[] }; links?: { next?: string | null } }>(`${TVDB}/series/${seriesId}/episodes/default?page=${page}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
-    for (const episode of body.data.episodes) if ((episode.seasonNumber || 0) > 0 && episode.number) {
-      episodes.push({ showTitle: series?.data?.name || showTitle, season: episode.seasonNumber as number, episode: episode.number, title: episode.name, airDate: episode.aired, runtime: episode.runtime, providerEpisodeId: episode.id, source: "TVDB" });
+    // Specials (season 0) are kept so Report Missing can be evaluated on them; the
+    // comparator still ignores unflagged specials, as before.
+    for (const episode of body.data.episodes) if ((episode.seasonNumber || 0) >= 0 && episode.number) {
+      episodes.push({ showTitle: series?.data?.name || showTitle, season: episode.seasonNumber || 0, episode: episode.number, title: episode.name, airDate: episode.aired, runtime: episode.runtime, providerEpisodeId: episode.id, source: "TVDB" });
     }
     if (!body.links?.next) break;
     page += 1;
@@ -358,10 +360,30 @@ function localComparisonInventory(localMetadata: PlexMetadata[]) {
   });
   return {localEpisodes,localProviderEpisodes,localTmdbEpisodeIds:new Set(localProviderEpisodes.flatMap(e=>e.tmdbEpisodeId ? [e.tmdbEpisodeId] : []))};
 }
+/**
+ * Specials (season 0) that a Manual Match includes but this show's saved provider
+ * catalogue lacks, rebuilt from the saved member records. Catalogues saved before
+ * specials were kept have none, so without this a saved Report Missing decision on
+ * a special would stay hidden until the next download. Only resolved catalogues of
+ * this show's own provider IDs are supplemented; real catalogue records always win.
+ */
+export function mappedSpecialsMissingFromCatalogue(catalogueEpisodes: ProviderEpisode[], mappings: { members: CoverageMember[] }[], show: { tmdbId?: number; tvdbId?: number }): ProviderEpisode[] {
+  const present = new Set(catalogueEpisodes.flatMap(episode => episode.providerEpisodeId ? [`${episode.source}:${episode.providerEpisodeId}`] : []));
+  const added = new Set<string>();
+  return mappings.flatMap(mapping => mapping.members).flatMap(member => {
+    const key = `${member.provider}:${member.id}`;
+    const ownShow = member.provider === "TMDB" ? show.tmdbId === member.showId : show.tvdbId === member.showId;
+    if (member.season !== 0 || !ownShow || present.has(key) || added.has(key)) return [];
+    added.add(key);
+    return [{ showTitle: member.show, season: 0, episode: member.episode, title: member.title, providerEpisodeId: member.id, source: member.provider }];
+  });
+}
+
 /** Resolve automatic evidence once, using either live saved relationships or strict saved-input replay. */
 async function compareLoadedPlexShow(input: LoadedComparison) {
-  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,addWarning,setHeartbeat}=input;
+  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,addWarning,setHeartbeat}=input;
   let {cachedTvdbEpisodeImdbIds}=input;
+  const providerEpisodes=[...input.providerEpisodes,...mappedSpecialsMissingFromCatalogue(input.providerEpisodes,mappings,{tmdbId:tmdbShow ? tmdbShow.id : undefined,tvdbId:tvdbResolved ? tvdbId : undefined})];
   let warning: string | undefined;
   const primary=group.records[0], ratingKey=group.identity;
   const plexGuids=[...new Set(details.flatMap(d=>d.guid?.startsWith("plex://show/") ? [d.guid] : []))];
@@ -492,7 +514,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           ratingKey, primary, tmdbShow, tvdbId, tvdbSlug, tmdbSeriesMatches, providerEpisodes,
           localEpisodes, localProviderEpisodes, localTmdbEpisodeIds, libraryTmdbEpisodeIds,
           coordinateMissingTvdbIds, directTvdbSatisfied, directImdbSatisfied, traktSatisfied,
-          tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, corrections: listCoverageCorrections(), autoCompoundEpisodes,
+          tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, autoCompoundEpisodes,
         });
         for (const { event, data } of diagnostics) logger.info(event, data);
         const linkedTvdbIds = [...new Set(tmdbSeriesMatches.flatMap((show) => show.external_ids?.tvdb_id ? [show.external_ids.tvdb_id] : []))];
@@ -653,7 +675,7 @@ async function runPlexScan(targetRatingKey?: string) {
       for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
         const ids = idsFromGuids(item.Guid);
         manualInventory.push({
-          ratingKey: item.ratingKey || "", showKey: group.identity, fingerprint: JSON.stringify([config.plexUrl,item]),
+          ratingKey: item.ratingKey || "", showKey: group.identity,
           identities: [
             ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
             ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
@@ -661,7 +683,7 @@ async function runPlexScan(targetRatingKey?: string) {
         });
       }
     }
-    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory, allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))));
+    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
     inputs.inventory = {capturedAt: startedAt, complete: allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))), groups: allShows, items: Object.fromEntries([...localResponsesByRatingKey].map(([key,value]) => [key,value.MediaContainer?.Metadata || []])), evidence: manualInventory};
     savePlexInventory(inputs.inventory);
     // Catalogue reuse does not certify ownership. Rebuild every comparison against this inventory.
@@ -955,24 +977,80 @@ export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
   return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
 }
 
-export type CoverageImpact = {members: CoverageMember[]; showKeys: string[]};
+export type CoverageImpact = {members: CoverageMember[]};
 export function captureCoverageImpact(ids: string[]): CoverageImpact {
-  return {members:listCoverageMappings().filter(mapping=>ids.includes(mapping.id)).flatMap(mapping=>mapping.members),showKeys:listCoverageCorrections().filter(correction=>ids.includes(correction.mappingId)).map(correction=>correction.showKey)};
+  return {members:listCoverageMappings().filter(mapping=>ids.includes(mapping.id)).flatMap(mapping=>mapping.members)};
 }
 function coverageGroupsForResults(results: PlexShowResult[], manualInventory: CoverageEvidence[]): CoverageGroup[] {
   return listCoverageMappings().flatMap(mapping=>{
     const outcomes=results.flatMap(show=>(show.coverageOutcomes || []).filter(outcome=>mapping.members.some(member=>member.provider===outcome.provider && member.id===outcome.id)).map(outcome=>({...outcome,showKey:show.ratingKey})));
     const missing=outcomes.filter(outcome=>outcome.status==="missing");
     if (!missing.length) return [];
-    const inventory=correctedCoverageInventory(mapping,manualInventory);
     return [{mappingId:mapping.id,health:mapping.health,missing,members:mapping.members.map(member=>{
-      const direct=inventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
+      const direct=manualInventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
       const matched=outcomes.filter(outcome=>outcome.provider===member.provider && outcome.id===member.id);
-      const status=direct ? "direct" : matched.some(o=>o.status==="missing") ? "missing" : matched.some(o=>o.status==="automatic") ? "automatic" : matched.some(o=>o.status==="manual") ? "manual" : "alternative";
-      return {...member,status};
+      // Explicit and derived missing status outrank direct ownership and every collected outcome.
+      const missingParts=missingPartsOf(mapping.members,member);
+      const status=member.reportMissing ? "reported-missing" : missingParts.length ? "incomplete" : direct ? "direct" : matched.some(o=>o.status==="missing") ? "missing" : matched.some(o=>o.status==="automatic") ? "automatic" : matched.some(o=>o.status==="manual") ? "manual" : "alternative";
+      return {...member,status,...(status==="incomplete" ? {missingParts} : {})};
     })}];
   });
 }
+/** Whether a Manual Match member belongs to a saved show comparison, by provider show or catalogue episode. */
+function memberInComparison(inputs: PlexGeneratedInputs, input: SavedPlexComparison, member: CoverageMember) {
+  return member.provider==="TMDB"
+    ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || Boolean(input.tmdbEpisodeAliases?.includes(member.showId)) || Boolean(inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
+    : input.tvdbId===member.showId || input.tvdbAliases.includes(member.showId) || Boolean(inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
+}
+
+/** A newly applied Plex Ignore: a whole show, or only the selected seasons of it. */
+export type IgnoreScope = {ratingKey: string; seasons?: number[]};
+
+/**
+ * Manual Match members inside an Ignore scope. A member belongs to the ignored
+ * show when that show's saved comparison lists its provider show or episode, or
+ * when one of the show's Plex items carries its identity. A season Ignore also
+ * requires the member's provider season (from the saved catalogue, else the
+ * saved member) to be one of the selected seasons.
+ */
+function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
+  if (!scopes.length) return [];
+  const inputs=readPlexInputs();
+  // Provider season of every catalogued episode, built once per cleanup.
+  const seasons=new Map<string,number>();
+  for (const [provider,catalogues] of [["TMDB",inputs.tmdb],["TVDB",inputs.tvdb]] as const)
+    for (const catalogue of Object.values(catalogues)) for (const episode of catalogue.episodes)
+      if (episode.providerEpisodeId) seasons.set(`${provider}:${episode.providerEpisodeId}`,episode.season);
+  // The member's own provider show only, not aliases or Plex GUIDs, so a
+  // mis-tagged item or shared alias never reaches another show's flags.
+  const ownShow=(input: SavedPlexComparison, member: CoverageMember) => member.provider==="TMDB"
+    ? input.tmdbId===member.showId || Boolean(input.tmdbId && inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
+    : input.tvdbId===member.showId || Boolean(input.tvdbId && inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
+  return listCoverageMappings().flatMap(mapping=>mapping.members).filter(member=>scopes.some(scope=>{
+    const input=inputs.comparisons[scope.ratingKey];
+    // Without a saved comparison, fall back to the show's own Plex items.
+    const inShow=input ? ownShow(input,member)
+      : Boolean(inputs.inventory?.evidence.some(item=>item.showKey===scope.ratingKey && item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id)));
+    return inShow && (!scope.seasons || scope.seasons.includes(seasons.get(`${member.provider}:${member.id}`) ?? member.season));
+  }));
+}
+
+/**
+ * Apply Ignore authoritatively over Report Missing. Deletes explicit flags of
+ * Manual Match members inside the newly ignored scopes, saves the Ignore rule
+ * (`save`) in the same transaction, then rechecks the affected cached shows so
+ * derived effects elsewhere are withdrawn immediately. Flags outside the scopes
+ * and every other mapping are preserved. Restore or expiry never recreates them.
+ * Rejects while a Plex scan is running only when there are flags to delete.
+ */
+export async function applyIgnoreReportMissingCleanup(scopes: IgnoreScope[], save: () => void): Promise<number | undefined> {
+  const impact=clearReportMissingFlags(membersInIgnoreScopes(scopes),save);
+  if (!impact.length) return undefined;
+  await requestCoverageRecheck({members:impact});
+  // The coverage revision whose rechecked report the client must display.
+  return coverageState().revision;
+}
+
 let coverageRecheckQueue: Promise<void> = Promise.resolve();
 /** Reconcile only affected comparisons. No client credentials, enumeration or HTTP is permitted here. */
 export function requestCoverageRecheck(impact: CoverageImpact): Promise<void> {
@@ -986,11 +1064,9 @@ async function recheckCoverage(impact: CoverageImpact) {
   const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
   const settings=parsePlexPreferences(readPlexSettings());
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
-  const targets=new Set(impact.showKeys);
+  const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {
-    if (impact.members.some(member=> member.provider==="TMDB"
-      ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || input.tmdbEpisodeAliases?.includes(member.showId) || inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id)
-      : input.tvdbId===member.showId || input.tvdbAliases.includes(member.showId) || inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))) targets.add(key);
+    if (impact.members.some(member=>memberInComparison(inputs,input,member))) targets.add(key);
   }
   // Persist obligations first. A failed local comparison must never consume them.
   for (const key of targets) {
@@ -1007,6 +1083,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   const inventory=inputs.inventory;
   const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(inventory.groups, inventory.items, ignored);
   const results=[...prior.shows];
+  const mappings=listCoverageMappings();
   for (const key of targets) {
     if (ignored.has(key)) continue;
     const input=inputs.comparisons[key];
@@ -1019,7 +1096,7 @@ async function recheckCoverage(impact: CoverageImpact) {
       const compared=await replayScope.run(replay,()=>comparisonIssueScope.run({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},()=>relationshipScope.run(input.relationships,()=>compareLoadedPlexShow({
         ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
         providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},
-        libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings:listCoverageMappings(),manualInventory:inventory.evidence,autoCompoundEpisodes:settings.autoCompoundEpisodes!==false,
+        libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory:inventory.evidence,autoCompoundEpisodes:settings.autoCompoundEpisodes!==false,
         config:{tmdbToken:""},token:"",traktCredentials:Object.values(input.relationships).some(relationship=>relationship.provider==="Trakt") ? {clientId:"",accessToken:""} : null,
         tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},addWarning:()=>{},setHeartbeat:()=>{},
       }))));

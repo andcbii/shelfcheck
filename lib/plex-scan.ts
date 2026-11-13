@@ -586,9 +586,10 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             for (const { tvdbEpisodeId, value: result } of traktCrosswalks.fulfilled) interpret("Trakt", tvdbEpisodeId, () => {
               traktValidationFailed += result.validationFailed;
               crosswalkDetails.set(tvdbEpisodeId, { traktTmdbIds: result.traktTmdbIds, validatedTmdbIds: result.validatedTmdbIds });
+              // A validation that could not be completed is a failed check, even when another
+              // validation succeeds; a mismatch is not.
+              if (result.validationFailures.length) failCrosswalk("Trakt", tvdbEpisodeId, result.validationFailures);
               if (!result.validated) {
-                // A validation that could not be completed is a failed check; a mismatch is not.
-                if (result.validationFailures.length) failCrosswalk("Trakt", tvdbEpisodeId, result.validationFailures);
                 traktInvalid += 1;
                 crosswalkDecisions.set(tvdbEpisodeId, "trakt-invalid-tmdb-fallback");
                 return;

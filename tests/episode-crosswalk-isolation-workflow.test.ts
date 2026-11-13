@@ -161,3 +161,29 @@ test("every failed Trakt validation of one episode is recorded as a cause of its
   for (const issue of validations) assert.match(issue.impacts!.join(" "), /Trakt episode crosswalk could not be checked/, `the crosswalk failure is grouped under ${issue.id}`);
   assert.ok(missingKeys(result).includes("TVDB:301"), "no coverage is guessed");
 });
+
+test("a failed Trakt validation is reported and retried even when another validation of the same episode succeeds", async t => {
+  const { rerun, state, requests } = await harness(t, catalogue, owned);
+  await connectTrakt();
+  // Trakt maps TVDB 301 to two TMDB episodes; TMDB 9001 validates, TMDB 9002's validation is unreadable.
+  const mapping = (episode: Episode) => ({ type: "episode", episode: { season: episode.season, number: episode.episode, ids: { tvdb: 301, tmdb: episode.id } }, show: { ids: { tmdb: 10, tvdb: 20 } } });
+  state.bodies.set("/search/tvdb/301", [mapping(tmdb1), mapping(tmdb2)]);
+  state.bodies.set("/3/tv/10/season/1/episode/2", null);
+  const result = await rerun();
+  assert.deepEqual(showFailures(result), []);
+  assert.ok(!missingKeys(result).includes("TVDB:301"), "the successful validation collects the episode");
+  const [issue, ...others] = crosswalkIssues(result).filter(item => item.episode?.id === 301);
+  assert.deepEqual(others, []);
+  assert.ok(issue, "the failed validation stays visible in Scan Issues");
+  assert.equal(issue.provider, "Trakt");
+  assert.match(issue.cause, /Trakt episode crosswalk could not be checked/);
+  assert.match(issue.impacts!.join(" "), /remains collected; this failed check is still unresolved/);
+
+  // TMDB repairs the response: the failed validation is requested again rather than reused, and the cause clears.
+  state.bodies.delete("/3/tv/10/season/1/episode/2");
+  requests.length = 0;
+  const recovered = await rerun();
+  assert.ok(requests.includes("/3/tv/10/season/1/episode/2"), "the failed validation is retried on the next scan");
+  assert.deepEqual(crosswalkIssues(recovered).filter(item => item.episode?.id === 301), []);
+  assert.ok(!missingKeys(recovered).includes("TVDB:301"));
+});

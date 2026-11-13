@@ -1,41 +1,26 @@
-# Shelfcheck 2.5.2
+# Shelfcheck 2.5.3
 
-Shelfcheck 2.5.2 replaces ownership corrections with **Report Missing** and fixes
-provider-cache recovery and stale Plex results.
+Shelfcheck 2.5.3 keeps episode matching problems from stopping comparison of an
+entire Plex show and recovers missing TVDB titles from English translations.
 
-## Report Missing in Manual Matches
+## Episode matching and recovery
 
-Each episode in a Manual Match has a **Report Missing** checkbox in the TMDB or
-TVDB provider panel. Selections remain a draft until saved, with a preview of
-their effect. This is a local Shelfcheck override; nothing is sent to Plex,
-TMDB, or TVDB.
-
-Complete-set Manual Matches now recognize equivalent owned content without a
-second declaration. Report Missing takes precedence over collected results
-across Plex libraries. Reporting a split part missing also keeps its combined
-episode missing, while other parts retain their normal coverage. Many-to-many
-matches require explicit selections on both provider sides or no flags.
-
-Saved overrides survive scans, restarts, and inventory changes. Saving or
-clearing them updates affected cached results without a full scan or provider
-download, including TVDB specials missing from older saved catalogues.
-
-Applying a show or season Ignore clears flags only in its scope and immediately
-updates related results. Restore and expiry do not bring deleted flags back.
-
-## Provider-cache fixes
-
-Provider failures no longer force unrelated successful downloads to repeat.
-TMDB verification recovery preserves completed work and outstanding refresh
-requirements, including invalidation of stale episode relationships when
-previously deferred provider changes are processed.
+- Individual malformed catalogue records and failed episode lookups are isolated
+  to the affected episode and dependent relationships. Other episodes and
+  independent matching methods continue normally.
+- TVDB's default catalogue remains the first source. When an episode's title is
+  unusable, Shelfcheck requests that episode's English translation, preserving
+  provider identities and numbering. Recovered titles are saved for reuse.
+- Unresolved episode lookups retry on subsequent user-requested scans, even when
+  the rest of the catalogue is reused. Recovery state survives restarts.
+- Failed checks appear in **05 — Scan Issues**, including when another method
+  establishes coverage. Episodes without established coverage remain in normal
+  Plex missing results under the existing visibility rules.
+- Cached Manual Match rechecks stay offline and isolate unavailable episode
+  relationships. Unusable shared catalogues retain existing last-good safeguards.
 
 ## Upgrading
 
-Use `andcbii/shelfcheck:2.5.2` or `andcbii/shelfcheck:latest` and retain your
+Use `andcbii/shelfcheck:2.5.3` or `andcbii/shelfcheck:latest` and retain your
 existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
-
-Existing Manual Matches are retained. Saved ownership corrections are
-permanently discarded, with Report Missing initially off; they are not converted
-into missing flags. Back up `/data` before upgrading if you need to retain those
-old declarations. No configuration or database reset is required.
+No configuration or database reset is required.

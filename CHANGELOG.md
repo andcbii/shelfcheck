@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.5.2 - 2026-11-12
+
+### Added
+
+- Per-episode Report Missing checkboxes in Manual Match provider panels, with
+  draft previews and distinct explicit and incomplete combined-episode statuses.
+- Report Missing support for one-to-one, combined/split, and many-to-many matches,
+  including TVDB specials absent from older cached catalogues.
+
+### Changed
+
+- Complete-set Manual Matches recognize equivalent owned content without a second
+  ownership declaration. Report Missing overrides every collected determination
+  across Plex libraries and updates affected cached results immediately.
+- Replace ownership corrections with Report Missing. Existing Manual Matches are
+  retained; old corrections are discarded without conversion to missing flags.
+- Applying show or season Ignore removes Report Missing flags only in its scope;
+  Restore and expiry do not recreate them.
+
+### Fixed
+
+- Refresh displayed results after Ignore cleanup and suppress missing badges for
+  ignored members of surviving coverage groups.
+- Isolate provider cache failures, preserve progress during TMDB verification
+  recovery, and invalidate stale identity relationships for retained changes.
+
 ## 2.5.1 - 2026-11-11
 
 ### Changed

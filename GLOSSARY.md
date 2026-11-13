@@ -42,6 +42,12 @@ A match determined and controlled by Shelfcheck through automatic matching.
 **Coverage Issue**:
 An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists.
 
+**Episode-scoped failure**:
+An unresolved episode lookup or coverage check whose impact is limited to the affected episode and relationships that depend on it. Independent episode checks remain usable, including other ways to establish coverage for that episode.
+
+**Shared-input failure**:
+An unavailable or unusable prerequisite that prevents reliable comparison of an entire show or library, rather than an individual episode or dependent relationship.
+
 **Episode coverage**:
 The content represented by an episode record, which may correspond to one or several records at another provider. A complete combined episode covers each of its parts; an individual part covers only that part.
 

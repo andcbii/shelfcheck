@@ -1021,9 +1021,12 @@ function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
  * and every other mapping are preserved. Restore or expiry never recreates them.
  * Rejects while a Plex scan is running only when there are flags to delete.
  */
-export async function applyIgnoreReportMissingCleanup(scopes: IgnoreScope[], save: () => void): Promise<void> {
+export async function applyIgnoreReportMissingCleanup(scopes: IgnoreScope[], save: () => void): Promise<number | undefined> {
   const impact=clearReportMissingFlags(membersInIgnoreScopes(scopes),save);
-  if (impact.length) await requestCoverageRecheck({members:impact});
+  if (!impact.length) return undefined;
+  await requestCoverageRecheck({members:impact});
+  // The coverage revision whose rechecked report the client must display.
+  return coverageState().revision;
 }
 
 let coverageRecheckQueue: Promise<void> = Promise.resolve();

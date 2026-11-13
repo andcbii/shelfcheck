@@ -172,3 +172,14 @@ test("Ignore rejects an editor's stale draft, and respects the scan lock only wh
   assert.equal((await stale.json()).code, "stale-revision");
   assert.deepEqual(await h.flags(crossShow.id), []);
 });
+
+test("the Ignore response carries the rechecked coverage revision only when cleanup changed flags", async t => {
+  const h = await harness(t);
+  await setup(h);
+  const untouched = await h.patchSettings({ ignoredSeasons: [{ ...forever("ratingKey:target", "Target"), seasons: [9] }] });
+  assert.deepEqual(await untouched.json(), { saved: true }, "No flags in scope: nothing to reload");
+  const cleaned = await h.patchSettings({ ignoredShows: [forever("ratingKey:other", "Other")] });
+  const body = await cleaned.json();
+  assert.equal(typeof body.coverageRevision, "number");
+  assert.equal(body.coverageRevision, (await h.status() as unknown as { coverage: { revision: number } }).coverage.revision, "The revision matches the rechecked report");
+});

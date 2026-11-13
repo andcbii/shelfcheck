@@ -248,6 +248,10 @@ export default function PlexPage() {
           }
           throw new Error(body.error || "Plex preferences could not be saved.");
         }
+        // Ignore cleanup rechecked cached comparisons on the server; show them now,
+        // through the same revision and stale-response guards as Manual Match saves.
+        const body = await response.json().catch(() => ({})) as { coverageRevision?: number };
+        if (typeof body.coverageRevision === "number") coverageChanged(body.coverageRevision);
       })
       .catch((saveError) => setError(saveError instanceof Error ? saveError.message : "Plex preferences could not be saved."));
   }

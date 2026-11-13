@@ -41,8 +41,9 @@ export async function PATCH(request: Request) {
     const next = parsePlexPreferences({ ...readPlexSettings(), ...patch });
     // Ignore is authoritative over Report Missing: applying it deletes flags in its
     // scope in the same transaction that saves the rule.
-    await applyIgnoreReportMissingCleanup(appliedIgnoreScopes(before, next), () => writePlexSettings(next));
-    return Response.json({ saved: true }, { headers });
+    const revision = await applyIgnoreReportMissingCleanup(appliedIgnoreScopes(before, next), () => writePlexSettings(next));
+    // When cleanup changed flags, the revision tells the page to reload rechecked results.
+    return Response.json({ saved: true, ...(revision === undefined ? {} : { coverageRevision: revision }) }, { headers });
   } catch (error) {
     if (error instanceof CoverageError) return Response.json({ error: error.message, code: error.code }, { status: error.status, headers });
     return Response.json({ error: error instanceof Error ? error.message : "Plex preferences could not be saved." }, { status: 500, headers });

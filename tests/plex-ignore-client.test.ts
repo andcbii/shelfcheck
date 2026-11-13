@@ -513,3 +513,36 @@ test("a failed save whose Ignore the server did keep leaves the show's results h
   await click("Close ignored shows");
   assert.equal(container.querySelector(".show-name-button"), null, "Results invalidated by the saved Ignore stay removed after Restore until a new scan");
 });
+
+test("a successful Ignore that clears flags reloads rechecked results, withdrawing derived effects elsewhere", async (t) => {
+  // Show one's combined episode is incomplete because its part in show two is reported missing.
+  const members = [
+    { provider: "TMDB", id: 100, showId: 10, show: "Example Show", title: "Whole", season: 1, episode: 1, url: "https://example.com/100", reportMissing: false, status: "incomplete", missingParts: [{ provider: "TVDB", id: 202 }] },
+    { provider: "TVDB", id: 202, showId: 21, show: "Parts show", title: "Part C", season: 2, episode: 3, url: "https://example.com/202", reportMissing: true, status: "reported-missing" },
+  ];
+  const before = { ...report, shows: [
+    { ...report.shows[0], missing: [{ season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"], incomplete: { TMDB: [{ provider: "TVDB", id: 202 }] } }] },
+    { ratingKey: "two", title: "Parts show", plexEpisodes: 1, missing: [{ season: 2, episode: 3, airDate: "2020-01-01", tvdbEpisodeId: 202, sources: ["TVDB"], reportedMissing: ["TVDB"] }] },
+  ], coverageGroups: [{ mappingId: "cross", members, missing: [
+    { provider: "TMDB", id: 100, status: "missing", missingParts: [{ provider: "TVDB", id: 202 }], season: 1, airDate: "2020-01-01", showKey: "one" },
+    { provider: "TVDB", id: 202, status: "missing", reportedMissing: true, season: 2, airDate: "2020-01-01", showKey: "two" },
+  ] }] };
+  // After cleanup the server rechecked show one: the combined episode is collected.
+  const after = { ...report, shows: [{ ...report.shows[0], missing: [] }, before.shows[1]], coverageGroups: [] };
+  let cleaned = false;
+  let scanReads = 0;
+  const defaults = configuredFetch(async () => { scanReads++; return json(cleaned ? { ...completed, report: after, coverage: { revision: 2, pending: 0, issues: [] } } : { ...completed, report: before, coverage: { revision: 1, pending: 0, issues: [] } }); });
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (input === "/api/plex/state" && init?.method === "PATCH") { cleaned = true; return json({ saved: true, coverageRevision: 2 }); }
+    return defaults(input, init);
+  });
+  assert.match(container.querySelector('[aria-label="Incomplete coverage group"]')?.textContent || "", /Incomplete · mapped part missing/);
+  const reads = scanReads;
+  await click("Parts show");
+  await click("Ignore this show");
+  await click("Forever");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(scanReads, reads + 1, "The rechecked cached report is loaded once");
+  assert.equal(container.querySelector('[aria-label="Incomplete coverage group"]'), null, "The derived incomplete status is withdrawn without a reload or scan");
+  assert.doesNotMatch(container.querySelector(".show-list")?.textContent || "", /Incomplete/);
+});

@@ -1,5 +1,8 @@
 # Triage labels
 
+Use these values in the Jira Labels field for project `SHELFCHECK`.
+They describe triage roles; workflow status is managed separately.
+
 | Canonical role | Tracker label | Meaning |
 | --- | --- | --- |
 | needs-triage | needs-triage | Maintainer evaluation needed |

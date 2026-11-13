@@ -31,7 +31,9 @@ async function fixture(t: test.TestContext) {
     // Fails only single-day feed requests, such as a separate fifth-scan safeguard list.
     oneDayFeedFailure:false,
     // Season downloads that wait until released, to interrupt a scan mid-library.
-    heldTmdb:new Map<number,()=>void>()};
+    heldTmdb:new Map<number,()=>void>(),
+    // Raw TVDB records of series 20, which can leave Episode-scoped failures on every scan.
+    tvdbRecords:[] as unknown[]};
   const requests: URL[] = [];
   const shows = [10,30].map(id=>({ratingKey:String(id),title:`Show ${id}`,Guid:[{id:`tmdb://${id}`},{id:`tvdb://${id+10}`}],updatedAt:1}));
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
@@ -66,7 +68,8 @@ async function fixture(t: test.TestContext) {
     const tvdb = u.pathname.match(/^\/v4\/series\/(20|40)$/);
     if(tvdb) return Response.json({data:{id:Number(tvdb[1]),name:`Show ${Number(tvdb[1])-10}`,slug:`show-${tvdb[1]}`}});
     if(u.pathname.includes("/episodes/default") && state.failedTvdb.has(Number(u.pathname.split("/")[3]))) return Response.json({},{status:404});
-    if(u.pathname.includes("/episodes/default")) return Response.json({data:{episodes:[]}});
+    if(u.pathname.includes("/episodes/default")) return Response.json({data:{episodes:u.pathname.includes("/series/20/") ? state.tvdbRecords : []}});
+    if(/^\/v4\/episodes\/\d+\/translations\/eng$/.test(u.pathname)) return Response.json({},{status:403});
     if(u.pathname.includes("/find/") && state.failedFind.has(Number(u.pathname.split("/")[3]))) return Response.json({},{status:404});
     if(u.pathname.includes("/find/")) return Response.json({tv_results:[],tv_episode_results:[]});
     throw new Error("Unexpected HTTP: "+u);
@@ -239,6 +242,26 @@ test("completed full scans with isolated issues count toward the fifth-scan safe
   assert.deepEqual(f.tmdbDownloads(),["/3/tv/10/season/1"],"the fifth completed scan refreshes today's changed TMDB library show despite unresolved issues");
   assert.ok(f.downloads().includes("/v4/series/40/episodes/default"),"the isolated failure is still retried");
   assert.ok(hasIssue(result,"catalogue-refresh:TVDB:ratingKey:30"),"the unrelated issue remains visible");
+  for(let i=6;i<=9;i++) { await f.run(); assert.deepEqual(f.tmdbDownloads(),[]); }
+  await f.run();
+  assert.deepEqual(f.tmdbDownloads(),["/3/tv/10/season/1"],"the tenth completed scan");
+});
+
+test("completed full scans with Episode-scoped failures count toward the fifth-scan safeguard", async t => {
+  const f = await fixture(t);
+  // An untitled TVDB episode whose English title request is rejected, and a record without numbering.
+  f.state.tvdbRecords = [{id:201,seasonNumber:1,number:2,name:null,aired:"2020-01-08"},{id:202,seasonNumber:1,number:null,name:"Unnumbered"}];
+  const episodeIssues = ["episode-check:ratingKey:10:catalogue-record:TVDB:20:202","episode-check:ratingKey:10:title-recovery:TVDB:201"];
+  const currentEpisodeIssues = (result:{coverage:{issues:Issue[]}}) => result.coverage.issues.map(issue=>issue.id).filter(id=>id.startsWith("episode-check:")).sort();
+  for(let i=1;i<=4;i++) {
+    const result = await f.run();
+    assert.equal(result.scan.status,"completed");
+    assert.deepEqual(currentEpisodeIssues(result),episodeIssues,`scan ${i} leaves the episode issues unresolved`);
+    if(i>1) assert.deepEqual(f.tmdbDownloads(),[]);
+  }
+  const fifth = await f.run();
+  assert.deepEqual(f.tmdbDownloads(),["/3/tv/10/season/1"],"the fifth completed scan refreshes today's changed TMDB library show despite the episode issues");
+  assert.deepEqual(currentEpisodeIssues(fifth),episodeIssues);
   for(let i=6;i<=9;i++) { await f.run(); assert.deepEqual(f.tmdbDownloads(),[]); }
   await f.run();
   assert.deepEqual(f.tmdbDownloads(),["/3/tv/10/season/1"],"the tenth completed scan");

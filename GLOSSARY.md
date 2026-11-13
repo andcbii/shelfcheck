@@ -42,6 +42,12 @@ A match determined and controlled by Shelfcheck through automatic matching.
 **Coverage Issue**:
 An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists.
 
+**Episode-scoped failure**:
+An unresolved episode lookup or coverage check whose impact is limited to the affected episode and relationships that depend on it. Independent episode checks remain usable, including other ways to establish coverage for that episode.
+
+**Shared-input failure**:
+An unavailable or unusable prerequisite that prevents reliable comparison of an entire show or library, rather than an individual episode or dependent relationship.
+
 **Episode coverage**:
 The content represented by an episode record, which may correspond to one or several records at another provider. A complete combined episode covers each of its parts; an individual part covers only that part.
 
@@ -56,6 +62,9 @@ A relationship between two complete sets of episode records that represent the s
 
 **Show mapping**:
 An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.
+
+**Episode crosswalk**:
+A lookup that relates a TVDB episode to another identity for the same episode (its IMDb ID, Trakt's episode search, or TMDB's external-ID search) so that ownership can be matched when provider numbering differs. It is automatic matching evidence and never creates a Manual Match.
 
 **Report Missing**:
 A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It applies to the provider episode across all Plex libraries, not to a file or Plex item, and lasts until the user clears it or the member leaves its Manual Match. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.

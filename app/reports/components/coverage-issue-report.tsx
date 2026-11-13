@@ -15,7 +15,7 @@ function Issue({ issue }: { issue: CoverageIssue }) {
     {show && <p className="coverage-issue-identities">{[show.ratingKey && `Plex ${show.ratingKey}`,show.tmdbId !== undefined && `TMDB ${show.tmdbId}`,show.tvdbId !== undefined && `TVDB ${show.tvdbId}`].filter(Boolean).join(" · ")}</p>}
     {episode && <p>{[episode.provider,episode.id !== undefined && String(episode.id),episode.showId !== undefined && `show ${episode.showId}`,episodeNumber,episode.title].filter(Boolean).join(" ")}</p>}
     <p className="coverage-issue-operation">{issue.provider && <strong>{issue.provider} · </strong>}{issue.category || issue.operation.replaceAll("-"," ")}</p>
-    <p><strong>ID source: </strong>{issue.lookup?.source.length ? issue.lookup.source.map(step=>`${step.kind.startsWith(step.provider) ? "" : `${step.provider} `}${step.kind}${step.id !== undefined ? ` ${step.id}` : ""}${step.cached ? " (cached)" : ""}`).join(" → ") : "Source unknown"}</p>
+    {issue.category !== "Episode Matching" && issue.category !== "Provider Catalogue" && <p><strong>ID source: </strong>{issue.lookup?.source.length ? issue.lookup.source.map(step=>`${step.kind.startsWith(step.provider) ? "" : `${step.provider} `}${step.kind}${step.id !== undefined ? ` ${step.id}` : ""}${step.cached ? " (cached)" : ""}`).join(" → ") : "Source unknown"}</p>}
     {issue.lookup?.requested && <p><strong>Failed lookup: </strong>{issue.lookup.requested.provider} {issue.lookup.requested.kind}{issue.lookup.requested.id !== undefined ? ` ${issue.lookup.requested.id}` : ""}</p>}
     <p>{issue.category === "Provider Lookup" && <strong>Response: </strong>}{issue.cause}</p>
     {issue.lookup && <p><strong>Impact: </strong>{issue.lookup.impact}</p>}

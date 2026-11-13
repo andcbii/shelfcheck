@@ -1,0 +1,98 @@
+import "server-only";
+import { episodeReference, usableTitle } from "@/lib/compound-episodes";
+import { providerLookupContext } from "@/lib/coverage-issues";
+import { ProviderHttpError } from "@/lib/plex-provider-client";
+import { isRecord } from "@/lib/value-guards";
+import { titleRecoveryIssueId } from "@/lib/episode-check-issues";
+import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison";
+
+/**
+ * Why an unusable default TVDB title is still unresolved after English fallback.
+ * `no-english-title`: TVDB answered, but its English translation has no usable title.
+ * `request-failed`: the translation request itself failed (`reason` is safe, readable text).
+ */
+export type TitleRecoveryState = Record<string, { outcome: "no-english-title" } | { outcome: "request-failed"; reason: string; causedBy?: string[] }>;
+
+const untitled = (episode: ProviderEpisode): episode is ProviderEpisode & { providerEpisodeId: number } => episode.source === "TVDB" && Boolean(episode.providerEpisodeId) && !usableTitle(episode.title);
+
+/**
+ * Fill unusable default TVDB titles from each episode's own English translation.
+ * Merging is by TVDB episode identity and touches only the title: valid default
+ * titles, IDs, numbering, dates and runtimes are kept. A title already recovered
+ * for the same episode (`previous`, the saved catalogue) is reused without a request.
+ *
+ * Never throws: each episode's failure stays with that episode.
+ */
+export async function recoverTvdbTitles({ episodes, previous, requestEnglish, authenticationError, reused }: {
+  episodes: ProviderEpisode[];
+  /** The previously saved catalogue, whose recovered English titles are reused. */
+  previous?: ProviderEpisode[];
+  requestEnglish: (tvdbEpisodeId: number) => Promise<unknown>;
+  /** A TVDB authentication failure: a request rejected with it is grouped under its cause. */
+  authenticationError?: unknown;
+  /**
+   * A reused catalogue's recorded outcomes. An episode TVDB already answered with no English
+   * title is asked again only when a title-dependent check needs its title in this comparison;
+   * that answer is otherwise kept. A failed request is always retried.
+   */
+  reused?: { outcomes: TitleRecoveryState; titleNeeded: (tvdbEpisodeId: number) => boolean };
+}) {
+  const saved = new Map((previous || []).flatMap(episode => episode.source === "TVDB" && episode.titleLanguage === "eng" && episode.providerEpisodeId && usableTitle(episode.title) ? [[episode.providerEpisodeId, episode.title]] : []));
+  const merged = episodes.map(episode => untitled(episode) && saved.has(episode.providerEpisodeId) ? { ...episode, title: saved.get(episode.providerEpisodeId), titleLanguage: "eng" as const } : episode);
+  const unresolved: TitleRecoveryState = {};
+  const pending = [...new Set(merged.filter(untitled).map(episode => episode.providerEpisodeId))].filter(id => {
+    if (reused?.outcomes[id]?.outcome !== "no-english-title" || reused.titleNeeded(id)) return true;
+    unresolved[id] = { outcome: "no-english-title" };
+    return false;
+  });
+  const titles = new Map<number, string>();
+  await Promise.all(pending.map(async id => {
+    try {
+      const body = await requestEnglish(id);
+      const name = isRecord(body) && isRecord(body.data) ? body.data.name : undefined;
+      if (usableTitle(name)) titles.set(id, name);
+      else unresolved[id] = { outcome: "no-english-title" };
+    } catch (error) {
+      // TVDB answers 404 when the episode has no English translation: no title, not an outage.
+      if (error instanceof ProviderHttpError && error.status === 404) unresolved[id] = { outcome: "no-english-title" };
+      else unresolved[id] = { outcome: "request-failed", reason: providerLookupContext(error, { source: [], impact: "" }).cause, ...(authenticationError !== undefined && error === authenticationError ? { causedBy: ["provider-authentication:TVDB"] } : {}) };
+    }
+  }));
+  return {
+    episodes: merged.map(episode => untitled(episode) && titles.has(episode.providerEpisodeId) ? { ...episode, title: titles.get(episode.providerEpisodeId), titleLanguage: "eng" as const } : episode),
+    unresolved,
+    recovered: [...titles.keys()],
+    attempted: pending.length > 0,
+  };
+}
+
+/** Saved recovery state is untrusted: keep only well-formed entries. */
+export function savedTitleRecovery(value: unknown): TitleRecoveryState {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).flatMap(([id, entry]): [string, TitleRecoveryState[string]][] => !/^\d+$/.test(id) || !isRecord(entry) ? []
+    : entry.outcome === "no-english-title" ? [[id, { outcome: "no-english-title" as const }]]
+    : entry.outcome === "request-failed" && typeof entry.reason === "string" ? [[id, { outcome: "request-failed" as const, reason: entry.reason, ...(Array.isArray(entry.causedBy) ? { causedBy: entry.causedBy.filter((item): item is string => typeof item === "string") } : {}) }]]
+    : []));
+}
+
+/**
+ * Episode-scoped failures of English title recovery, with title-dependent checks
+ * explained by the actual recovery outcome. `carried`: recovery was not attempted
+ * in this comparison (an offline recheck or last-good catalogue), so a recorded
+ * request failure is kept without claiming a new request.
+ */
+export function withTitleRecovery(ratingKey: string, failures: EpisodeCheckFailure[], state: TitleRecoveryState, episodes: ProviderEpisode[], carried = false): EpisodeCheckFailure[] {
+  const requestFailures = Object.entries(state).flatMap(([id, entry]): EpisodeCheckFailure[] => {
+    if (entry.outcome !== "request-failed") return [];
+    const episode = episodes.find(item => item.source === "TVDB" && item.providerEpisodeId === Number(id));
+    return [{ operation: "title-recovery", episode: episodeReference("TVDB", { ...episode, providerEpisodeId: Number(id) }), kind: "request-failed", reason: `${entry.reason}.`, ...(entry.causedBy?.length ? { causedBy: entry.causedBy } : {}), ...(carried ? { existingOnly: "carry" as const } : {}) }];
+  });
+  const explained = failures.map(failure => {
+    const tvdbEpisodeId = failure.kind === "missing-title" && failure.episode.provider === "TVDB" ? failure.episode.id : undefined;
+    const entry = tvdbEpisodeId !== undefined ? state[tvdbEpisodeId] : undefined;
+    if (!entry || tvdbEpisodeId === undefined) return failure;
+    if (entry.outcome === "no-english-title") return { ...failure, reason: "TVDB returned no usable default or English title for this episode." };
+    return { ...failure, reason: "TVDB returned no usable default title for this episode, and its English title could not be retrieved.", causedBy: [titleRecoveryIssueId(ratingKey, tvdbEpisodeId)] };
+  });
+  return [...requestFailures, ...explained];
+}

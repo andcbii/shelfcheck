@@ -20,7 +20,8 @@ hook.deregister();
 export type Provider = "TMDB" | "TVDB";
 export type Identity = { provider: Provider; id: number };
 /** A provider episode of "Target" unless `show` places it in the second Plex show, "Other" (TMDB 11 / TVDB 21). */
-export type Episode = Identity & { season: number; episode: number; name: string; show?: "other" };
+/** `airDate` defaults to 2020-01-01; `name` may be null as providers sometimes return it; `runtime` (minutes) also sets an owned Plex file's duration. */
+export type Episode = Identity & { season: number; episode: number; name: string | null; show?: "other"; airDate?: string; runtime?: number };
 type Missing = { tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: Provider[]; reportedMissing?: Provider[]; incomplete?: Partial<Record<Provider, Identity[]>> };
 type Group = { mappingId: string; members: (Identity & { status: string; missingParts?: Identity[] })[] };
 type Result = { report: { shows: { ratingKey: string; missing: Missing[] }[]; coverageGroups?: Group[] } };
@@ -50,7 +51,12 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   const hasOther = catalogue.some(episode => episode.show);
   // Plex owns each `owned` episode by provider identity and by Plex coordinates.
   const guid = (episode: Episode) => ({ id: `${episode.provider.toLowerCase()}://${episode.id}` });
-  const state = { secondLibrary: false };
+  // `tvdbChanged`: TVDB series the update feed reports changed, so their catalogues are downloaded again.
+  // `tmdbRecords` (by season) and `tvdbRecords`: raw, possibly malformed, catalogue records appended to Target's provider responses.
+  // `bodies`/`statuses`: per-pathname provider response overrides (e.g. a malformed `/3/find/301` payload or a 404).
+  // `imdb`: an IMDb GUID Plex also carries on the owned file of a provider episode.
+  // `english`: TVDB English episode translations by TVDB episode ID (null name = translation without a title); others are 404.
+  const state = { secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -59,6 +65,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
+    if (state.statuses.has(u.pathname)) return Response.json({}, { status: state.statuses.get(u.pathname) });
+    if (state.bodies.has(u.pathname)) return Response.json(state.bodies.get(u.pathname));
     let body: unknown;
     let match: RegExpMatchArray | null;
     if (u.hostname === "plex") {
@@ -67,28 +75,33 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
       else if (u.pathname.includes("allLeaves")) body = { MediaContainer: { Metadata: u.pathname.includes("/copy/")
         // Another library also reports owning the first owned episode.
         ? [{ ratingKey: "copy-1", updatedAt: 1, parentIndex: 7, index: 7, Guid: [guid(owned[0])] }]
-        : owned.filter(episode => Boolean(episode.show) === u.pathname.includes("/other/")).map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, Guid: [guid(episode)] })) } };
+        : owned.filter(episode => Boolean(episode.show) === u.pathname.includes("/other/")).map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, ...(episode.runtime && episode.name ? { title: episode.name, duration: episode.runtime * 60_000 } : {}), Guid: [guid(episode), ...(state.imdb.has(episode.id) ? [{ id: `imdb://${state.imdb.get(episode.id)}` }] : [])] })) } };
       else body = { MediaContainer: { Metadata: [u.pathname.includes("/copy") ? copy : u.pathname.includes("/other") ? otherShow : show] } };
     }
     else if (u.pathname === "/v4/login") body = { data: { token: "test" } };
     else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])$/))) {
       const tmdb = tmdbAll.filter(inShow(Number(match[1])));
-      body = { id: Number(match[1]), name: match[1] === "10" ? "Target" : "Other", seasons: [...new Set(tmdb.map(episode => episode.season))].map(season_number => ({ season_number })) };
+      body = { id: Number(match[1]), name: match[1] === "10" ? "Target" : "Other", seasons: [...new Set([...tmdb.map(episode => episode.season), ...(match[1] === "10" ? Object.keys(state.tmdbRecords).map(Number) : [])])].map(season_number => ({ season_number })) };
     }
-    else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])\/season\/(\d+)$/))) body = { episodes: tmdbAll.filter(inShow(Number(match[1]))).filter(episode => episode.season === Number(match![2])).map(episode => ({ id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name, air_date: "2020-01-01" })) };
+    else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])\/season\/(\d+)$/))) body = { episodes: tmdbAll.filter(inShow(Number(match[1]))).filter(episode => episode.season === Number(match![2])).map((episode): unknown => ({ id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name, air_date: episode.airDate || "2020-01-01", ...(episode.runtime ? { runtime: episode.runtime } : {}) })).concat(match[1] === "10" ? state.tmdbRecords[Number(match[2])] || [] : []) };
     else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])\/season\/(\d+)\/episode\/(\d+)$/))) {
       const episode = tmdbAll.filter(inShow(Number(match[1]))).find(item => item.season === Number(match![2]) && item.episode === Number(match![3]))!;
       body = { id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name };
     }
     else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])$/))) body = { data: { id: Number(match[1]), name: match[1] === "20" ? "Target" : "Other", slug: match[1] === "20" ? "target" : "other" } };
-    else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])\/episodes\/default$/))) body = { data: { episodes: tvdbAll.filter(inShow(Number(match[1]))).map(episode => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: "2020-01-01" })) } };
+    else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])\/episodes\/default$/))) body = { data: { episodes: tvdbAll.filter(inShow(Number(match[1]))).map((episode): unknown => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: episode.airDate || "2020-01-01", ...(episode.runtime ? { runtime: episode.runtime } : {}) })).concat(match[1] === "20" ? state.tvdbRecords : []) } };
     else if ((match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/))) {
       const episode = tvdbAll.find(item => item.id === Number(match![1]))!;
       body = { data: { id: episode.id, seriesId: tvdbShowId(episode), seasonNumber: episode.season, number: episode.episode, name: episode.name } };
     }
+    else if ((match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/translations\/eng$/))) {
+      if (!state.english.has(Number(match[1]))) return Response.json({ status: "failure", message: "Not found" }, { status: 404 });
+      body = { status: "success", data: { name: state.english.get(Number(match[1])), overview: null, language: "eng" } };
+    }
     else if (u.pathname === "/3/tv/changes") body = { results: [], total_pages: 1 };
-    else if (u.pathname === "/v4/updates") body = { data: [] };
+    else if (u.pathname === "/v4/updates") body = { data: state.tvdbChanged.map(recordId => ({ entityType: "series", recordId })) };
     else if (u.pathname.includes("/find/")) body = { tv_results: [], tv_episode_results: [] };
+    else if (u.pathname.startsWith("/search/tvdb/")) body = [];
     else throw new Error("Unexpected HTTP: " + u);
     return Response.json(body);
   });

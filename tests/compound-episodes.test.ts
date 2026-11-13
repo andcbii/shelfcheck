@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compoundTvdbCoverage, type CompoundProviderEpisode, type LocalCompoundEpisode } from "../lib/compound-episodes";
+import { compoundTvdbCoverage, compoundTvdbEvidence, type CompoundProviderEpisode, type LocalCompoundEpisode } from "../lib/compound-episodes";
 
 function coverage(episodes: CompoundProviderEpisode[], local: LocalCompoundEpisode = { season: 1, episode: 1, title: episodes[0].title, runtime: episodes[0].runtime, tmdbEpisodeId: 900 }) {
   return compoundTvdbCoverage(episodes, [local]).map((item) => item.tvdbEpisodeId).sort((a, b) => a - b);
@@ -55,4 +55,17 @@ test("records the Plex coordinate, TMDB identity, and evidence", () => {
     { tvdbEpisodeId: 10150697, plexSeason: 3, plexEpisode: 1, tmdbEpisodeId: 4926701 },
   ]);
   assert.ok(result.every((item) => item.evidence.includes("matching-normalized-title") && item.evidence.includes("plex-runtime-matches-split-total")));
+});
+
+test("an untitled same-day TVDB record withholds the relationship and reports it instead of throwing", () => {
+  const episodes = [
+    { source: "TMDB", season: 1, episode: 1, title: "Caretaker", airDate: "1995-01-16", runtime: 92, providerEpisodeId: 900 },
+    { source: "TMDB", season: 1, episode: 2, title: "Parallax", airDate: "1995-01-23", runtime: 46, providerEpisodeId: 901 },
+    { source: "TVDB", season: 1, episode: 1, title: "Caretaker (1)", airDate: "1995-01-16", runtime: 46, providerEpisodeId: 101 },
+    { source: "TVDB", season: 1, episode: 2, title: null, airDate: "1995-01-16", runtime: 46, providerEpisodeId: 102 },
+    { source: "TVDB", season: 1, episode: 3, title: "   ", airDate: "1995-01-16", runtime: 46, providerEpisodeId: 103 },
+  ] as unknown as CompoundProviderEpisode[];
+  const result = compoundTvdbEvidence(episodes, [{ season: 1, episode: 1, title: "Caretaker", runtime: 92, tmdbEpisodeId: 900 }]);
+  assert.deepEqual(result.coverage, []);
+  assert.deepEqual(result.failures.map(failure => [failure.kind, failure.episode.id, failure.dependents.map(dependent => dependent.id)]), [["missing-title", 102, [101]], ["missing-title", 103, [101]]]);
 });

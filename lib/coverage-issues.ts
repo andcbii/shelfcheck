@@ -34,7 +34,8 @@ export type CoverageIssue = {
   scope: "library" | "show" | "episode";
   cause: string;
   action: string;
-  category?: "Provider Lookup";
+  /** Provider Lookup: a request or response failed. Episode Matching: a check over available evidence failed. Provider Catalogue: an individual catalogue record was unusable. */
+  category?: "Provider Lookup" | "Episode Matching" | "Provider Catalogue";
   lookup?: ProviderLookup;
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];
@@ -52,6 +53,8 @@ function store() {
 export function listCoverageIssues(): CoverageIssue[] {
   const issues: CoverageIssue[] = (store().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
   const byId = new Map(issues.map(issue=>[issue.id,issue]));
+  // A dependent issue's own recorded impacts travel with it into its root, never impacts folded into it here.
+  const ownImpacts = new Map(issues.map(issue=>[issue.id,issue.impacts || []]));
   const rootsFor = (id:string, seen:Set<string>): CoverageIssue[] | undefined => {
     const issue = byId.get(id);
     if (!issue || seen.has(id)) return undefined;
@@ -65,7 +68,7 @@ export function listCoverageIssues(): CoverageIssue[] {
     if (!issue.causedBy?.length) return true;
     const roots = rootsFor(issue.id,new Set());
     if (!roots) return true;
-    const impact = `${issue.show?.title ? `${issue.show.title}: ` : ""}${issue.cause}${issue.lookup ? ` ${issue.lookup.impact}` : ""}`;
+    const impact = `${issue.show?.title ? `${issue.show.title}: ` : ""}${issue.cause}${issue.lookup ? ` ${issue.lookup.impact}` : ""}${ownImpacts.get(issue.id)!.map(item=>` ${item}`).join("")}`;
     for (const root of roots) {
       root.impacts = [...new Set([...(root.impacts || []),impact])];
     }
@@ -79,5 +82,9 @@ export function getCoverageIssue(id: string): CoverageIssue | undefined {
 export function setCoverageIssue(issue: CoverageIssue) {
   store().prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(issue.id,JSON.stringify(issue));
 }
+/** Current cause IDs owned by one operation family, e.g. one show's episode checks. */
+export function coverageIssueIdsWithPrefix(prefix: string): string[] {
+  return (store().prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id,1,length(?))=? ORDER BY id").all(prefix,prefix) as {id:string}[]).map(row=>row.id);
+}
 export function resolveCoverageIssue(id: string) { store().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=?").run(id); }
-export function coverageIssueCause(error: unknown) { return error instanceof Error ? error.message : String(error); }
+export { coverageIssueCause } from "@/lib/value-guards";

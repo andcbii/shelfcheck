@@ -13,8 +13,11 @@ import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, trackScanIgnores, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
-import type { CompoundCoverage, LocalCompoundEpisode } from "@/lib/compound-episodes";
-import { comparePlexShow, type ProviderEpisode } from "@/lib/plex-comparison";
+import { episodeReference, titleDependentTvdbEpisodeIds, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
+import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
+import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
+import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
+import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 import { PLEX_SCAN_WORKERS, type PlexProviderName } from "@/lib/plex-provider-policy";
@@ -23,6 +26,8 @@ import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFing
 import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, mergeScanProgress, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
+import { isRecord } from "@/lib/value-guards";
+import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
@@ -68,22 +73,38 @@ const providerClient = new PlexProviderClient(
   },
 );
 
+/** The saved relationship key of one provider request: its provider and URL. */
+function relationshipKey(provider: ProviderName, url: string) { return `${provider}:${url}`; }
+function relationshipProvider(key: string) { return key.slice(0, key.indexOf(":")); }
+/** The Provider Lookup cause of a rejected relationship request for one show. */
+function episodeIdentityIssueId(ratingKey: string | undefined, relationship: string) { return `episode-identity:${ratingKey}:${relationship}`; }
+
 const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
 const replayScope = new AsyncLocalStorage<{missing:Set<string>}>();
+/** Set while one TVDB episode's crosswalk lookup runs: its saved relationships are episode-scoped. */
+const crosswalkLookupScope = new AsyncLocalStorage<true>();
+/**
+ * An offline replay found no saved response for one episode's crosswalk. No request was
+ * attempted; the failure stays with that episode instead of discarding the show comparison.
+ */
+class SavedRelationshipUnavailableError extends Error {
+  constructor(readonly relationship: string) { super(`The saved ${relationshipProvider(relationship)} response for this episode is not available to the offline recheck; no request was made.`); }
+}
 const relationshipScope = new AsyncLocalStorage<SavedPlexComparison["relationships"]>();
 function relationshipIsReusable(key:string) {
   const relationships = relationshipScope.getStore();
   const show = comparisonIssueScope.getStore();
-  return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !getCoverageIssue(`episode-identity:${show?.ratingKey}:${key}`)));
+  return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !getCoverageIssue(episodeIdentityIssueId(show?.ratingKey, key))));
 }
 async function checkedJson<T>(url: string, init: RequestInit, provider: ProviderName, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}): Promise<T> {
   const relationships = relationshipScope.getStore();
-  const key = `${provider}:${url}`;
+  const key = relationshipKey(provider, url);
   const show = comparisonIssueScope.getStore();
-  const issueId = `episode-identity:${show?.ratingKey}:${key}`;
+  const issueId = episodeIdentityIssueId(show?.ratingKey, key);
   if (relationships && relationshipIsReusable(key)) return relationships[key].value as T;
   const replay=replayScope.getStore();
+  if (replay && crosswalkLookupScope.getStore()) throw new SavedRelationshipUnavailableError(key);
   if (replay) { replay.missing.add(key); throw new Error(`Saved provider identity relationship is missing: ${key}`); }
   const endpoint = new URL(url);
   const tvdbEpisodeId = endpoint.pathname.match(/\/(?:episodes|search\/tvdb)\/(\d+)/)?.[1];
@@ -151,25 +172,52 @@ async function getTmdbShow(tmdbId: number | undefined, tvdbId: number | undefine
   return show ? tmdbJson<TmdbShow>(`/tv/${show.id}?append_to_response=external_ids`, token) : null;
 }
 
-async function tmdbEpisodes(show: TmdbShow, token: string): Promise<ProviderEpisode[]> {
+async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCatalogue> {
   if (!Number.isFinite(show.id) || !Array.isArray(show.seasons)) throw new Error("TMDB returned an incomplete show catalogue.");
   const seasons = show.seasons;
   const responses = await Promise.all(seasons.map(async (season) => {
-    const response = await tmdbJson<{ episodes?: { id?: number; season_number: number; episode_number: number; name?: string; air_date?: string | null; runtime?: number | null }[] }>(`/tv/${show.id}/season/${season.season_number}`, token);
+    const response = await tmdbJson<{ episodes?: unknown[] }>(`/tv/${show.id}/season/${season.season_number}`, token);
     if (!Array.isArray(response.episodes)) throw new ProviderResponseError("TMDB",{provider:"TMDB",kind:`show ${show.id} season`,id:season.season_number});
-    return response;
+    return { season: season.season_number, episodes: response.episodes };
   }));
-  return responses.flatMap((season) => (season.episodes || []).map((episode) => ({ showTitle: show.name, season: episode.season_number, episode: episode.episode_number, title: episode.name, airDate: episode.air_date || undefined, runtime: episode.runtime || undefined, providerEpisodeId: episode.id, source: "TMDB" as const })));
+  const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
+  for (const response of responses) normaliseTmdbRecords(show, response.season, response.episodes, catalogue);
+  return usableCatalogue("TMDB", show.id, catalogue);
 }
 
+/**
+ * A successful identity/crosswalk response that cannot be interpreted. Distinct from a
+ * rejected request: the request policy succeeded, so it is never a provider outage.
+ */
+class CrosswalkResponseError extends Error {
+  constructor(readonly provider: ProviderName, detail: string) { super(`${provider} returned a successful response that could not be interpreted (${detail}).`); }
+}
+/** An optional list of records in a successful response; absent means none. */
+function responseRecords<T>(provider: ProviderName, body: unknown, field: string): T[] {
+  if (!isRecord(body)) throw new CrosswalkResponseError(provider, "the response is not an object");
+  const list = body[field];
+  if (list === undefined || list === null) return [];
+  if (!Array.isArray(list) || !list.every(isRecord)) throw new CrosswalkResponseError(provider, `${field} is not a list of records`);
+  return list as T[];
+}
+const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
+/** The saved relationship key of one TVDB episode's crosswalk request. */
+function crosswalkRelationshipKey(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
+  return crosswalk === "IMDb" ? relationshipKey("TVDB", `${TVDB}/episodes/${tvdbEpisodeId}/extended`) : crosswalk === "Trakt" ? relationshipKey("Trakt", `${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`) : relationshipKey("TMDB", `${TMDB}/find/${tvdbEpisodeId}?external_source=tvdb_id`);
+}
+/** A failed request or interpretation within one episode's crosswalk, with the saved relationship it concerns. */
+type CrosswalkCause = { error: unknown; relationship: string };
+/** When one crosswalk has causes of several kinds, the most actionable kind names it. */
+const crosswalkFailureKinds: EpisodeCheckFailure["kind"][] = ["request-failed", "unreadable-response", "relationship-unavailable", "exception"];
+
 async function findTmdbEpisodeByTvdbId(tvdbEpisodeId: number, token: string): Promise<TmdbEpisodeFindResult[]> {
-  const found = await tmdbJson<{ tv_episode_results?: TmdbEpisodeFindResult[] }>(`/find/${tvdbEpisodeId}?external_source=tvdb_id`, token, {provider:"TVDB",id:tvdbEpisodeId});
-  return found.tv_episode_results || [];
+  const found = await tmdbJson<unknown>(`/find/${tvdbEpisodeId}?external_source=tvdb_id`, token, {provider:"TVDB",id:tvdbEpisodeId});
+  return responseRecords<TmdbEpisodeFindResult>("TMDB", found, "tv_episode_results");
 }
 
 async function tmdbShowsForTvdbId(tvdbShowId: number, token: string): Promise<TmdbShow[]> {
-  const found = await tmdbJson<{ tv_results?: TmdbShow[] }>(`/find/${tvdbShowId}?external_source=tvdb_id`, token);
-  return found.tv_results || [];
+  const found = await tmdbJson<unknown>(`/find/${tvdbShowId}?external_source=tvdb_id`, token);
+  return responseRecords<TmdbShow>("TMDB", found, "tv_results").filter(usableTmdbShow);
 }
 
 async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | null> {
@@ -177,50 +225,71 @@ async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | nul
   return response.data ? { id: response.data.id || seriesId, name: response.data.name, slug: response.data.slug, year: response.data.year } : null;
 }
 
-async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, credentials: TraktCredentials, tmdbToken: string) {
-  const cached = relationshipIsReusable(`Trakt:${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`);
-  const results = await traktJson<TraktEpisodeSearchResult[]>(`/search/tvdb/${tvdbEpisodeId}?type=episode`, credentials);
-  const sameShow = results.filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
+/**
+ * `retry`: a previous Trakt crosswalk for this episode failed, so saved validation responses
+ * are requested again instead of reused. `validationFailures` are failed validation lookups.
+ */
+async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, credentials: TraktCredentials, tmdbToken: string, retry = false) {
+  const cached = relationshipIsReusable(crosswalkRelationshipKey("Trakt", tvdbEpisodeId));
+  const results = await traktJson<unknown>(`/search/tvdb/${tvdbEpisodeId}?type=episode`, credentials);
+  if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
+  const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
   const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && Number.isFinite(result.episode.season) && Number.isFinite(result.episode.number));
-  if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[] };
+  if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[], validationFailures: [] as CrosswalkCause[] };
   const validations = await Promise.allSettled(completeMappings.map(async (result) => {
     const episode = result.episode!;
     const matchedTmdbShowId = result.show!.ids!.tmdb as number;
     const origin = comparisonIssueScope.getStore();
+    const path = `/tv/${matchedTmdbShowId}/season/${episode.season}/episode/${episode.number}`;
+    const relationship = relationshipKey("TMDB", `${TMDB}${path}`);
+    if (retry && !replayScope.getStore()) delete relationshipScope.getStore()?.[relationship];
     const details = await lookupSourceScope.run([
       ...(origin?.tvdbSource || []),{provider:"TVDB",kind:"catalogue episode",id:tvdbEpisodeId,cached:origin?.tvdbCached},
       {provider:"Trakt",kind:"external TMDB show ID",id:matchedTmdbShowId,cached},
       {provider:"Trakt",kind:"external TMDB episode ID",id:episode.ids!.tmdb as number,cached},
-    ],()=>tmdbJson<{ id?: number }>(`/tv/${matchedTmdbShowId}/season/${episode.season}/episode/${episode.number}`, tmdbToken));
-    return details.id === episode.ids!.tmdb ? details.id : undefined;
+    ],()=>tmdbJson<unknown>(path, tmdbToken)).catch(error => { throw Object.assign(new Error("validation"), { cause: error, relationship }); });
+    if (!isRecord(details)) throw Object.assign(new Error("validation"), { cause: new CrosswalkResponseError("TMDB", "the validating episode record is not an object"), relationship });
+    return details.id === episode.ids!.tmdb ? details.id as number : undefined;
   }));
   const validatedIds = validations.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
-  return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds };
+  const validationFailures = validations.flatMap((result) => result.status === "rejected" ? [{ error: (result.reason as { cause?: unknown }).cause ?? result.reason, relationship: (result.reason as { relationship?: string }).relationship || "" }] : []);
+  return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds, validationFailures };
 }
 
-async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<{ episodes: ProviderEpisode[]; slug?: string; name?: string }> {
-  const episodes: ProviderEpisode[] = [];
+async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<NormalisedCatalogue & { slug?: string; name?: string }> {
+  const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
   const series = cachedSlug ? null : await checkedJson<{ data?: { slug?: string; name?: string } }>(`${TVDB}/series/${seriesId}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
   while (page < 100) {
-    const body = await checkedJson<{ data?: { episodes?: { id?: number; seasonNumber?: number; number?: number; name?: string; aired?: string; runtime?: number }[] }; links?: { next?: string | null } }>(`${TVDB}/series/${seriesId}/episodes/default?page=${page}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
+    const body = await checkedJson<{ data?: { episodes?: unknown[] }; links?: { next?: string | null } }>(`${TVDB}/series/${seriesId}/episodes/default?page=${page}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
     // Specials (season 0) are kept so Report Missing can be evaluated on them; the
     // comparator still ignores unflagged specials, as before.
-    for (const episode of body.data.episodes) if ((episode.seasonNumber || 0) >= 0 && episode.number) {
-      episodes.push({ showTitle: series?.data?.name || showTitle, season: episode.seasonNumber || 0, episode: episode.number, title: episode.name, airDate: episode.aired, runtime: episode.runtime, providerEpisodeId: episode.id, source: "TVDB" });
-    }
+    normaliseTvdbRecords(seriesId, series?.data?.name || showTitle, page, body.data.episodes, catalogue);
     if (!body.links?.next) break;
     page += 1;
     if (page >= 100) throw new Error("TVDB episode catalogue exceeded the safe pagination limit.");
   }
-  return { episodes, slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
+  return { ...usableCatalogue("TVDB", seriesId, catalogue), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
+}
+
+/**
+ * Individual malformed records are episode-scoped. A catalogue whose records are
+ * all unusable is an unreadable catalogue, never an empty verified one.
+ */
+function usableCatalogue(provider: CoverageProvider, showId: number, catalogue: NormalisedCatalogue) {
+  if (!catalogue.episodes.length && catalogue.malformed.length) throw new ProviderResponseError(provider,{provider,kind:provider === "TMDB" ? "show episode catalogue" : "series episode catalogue",id:showId});
+  return catalogue;
 }
 
 async function tvdbEpisodeImdbIds(episodeId: number, token: string) {
-  const body = await checkedJson<{ data?: { remoteIds?: { id?: string }[] } }>(`${TVDB}/episodes/${episodeId}/extended`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
-  return new Set((body.data?.remoteIds || []).flatMap((remote) => remote.id?.match(/^tt\d+$/i) ? [remote.id.toLowerCase()] : []));
+  const body = await checkedJson<unknown>(`${TVDB}/episodes/${episodeId}/extended`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
+  if (!isRecord(body) || !isRecord(body.data)) throw new CrosswalkResponseError("TVDB", "the episode record is missing");
+  const remoteIds = body.data.remoteIds;
+  if (remoteIds !== undefined && remoteIds !== null && !Array.isArray(remoteIds)) throw new CrosswalkResponseError("TVDB", "remoteIds is not a list");
+  // Remote IDs of other sources may use other shapes; only IMDb episode IDs are read.
+  return new Set(((remoteIds || []) as unknown[]).flatMap((remote) => isRecord(remote) && typeof remote.id === "string" && /^tt\d+$/i.test(remote.id) ? [remote.id.toLowerCase()] : []));
 }
 
 async function tmdbChangedShows(since: string, token: string, now: string): Promise<Set<number> | null> {
@@ -327,12 +396,15 @@ function fulfilOverdueSafeguards(inputs: PlexGeneratedInputs, utcDate: string) {
 type LoadedComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];
   tmdbId?: number; tvdbId?: number; tmdbShow: TmdbShow | null; tvdbResolved: boolean; tvdbSlug?: string;
-  providerEpisodes: ProviderEpisode[]; tmdbEpisodeAliases: Set<number>; cachedTvdbEpisodeImdbIds: Record<string,string[]>;
+  providerEpisodes: ProviderEpisode[];
+  /** Individual catalogue records that could not be used in full; mapped records with an ID but no numbering are still checked by ID. */
+  malformedRecords: MalformedCatalogueRecord[];
+  tmdbEpisodeAliases: Set<number>; cachedTvdbEpisodeImdbIds: Record<string,string[]>;
   libraryTmdbEpisodeIds: Set<number>; libraryTvdbEpisodeIds: Set<number>; libraryImdbEpisodeIds: Set<string>;
   mappings: ReturnType<typeof listCoverageMappings>; manualInventory: CoverageEvidence[]; autoCompoundEpisodes: boolean;
   config: {tmdbToken:string}; token: string; traktCredentials: TraktCredentials | null;
   tvdbChanges: Set<number> | null; logger: Pick<ScanLogger,"info"|"warn">;
-  addWarning: (message:string)=>void; setHeartbeat: (key:string,title:string,phase:string)=>void;
+  setHeartbeat: (key:string,title:string,phase:string)=>void;
 };
 /** Ordinary automatic ownership excludes ignored shows; manual evidence keeps all items. */
 function libraryInventoryIndex(groups: PlexShowGroup[], items: Record<string, PlexMetadata[]>, ignored: Set<string>) {
@@ -361,29 +433,35 @@ function localComparisonInventory(localMetadata: PlexMetadata[]) {
   return {localEpisodes,localProviderEpisodes,localTmdbEpisodeIds:new Set(localProviderEpisodes.flatMap(e=>e.tmdbEpisodeId ? [e.tmdbEpisodeId] : []))};
 }
 /**
- * Specials (season 0) that a Manual Match includes but this show's saved provider
- * catalogue lacks, rebuilt from the saved member records. Catalogues saved before
- * specials were kept have none, so without this a saved Report Missing decision on
- * a special would stay hidden until the next download. Only resolved catalogues of
- * this show's own provider IDs are supplemented; real catalogue records always win.
+ * Manual Match members this show's saved provider catalogue lacks as comparable
+ * episodes, rebuilt from the saved member records:
+ * - specials (season 0): catalogues saved before specials were kept have none, so
+ *   without this a saved Report Missing decision on a special would stay hidden
+ *   until the next download;
+ * - catalogue records with an ID but no usable numbering (`unnumbered`): their
+ *   ID-based checks (Report Missing, direct ownership, Manual Match) still apply,
+ *   using the numbering saved with the member rather than an invented one.
+ * Only resolved catalogues of this show's own provider IDs are supplemented; real
+ * catalogue records always win.
  */
-export function mappedSpecialsMissingFromCatalogue(catalogueEpisodes: ProviderEpisode[], mappings: { members: CoverageMember[] }[], show: { tmdbId?: number; tvdbId?: number }): ProviderEpisode[] {
+export function mappedMembersMissingFromCatalogue(catalogueEpisodes: ProviderEpisode[], mappings: { members: CoverageMember[] }[], show: { tmdbId?: number; tvdbId?: number }, unnumbered: MalformedCatalogueRecord[] = []): ProviderEpisode[] {
   const present = new Set(catalogueEpisodes.flatMap(episode => episode.providerEpisodeId ? [`${episode.source}:${episode.providerEpisodeId}`] : []));
+  const unnumberedIds = new Set(unnumbered.flatMap(record => record.id !== undefined && record.season === undefined ? [`${record.provider}:${record.id}`] : []));
   const added = new Set<string>();
   return mappings.flatMap(mapping => mapping.members).flatMap(member => {
     const key = `${member.provider}:${member.id}`;
     const ownShow = member.provider === "TMDB" ? show.tmdbId === member.showId : show.tvdbId === member.showId;
-    if (member.season !== 0 || !ownShow || present.has(key) || added.has(key)) return [];
+    if ((member.season !== 0 && !unnumberedIds.has(key)) || !ownShow || present.has(key) || added.has(key)) return [];
     added.add(key);
-    return [{ showTitle: member.show, season: 0, episode: member.episode, title: member.title, providerEpisodeId: member.id, source: member.provider }];
+    return [{ showTitle: member.show, season: member.season, episode: member.episode, title: member.title, providerEpisodeId: member.id, source: member.provider }];
   });
 }
 
 /** Resolve automatic evidence once, using either live saved relationships or strict saved-input replay. */
 async function compareLoadedPlexShow(input: LoadedComparison) {
-  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,addWarning,setHeartbeat}=input;
+  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,setHeartbeat}=input;
   let {cachedTvdbEpisodeImdbIds}=input;
-  const providerEpisodes=[...input.providerEpisodes,...mappedSpecialsMissingFromCatalogue(input.providerEpisodes,mappings,{tmdbId:tmdbShow ? tmdbShow.id : undefined,tvdbId:tvdbResolved ? tvdbId : undefined})];
+  const providerEpisodes=[...input.providerEpisodes,...mappedMembersMissingFromCatalogue(input.providerEpisodes,mappings,{tmdbId:tmdbShow ? tmdbShow.id : undefined,tvdbId:tvdbResolved ? tvdbId : undefined},input.malformedRecords)];
   let warning: string | undefined;
   const primary=group.records[0], ratingKey=group.identity;
   const plexGuids=[...new Set(details.flatMap(d=>d.guid?.startsWith("plex://show/") ? [d.guid] : []))];
@@ -393,20 +471,70 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
   let tmdbSeriesMatches: TmdbShow[]=[], tvdbSeriesMatches: TvdbShow[]=[], equivalentTmdbIds=new Set<number>();
   const autoMatchEvidence=new Map<number,{method:PlexAutoMatchMethod;tmdbEpisodeId:number;tmdbEpisode?:TmdbEpisodeFindResult}>();
   const phaseTimings: Record<string,number>={};
-  const recordWarning=(message:string)=>{warning=warning ? `${warning} ${message}` : message;addWarning(message);};
+  // Failed episode crosswalks are episode-scoped: they are explained on the show result but
+  // never make its saved comparison incomplete, so cached rechecks can still replay it.
+  const recordWarning=(message:string)=>{warning=warning ? `${warning} ${message}` : message;};
+        // Episode-scoped identity/crosswalk failures (GLOSSARY): each failed lookup or
+        // unreadable successful response stays with its TVDB episode. It grants no
+        // coverage, and later independent methods and sibling episodes still run.
+        const crosswalkFailures: EpisodeCheckFailure[] = [];
+        const crosswalksAttempted = new Set<string>();
+        const tvdbEpisodeOf = (id: number) => providerEpisodes.find((episode) => episode?.source === "TVDB" && episode.providerEpisodeId === id);
+        const crosswalkEpisode = (id: number) => episodeReference("TVDB", { ...tvdbEpisodeOf(id), providerEpisodeId: id });
+        /** One failed request or interpretation within a crosswalk: a rejected request has its own Provider Lookup cause; anything else is never relabelled as one. */
+        const crosswalkCause = ({ error, relationship }: CrosswalkCause) => {
+          const requestIssue = episodeIdentityIssueId(ratingKey, relationship);
+          // A replay without a saved response keeps the scan's rejected-request cause when there is one.
+          const kind: EpisodeCheckFailure["kind"] = error instanceof CrosswalkResponseError ? "unreadable-response" : getCoverageIssue(requestIssue) ? "request-failed" : error instanceof SavedRelationshipUnavailableError ? "relationship-unavailable" : "exception";
+          return kind === "request-failed" ? { kind, reason: `the ${relationshipProvider(relationship)} request failed.`, requestIssue } : { kind, reason: coverageIssueCause(error) };
+        };
+        /** Record one episode's failed crosswalk with every cause found for it (e.g. each failed Trakt validation). */
+        const failCrosswalk = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, causes: CrosswalkCause[]): EpisodeCheckFailure => {
+          const found = causes.map(crosswalkCause);
+          const causedBy = [...new Set(found.flatMap(cause => cause.requestIssue ? [cause.requestIssue] : []))];
+          const failure: EpisodeCheckFailure = { operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId),
+            kind: crosswalkFailureKinds.find(kind => found.some(cause => cause.kind === kind))!,
+            reason: [...new Set(found.map(cause => cause.reason))].join(" "),
+            ...(causedBy.length ? { causedBy } : {}) };
+          crosswalkFailures.push(failure);
+          return failure;
+        };
+        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: crosswalkRelationshipKey(crosswalk, tvdbEpisodeId) }]);
+        /** Run one crosswalk per TVDB episode; a failure is recorded against its episode only. */
+        const settleCrosswalks = async <T,>(crosswalk: EpisodeCrosswalk, ids: number[], lookup: (tvdbEpisodeId: number) => Promise<T>) => {
+          const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, () => lookup(tvdbEpisodeId)); }));
+          const fulfilled: { tvdbEpisodeId: number; value: T }[] = [];
+          const requestFailures: string[] = [];
+          settled.forEach((result, index) => {
+            if (result.status === "fulfilled") fulfilled.push({ tvdbEpisodeId: ids[index], value: result.value });
+            else if (failedLookup(crosswalk, ids[index], result.reason).kind === "request-failed") requestFailures.push(coverageIssueCause(result.reason));
+          });
+          return { fulfilled, requestFailures };
+        };
+        /** Interpret one episode's crosswalk evidence; an unexpected exception stays with that episode. */
+        const interpret = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, run: () => void) => {
+          try { run(); } catch (error) { failedLookup(crosswalk, tvdbEpisodeId, error); }
+        };
+        // A failed crosswalk is requested again on the next scan instead of reusing its saved response.
+        const recordedCrosswalkFailures = recordedEpisodeCrosswalkFailures(ratingKey);
+        const retryCrosswalks = new Set(recordedCrosswalkFailures.map(({ crosswalk, tvdbEpisodeId }) => `${crosswalk}:${tvdbEpisodeId}`));
+        if (!replayScope.getStore()) for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) {
+          delete relationshipScope.getStore()?.[crosswalkRelationshipKey(crosswalk, tvdbEpisodeId)];
+          if (crosswalk === "IMDb") delete cachedTvdbEpisodeImdbIds[String(tvdbEpisodeId)];
+        }
         if (tvdbId) {
           tmdbSeriesMatches = await tmdbShowsForTvdbId(tvdbId, config.tmdbToken).catch((error) => {
-            logger.warn("plex.show.tmdb-equivalent-series-unavailable", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, error: error instanceof Error ? error.message : String(error) });
+            logger.warn("plex.show.tmdb-equivalent-series-unavailable", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, error: coverageIssueCause(error) });
             return [];
           });
         }
         const knownTmdbIds = new Set(tmdbSeriesMatches.map((show) => show.id));
-        const extraTmdbShows = await Promise.allSettled(plexTmdbIds.filter((id) => !knownTmdbIds.has(id) && id !== tmdbShow?.id).map((id) => tmdbJson<TmdbShow>(`/tv/${id}`, config.tmdbToken)));
-        tmdbSeriesMatches = [...tmdbSeriesMatches, ...(tmdbShow ? [tmdbShow] : []), ...extraTmdbShows.flatMap((result) => result.status === "fulfilled" ? [result.value] : [])].filter((show, index, matches) => matches.findIndex((candidate) => candidate.id === show.id) === index);
+        const extraTmdbShows = await Promise.allSettled(plexTmdbIds.filter((id) => !knownTmdbIds.has(id) && id !== tmdbShow?.id).map((id) => tmdbJson<unknown>(`/tv/${id}`, config.tmdbToken)));
+        tmdbSeriesMatches = [...tmdbSeriesMatches, ...(tmdbShow ? [tmdbShow] : []), ...extraTmdbShows.flatMap((result) => result.status === "fulfilled" && usableTmdbShow(result.value) ? [result.value] : [])].filter((show, index, matches) => matches.findIndex((candidate) => candidate.id === show.id) === index);
         // Episode-discovered aliases describe provider relationships, independently of
         // whether the current library still owns one of their episodes.
-        const savedAliasSummaries = await Promise.allSettled([...tmdbEpisodeAliases].filter(id => !tmdbSeriesMatches.some(show => show.id === id)).map(id => tmdbJson<TmdbShow>(`/tv/${id}?append_to_response=external_ids`, config.tmdbToken)));
-        tmdbSeriesMatches.push(...savedAliasSummaries.flatMap(result => result.status === "fulfilled" ? [result.value] : []));
+        const savedAliasSummaries = await Promise.allSettled([...tmdbEpisodeAliases].filter(id => !tmdbSeriesMatches.some(show => show.id === id)).map(id => tmdbJson<unknown>(`/tv/${id}?append_to_response=external_ids`, config.tmdbToken)));
+        tmdbSeriesMatches.push(...savedAliasSummaries.flatMap(result => result.status === "fulfilled" && usableTmdbShow(result.value) ? [result.value] : []));
         equivalentTmdbIds = tmdbShow?.id || tmdbId ? equivalentTmdbShowIds((tmdbShow?.id || tmdbId)!, tmdbSeriesMatches) : new Set<number>();
         const tvdbSummaries = await Promise.allSettled(plexTvdbIds.map((id) => tvdbShow(id, token)));
         tvdbSeriesMatches = tvdbSummaries.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
@@ -421,21 +549,22 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         for (const tvdbEpisodeId of locallySatisfiedTvdbIds) logger.info("plex.show.episode-crosswalk-decision", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId, outcome: "reconciled-by-direct-plex-tvdb-guid" });
         if (libraryImdbEpisodeIds.size) {
           const canReuseTvdbEpisodeIds = Boolean(tvdbId && tvdbChanges !== null && !tvdbChanges.has(tvdbId));
-          const imdbLookups = await Promise.allSettled([...coordinateMissingTvdbIds].filter((id) => !locallySatisfiedTvdbIds.has(id)).map(async (tvdbEpisodeId) => {
+          const imdbLookups = await settleCrosswalks("IMDb", [...coordinateMissingTvdbIds].filter((id) => !locallySatisfiedTvdbIds.has(id)), async (tvdbEpisodeId) => {
             const cached = canReuseTvdbEpisodeIds ? cachedTvdbEpisodeImdbIds[String(tvdbEpisodeId)] : undefined;
             const imdbIds = cached ? new Set(cached) : await tvdbEpisodeImdbIds(tvdbEpisodeId, token);
             cachedTvdbEpisodeImdbIds[String(tvdbEpisodeId)] = [...imdbIds];
-            return { tvdbEpisodeId, imdbIds };
-          }));
-          const failedImdbLookups = imdbLookups.filter((lookup) => lookup.status === "rejected").length;
-          if (failedImdbLookups) recordWarning(`${failedImdbLookups} TVDB IMDb identity ${failedImdbLookups === 1 ? "lookup" : "lookups"} failed; this show will be checked again next scan.`);
-          for (const lookup of imdbLookups) if (lookup.status === "fulfilled" && [...lookup.value.imdbIds].some((id) => libraryImdbEpisodeIds.has(id))) {
-            locallySatisfiedTvdbIds.add(lookup.value.tvdbEpisodeId);
-            directImdbSatisfied.add(lookup.value.tvdbEpisodeId);
-            const localMatch = localProviderEpisodes.find((episode) => episode.tmdbEpisodeId && episode.imdbEpisodeId && lookup.value.imdbIds.has(episode.imdbEpisodeId));
-            if (localMatch?.tmdbEpisodeId) autoMatchEvidence.set(lookup.value.tvdbEpisodeId, { method: "Matched via IMDb", tmdbEpisodeId: localMatch.tmdbEpisodeId });
-            logger.info("plex.show.episode-crosswalk-decision", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId: lookup.value.tvdbEpisodeId, imdbEpisodeIds: [...lookup.value.imdbIds], outcome: "reconciled-by-direct-imdb-guid" });
-          }
+            return imdbIds;
+          });
+          const failedImdbLookups = imdbLookups.requestFailures.length;
+          if (failedImdbLookups) recordWarning(`${failedImdbLookups} TVDB IMDb identity ${failedImdbLookups === 1 ? "lookup" : "lookups"} failed; ${failedImdbLookups === 1 ? "it is" : "they are"} requested again on the next scan.`);
+          for (const { tvdbEpisodeId, value: imdbIds } of imdbLookups.fulfilled) interpret("IMDb", tvdbEpisodeId, () => {
+            if (![...imdbIds].some((id) => libraryImdbEpisodeIds.has(id))) return;
+            const localMatch = localProviderEpisodes.find((episode) => episode.tmdbEpisodeId && episode.imdbEpisodeId && imdbIds.has(episode.imdbEpisodeId));
+            locallySatisfiedTvdbIds.add(tvdbEpisodeId);
+            directImdbSatisfied.add(tvdbEpisodeId);
+            if (localMatch?.tmdbEpisodeId) autoMatchEvidence.set(tvdbEpisodeId, { method: "Matched via IMDb", tmdbEpisodeId: localMatch.tmdbEpisodeId });
+            logger.info("plex.show.episode-crosswalk-decision", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId, imdbEpisodeIds: [...imdbIds], outcome: "reconciled-by-direct-imdb-guid" });
+          });
         }
         const crosswalkCandidateTvdbIds = new Set([...coordinateMissingTvdbIds].filter((id) => !locallySatisfiedTvdbIds.has(id)));
         if (tmdbShow && crosswalkCandidateTvdbIds.size && libraryTmdbEpisodeIds.size) {
@@ -451,72 +580,76 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           let traktFailed = 0;
           const traktFailureReasons = new Set<string>();
           if (traktCredentials && tvdbId) {
-            const traktCrosswalks = await Promise.allSettled([...crosswalkCandidateTvdbIds].map(async (tvdbEpisodeId) => ({ tvdbEpisodeId, result: await findEpisodeViaTrakt(tvdbEpisodeId, equivalentTmdbIds, tvdbId!, libraryTmdbEpisodeIds, traktCredentials, config.tmdbToken) })));
-            for (const crosswalk of traktCrosswalks) {
-              if (crosswalk.status === "rejected") {
-                traktFailed += 1;
-                traktFailureReasons.add(crosswalk.reason instanceof Error ? crosswalk.reason.message : String(crosswalk.reason));
-                continue;
-              }
-              if (!crosswalk.value.result.validated) {
-                crosswalkDetails.set(crosswalk.value.tvdbEpisodeId, { traktTmdbIds: crosswalk.value.result.traktTmdbIds, validatedTmdbIds: crosswalk.value.result.validatedTmdbIds });
-                traktValidationFailed += crosswalk.value.result.validationFailed;
+            const traktCrosswalks = await settleCrosswalks("Trakt", [...crosswalkCandidateTvdbIds], (tvdbEpisodeId) => findEpisodeViaTrakt(tvdbEpisodeId, equivalentTmdbIds, tvdbId!, libraryTmdbEpisodeIds, traktCredentials, config.tmdbToken, retryCrosswalks.has(`Trakt:${tvdbEpisodeId}`)));
+            traktFailed = traktCrosswalks.requestFailures.length;
+            for (const reason of traktCrosswalks.requestFailures) traktFailureReasons.add(reason);
+            for (const { tvdbEpisodeId, value: result } of traktCrosswalks.fulfilled) interpret("Trakt", tvdbEpisodeId, () => {
+              traktValidationFailed += result.validationFailed;
+              crosswalkDetails.set(tvdbEpisodeId, { traktTmdbIds: result.traktTmdbIds, validatedTmdbIds: result.validatedTmdbIds });
+              // A validation that could not be completed is a failed check, even when another
+              // validation succeeds; a mismatch is not.
+              if (result.validationFailures.length) failCrosswalk("Trakt", tvdbEpisodeId, result.validationFailures);
+              if (!result.validated) {
                 traktInvalid += 1;
-                crosswalkDecisions.set(crosswalk.value.tvdbEpisodeId, "trakt-invalid-tmdb-fallback");
-                continue;
+                crosswalkDecisions.set(tvdbEpisodeId, "trakt-invalid-tmdb-fallback");
+                return;
               }
-              traktValidationFailed += crosswalk.value.result.validationFailed;
-              crosswalkDetails.set(crosswalk.value.tvdbEpisodeId, { traktTmdbIds: crosswalk.value.result.traktTmdbIds, validatedTmdbIds: crosswalk.value.result.validatedTmdbIds });
-              if (crosswalk.value.result.owned) {
-                tmdbFallbackIds.delete(crosswalk.value.tvdbEpisodeId);
-                locallySatisfiedTvdbIds.add(crosswalk.value.tvdbEpisodeId);
-                traktSatisfied.add(crosswalk.value.tvdbEpisodeId);
-                if (crosswalk.value.result.ownedTmdbId) autoMatchEvidence.set(crosswalk.value.tvdbEpisodeId, { method: "Matched via Trakt", tmdbEpisodeId: crosswalk.value.result.ownedTmdbId });
+              if (result.owned) {
+                tmdbFallbackIds.delete(tvdbEpisodeId);
+                locallySatisfiedTvdbIds.add(tvdbEpisodeId);
+                traktSatisfied.add(tvdbEpisodeId);
+                if (result.ownedTmdbId) autoMatchEvidence.set(tvdbEpisodeId, { method: "Matched via Trakt", tmdbEpisodeId: result.ownedTmdbId });
                 traktReconciled += 1;
-                crosswalkDecisions.set(crosswalk.value.tvdbEpisodeId, "reconciled-by-validated-trakt");
-              } else { traktValidatedNotOwned += 1; crosswalkDecisions.set(crosswalk.value.tvdbEpisodeId, "trakt-not-owned-tmdb-fallback"); }
-            }
-            if (traktFailed) recordWarning(`${traktFailed} Trakt episode identity ${traktFailed === 1 ? "lookup" : "lookups"} failed; this show will be checked again next scan.`);
+                crosswalkDecisions.set(tvdbEpisodeId, "reconciled-by-validated-trakt");
+              } else { traktValidatedNotOwned += 1; crosswalkDecisions.set(tvdbEpisodeId, "trakt-not-owned-tmdb-fallback"); }
+            });
+            if (traktFailed) recordWarning(`${traktFailed} Trakt episode identity ${traktFailed === 1 ? "lookup" : "lookups"} failed; ${traktFailed === 1 ? "it is" : "they are"} requested again on the next scan.`);
           }
-          const crosswalks = await Promise.allSettled([...tmdbFallbackIds].map(async (tvdbEpisodeId) => ({ tvdbEpisodeId, matches: await findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken) })));
-          const unknownTmdbShowIds = [...new Set(crosswalks.flatMap((result) => result.status === "fulfilled" ? result.value.matches.flatMap((episode) => episode.show_id && !equivalentTmdbIds.has(episode.show_id) ? [episode.show_id] : []) : []))];
+          const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], (tvdbEpisodeId) => findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken));
+          const unknownTmdbShowIds = [...new Set(crosswalks.fulfilled.flatMap(({ value: matches }) => matches.flatMap((episode) => typeof episode.show_id === "number" && !equivalentTmdbIds.has(episode.show_id) ? [episode.show_id] : [])))];
           for (const id of unknownTmdbShowIds) tmdbEpisodeAliases.add(id);
-          const aliasChecks = await Promise.allSettled(unknownTmdbShowIds.map((showId) => tmdbJson<TmdbShow>(`/tv/${showId}?append_to_response=external_ids`, config.tmdbToken)));
-          for (const alias of aliasChecks) if (alias.status === "fulfilled") {
+          const aliasChecks = await Promise.allSettled(unknownTmdbShowIds.map((showId) => tmdbJson<unknown>(`/tv/${showId}?append_to_response=external_ids`, config.tmdbToken)));
+          for (const alias of aliasChecks) if (alias.status === "fulfilled" && usableTmdbShow(alias.value)) {
             // The episode-level /find result is already an explicit provider link.
             // Fetching the show only enriches reporting; it does not validate or veto that link.
-            if (!tmdbSeriesMatches.some((show) => show.id === alias.value.id)) tmdbSeriesMatches.push(alias.value);
+            if (!tmdbSeriesMatches.some((show) => show.id === (alias.value as TmdbShow).id)) tmdbSeriesMatches.push(alias.value);
             if (tvdbId && tmdbShowLinksToTvdb(alias.value, tvdbId)) equivalentTmdbIds.add(alias.value.id);
           }
           let rejectedOtherShow = 0;
           let unmatched = 0;
-          for (const result of crosswalks) {
-            if (result.status !== "fulfilled") continue;
-            const sameShowMatches = result.value.matches.filter((episode) => episode.show_id && equivalentTmdbIds.has(episode.show_id));
-            crosswalkDetails.set(result.value.tvdbEpisodeId, { ...crosswalkDetails.get(result.value.tvdbEpisodeId), tmdbFindIds: result.value.matches.flatMap((episode) => episode.id ? [episode.id] : []) });
-            const ownedTmdbMatch = ownedTmdbEpisodeMatch(result.value.matches, libraryTmdbEpisodeIds);
+          for (const { tvdbEpisodeId, value: matches } of crosswalks.fulfilled) interpret("TMDB", tvdbEpisodeId, () => {
+            const sameShowMatches = matches.filter((episode) => episode.show_id && equivalentTmdbIds.has(episode.show_id));
+            crosswalkDetails.set(tvdbEpisodeId, { ...crosswalkDetails.get(tvdbEpisodeId), tmdbFindIds: matches.flatMap((episode) => episode.id ? [episode.id] : []) });
+            const ownedTmdbMatch = ownedTmdbEpisodeMatch(matches, libraryTmdbEpisodeIds);
             if (ownedTmdbMatch?.id) {
-              locallySatisfiedTvdbIds.add(result.value.tvdbEpisodeId); tmdbSatisfied.add(result.value.tvdbEpisodeId); autoMatchEvidence.set(result.value.tvdbEpisodeId, { method: "Matched via TMDB External ID", tmdbEpisodeId: ownedTmdbMatch.id, tmdbEpisode: ownedTmdbMatch }); crosswalkDecisions.set(result.value.tvdbEpisodeId, "reconciled-by-tmdb-find");
+              locallySatisfiedTvdbIds.add(tvdbEpisodeId); tmdbSatisfied.add(tvdbEpisodeId); autoMatchEvidence.set(tvdbEpisodeId, { method: "Matched via TMDB External ID", tmdbEpisodeId: ownedTmdbMatch.id, tmdbEpisode: ownedTmdbMatch }); crosswalkDecisions.set(tvdbEpisodeId, "reconciled-by-tmdb-find");
               // No parent-series agreement or secondary lookup is required: Plex owns
               // the exact TMDB episode returned for this TVDB episode external ID.
             }
-            else if (result.value.matches.length && !sameShowMatches.length) rejectedOtherShow += 1;
+            else if (matches.length && !sameShowMatches.length) rejectedOtherShow += 1;
             else unmatched += 1;
-            if (!crosswalkDecisions.has(result.value.tvdbEpisodeId)) crosswalkDecisions.set(result.value.tvdbEpisodeId, result.value.matches.length && !sameShowMatches.length ? "tmdb-cross-show-rejected" : "reported-missing");
-          }
-          const failedCrosswalks = crosswalks.filter((result) => result.status === "rejected").length;
-          if (failedCrosswalks) recordWarning(`${failedCrosswalks} TMDB TVDB-ID ${failedCrosswalks === 1 ? "lookup" : "lookups"} failed; this show will be checked again next scan.`);
-          logger.info("plex.show.episode-crosswalk", { ratingKey, strategy: traktCredentials ? "trakt-validate-with-tmdb-then-find" : "tmdb-find-by-tvdb-episode-id", equivalentTmdbShowIds: [...equivalentTmdbIds], tvdbCandidates: crosswalkCandidateTvdbIds.size, traktReconciled, traktValidatedNotOwned, traktValidationFailed, traktInvalid, traktFailed, ...(traktFailureReasons.size ? { traktFailureReasons: [...traktFailureReasons].slice(0, 3) } : {}), tmdbFallback: tmdbFallbackIds.size, reconciled: locallySatisfiedTvdbIds.size, rejectedOtherShow, unmatched, failed: failedCrosswalks });
+            if (!crosswalkDecisions.has(tvdbEpisodeId)) crosswalkDecisions.set(tvdbEpisodeId, matches.length && !sameShowMatches.length ? "tmdb-cross-show-rejected" : "reported-missing");
+          });
+          const failedCrosswalks = crosswalks.requestFailures.length;
+          if (failedCrosswalks) recordWarning(`${failedCrosswalks} TMDB TVDB-ID ${failedCrosswalks === 1 ? "lookup" : "lookups"} failed; ${failedCrosswalks === 1 ? "it is" : "they are"} requested again on the next scan.`);
+          logger.info("plex.show.episode-crosswalk", { ratingKey, strategy: traktCredentials ? "trakt-validate-with-tmdb-then-find" : "tmdb-find-by-tvdb-episode-id", equivalentTmdbShowIds: [...equivalentTmdbIds], tvdbCandidates: crosswalkCandidateTvdbIds.size, traktReconciled, traktValidatedNotOwned, traktValidationFailed, traktInvalid, traktFailed, ...(traktFailureReasons.size ? { traktFailureReasons: [...traktFailureReasons].slice(0, 3) } : {}), tmdbFallback: tmdbFallbackIds.size, reconciled: locallySatisfiedTvdbIds.size, rejectedOtherShow, unmatched, failed: failedCrosswalks, crosswalkFailures: crosswalkFailures.length });
           for (const tvdbEpisodeId of crosswalkCandidateTvdbIds) logger.info("plex.show.episode-crosswalk-decision", { ratingKey, tmdbShowId: tmdbShow.id, tvdbShowId: tvdbId, tvdbEpisodeId, ...crosswalkDetails.get(tvdbEpisodeId), outcome: crosswalkDecisions.get(tvdbEpisodeId) || "lookup-failed" });
           phaseTimings.crosswalkMs = Date.now() - crosswalkStarted;
         }
-        const { missing, coverageOutcomes, autoMatches, compoundCoverage, manualCoverage, diagnostics } = comparePlexShow({
+        // A recorded crosswalk failure that was not looked up again (another method made it
+        // unnecessary) stays unresolved while its episode remains in the catalogue.
+        for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) if (!crosswalksAttempted.has(`${crosswalk}:${tvdbEpisodeId}`) && tvdbEpisodeOf(tvdbEpisodeId)) {
+          crosswalkFailures.push({ operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId), kind: "exception", reason: "not checked again", existingOnly: "carry" });
+        }
+        const { missing, coverageOutcomes, autoMatches, compoundCoverage, manualCoverage, diagnostics, episodeFailures } = comparePlexShow({
           ratingKey, primary, tmdbShow, tvdbId, tvdbSlug, tmdbSeriesMatches, providerEpisodes,
           localEpisodes, localProviderEpisodes, localTmdbEpisodeIds, libraryTmdbEpisodeIds,
           coordinateMissingTvdbIds, directTvdbSatisfied, directImdbSatisfied, traktSatisfied,
-          tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, autoCompoundEpisodes,
+          tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, autoCompoundEpisodes, crosswalkFailures,
+          compoundCausesRecorded: compoundMatchingCausesRecorded(ratingKey),
         });
         for (const { event, data } of diagnostics) logger.info(event, data);
+        for (const failure of episodeFailures) logger[failure.existingOnly === "refresh" ? "info" : "warn"]("plex.show.episode-check-failed", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, ...failure });
         const linkedTvdbIds = [...new Set(tmdbSeriesMatches.flatMap((show) => show.external_ids?.tvdb_id ? [show.external_ids.tvdb_id] : []))];
         const missingTvdbSummaries = linkedTvdbIds.filter((id) => !tvdbSeriesMatches.some((show) => show.id === id));
         const linkedTvdbSummaries = await Promise.allSettled(missingTvdbSummaries.map((id) => tvdbShow(id, token)));
@@ -526,7 +659,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           tvdb: tvdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, slug: show.slug, ...(show.year && Number.isFinite(Number(show.year)) ? { year: Number(show.year) } : {}) })),
         };
         const result: PlexShowResult = { ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, coverageOutcomes, missing, ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) };
-  return {result,tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds};
+  return {result,tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds,episodeFailures};
 }
 
 async function runPlexScan(targetRatingKey?: string) {
@@ -748,6 +881,10 @@ async function runPlexScan(targetRatingKey?: string) {
       let cacheable = true;
       const addWarning = (message: string) => { warning = warning ? `${warning} ${message}` : message; cacheable = false; };
       const providerEpisodes: ProviderEpisode[] = [];
+      // Individual catalogue records that could not be used, from whichever catalogue was compared.
+      const malformedRecords: MalformedCatalogueRecord[] = [];
+      // English title fallback outcome for the compared TVDB catalogue; `carried` when not attempted this scan.
+      let titleRecovery: {state: TitleRecoveryState; carried: boolean} = {state: {}, carried: false};
       let tmdbShow: TmdbShow | null = null;
       let tvdbResolved = false;
       let tvdbCatalogueReused = false;
@@ -776,10 +913,11 @@ async function runPlexScan(targetRatingKey?: string) {
         });
         if (tmdbShow) {
           selectTmdbIdentity(tmdbShow,reuseTmdb);
-          const episodes = reuseTmdb ? savedTmdb.episodes : await tmdbEpisodes(tmdbShow, config.tmdbToken);
+          const {episodes,malformed=[]} = reuseTmdb ? savedTmdb : await tmdbEpisodes(tmdbShow, config.tmdbToken);
           providerEpisodes.push(...episodes);
+          malformedRecords.push(...malformed);
           if (!reuseTmdb) {
-            inputs.tmdb[String(tmdbShow.id)] = {version:1, downloadedAt:new Date().toISOString(), show:tmdbShow, episodes};
+            inputs.tmdb[String(tmdbShow.id)] = {version:1, downloadedAt:new Date().toISOString(), show:tmdbShow, episodes, ...(malformed.length ? {malformed} : {})};
             savePlexCatalogue("tmdb", tmdbShow.id, inputs.tmdb[String(tmdbShow.id)]);
             delete refresh.tmdb;
             delete inputs.deferredTmdbChanges[String(tmdbShow.id)];
@@ -796,6 +934,7 @@ async function runPlexScan(targetRatingKey?: string) {
           tmdbShow = savedTmdb.show;
           selectTmdbIdentity(tmdbShow,true);
           providerEpisodes.push(...savedTmdb.episodes);
+          malformedRecords.push(...savedTmdb.malformed || []);
         } else { tmdbShow = null; unavailableCatalogueCauses.push(`catalogue-refresh:TMDB:${ratingKey}`); }
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
@@ -808,9 +947,28 @@ async function runPlexScan(targetRatingKey?: string) {
           const reuseTvdb = reuseProviderCatalogue({provider:"tvdb",now:startedAt,downloadedAt:savedTvdb?.downloadedAt,usable:usableProviderCatalogue(savedTvdb),mandatory:!!refresh.tvdb,targeted:!!targetRatingKey,changed:tvdbCatalogueChanges.has(tvdbId)});
           tvdbCatalogueReused = reuseTvdb;
           if (!reuseTvdb && tvdbAuthenticationError) throw tvdbAuthenticationError;
-          const tvdb = reuseTvdb ? {episodes:savedTvdb.episodes,slug:savedTvdb.show.slug,name:savedTvdb.show.name} : await tvdbSeries(tvdbId, token, undefined, primary.title || "Unknown show");
+          const tvdb = reuseTvdb ? {episodes:savedTvdb.episodes,malformed:savedTvdb.malformed || [],slug:savedTvdb.show.slug,name:savedTvdb.show.name} : await tvdbSeries(tvdbId, token, undefined, primary.title || "Unknown show");
+          // Default catalogue first; only unusable titles are recovered, per TVDB episode, from English.
+          const titleDependent = autoCompoundEpisodes ? titleDependentTvdbEpisodeIds([...providerEpisodes, ...tvdb.episodes], localProviderEpisodes) : new Set<number>();
+          const recovery = await recoverTvdbTitles({
+            episodes: tvdb.episodes,
+            previous: reuseTvdb ? undefined : savedTvdb?.episodes,
+            requestEnglish: tvdbEpisodeId => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : providerClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
+            authenticationError: tvdbAuthenticationError,
+            ...(reuseTvdb ? { reused: { outcomes: savedTvdb.titleRecovery || {}, titleNeeded: (id: number) => titleDependent.has(id) } } : {}),
+          });
+          tvdb.episodes = recovery.episodes;
+          titleRecovery = {state: recovery.unresolved, carried: false};
+          for (const tvdbEpisodeId of recovery.recovered) logger.info("plex.show.episode-title-recovered", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId, language: "eng" });
+          for (const [tvdbEpisodeId, entry] of Object.entries(recovery.unresolved)) logger.warn("plex.show.episode-title-unrecovered", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId: Number(tvdbEpisodeId), ...entry });
+          if (reuseTvdb && recovery.attempted) {
+            // Recovered titles join the reusable catalogue without changing its download time.
+            inputs.tvdb[String(tvdbId)] = {...savedTvdb, episodes:tvdb.episodes, titleRecovery:recovery.unresolved};
+            if (!Object.keys(recovery.unresolved).length) delete inputs.tvdb[String(tvdbId)].titleRecovery;
+            savePlexCatalogue("tvdb", tvdbId, inputs.tvdb[String(tvdbId)]);
+          }
           if (!reuseTvdb) {
-            inputs.tvdb[String(tvdbId)] = {version:1, downloadedAt:new Date().toISOString(), show:{id:tvdbId, name:tvdb.name, slug:tvdb.slug}, episodes:tvdb.episodes};
+            inputs.tvdb[String(tvdbId)] = {version:1, downloadedAt:new Date().toISOString(), show:{id:tvdbId, name:tvdb.name, slug:tvdb.slug}, episodes:tvdb.episodes, ...(tvdb.malformed.length ? {malformed:tvdb.malformed} : {}), ...(Object.keys(recovery.unresolved).length ? {titleRecovery:recovery.unresolved} : {})};
             delete refresh.tvdb;
             if (inputs.pendingTvdbChanges[String(tvdbId)]) {
               delete inputs.pendingTvdbChanges[String(tvdbId)];
@@ -822,6 +980,7 @@ async function runPlexScan(targetRatingKey?: string) {
           tvdbResolved = true;
           tvdbSlug = tvdb.slug;
           providerEpisodes.push(...tvdb.episodes);
+          malformedRecords.push(...tvdb.malformed);
           phaseTimings.tvdbMs = Date.now() - phaseStarted;
         }
         resolveCoverageIssue(`catalogue-refresh:TVDB:${ratingKey}`);
@@ -830,7 +989,7 @@ async function runPlexScan(targetRatingKey?: string) {
         refresh.tvdb = true;
         setCoverageIssue({id:`catalogue-refresh:TVDB:${ratingKey}`,...(tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...providerLookupContext(error,{source:tvdbSource,requested:{provider:"TVDB",kind:"series",id:tvdbId},impact:`TVDB episode coverage could not be fully verified. ${usableProviderCatalogue(inputs.tvdb[String(tvdbId)]) ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${savedComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`})});
         const savedTvdb = inputs.tvdb[String(tvdbId)];
-        if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); }
+        if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); malformedRecords.push(...savedTvdb.malformed || []); titleRecovery = {state: savedTvdb.titleRecovery || {}, carried: true}; }
         else unavailableCatalogueCauses.push(`catalogue-refresh:TVDB:${ratingKey}`);
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");
@@ -854,8 +1013,11 @@ async function runPlexScan(targetRatingKey?: string) {
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
       try {
       await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError}, () => relationshipScope.run(relationships, async () => {
-        const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,addWarning,setHeartbeat});
+        const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat});
         ({tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds}=compared);
+        // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
+        reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords);
+        for (const record of malformedRecords) logger.warn("plex.show.catalogue-record-unusable", { ratingKey, ...record });
         results.push({...compared.result,...(warning ? {warning} : {})});
         inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? {...savedComparison,refresh} : {group,details,localMetadata,tmdbId,tvdbId,relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
@@ -1095,12 +1257,13 @@ async function recheckCoverage(impact: CoverageImpact) {
       const replay={missing:new Set<string>()};
       const compared=await replayScope.run(replay,()=>comparisonIssueScope.run({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},()=>relationshipScope.run(input.relationships,()=>compareLoadedPlexShow({
         ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
-        providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},
+        providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},
         libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory:inventory.evidence,autoCompoundEpisodes:settings.autoCompoundEpisodes!==false,
         config:{tmdbToken:""},token:"",traktCredentials:Object.values(input.relationships).some(relationship=>relationship.provider==="Trakt") ? {clientId:"",accessToken:""} : null,
-        tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},addWarning:()=>{},setHeartbeat:()=>{},
+        tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},setHeartbeat:()=>{},
       }))));
       if (replay.missing.size) throw new Error(`Saved provider identity relationships are incomplete (${[...replay.missing].join(", ")}).`);
+      reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
       const index=results.findIndex(show=>show.ratingKey===key);
       if (index>=0) results[index]=compared.result; else results.push(compared.result);
       resolveCoverageIssue(`comparison-inputs:${key}`);

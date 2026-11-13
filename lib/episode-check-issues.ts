@@ -108,7 +108,7 @@ export function catalogueRecordIssue(show: EpisodeCheckShow, record: MalformedCa
   const impact = record.problem === "no-identity"
     ? "This episode was compared by its season and episode numbering only. Checks that need its provider episode ID (direct ownership, crosswalks, Manual Match and Report Missing) were skipped."
     : record.problem === "no-numbering"
-      ? "This episode cannot be compared: it was not checked and no missing result was created for it. Other episodes were compared normally."
+      ? "This episode cannot be compared by numbering: checks that need it were skipped and no missing result was created from this record. If it belongs to a Manual Match, its ID-based checks (Report Missing, direct ownership and Manual Match) still use the numbering saved with that Manual Match. Other episodes were compared normally."
       : "This record was skipped: it was not compared and no missing result was created for it. Other episodes were compared normally.";
   return {
     id: catalogueRecordIssueId(show.ratingKey, record),

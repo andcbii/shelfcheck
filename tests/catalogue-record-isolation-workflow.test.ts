@@ -160,3 +160,24 @@ test("a downloaded catalogue with no usable records is a shared-input failure th
   assert.deepEqual(rows(broken), ["TMDB:9002", "TVDB:102"], "last-good TVDB records are still compared, not an empty catalogue");
   assert.deepEqual(recordIssues(broken), [], "records of a rejected catalogue are not reported individually");
 });
+
+test("a TVDB record with an ID but no numbering still takes part in ID-based checks, such as its Report Missing flag", async t => {
+  const tmdb3: Episode = { provider: "TMDB", id: 9003, season: 1, episode: 3, name: "Three" };
+  const tvdb3: Episode = { provider: "TVDB", id: 103, season: 1, episode: 3, name: "Three" };
+  // TVDB's episode record (used to save the Manual Match) has numbering; its default catalogue record does not.
+  const { rerun, state, save, setFlags, missing } = await harness(t, [...catalogue, tmdb3, tvdb3], [tmdb1, tmdb3]);
+  const record = (episode: Episode) => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: "2020-01-01" });
+  state.bodies.set("/v4/series/20/episodes/default", { data: { episodes: [record(tvdb1), record(tvdb2), { id: 103, seasonNumber: 1, name: "Three", aired: "2020-01-01" }] } });
+  const first = await rerun();
+  assert.deepEqual(rows(first), ["TMDB:9002", "TVDB:102"], "no row is invented for the unnumbered record");
+
+  const saved = await save([tmdb3, tvdb3]);
+  assert.ok(saved.ok, await saved.clone().text());
+  await setFlags((await saved.json()).mapping.id, [tvdb3]);
+  const reported = await rerun();
+  assert.equal(missing(reported)["TVDB:103"], "reported-missing", "the flag on its ID keeps it missing, at its saved Manual Match numbering");
+  const [issue, ...others] = recordIssues(reported);
+  assert.deepEqual(others, []);
+  assert.equal(issue.episode?.id, 103, "the record is still reported as lacking numbering");
+  assert.match(issue.impacts!.join(" "), /Manual Match/);
+});

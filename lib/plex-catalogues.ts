@@ -4,7 +4,7 @@ import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/cat
 import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
-import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInput, deletePlexGeneratedInputs } from "@/lib/sqlite";
+import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputs } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
 /**
@@ -139,7 +139,9 @@ export function savePlexInputs(inputs: PlexGeneratedInputs) {
  * rejected one has `rejectedAt` instead, and keeps an unreadable payload only so offline
  * rechecks can explain the failure. It records a provider relationship, never ownership.
  */
-export type SharedTmdbCrosswalk = {value?: unknown; receivedAt?: string; rejectedAt?: string};
+export type SharedTmdbCrosswalk = {value?: unknown; receivedAt?: string; rejectedAt?: string;
+  /** When clearing one show's cache made this usable response not current for live scans; offline rechecks still replay it. */
+  invalidatedAt?: string};
 const sharedTmdbCrosswalkKey = (tvdbEpisodeId: number) => `tmdb-crosswalk:${tvdbEpisodeId}`;
 export function readSharedTmdbCrosswalk(tvdbEpisodeId: number) {
   return readPlexGeneratedInputs<SharedTmdbCrosswalk>(sharedTmdbCrosswalkKey(tvdbEpisodeId));
@@ -148,12 +150,13 @@ export function saveSharedTmdbCrosswalk(tvdbEpisodeId: number, evidence: SharedT
   writePlexGeneratedInputs(sharedTmdbCrosswalkKey(tvdbEpisodeId), evidence);
 }
 /**
- * Forgets a usable shared response so the next lookup is requested again. A rejection is kept:
- * other shows' offline rechecks rely on it so they cannot revive the rejected answer.
+ * Marks a usable shared response not current for live scans, so the next lookup is requested
+ * again; it keeps its receipt time so other shows' offline rechecks cannot revive an older copy.
+ * A rejection is kept unchanged for the same reason.
  */
-export function forgetSharedTmdbCrosswalk(tvdbEpisodeId: number) {
+export function invalidateSharedTmdbCrosswalk(tvdbEpisodeId: number) {
   const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
-  if (shared && !shared.rejectedAt) deletePlexGeneratedInput(sharedTmdbCrosswalkKey(tvdbEpisodeId));
+  if (shared?.receivedAt && !shared.invalidatedAt) saveSharedTmdbCrosswalk(tvdbEpisodeId, {...shared, invalidatedAt: new Date().toISOString()});
 }
 /** Clears one show's saved comparison, or all generated inputs; returns the cleared show's relationship keys. */
 export function clearPlexInputs(ratingKey?: string): string[] {

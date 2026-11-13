@@ -371,6 +371,39 @@ for (const failure of ["a failed request", "an unreadable response"] as const) t
   assert.ok(!missingKeys(covered, "other").includes("TVDB:301"));
 });
 
+test("clearing one show's cache after its rescan replaced the shared answer does not let other shows' offline rechecks revive their older copy", async t => {
+  const { rerun, state, requests, restart, clearCache, save, setFlags, status } = await sharedDayOne(t);
+  await rerun();
+
+  // Target's rescan replaces the shared match with a valid empty answer; then Target is cleared.
+  state.bodies.set("/3/find/301", empty);
+  t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
+  assert.deepEqual(autoMatches(await rerun("ratingKey:target"), "target"), []);
+  await clearCache("ratingKey:target");
+
+  const mappingId = await saveUnrelatedMatch(save);
+  for (const restarting of [false, true]) {
+    if (restarting) { restart(); await setFlags(mappingId, [tvdb3]); }
+    requests.length = 0;
+    const rechecked = await settled(status);
+    assert.deepEqual([...requests], [], "the cached recheck stays offline");
+    assert.deepEqual(autoMatches(rechecked, "other"), [], "Other's older copy of the match is not revived");
+    assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+  }
+
+  // The cleared answer is never reused live: the next scan requests it once for both shows.
+  state.bodies.set("/3/find/301", found(tmdb1));
+  t.mock.timers.setTime(Date.parse("2026-11-12T12:00:00Z"));
+  requests.length = 0;
+  const live = await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
+  for (const name of ["target", "other"] as const) assert.deepEqual(autoMatches(live, name), [matched]);
+  t.mock.timers.setTime(Date.parse("2026-11-12T13:00:00Z"));
+  requests.length = 0;
+  await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), [], "the new answer is current again");
+});
+
 test("a rejection from another show's ordinary next-day refresh stops Other's offline recheck before and after restart", async t => {
   const { rerun, state, requests, restart, save, setFlags, status } = await sharedDayOne(t);
   await rerun();

@@ -75,7 +75,7 @@ A saved TMDB external-ID crosswalk response whose required refresh in a live sca
 _Avoid_: Stale fallback, expired match
 
 **Shared crosswalk evidence**:
-The latest outcome of one TVDB episode's TMDB external-ID crosswalk, shared by every show comparison that needs that lookup: a usable response with its receipt time, or a rejection. It is a provider relationship, not an ownership decision; each comparison still decides coverage against current library inventory. A later outcome in one comparison, a replacement or a rejection, applies to every other comparison and offline recheck that saved the older answer, and clearing one show's cache does not remove a rejection.
+The latest outcome of one TVDB episode's TMDB external-ID crosswalk, shared by every show comparison that needs that lookup: a usable response with its receipt time, or a rejection. It is a provider relationship, not an ownership decision; each comparison still decides coverage against current library inventory. A later outcome in one comparison, a replacement or a rejection, applies to every other comparison and offline recheck that saved the older answer, and clearing one show's cache never lets an offline recheck revive an older copy: a usable response is only marked not current for live scans, and a rejection is kept.
 _Avoid_: Crosswalk cache, shared match
 
 **Report Missing**:

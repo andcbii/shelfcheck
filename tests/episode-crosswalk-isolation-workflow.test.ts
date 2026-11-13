@@ -90,6 +90,9 @@ test("failed IMDb and Trakt crosswalks let the TMDB crosswalk still collect the 
   assert.equal(rejected[0].category, "Provider Lookup");
   assert.equal(rejected[0].lookup?.status, 404);
   assert.match(rejected[0].impacts!.join(" "), /Trakt episode crosswalk could not be checked: the Trakt request failed\..*remains collected/);
+  // Only the failed episode lookup is retried, not the whole show.
+  const warning = (result as unknown as { report: { shows: { ratingKey: string; warning?: string }[] } }).report.shows.find(item => item.ratingKey === "ratingKey:target")?.warning;
+  assert.equal(warning, "1 Trakt episode identity lookup failed; it is requested again on the next scan.");
 
   state.bodies.delete("/v4/episodes/301/extended");
   state.bodies.set("/search/tvdb/301", []);

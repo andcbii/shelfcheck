@@ -132,7 +132,7 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
     throw error;
   }
   if (show && matching) resolveCoverageIssue(issueId);
-  if (relationships) relationships[key] = {provider, value};
+  if (relationships) relationships[key] = {provider, value, receivedAt: new Date().toISOString()};
   return value;
 }
 
@@ -204,6 +204,18 @@ const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) &&
 /** The saved relationship key of one TVDB episode's crosswalk request. */
 function crosswalkRelationshipKey(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
   return crosswalk === "IMDb" ? relationshipKey("TVDB", `${TVDB}/episodes/${tvdbEpisodeId}/extended`) : crosswalk === "Trakt" ? relationshipKey("Trakt", `${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`) : relationshipKey("TMDB", `${TMDB}/find/${tvdbEpisodeId}?external_source=tvdb_id`);
+}
+/**
+ * Episode crosswalk freshness: when a live scan reaches one TVDB episode's TMDB external-ID
+ * crosswalk, a saved response is reused only if it was received on or after the scan's starting
+ * UTC date (`referenceDate`). An older or undated response is discarded so it is requested again;
+ * no receipt date is ever inferred. Other saved relationships keep their existing reuse rules.
+ */
+function expireTmdbCrosswalk(tvdbEpisodeId: number, referenceDate: string) {
+  const relationships = relationshipScope.getStore();
+  const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
+  const received = Date.parse(relationships?.[key]?.receivedAt || "");
+  if (relationships && Object.hasOwn(relationships, key) && !(Number.isFinite(received) && new Date(received).toISOString().slice(0, 10) >= referenceDate)) delete relationships[key];
 }
 /** A failed request or interpretation within one episode's crosswalk, with the saved relationship it concerns. */
 type CrosswalkCause = { error: unknown; relationship: string };
@@ -405,6 +417,8 @@ type LoadedComparison = {
   config: {tmdbToken:string}; token: string; traktCredentials: TraktCredentials | null;
   tvdbChanges: Set<number> | null; logger: Pick<ScanLogger,"info"|"warn">;
   setHeartbeat: (key:string,title:string,phase:string)=>void;
+  /** A live scan's starting UTC date, for episode crosswalk freshness; absent in an offline replay. */
+  crosswalkReferenceDate?: string;
 };
 /** Ordinary automatic ownership excludes ignored shows; manual evidence keeps all items. */
 function libraryInventoryIndex(groups: PlexShowGroup[], items: Record<string, PlexMetadata[]>, ignored: Set<string>) {
@@ -605,7 +619,10 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             });
             if (traktFailed) recordWarning(`${traktFailed} Trakt episode identity ${traktFailed === 1 ? "lookup" : "lookups"} failed; ${traktFailed === 1 ? "it is" : "they are"} requested again on the next scan.`);
           }
-          const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], (tvdbEpisodeId) => findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken));
+          const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], (tvdbEpisodeId) => {
+            if (input.crosswalkReferenceDate && !replayScope.getStore()) expireTmdbCrosswalk(tvdbEpisodeId, input.crosswalkReferenceDate);
+            return findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken);
+          });
           const unknownTmdbShowIds = [...new Set(crosswalks.fulfilled.flatMap(({ value: matches }) => matches.flatMap((episode) => typeof episode.show_id === "number" && !equivalentTmdbIds.has(episode.show_id) ? [episode.show_id] : [])))];
           for (const id of unknownTmdbShowIds) tmdbEpisodeAliases.add(id);
           const aliasChecks = await Promise.allSettled(unknownTmdbShowIds.map((showId) => tmdbJson<unknown>(`/tv/${showId}?append_to_response=external_ids`, config.tmdbToken)));
@@ -1013,7 +1030,7 @@ async function runPlexScan(targetRatingKey?: string) {
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
       try {
       await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError}, () => relationshipScope.run(relationships, async () => {
-        const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat});
+        const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat,crosswalkReferenceDate:startedAt.slice(0,10)});
         ({tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds}=compared);
         // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
         reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords);

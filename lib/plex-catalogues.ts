@@ -21,7 +21,9 @@ export type SavedPlexComparison = {
   tmdbId?: number; tvdbId?: number;
   // Raw successful HTTP identity relationships, including successful empty responses.
   // Ownership must always be derived against current inventory, never reused from a result.
-  relationships: Record<string, {provider: string; value: unknown}>;
+  // `receivedAt`: when the response was actually received; reuse, replay and restart never
+  // renew it, and responses saved before it was recorded have none.
+  relationships: Record<string, {provider: string; value: unknown; receivedAt?: string}>;
   tmdbAliases: number[]; tvdbAliases: number[];
   tmdbEpisodeAliases?: number[];
   tvdbEpisodeImdbIds?: Record<string, string[]>;

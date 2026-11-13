@@ -66,6 +66,10 @@ An association between provider show records that identifies related catalogues 
 **Episode crosswalk**:
 A lookup that relates a TVDB episode to another identity for the same episode (its IMDb ID, Trakt's episode search, or TMDB's external-ID search) so that ownership can be matched when provider numbering differs. It is automatic matching evidence and never creates a Manual Match.
 
+**Episode crosswalk freshness**:
+The rule that a saved TMDB external-ID crosswalk response, whether a match or a valid empty answer, is reused only on the UTC date it was actually received. A live scan that reaches that matching step requests it again when the response is missing, undated, or received before the scan's starting UTC date. Reuse, offline rechecks and restarts never renew the receipt time, and the rule is independent of TMDB's show change feed and of provider catalogue freshness.
+_Avoid_: Crosswalk expiry job, daily cache clear
+
 **Report Missing**:
 A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It applies to the provider episode across all Plex libraries, not to a file or Plex item, and lasts until the user clears it or the member leaves its Manual Match. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.
 _Avoid_: Ownership correction, declared content

@@ -164,7 +164,7 @@ test("Report Missing on a one-to-one Manual Match overrides direct ownership and
   assert.deepEqual(await h.flags(mapping.id), []);
 });
 
-test("Report Missing beats automatic crosswalk ownership and is limited to one-to-one mappings in this release", async t => {
+test("Report Missing beats automatic crosswalk ownership and only names members of the saved mapping", async t => {
   const h = await harness(t);
   h.state.crosswalk = true;
   const saved = await (await h.save(100, [200])).json();
@@ -181,13 +181,10 @@ test("Report Missing beats automatic crosswalk ownership and is limited to one-t
   const current = (await flagged.json()).mapping;
   const outsider = await h.post({ action: "save", id: current.id, revision: current.revision, reportMissing: [{ provider: "TVDB", id: 999 }] });
   assert.equal(outsider.status, 400);
-  // Larger mappings keep working without flags; their flag behaviour is delivered separately.
+  // One-to-many mappings accept flags too (see report-missing-combined-workflow); many-to-many stays rejected.
   const larger = await h.save(101, [201, 202], { reportMissing: [{ provider: "TVDB", id: 202 }] });
-  assert.equal(larger.status, 400);
-  assert.equal((await larger.json()).code, "report-missing-unsupported");
-  const unflagged = await h.save(101, [201, 202]);
-  assert.equal(unflagged.status, 201);
-  assert.deepEqual(await h.flags(current.id), ["TVDB:200"], "Rejected saves leave other mappings' flags intact");
+  assert.equal(larger.status, 201);
+  assert.deepEqual(await h.flags(current.id), ["TVDB:200"], "Saving another mapping leaves this mapping's flags intact");
 });
 
 test("Report Missing follows mapping membership through edits and deletion and respects stale edits and scan locks", async t => {

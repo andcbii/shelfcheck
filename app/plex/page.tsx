@@ -6,7 +6,7 @@ import type { CoverageIssue } from "@/lib/coverage-issues";
 /* eslint-disable @next/next/no-img-element */
 
 import Link from "next/link";
-import type { CoverageGroup } from "@/lib/manual-coverage-model";
+import { INCOMPLETE_LABEL, missingPartsExplanation, type CoverageGroup } from "@/lib/manual-coverage-model";
 import { ManualCoverageManager } from "@/app/components/manual-coverage-manager";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
@@ -395,7 +395,7 @@ export default function PlexPage() {
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>
         <p>Every episode in either alternative complete set covers this content. Automatic matches keep their status and do not count as directly owned members.</p>
         {group.health && group.health !== "healthy" && <p>{group.health === "pending" ? "Coverage pending recheck" : "Mapping needs review"}</p>}
-        {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{member.season} E{member.episode} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "reported-missing" ? "Reported missing" : member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong></li>)}</ul></section>)}
+        {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{member.season} E{member.episode} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "reported-missing" ? "Reported missing" : member.status === "incomplete" ? INCOMPLETE_LABEL : member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong>{member.status === "incomplete" && member.missingParts?.length ? <small>{missingPartsExplanation(group.members, member.missingParts)}</small> : null}</li>)}</ul></section>)}
       </section>)}
       {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);

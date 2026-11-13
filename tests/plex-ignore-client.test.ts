@@ -282,6 +282,29 @@ test("a reported-missing episode stays in Plex results with Reported missing sta
   assert.equal(container.querySelectorAll('.show-list article').length,1,"The show stays visible in Plex missing results");
 });
 
+test("an incomplete combined episode reads differently from the reported-missing part responsible", async (t) => {
+  const members = [
+    {provider:"TMDB",id:100,showId:10,show:"Example Show",title:"Whole",season:1,episode:1,url:"https://www.themoviedb.org/tv/10/season/1/episode/1",reportMissing:false,status:"incomplete",missingParts:[{provider:"TVDB",id:202}]},
+    {provider:"TVDB",id:200,showId:20,show:"Example Show",title:"Part A",season:2,episode:1,url:"https://thetvdb.com/series/example/episodes/200",reportMissing:false,status:"manual"},
+    {provider:"TVDB",id:202,showId:20,show:"Example Show",title:"Part C",season:2,episode:3,url:"https://thetvdb.com/series/example/episodes/202",reportMissing:true,status:"reported-missing"},
+  ];
+  const groupedReport = {...report,shows:[{...report.shows[0],missing:[
+    {season:1,episode:1,airDate:"2020-01-01",tmdbEpisodeId:100,sources:["TMDB"],incomplete:{TMDB:[{provider:"TVDB",id:202}]}},
+    {season:2,episode:3,airDate:"2020-01-01",tvdbEpisodeId:202,sources:["TVDB"],reportedMissing:["TVDB"]},
+  ]}],coverageGroups:[{mappingId:"combined",members,missing:[
+    {provider:"TMDB",id:100,status:"missing",missingParts:[{provider:"TVDB",id:202}],season:1,airDate:"2020-01-01",showKey:"one"},
+    {provider:"TVDB",id:202,status:"missing",reportedMissing:true,season:2,airDate:"2020-01-01",showKey:"one"},
+  ]}]};
+  const defaults=configuredFetch(async()=>json({...completed,report:groupedReport}));
+  const {container}=await mountPage(t,async(input,init)=>String(input).startsWith("/api/plex/manual-coverage") ? json({revision:1,mappings:[{id:"combined",revision:1,members}],pending:0}) : defaults(input,init));
+  const group=container.querySelector('[aria-label="Incomplete coverage group"]');
+  assert.ok(group);
+  assert.match(group.textContent||"",/Whole · Episode ID 100Incomplete · mapped part missingContains TVDB Part C \(Episode ID 202\), which you reported missing/);
+  assert.match(group.textContent||"",/Part C · Episode ID 202Reported missing/);
+  assert.match(group.textContent||"",/Part A · Episode ID 200Covered by complete alternative set/);
+  assert.equal(container.querySelectorAll('.show-list article').length,1,"The show stays visible in Plex missing results");
+});
+
 test("coverage groups respect aired-date and season-ignore visibility", async (t) => {
   for (const settings of [{hideUnairedEpisodes:true}, {ignoredSeasons:[{ratingKey:"one",title:"Example Show",seasons:[1]}]}]) {
     await t.test(JSON.stringify(settings),async subtest=>{

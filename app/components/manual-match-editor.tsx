@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useId, useRef, useState } from "react";
 import { ReportPagination } from "@/app/reports/report-pagination";
-import type { CoverageEvidence, CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
+import { INCOMPLETE_LABEL, missingPartsExplanation, missingPartsOf, reportMissingSupported, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
   initialUrls: string[];
   initialMappingId?: string;
@@ -32,8 +32,7 @@ function identifiesMember(input: string, member: CoverageMember) {
 const memberKey = (member: { provider: string; id: number }) => `${member.provider}:${member.id}`;
 const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
 const episodeCode = (member: CoverageMember) => `S${String(member.season).padStart(2, "0")}E${String(member.episode).padStart(2, "0")}`;
-// One-to-many and many-to-many Report Missing rules are delivered separately.
-const isOneToOne = (members: CoverageMember[]) => members.filter(member => member.provider === "TMDB").length === 1 && members.filter(member => member.provider === "TVDB").length === 1;
+const episodeName = (member: CoverageMember) => `${member.provider} ${member.title}`;
 export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, episodeScope = false, scanActive = false }: Props) {
   const [formOpen, setFormOpen] = useState(!report);
   const [scanning, setScanning] = useState(scanActive);
@@ -62,8 +61,12 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
   // Saved members are editable in place; changed membership needs a reviewed preview first.
   const draftMembers = preview?.members || (editing && savedUrls ? editing.members : null);
-  const draftOneToOne = Boolean(draftMembers && isOneToOne(draftMembers));
-  const draftFlagged = draftMembers?.filter(member => draftFlags.includes(memberKey(member))) || [];
+  // Many-to-many Report Missing rules are delivered separately.
+  const draftSupported = Boolean(draftMembers && reportMissingSupported(draftMembers));
+  // The draft as it would be saved: explicit flags only. Derived status is recalculated from them.
+  const draftState = draftMembers?.map(member => ({ ...member, reportMissing: draftFlags.includes(memberKey(member)) })) || [];
+  const draftFlagged = draftState.filter(member => member.reportMissing);
+  const draftIncomplete = draftState.filter(member => !member.reportMissing && missingPartsOf(draftState, member).length);
   const flagsChanged = draftFlags.join() !== (editing ? flaggedKeys(editing.members) : []).join();
   const dirty = flagsChanged || Boolean(preview) || (editing ? !savedUrls : urls.join() !== defaultUrls.join());
   const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
@@ -114,8 +117,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   function saveDraft() {
     if (!draftMembers) return;
-    // Larger matches cannot carry flags yet, so saving one clears any drafted flags explicitly.
-    const reportMissing = (draftOneToOne ? draftFlagged : []).map(({ provider, id }) => ({ provider, id }));
+    // Many-to-many matches cannot carry flags yet, so saving one clears any drafted flags explicitly.
+    const reportMissing = (draftSupported ? draftFlagged : []).map(({ provider, id }) => ({ provider, id }));
     void action(preview
       ? { action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision, reportMissing }
       : { action: "save", id: editing?.id, revision: editing?.revision, reportMissing });
@@ -260,6 +263,14 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   function itemEvidence(mapping: CoverageMapping, item: CoverageEvidence) {
     return <p key={`${mapping.id}:${item.showKey}:${item.ratingKey}`}>Plex item {item.ratingKey} · {item.showKey} · Provider identities: {item.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}</p>;
   }
+  // A combined episode is incomplete while any of its split episodes is reported missing.
+  // The status is derived from the given flags (saved, or the draft), never selected itself.
+  function derivedStatus(members: CoverageMember[], member: CoverageMember) {
+    const current = members.find(item => memberKey(item) === memberKey(member));
+    if (!current || current.reportMissing) return null;
+    const parts = missingPartsOf(members, current);
+    return parts.length ? <p className="report-missing-status report-missing-derived"><span>{INCOMPLETE_LABEL}</span> <small>{missingPartsExplanation(members, parts)}</small></p> : null;
+  }
   // One presentation for saved rows, the Matching Episodes dialog and the editor:
   // a panel per provider, preserving each provider's identities, numbering and links.
   function panels(members: CoverageMember[], scope: string, editable = false) {
@@ -272,6 +283,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
             <div id={contextId}><strong>{member.provider} / {member.show}</strong><p>{member.title} / {episodeCode(member)} / Episode ID {member.id}</p><p>Show ID {member.showId}</p></div>
             <a href={member.url} target="_blank" rel="noreferrer">{member.url}</a>
             {!editable && member.reportMissing && <p className="report-missing-status">Reported missing</p>}
+            {!member.reportMissing && derivedStatus(editable ? draftState : members, member)}
             {editable && <label className="report-missing-toggle"><input type="checkbox" aria-describedby={contextId} disabled={locked} checked={draftFlags.includes(memberKey(member))} onChange={event => toggleFlag(member, event.target.checked)}/>Report Missing</label>}
           </div>;
         })}
@@ -280,12 +292,14 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   function draftEditor(members: CoverageMember[]) {
     return <section aria-label={preview ? "Resolved episode preview" : "Manual Match episodes"}>
-      {draftOneToOne
-        ? <p className="report-missing-explanation"><strong>Report Missing</strong> keeps an episode missing in your Plex results when your local copy lacks its content, even if matching would mark it collected. It is a local Shelfcheck override: Shelfcheck sends no report to Plex, TMDB, or TVDB.</p>
-        : <p className="report-missing-explanation">Report Missing is available for one-to-one Manual Matches.{draftFlags.some(key => members.some(member => memberKey(member) === key)) ? " Saving this larger match clears Report Missing." : ""}</p>}
-      {panels(members, "draft", draftOneToOne)}
-      {draftOneToOne && <p className="report-missing-impact" aria-live="polite"><strong>After saving</strong> {draftFlagged.length
-        ? <>{draftFlagged.map(member => `${member.provider} ${member.title}`).join(", ")} {draftFlagged.length === 1 ? "stays" : "stay"} missing as Reported missing in Plex results.{draftFlagged.length < members.length ? " The other episode follows normal matching." : ""}</>
+      {draftSupported
+        ? <p className="report-missing-explanation"><strong>Report Missing</strong> keeps an episode missing in your Plex results when your local copy lacks its content, even if matching would mark it collected. Reporting a split episode missing also keeps its combined episode missing. It is a local Shelfcheck override: Shelfcheck sends no report to Plex, TMDB, or TVDB.</p>
+        : <p className="report-missing-explanation">Report Missing is available when one provider side has a single episode.{draftFlags.some(key => members.some(member => memberKey(member) === key)) ? " Saving this match clears Report Missing." : ""}</p>}
+      {panels(members, "draft", draftSupported)}
+      {draftSupported && <p className="report-missing-impact" aria-live="polite"><strong>After saving</strong> {draftFlagged.length
+        ? <>{draftFlagged.map(episodeName).join(", ")} {draftFlagged.length === 1 ? "stays" : "stay"} missing as Reported missing in Plex results.
+          {draftIncomplete.map(member => ` ${episodeName(member)} stays missing as ${INCOMPLETE_LABEL} because it contains ${missingPartsOf(draftState, member).map(part => episodeName(draftState.find(item => memberKey(item) === memberKey(part))!)).join(" and ")}.`).join("")}
+          {members.length - draftFlagged.length - draftIncomplete.length === 1 ? " The other episode follows normal matching." : members.length > draftFlagged.length + draftIncomplete.length ? " The other episodes follow normal matching." : ""}</>
         : "every episode follows normal matching."}</p>}
       <p className="manual-match-draft-state">{dirty ? "Unsaved changes" : "No unsaved changes"}</p>
       <button disabled={locked || !dirty} onClick={cancelDraft}>Cancel</button>

@@ -113,12 +113,58 @@ for (const dismissal of ["Close", "backdrop"]) {
   });
 }
 
-test("larger mappings stay editable without Report Missing controls", async t => {
-  const ui = await mount(t, { members: [tmdb, tvdb, { ...tvdb, id: 201, title: "Murder Pals (2)", episode: 20, url: "https://thetvdb.com/series/animaniacs/episodes/201" }] });
+test("many-to-many mappings stay editable without Report Missing controls", async t => {
+  const ui = await mount(t, { members: [tmdb, { ...tmdb, id: 101, title: "Other half", episode: 19, url: "https://www.themoviedb.org/tv/10/season/3/episode/19" }, tvdb, { ...tvdb, id: 201, title: "Murder Pals (2)", episode: 20, url: "https://thetvdb.com/series/animaniacs/episodes/201" }] });
   assert.equal(ui.checkboxes().length, 0);
-  assert.match(ui.editor().textContent || "", /Report Missing is available for one-to-one Manual Matches/);
+  assert.match(ui.editor().textContent || "", /Report Missing is available when one provider side has a single episode/);
   assert.ok(ui.button("Resolve and review"));
 });
+
+// The real example: TMDB "Murder Pals" is one combined episode; TVDB lists it as two parts.
+const part2 = { ...tvdb, id: 199, title: "Murder Pals (2)", episode: 21, url: "https://thetvdb.com/series/animaniacs/episodes/199" };
+const oneToMany = [tmdb, part2, tvdb];
+// The same content with the provider roles reversed: TVDB lists one combined episode.
+const reversed = [
+  { ...tvdb, title: "Murder Pals (complete)" },
+  { ...tmdb, id: 99, title: "Murder Pals, part 1", episode: 17, url: "https://www.themoviedb.org/tv/10/season/3/episode/17" },
+  { ...tmdb, title: "Murder Pals, part 2" },
+];
+
+for (const [name, members, combined, part, otherPart] of [
+  // [direction, members (combined first, flagged part last), combined label, flagged part label, unflagged part label]
+  ["TMDB combined", oneToMany, "TMDB Murder Pals", "TVDB Murder Pals \\(3\\)", "TVDB Murder Pals \\(2\\)"],
+  ["TVDB combined", reversed, "TVDB Murder Pals \\(complete\\)", "TMDB Murder Pals, part 2", "TMDB Murder Pals, part 1"],
+] as const) {
+  test(`${name}: one-to-many drafts preview the reported part and the incomplete combined episode`, async t => {
+    const ui = await mount(t, { members: [...members] });
+    assert.equal(ui.checkboxes().length, 3, "Every episode in either provider panel has Report Missing");
+    const boxFor = (id: number) => ui.checkboxes().findIndex(box => box.getAttribute("aria-describedby")!.split(" ").some(ref => new RegExp(`Episode ID ${id}(?!\\d)`).test(ui.container.querySelector(`[id="${ref}"]`)?.textContent || "")));
+    const flagged = members[2], whole = members[0];
+    const partIndex = boxFor(flagged.id), wholeIndex = boxFor(whole.id);
+    assert.ok(partIndex >= 0 && wholeIndex >= 0);
+    await ui.toggle(partIndex);
+    assert.deepEqual(ui.posts, [], "Toggling saves nothing");
+    const draft = ui.editor().textContent || "";
+    assert.match(draft, new RegExp(`After saving.*${part} stays missing as Reported missing.*${combined} stays missing as Incomplete · mapped part missing because it contains ${part}.*The other episode follows normal matching`));
+    assert.match(draft, /Incomplete · mapped part missing/, "The combined episode's panel shows its derived draft status");
+    assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing|Incomplete/, "Saved rows show saved state, not the draft");
+    assert.equal(ui.checkboxes()[wholeIndex].checked, false, "The derived status is not a checkbox selection");
+
+    await ui.click("Save coverage mapping");
+    assert.deepEqual(ui.last(), { action: "save", id: "match", revision: 2, reportMissing: [{ provider: flagged.provider, id: flagged.id }] }, "Only the explicit flag is saved");
+    const row = ui.container.querySelector("article")?.textContent || "";
+    assert.match(row, new RegExp(`${part.replace(/^\w+ /, "")}.*Reported missing`));
+    assert.match(row, new RegExp(`Incomplete · mapped part missing.*Contains ${part} \\(Episode ID ${flagged.id}\\), which you reported missing`), "The saved row names the flagged part responsible");
+    assert.equal(row.match(/Incomplete · mapped part missing/g)?.length, 1, `Only the combined episode is derived missing, not ${otherPart}`);
+    assert.equal(row.match(/Reported missing/g)?.length, 1);
+
+    // An explicitly flagged combined episode infers nothing about its parts.
+    await ui.toggle(partIndex);
+    await ui.toggle(wholeIndex);
+    assert.match(ui.editor().textContent || "", new RegExp(`After saving.*${combined} stays missing as Reported missing.*The other episodes follow normal matching`));
+    assert.doesNotMatch(ui.editor().textContent || "", /Incomplete · mapped part missing/);
+  });
+}
 
 test("Report Missing controls lock when a scan starts after the dialog opens", async t => {
   let status = "completed";

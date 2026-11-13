@@ -25,10 +25,14 @@ publish port `3000` directly to the public internet.
   double-length TMDB episode represents multiple split TVDB episodes.
 - Link complete TMDB and TVDB episode sets with persistent Manual Matches,
   including cross-show mappings. Owning either complete side covers the other.
-- Check **Report Missing** on an episode in a one-to-one Manual Match when your
-  local copy lacks its content. The episode stays in Plex results as
-  **Reported missing** until you clear it. This is a local Shelfcheck override;
-  nothing is reported to Plex, TMDB, or TVDB.
+- Check **Report Missing** on an episode in a Manual Match when your local copy
+  lacks its content. The episode stays in Plex results as **Reported missing**
+  until you clear it. When one combined episode is matched to several split
+  episodes, reporting a split episode missing also keeps the combined episode
+  missing as **Incomplete · mapped part missing**, while the other parts stay
+  collected. This is a local Shelfcheck override; nothing is reported to Plex,
+  TMDB, or TVDB. Matches with several episodes on both sides do not accept
+  Report Missing yet.
 - Review incomplete coverage groups, repair broken mappings, and bulk-delete
   selected mappings from the Manual Matches report.
 - Retain downloadable, credential-safe diagnostic logs for the latest 10 scans.
@@ -145,7 +149,8 @@ ownership is resolved in this order:
 6. Missing episode.
 
 A saved **Report Missing** flag on a Manual Match member precedes every step
-above, for TMDB and TVDB episodes alike.
+above, for TMDB and TVDB episodes alike, and so does the
+**Incomplete · mapped part missing** status it gives a combined episode.
 
 Compound matching is deliberately conservative. It requires the same show,
 season, air date, and normalized title; consecutive split TVDB episodes; an

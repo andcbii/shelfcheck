@@ -1,7 +1,7 @@
 import { compoundTvdbCoverage, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
 import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-match";
-import type { CoverageEvidence, CoverageMapping, CoverageOutcome } from "@/lib/manual-coverage-model";
+import { missingPartsOf, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome } from "@/lib/manual-coverage-model";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
 export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; airDate?: string; runtime?: number; providerEpisodeId?: number; source: "TMDB" | "TVDB" };
@@ -59,15 +59,16 @@ export function comparePlexShow(input: PlexComparisonInput) {
   const manualCoverage: NonNullable<PlexShowResult["manualCoverage"]> = [];
   const missingMap = new Map<string, PlexMissingEpisode>();
   const coverageOutcomes: CoverageOutcome[] = [];
-  const addMissing = (key: string, episode: ProviderEpisode, reported: boolean) => {
-    const existing = missingMap.get(key);
+  const addMissing = (key: string, episode: ProviderEpisode, reported: boolean, missingParts: CoverageIdentity[] = []) => {
+    let existing = missingMap.get(key);
     if (existing) {
       if (!existing.sources.includes(episode.source)) existing.sources.push(episode.source);
       existing.title ||= episode.title; existing.airDate ||= episode.airDate;
       if (episode.source === "TMDB") existing.tmdbEpisodeId ||= episode.providerEpisodeId;
       if (episode.source === "TVDB") existing.tvdbEpisodeId ||= episode.providerEpisodeId;
       if (reported) existing.reportedMissing = [...new Set([...(existing.reportedMissing || []), episode.source])];
-    } else missingMap.set(key, { season: episode.season, episode: episode.episode, title: episode.title, airDate: episode.airDate, ...(episode.source === "TMDB" ? { tmdbEpisodeId: episode.providerEpisodeId } : { tvdbEpisodeId: episode.providerEpisodeId }), sources: [episode.source], ...(reported ? { reportedMissing: [episode.source] } : {}) });
+    } else missingMap.set(key, existing = { season: episode.season, episode: episode.episode, title: episode.title, airDate: episode.airDate, ...(episode.source === "TMDB" ? { tmdbEpisodeId: episode.providerEpisodeId } : { tvdbEpisodeId: episode.providerEpisodeId }), sources: [episode.source], ...(reported ? { reportedMissing: [episode.source] } : {}) });
+    if (missingParts.length) existing.incomplete = { ...existing.incomplete, [episode.source]: missingParts };
   };
   for (const episode of providerEpisodes) {
     const key = `${episode.season}:${episode.episode}`;
@@ -75,12 +76,16 @@ export function comparePlexShow(input: PlexComparisonInput) {
     // An explicit Report Missing flag precedes every collected determination:
     // coordinates, direct ownership, crosswalks, compound matching and Manual Match coverage.
     const reported = Boolean(episode.providerEpisodeId && memberMapping?.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId && member.reportMissing));
-    if (episode.season === 0 && !reported) continue;
+    // A combined episode whose split episodes are reported missing is incomplete,
+    // with the same precedence. It is derived from the saved flags, never stored.
+    const missingParts = memberMapping && episode.providerEpisodeId && !reported ? missingPartsOf(memberMapping.members, { provider: episode.source, id: episode.providerEpisodeId }) : [];
+    if (episode.season === 0 && !reported && !missingParts.length) continue;
     const outcome: CoverageOutcome | undefined = memberMapping && episode.providerEpisodeId ? { provider: episode.source, id: episode.providerEpisodeId, status: "missing", season: episode.season, airDate: episode.airDate } : undefined;
     if (outcome) coverageOutcomes.push(outcome);
-    if (reported) {
-      outcome!.reportedMissing = true;
-      addMissing(key, episode, true);
+    if (reported || missingParts.length) {
+      if (reported) outcome!.reportedMissing = true;
+      else outcome!.missingParts = missingParts;
+      addMissing(key, episode, reported, missingParts);
       continue;
     }
     if (localEpisodes.has(key)) { if (outcome) outcome.status = "automatic"; continue; }

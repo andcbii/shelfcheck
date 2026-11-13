@@ -65,6 +65,10 @@ _Avoid_: Ownership correction, declared content
 The status of an episode whose Report Missing flag is set. It outranks every collected determination, so the episode and its show stay in Plex missing results. Flagging one member does not flag another member.
 _Avoid_: Keep missing, marked missing
 
+**Incomplete combined episode**:
+The derived status, shown as **Incomplete · mapped part missing**, of a combined episode whose Manual Match maps it alone to several split episodes when one or more of those split episodes is reported missing. It is recalculated from the currently saved Report Missing flags and is never saved as a flag itself, so it ends as soon as the last responsible flag is cleared or its member leaves the Manual Match. It has the same precedence as Reported missing, which it yields to when the combined episode is also flagged. Reporting the combined episode missing never makes its split episodes missing.
+_Avoid_: Derived flag, inferred missing
+
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.
 _Avoid_: Dismiss, snooze

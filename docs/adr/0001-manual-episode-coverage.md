@@ -38,6 +38,14 @@ Spec #30 deliberately reopens two parts of this decision.
 - A save may change only the flags of an existing mapping without re-resolving its members. It uses the same revision check, scan lock, immediate cached recheck, and next-scan refresh obligations as any other Manual Match save. A flag-only save keeps the mapping's saved health because no provider record was re-reviewed.
 - Editing members without restating flags keeps flags on retained members and drops flags on removed members. Flags on larger mappings are rejected until their rules are delivered; larger mappings keep working without flags.
 
+### Report Missing for combined and split episodes (#38)
+
+- Flags are accepted whenever one provider side of the Manual Match has a single episode, in either provider direction. Many-to-many mappings still reject flags until their rules are delivered.
+- When the single episode is a combined episode mapped to two or more split episodes, any reported-missing split episode makes the combined episode an **incomplete combined episode**, labeled **Incomplete · mapped part missing**, with an explanation naming the flagged part or parts responsible. The status is recalculated from the currently saved flags by the shared comparison and by grouped results; it is never stored as a flag, so clearing a part's flag, removing that member, or deleting the mapping withdraws only that part's effect while other flagged parts keep the combined episode incomplete.
+- The derived status has the same precedence as Reported missing: it is checked before coordinates, direct ownership, crosswalks, compound matching, and Manual Match coverage, and grouped results label it ahead of direct ownership, so it cannot be hidden by any of them. An explicit flag on the combined episode outranks the derived label and is independent of its parts' flags.
+- Neither status removes source evidence. The combined episode's directly owned identities still cover every unflagged part through the complete Manual Match, so explicitly flagging only the combined episode makes no part missing, and flagging one part leaves the others collected.
+- One-to-one Manual Matches keep the #37 rule that a flag changes only its own episode; with one episode on each side there is no combined episode to make incomplete.
+
 The shared backend, immediate cached recheck, next-scan refresh obligations, and active-scan mutation protection of ADR-0003 are unchanged.
 
 ## Manual Matches and Matching Episodes

@@ -58,7 +58,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `english`: TVDB English episode translations by TVDB episode ID (null name = translation without a title); others are 404.
   // `onRequest`: called with each request's pathname before it is answered (e.g. to advance a controlled clock).
   // `raw`: per-pathname successful (HTTP 200) response bodies sent as-is, e.g. one that is not JSON.
-  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, raw: new Map<string, string>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
+  // `hold`: per-pathname gates; a matching request is recorded at once but answered only when its gate settles.
+  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -68,6 +69,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     const u = new URL(String(input));
     requests.push(u.pathname);
     state.onRequest?.(u.pathname);
+    await state.hold.get(u.pathname);
     if (state.statuses.has(u.pathname)) return Response.json({}, { status: state.statuses.get(u.pathname) });
     if (state.raw.has(u.pathname)) return new Response(state.raw.get(u.pathname), { status: 200, headers: { "Content-Type": "application/json" } });
     if (state.bodies.has(u.pathname)) return Response.json(state.bodies.get(u.pathname));
@@ -148,9 +150,11 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=0 WHERE mapping_id=?").run(id);
     for (const member of members) db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=1 WHERE mapping_id=? AND provider=? AND episode_id=?").run(id, member.provider, member.id);
   };
-  // Rewrites saved provider relationships in the format of releases that did not record a receipt time.
+  // Rewrites saved provider relationships in the format of releases that did not record a receipt
+  // time, which also had no shared TMDB crosswalk evidence.
   const writeUndatedRelationships = () => {
     const db = cache.__shelfcheckDatabase!;
+    db.prepare("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE 'tmdb-crosswalk:%'").run();
     for (const row of db.prepare("SELECT cache_key, payload FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE 'comparison:%'").all() as { cache_key: string; payload: string }[]) {
       const comparison = JSON.parse(row.payload) as { relationships: Record<string, { receivedAt?: string }> };
       for (const relationship of Object.values(comparison.relationships)) delete relationship.receivedAt;

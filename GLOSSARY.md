@@ -74,6 +74,10 @@ _Avoid_: Crosswalk expiry job, daily cache clear
 A saved TMDB external-ID crosswalk response whose required refresh in a live scan failed, by a failed request or an unreadable successful response. It grants no coverage in that scan, in later offline rechecks or after a restart, even when the show's last-good comparison is otherwise retained, and the lookup is retried on the next live scan that needs it. Only a later usable response replaces it; coverage from another method does not mark it recovered.
 _Avoid_: Stale fallback, expired match
 
+**Shared crosswalk evidence**:
+The latest outcome of one TVDB episode's TMDB external-ID crosswalk, shared by every show comparison that needs that lookup: a usable response with its receipt time, or a rejection. It is a provider relationship, not an ownership decision; each comparison still decides coverage against current library inventory. A rejection in one comparison applies to every other comparison and offline recheck that saved the older answer.
+_Avoid_: Crosswalk cache, shared match
+
 **Report Missing**:
 A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It applies to the provider episode across all Plex libraries, not to a file or Plex item, and lasts until the user clears it or the member leaves its Manual Match. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.
 _Avoid_: Ownership correction, declared content

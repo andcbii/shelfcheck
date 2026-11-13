@@ -4,7 +4,7 @@ import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/cat
 import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
-import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputs } from "@/lib/sqlite";
+import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInput, deletePlexGeneratedInputs } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
 /**
@@ -132,10 +132,32 @@ export function savePlexInputs(inputs: PlexGeneratedInputs) {
   for (const [key,input] of Object.entries(inputs.comparisons)) savePlexComparison(key, input);
   if (inputs.inventory) savePlexInventory(inputs.inventory);
 }
+/**
+ * Shared crosswalk evidence: the latest outcome of one TVDB episode's TMDB external-ID
+ * crosswalk, shared by every show comparison that needs that lookup. A usable response (a
+ * match or a valid empty answer) has `receivedAt`, the time it was actually received. A
+ * rejected one has `rejectedAt` instead, and keeps an unreadable payload only so offline
+ * rechecks can explain the failure. It records a provider relationship, never ownership.
+ */
+export type SharedTmdbCrosswalk = {value?: unknown; receivedAt?: string; rejectedAt?: string};
+export function readSharedTmdbCrosswalk(tvdbEpisodeId: number) {
+  return readPlexGeneratedInputs<SharedTmdbCrosswalk>(`tmdb-crosswalk:${tvdbEpisodeId}`);
+}
+export function saveSharedTmdbCrosswalk(tvdbEpisodeId: number, evidence: SharedTmdbCrosswalk) {
+  writePlexGeneratedInputs(`tmdb-crosswalk:${tvdbEpisodeId}`, evidence);
+}
+/** The TVDB episode of a saved TMDB external-ID lookup relationship key, if it is one. */
+const tmdbExternalIdLookup = (relationship: string) => relationship.startsWith("TMDB:") ? relationship.match(/\/find\/(\d+)\?external_source=tvdb_id$/)?.[1] : undefined;
 export function clearPlexInputs(ratingKey?: string) {
   if (!ratingKey) { deletePlexGeneratedInputs(); return; }
   const previous = readPlexGeneratedInputs<SavedPlexComparison>(`comparison:${ratingKey}`);
   if (previous) {
+    // Clearing one show also drops the shared crosswalk evidence it saved, so its next lookup
+    // is requested again and other shows cannot keep reusing the cleared answer.
+    for (const relationship of Object.keys(previous.relationships)) {
+      const tvdbEpisodeId = tmdbExternalIdLookup(relationship);
+      if (tvdbEpisodeId) deletePlexGeneratedInput(`tmdb-crosswalk:${tvdbEpisodeId}`);
+    }
     previous.refresh = {tmdb:true, tvdb:true};
     previous.complete = false;
     previous.relationships = {};

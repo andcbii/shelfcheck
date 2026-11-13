@@ -65,6 +65,37 @@ function approximately(value: number, expected: number) {
   return Math.abs(value - expected) <= Math.max(4, expected * 0.12);
 }
 
+/**
+ * The owned combined TMDB episode a local Plex episode carries, with the TVDB records of the
+ * same season and air date that may be its split parts. Undefined when the local episode
+ * cannot be a combined episode, so no TVDB title is needed for it.
+ */
+function sameDayCandidates(episodes: CompoundProviderEpisode[], tmdbEpisodes: CompoundProviderEpisode[], local: LocalCompoundEpisode) {
+  if (!local.tmdbEpisodeId || !usableTitle(local.title) || !local.runtime) return undefined;
+  const tmdb = tmdbEpisodes.find((episode) => episode.providerEpisodeId === local.tmdbEpisodeId);
+  if (!tmdb?.airDate || !usableTitle(tmdb.title) || !tmdb.runtime || tmdb.season !== local.season) return undefined;
+  const title = baseTitle(tmdb.title);
+  if (!title || baseTitle(local.title) !== title) return undefined;
+  const sameDay = episodes.filter((episode) => episode?.source === "TVDB"
+    && episode.providerEpisodeId
+    && episode.season === tmdb.season
+    && episode.airDate === tmdb.airDate);
+  return { tmdb, title, sameDay, localRuntime: local.runtime, tmdbRuntime: tmdb.runtime };
+}
+
+/**
+ * TVDB episodes whose title combined/split matching would read for the current Plex
+ * inventory: the same-day candidates of owned combined TMDB episodes. Only these
+ * episodes' missing titles block a check.
+ */
+export function titleDependentTvdbEpisodeIds(episodes: CompoundProviderEpisode[], localEpisodes: LocalCompoundEpisode[]): Set<number> {
+  const tmdbEpisodes = episodes.filter((episode) => episode?.source === "TMDB");
+  return new Set(localEpisodes.flatMap((local) => {
+    try { return sameDayCandidates(episodes, tmdbEpisodes, local)?.sameDay.map((episode) => episode.providerEpisodeId!) || []; }
+    catch { return []; }
+  }));
+}
+
 /** Returns auditable TVDB coverage granted by locally-owned, combined TMDB episodes. */
 export function compoundTvdbCoverage(episodes: CompoundProviderEpisode[], localEpisodes: LocalCompoundEpisode[]): CompoundCoverage[] {
   return compoundTvdbEvidence(episodes, localEpisodes).coverage;
@@ -93,15 +124,9 @@ export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localE
   return { coverage, failures };
 
   function compoundForLocal(local: LocalCompoundEpisode) {
-    if (!local.tmdbEpisodeId || !usableTitle(local.title) || !local.runtime) return;
-    const tmdb = tmdbEpisodes.find((episode) => episode.providerEpisodeId === local.tmdbEpisodeId);
-    if (!tmdb?.airDate || !usableTitle(tmdb.title) || !tmdb.runtime || tmdb.season !== local.season) return;
-    const title = baseTitle(tmdb.title);
-    if (!title || baseTitle(local.title) !== title) return;
-    const sameDay = episodes.filter((episode) => episode?.source === "TVDB"
-      && episode.providerEpisodeId
-      && episode.season === tmdb.season
-      && episode.airDate === tmdb.airDate);
+    const candidate = sameDayCandidates(episodes, tmdbEpisodes, local);
+    if (!candidate) return;
+    const { title, sameDay, localRuntime, tmdbRuntime } = candidate;
     const matches = sameDay.filter((episode) => usableTitle(episode.title) && baseTitle(episode.title) === title)
       .sort((a, b) => a.episode - b.episode);
     // Without a title, a same-day TVDB record may or may not be a part of this
@@ -121,8 +146,8 @@ export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localE
 
     const splitRuntimes = matches.map((episode) => episode.runtime).filter((runtime): runtime is number => Number.isFinite(runtime) && runtime! > 0);
     const splitRuntime = splitRuntimes.reduce((sum, runtime) => sum + runtime, 0);
-    const exactRuntime = splitRuntimes.length === matches.length && approximately(local.runtime, splitRuntime);
-    const providerRuntime = approximately(local.runtime, tmdb.runtime) && Boolean(typicalRuntime && tmdb.runtime >= typicalRuntime * 1.6);
+    const exactRuntime = splitRuntimes.length === matches.length && approximately(localRuntime, splitRuntime);
+    const providerRuntime = approximately(localRuntime, tmdbRuntime) && Boolean(typicalRuntime && tmdbRuntime >= typicalRuntime * 1.6);
     if (!exactRuntime && !providerRuntime) return;
     const evidence = ["same-show-season-airdate", "matching-normalized-title", "owned-tmdb-identity", exactRuntime ? "plex-runtime-matches-split-total" : "plex-runtime-matches-double-length-tmdb"];
     for (const match of matches) coverage.push({ tvdbEpisodeId: match.providerEpisodeId!, plexSeason: local.season, plexEpisode: local.episode, tmdbEpisodeId: local.tmdbEpisodeId!, evidence });

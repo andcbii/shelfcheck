@@ -20,17 +20,27 @@ const untitled = (episode: ProviderEpisode): episode is ProviderEpisode & { prov
  * titles, IDs, numbering, dates and runtimes are kept. A title already recovered
  * for the same episode (`previous`, the saved catalogue) is reused without a request.
  *
- * `answered` (a reused catalogue's recorded outcomes): an episode TVDB already answered
- * with no English title is asked again only while a title-dependent check still `needed`
- * it; that answer is otherwise kept. A failed request is always retried.
  * Never throws: each episode's failure stays with that episode.
  */
-export async function recoverTvdbTitles(episodes: ProviderEpisode[], previous: ProviderEpisode[] | undefined, requestEnglish: (tvdbEpisodeId: number) => Promise<unknown>, authenticationError?: unknown, answered?: { state: TitleRecoveryState; needed: (tvdbEpisodeId: number) => boolean }) {
+export async function recoverTvdbTitles({ episodes, previous, requestEnglish, authenticationError, reused }: {
+  episodes: ProviderEpisode[];
+  /** The previously saved catalogue, whose recovered English titles are reused. */
+  previous?: ProviderEpisode[];
+  requestEnglish: (tvdbEpisodeId: number) => Promise<unknown>;
+  /** A TVDB authentication failure: a request rejected with it is grouped under its cause. */
+  authenticationError?: unknown;
+  /**
+   * A reused catalogue's recorded outcomes. An episode TVDB already answered with no English
+   * title is asked again only when a title-dependent check needs its title in this comparison;
+   * that answer is otherwise kept. A failed request is always retried.
+   */
+  reused?: { outcomes: TitleRecoveryState; titleNeeded: (tvdbEpisodeId: number) => boolean };
+}) {
   const saved = new Map((previous || []).flatMap(episode => episode.source === "TVDB" && episode.titleLanguage === "eng" && episode.providerEpisodeId && usableTitle(episode.title) ? [[episode.providerEpisodeId, episode.title]] : []));
   const merged = episodes.map(episode => untitled(episode) && saved.has(episode.providerEpisodeId) ? { ...episode, title: saved.get(episode.providerEpisodeId), titleLanguage: "eng" as const } : episode);
   const unresolved: TitleRecoveryState = {};
   const pending = [...new Set(merged.filter(untitled).map(episode => episode.providerEpisodeId))].filter(id => {
-    if (answered?.state[id]?.outcome !== "no-english-title" || answered.needed(id)) return true;
+    if (reused?.outcomes[id]?.outcome !== "no-english-title" || reused.titleNeeded(id)) return true;
     unresolved[id] = { outcome: "no-english-title" };
     return false;
   });

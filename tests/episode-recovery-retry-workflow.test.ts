@@ -25,7 +25,7 @@ const untitled: Episode = { provider: "TVDB", id: 105, season: 1, episode: 5, na
 const part2Check = "episode-check:ratingKey:target:compound-matching:TVDB:102";
 const untitledCheck = "episode-check:ratingKey:target:compound-matching:TVDB:105";
 
-test("an English title answered as unavailable is requested again only while a title-dependent check still needs it", async t => {
+test("an English title answered as unavailable is requested again only on scans where a title-dependent check needs it", async t => {
   const owned = [combined];
   const { rerun, state, requests } = await harness(t, [combined, unowned, finale, part1, part2, untitled], owned);
   const first = await rerun();
@@ -40,12 +40,13 @@ test("an English title answered as unavailable is requested again only while a t
   assert.deepEqual(downloads(requests.slice(before)), [], "no catalogue download");
   assert.deepEqual(episodeIssues(second), [part2Check], "repeated failure keeps one cause");
 
-  // Owning Finale makes the untitled episode's title needed: its recorded answer explains the
-  // blocked check without a new request, and the next scan asks TVDB again.
+  // Owning Finale makes the untitled episode's title needed: the same scan asks TVDB again
+  // before explaining the blocked check, even though the catalogue is reused.
   owned.push(finale);
   before = requests.length;
   const needed = await rerun();
-  assert.deepEqual(translations(requests.slice(before)), ["/v4/episodes/102/translations/eng"]);
+  assert.deepEqual(translations(requests.slice(before)), ["/v4/episodes/102/translations/eng", "/v4/episodes/105/translations/eng"]);
+  assert.deepEqual(downloads(requests.slice(before)), [], "no catalogue download");
   assert.deepEqual(episodeIssues(needed), [part2Check, untitledCheck]);
   assert.match((needed as unknown as Result).coverage.issues.find(issue => issue.id === untitledCheck)!.cause, /no usable default or English title/);
 

@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useId, useRef, useState } from "react";
 import { ReportPagination } from "@/app/reports/report-pagination";
-import { INCOMPLETE_LABEL, missingPartsExplanation, missingPartsOf, reportMissingSelectionProblem, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+import { INCOMPLETE_LABEL, memberKey, missingPartsExplanation, missingPartsOf, reportMissingSelectionProblem, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
   initialUrls: string[];
   initialMappingId?: string;
@@ -29,7 +29,6 @@ function identifiesMember(input: string, member: CoverageMember) {
   } catch { /* Unresolved or incomplete draft input has no saved membership. */ }
   return false;
 }
-const memberKey = (member: { provider: string; id: number }) => `${member.provider}:${member.id}`;
 const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
 const episodeCode = (member: CoverageMember) => `S${String(member.season).padStart(2, "0")}E${String(member.episode).padStart(2, "0")}`;
 const episodeName = (member: CoverageMember) => `${member.provider} ${member.title}`;
@@ -184,7 +183,13 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           // Reopen the latest saved state (for example, flags deleted by Ignore)
           // so the stale draft cannot be resubmitted and silently restore them.
           const refreshed = result.code === "stale-revision" && latest?.find(mapping => mapping.id === editing?.id);
-          if (refreshed) openMapping(refreshed);
+          if (refreshed) {
+            // Keep the typed episode list so a membership edit can be resolved again,
+            // but drop the old review and flags, which belong to the stale revision.
+            const typed = urls;
+            openMapping(refreshed);
+            setUrls(typed);
+          }
         }
         if (result.mappingId && result.code === "membership-conflict") {
           const existing = mappings.find(mapping => mapping.id === result.mappingId);

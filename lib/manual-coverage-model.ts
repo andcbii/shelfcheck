@@ -48,6 +48,9 @@ export type CoverageGroup = {
   missing: (CoverageOutcome & { showKey: string })[];
 };
 
+/** Stable key for a provider episode, shared by server flag rows and client drafts. */
+export const memberKey = (member: { provider: string; id: number }) => `${member.provider}:${member.id}`;
+
 const side = <T extends CoverageIdentity>(members: T[], provider: CoverageProvider) => members.filter(member => member.provider === provider);
 
 /**
@@ -72,7 +75,7 @@ export function reportMissingSelectionProblem(members: (CoverageIdentity & { rep
  * provider side when the other side lists two or more split episodes.
  */
 export function combinedMember<T extends CoverageIdentity>(members: T[]): T | undefined {
-  const tmdb = members.filter(member => member.provider === "TMDB"), tvdb = members.filter(member => member.provider === "TVDB");
+  const tmdb = side(members, "TMDB"), tvdb = side(members, "TVDB");
   if (tmdb.length === 1 && tvdb.length > 1) return tmdb[0];
   if (tvdb.length === 1 && tmdb.length > 1) return tvdb[0];
   return undefined;

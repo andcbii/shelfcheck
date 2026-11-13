@@ -488,3 +488,28 @@ test("a rejected Ignore keeps the show visible and explains why", async (t) => {
   assert.equal(container.querySelector(".show-name-button")?.textContent, "Example Show", "The show's results stay visible");
   assert.match(container.querySelector(".ignored-stat")?.textContent || "", /0/, "The rejected Ignore is not listed");
 });
+
+test("a failed save whose Ignore the server did keep leaves the show's results hidden", async (t) => {
+  let saved = false;
+  const defaults = configuredFetch(async () => json(completed));
+  const { container, click } = await mountPage(t, async (input, init) => {
+    if (input === "/api/plex/state" && init?.method === "PATCH") {
+      // The first save keeps the Ignore but fails afterwards; Restore then succeeds.
+      if (!saved) { saved = true; return Response.json({ error: "Plex preferences could not be saved." }, { status: 500 }); }
+      saved = false;
+      return json({ saved: true });
+    }
+    if (input === "/api/plex/state") return json({ settings: { ignoredShows: saved ? [{ ratingKey: "one", title: "Example Show" }] : [], ignoredSeasons: [] } });
+    return defaults(input, init);
+  });
+  await click("Example Show");
+  await click("Ignore this show");
+  await click("Forever");
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.equal(container.querySelector(".show-name-button"), null, "The saved Ignore keeps the show hidden");
+  assert.match(container.querySelector(".ignored-stat")?.textContent || "", /1/);
+  await click("IGNORED SHOWS");
+  await click("Restore Example Show");
+  await click("Close ignored shows");
+  assert.equal(container.querySelector(".show-name-button"), null, "Results invalidated by the saved Ignore stay removed after Restore until a new scan");
+});

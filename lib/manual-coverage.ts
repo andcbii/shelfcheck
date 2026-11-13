@@ -2,7 +2,7 @@ import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { coverageDatabase } from "@/lib/sqlite";
-import { reportMissingSelectionProblem, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+import { memberKey, reportMissingSelectionProblem, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 export class CoverageError extends Error {
   constructor(message: string, public status = 400, public code = "validation", public mappingId?: string) {
     super(message);
@@ -16,19 +16,24 @@ export function coverageState() {
   return {revision:state.revision,pending:issues.length ? 1 : 0,issues};
 }
 
-const memberKey = (member: { provider: string; id: number }) => `${member.provider}:${member.id}`;
-
 // Mapping payloads describe members; Report Missing flags live on the membership rows.
-function withFlags(db: ReturnType<typeof coverageDatabase>, mapping: CoverageMapping): CoverageMapping {
-  const flagged = new Set((db.prepare("SELECT provider,episode_id FROM shelfcheck_coverage_members WHERE mapping_id=? AND report_missing=1").all(mapping.id) as { provider: string; episode_id: number }[]).map(row => `${row.provider}:${row.episode_id}`));
-  return { ...mapping, members: mapping.members.map(member => ({ ...member, reportMissing: flagged.has(memberKey(member)) })) };
+function flaggedMembers(db: ReturnType<typeof coverageDatabase>, mappingId?: string): Set<string> {
+  const rows = (mappingId === undefined
+    ? db.prepare("SELECT mapping_id,provider,episode_id FROM shelfcheck_coverage_members WHERE report_missing=1").all()
+    : db.prepare("SELECT mapping_id,provider,episode_id FROM shelfcheck_coverage_members WHERE mapping_id=? AND report_missing=1").all(mappingId)) as { mapping_id: string; provider: string; episode_id: number }[];
+  return new Set(rows.map(row => `${row.mapping_id}|${row.provider}:${row.episode_id}`));
+}
+function withFlags(db: ReturnType<typeof coverageDatabase>, mapping: CoverageMapping, flagged = flaggedMembers(db, mapping.id)): CoverageMapping {
+  return { ...mapping, members: mapping.members.map(member => ({ ...member, reportMissing: flagged.has(`${mapping.id}|${memberKey(member)}`) })) };
 }
 
 export function listCoverageMappings(): CoverageMapping[] {
   const db = coverageDatabase();
+  // One query for every flag, not one per mapping.
+  const flagged = flaggedMembers(db);
   return (db.prepare("SELECT payload FROM shelfcheck_coverage_mappings ORDER BY rowid").all() as {
     payload: string;
-  }[]).map(row => withFlags(db, JSON.parse(row.payload)));
+  }[]).map(row => withFlags(db, JSON.parse(row.payload), flagged));
 }
 
 export function assertCoverageMutationAllowed() {

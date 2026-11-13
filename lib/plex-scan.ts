@@ -994,14 +994,22 @@ export type IgnoreScope = {ratingKey: string; seasons?: number[]};
 function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
   if (!scopes.length) return [];
   const inputs=readPlexInputs();
-  const season=(member: CoverageMember) => (member.provider==="TMDB" ? inputs.tmdb : inputs.tvdb)[String(member.showId)]?.episodes.find(episode=>episode.providerEpisodeId===member.id)?.season
-    ?? Object.values(member.provider==="TMDB" ? inputs.tmdb : inputs.tvdb).flatMap(catalogue=>catalogue.episodes).find(episode=>episode.providerEpisodeId===member.id)?.season
-    ?? member.season;
+  // Provider season of every catalogued episode, built once per cleanup.
+  const seasons=new Map<string,number>();
+  for (const [provider,catalogues] of [["TMDB",inputs.tmdb],["TVDB",inputs.tvdb]] as const)
+    for (const catalogue of Object.values(catalogues)) for (const episode of catalogue.episodes)
+      if (episode.providerEpisodeId) seasons.set(`${provider}:${episode.providerEpisodeId}`,episode.season);
+  // The member's own provider show only, not aliases or Plex GUIDs, so a
+  // mis-tagged item or shared alias never reaches another show's flags.
+  const ownShow=(input: SavedPlexComparison, member: CoverageMember) => member.provider==="TMDB"
+    ? input.tmdbId===member.showId || Boolean(input.tmdbId && inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
+    : input.tvdbId===member.showId || Boolean(input.tvdbId && inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
   return listCoverageMappings().flatMap(mapping=>mapping.members).filter(member=>scopes.some(scope=>{
     const input=inputs.comparisons[scope.ratingKey];
-    const inShow=(input && memberInComparison(inputs,input,member))
-      || Boolean(inputs.inventory?.evidence.some(item=>item.showKey===scope.ratingKey && item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id)));
-    return inShow && (!scope.seasons || scope.seasons.includes(season(member)));
+    // Without a saved comparison, fall back to the show's own Plex items.
+    const inShow=input ? ownShow(input,member)
+      : Boolean(inputs.inventory?.evidence.some(item=>item.showKey===scope.ratingKey && item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id)));
+    return inShow && (!scope.seasons || scope.seasons.includes(seasons.get(`${member.provider}:${member.id}`) ?? member.season));
   }));
 }
 
@@ -1050,6 +1058,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   const inventory=inputs.inventory;
   const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(inventory.groups, inventory.items, ignored);
   const results=[...prior.shows];
+  const mappings=listCoverageMappings();
   for (const key of targets) {
     if (ignored.has(key)) continue;
     const input=inputs.comparisons[key];
@@ -1062,7 +1071,7 @@ async function recheckCoverage(impact: CoverageImpact) {
       const compared=await replayScope.run(replay,()=>comparisonIssueScope.run({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},()=>relationshipScope.run(input.relationships,()=>compareLoadedPlexShow({
         ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
         providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},
-        libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings:listCoverageMappings(),manualInventory:inventory.evidence,autoCompoundEpisodes:settings.autoCompoundEpisodes!==false,
+        libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory:inventory.evidence,autoCompoundEpisodes:settings.autoCompoundEpisodes!==false,
         config:{tmdbToken:""},token:"",traktCredentials:Object.values(input.relationships).some(relationship=>relationship.provider==="Trakt") ? {clientId:"",accessToken:""} : null,
         tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},addWarning:()=>{},setHeartbeat:()=>{},
       }))));

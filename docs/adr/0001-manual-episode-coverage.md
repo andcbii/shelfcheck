@@ -54,6 +54,8 @@ Spec #30 deliberately reopens two parts of this decision.
 
 The shared backend, immediate cached recheck, next-scan refresh obligations, and active-scan mutation protection of ADR-0003 are unchanged.
 
+Specials (season 0) follow the same rules on both providers. TVDB catalogues now keep specials, as TMDB catalogues already did, and the comparator still leaves unflagged specials out of missing results. A catalogue saved before this change lacks its specials until it is downloaded again. Saving a flag records that show's refresh obligation, so the next scan downloads it.
+
 ### Ignore clears Report Missing (#40)
 
 - Ignore is authoritative over Report Missing. Saving Plex preferences compares the active rules before and after the save. Each **newly applied** scope deletes the explicit flags of Manual Match members inside it, in the same transaction that saves the rule. A newly applied scope is a whole show, or seasons added to a show's season ignore. Changing an existing rule's duration applies nothing new. Temporary and permanent Ignore clean up the same way. Restore and expiry never recreate deleted flags.

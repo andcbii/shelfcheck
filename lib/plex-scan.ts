@@ -206,8 +206,10 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
   while (page < 100) {
     const body = await checkedJson<{ data?: { episodes?: { id?: number; seasonNumber?: number; number?: number; name?: string; aired?: string; runtime?: number }[] }; links?: { next?: string | null } }>(`${TVDB}/series/${seriesId}/episodes/default?page=${page}`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
-    for (const episode of body.data.episodes) if ((episode.seasonNumber || 0) > 0 && episode.number) {
-      episodes.push({ showTitle: series?.data?.name || showTitle, season: episode.seasonNumber as number, episode: episode.number, title: episode.name, airDate: episode.aired, runtime: episode.runtime, providerEpisodeId: episode.id, source: "TVDB" });
+    // Specials (season 0) are kept so Report Missing can be evaluated on them; the
+    // comparator still ignores unflagged specials, as before.
+    for (const episode of body.data.episodes) if ((episode.seasonNumber || 0) >= 0 && episode.number) {
+      episodes.push({ showTitle: series?.data?.name || showTitle, season: episode.seasonNumber || 0, episode: episode.number, title: episode.name, airDate: episode.aired, runtime: episode.runtime, providerEpisodeId: episode.id, source: "TVDB" });
     }
     if (!body.links?.next) break;
     page += 1;

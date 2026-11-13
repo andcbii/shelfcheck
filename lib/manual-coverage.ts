@@ -2,7 +2,7 @@ import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { coverageDatabase } from "@/lib/sqlite";
-import { reportMissingSupported, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+import { reportMissingSelectionProblem, type CoverageEvidence, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 export class CoverageError extends Error {
   constructor(message: string, public status = 400, public code = "validation", public mappingId?: string) {
     super(message);
@@ -69,9 +69,11 @@ export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?
     members = (members || existing!.members).map(member => { const description = { ...member }; delete description.reportMissing; return description; });
     const flags = requestedFlags(reportMissing, members) || new Set(existing?.members.filter(member => member.reportMissing).map(memberKey));
     for (const key of flags) if (!members.some(member => memberKey(member) === key)) flags.delete(key);
-    // Many-to-many flag rules are delivered separately; those mappings save without flags.
-    if (flags.size && !reportMissingSupported(members))
-      throw new CoverageError("Report Missing is available when one provider side has a single episode. Clear Report Missing to save a match with several episodes on both sides.", 400, "report-missing-unsupported", existing?.id);
+    // Every manual save, including membership edits that change the mapping's shape,
+    // must leave a many-to-many mapping with flags on both sides or none. Nothing is
+    // written before this check, so a rejected save leaves the saved state untouched.
+    const selectionProblem = reportMissingSelectionProblem(members.map(member => ({ ...member, reportMissing: flags.has(memberKey(member)) })));
+    if (selectionProblem) throw new CoverageError(selectionProblem, 400, "report-missing-one-sided", existing?.id);
     for (const m of members) {
       const row = db.prepare("SELECT mapping_id FROM shelfcheck_coverage_members WHERE provider=? AND episode_id=?").get(m.provider, m.id) as {
         mapping_id: string;

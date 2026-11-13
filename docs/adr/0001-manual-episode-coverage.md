@@ -46,6 +46,12 @@ Spec #30 deliberately reopens two parts of this decision.
 - Neither status removes source evidence. The combined episode's directly owned identities still cover every unflagged part through the complete Manual Match, so explicitly flagging only the combined episode makes no part missing, and flagging one part leaves the others collected.
 - One-to-one Manual Matches keep the #37 rule that a flag changes only its own episode; with one episode on each side there is no combined episode to make incomplete.
 
+### Report Missing for many-to-many Manual Matches (#39)
+
+- Many-to-many Manual Matches now accept flags. Because neither side is a single combined episode, Shelfcheck cannot know which opposite-side episode contains a flagged one, so it derives no status: each flag affects only its own episode with the #37 precedence, scope, and durability, and unselected episodes keep their normal matching evidence.
+- Every manual save, whether flag-only or a reviewed membership edit, applies the **both-sides-or-none rule**: when the saved shape is many-to-many, the explicit flags must be empty or include at least one episode on each provider side. Derived status never satisfies it. The editor checks the draft before sending it and explains how to repair the selection or clear every flag; the mapping mutation rejects a one-sided save with `report-missing-one-sided` before writing anything, so the saved mapping, its flags, and cached results are unchanged.
+- The rule belongs to manual saves only. Reading, listing, comparing, rechecking, and deleting accept a one-sided persisted state, which automatic Ignore cleanup may leave; its remaining flags stay active until the next manual save repairs or clears them.
+
 The shared backend, immediate cached recheck, next-scan refresh obligations, and active-scan mutation protection of ADR-0003 are unchanged.
 
 ## Manual Matches and Matching Episodes

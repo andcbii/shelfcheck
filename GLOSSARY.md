@@ -69,6 +69,10 @@ _Avoid_: Keep missing, marked missing
 The derived status, shown as **Incomplete · mapped part missing**, of a combined episode whose Manual Match maps it alone to several split episodes when one or more of those split episodes is reported missing. It is recalculated from the currently saved Report Missing flags and is never saved as a flag itself, so it ends as soon as the last responsible flag is cleared or its member leaves the Manual Match. It has the same precedence as Reported missing, which it yields to when the combined episode is also flagged. Reporting the combined episode missing never makes its split episodes missing.
 _Avoid_: Derived flag, inferred missing
 
+**Many-to-many Manual Match**:
+A Manual Match whose TMDB and TVDB sides each list two or more episodes, so neither side is a single combined episode. Shelfcheck never guesses which opposite-side episode contains a reported-missing episode, so no status is derived: each Report Missing flag affects only its own episode. A manual save must leave either no flags or at least one explicit flag on each provider side (the **both-sides-or-none rule**); derived status never satisfies it. The rule checks manual saves, including membership edits that change the mapping into this shape, and never rejects reading or comparing saved flags, so a one-sided state left by automatic cleanup stays active until the next manual save repairs or clears it.
+_Avoid_: Partial selection, guessed correspondence
+
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.
 _Avoid_: Dismiss, snooze

@@ -181,7 +181,7 @@ test("Report Missing beats automatic crosswalk ownership and only names members 
   const current = (await flagged.json()).mapping;
   const outsider = await h.post({ action: "save", id: current.id, revision: current.revision, reportMissing: [{ provider: "TVDB", id: 999 }] });
   assert.equal(outsider.status, 400);
-  // One-to-many mappings accept flags too (see report-missing-combined-workflow); many-to-many stays rejected.
+  // Larger mappings accept flags too (see report-missing-combined-workflow and report-missing-many-to-many-workflow).
   const larger = await h.save(101, [201, 202], { reportMissing: [{ provider: "TVDB", id: 202 }] });
   assert.equal(larger.status, 201);
   assert.deepEqual(await h.flags(current.id), ["TVDB:200"], "Saving another mapping leaves this mapping's flags intact");

@@ -167,6 +167,7 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .manual-match-editor .report-missing-derived small { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 .manual-match-editor label.report-missing-toggle { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font: 13px var(--font-sans); letter-spacing: normal; text-transform: none; cursor: pointer; }
 .manual-match-editor .report-missing-explanation { padding: 12px 14px; border: 1px solid var(--line); background: rgba(255,255,255,.35); font-size: 13px; }
+.manual-match-editor .report-missing-validation { padding: 12px 14px; border: 1px solid #e7baa1; background: #fce9dc; color: #933b1b; font-size: 13px; overflow-wrap: anywhere; }
 .manual-match-editor .report-missing-impact { padding: 12px 14px; background: rgba(0,0,0,.05); font-size: 13px; }
 .manual-match-editor .manual-match-draft-state { color: var(--muted); font-size: 12px; }
 .manual-match-editor .manual-match-record > a { display: block; min-height: 0; padding: 0; border: 0; color: inherit; font-size: 12px; line-height: 1.5; text-decoration: underline; overflow-wrap: anywhere; }

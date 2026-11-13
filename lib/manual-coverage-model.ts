@@ -48,15 +48,23 @@ export type CoverageGroup = {
   missing: (CoverageOutcome & { showKey: string })[];
 };
 
-const side = (members: CoverageIdentity[], provider: CoverageProvider) => members.filter(member => member.provider === provider);
+const side = <T extends CoverageIdentity>(members: T[], provider: CoverageProvider) => members.filter(member => member.provider === provider);
 
 /**
- * Report Missing flags may be saved when one provider side is a single episode:
- * one-to-one, or a combined episode and its split episodes in either direction.
- * Many-to-many mappings cannot carry flags yet.
+ * Manual-save rule for Report Missing selections. A many-to-many Manual Match
+ * (several episodes on both provider sides) saves zero flags or at least one
+ * explicit flag on each side, so Shelfcheck never guesses which opposite-side
+ * episode contains a flagged one. Derived status never counts as a selection.
+ * Returns why the selection cannot be saved, or undefined when it can.
+ *
+ * Only manual saves apply this rule. Reading or comparing persisted flags
+ * accepts a one-sided state, which automatic Ignore cleanup may leave behind.
  */
-export function reportMissingSupported(members: CoverageIdentity[]) {
-  return side(members, "TMDB").length === 1 || side(members, "TVDB").length === 1;
+export function reportMissingSelectionProblem(members: (CoverageIdentity & { reportMissing?: boolean })[]): string | undefined {
+  const tmdb = side(members, "TMDB"), tvdb = side(members, "TVDB");
+  if (tmdb.length < 2 || tvdb.length < 2 || !members.some(member => member.reportMissing)) return undefined;
+  const unflagged = !tmdb.some(member => member.reportMissing) ? "TMDB" : !tvdb.some(member => member.reportMissing) ? "TVDB" : undefined;
+  return unflagged && `This Manual Match has several episodes on both provider sides, so Report Missing needs an explicit selection on each side. Select Report Missing on at least one ${unflagged} episode that your local copy lacks, or clear Report Missing on every episode.`;
 }
 
 /**

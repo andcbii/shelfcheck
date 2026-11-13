@@ -10,7 +10,7 @@ import { ManualMatchEditor } from "../app/components/manual-match-editor";
 const tmdb = { provider: "TMDB", id: 100, showId: 10, show: "Animaniacs", title: "Murder Pals", season: 3, episode: 18, url: "https://www.themoviedb.org/tv/10/season/3/episode/18", reportMissing: false };
 const tvdb = { provider: "TVDB", id: 200, showId: 20, show: "Animaniacs", title: "Murder Pals (3)", season: 8, episode: 22, url: "https://thetvdb.com/series/animaniacs/episodes/200", reportMissing: false };
 
-async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; scan?: () => string; dialog?: boolean } = {}) {
+async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; resolved?: typeof tmdb[]; scan?: () => string; dialog?: boolean } = {}) {
   const browser = new Window({ url: "http://localhost/plex" });
   let mapping = { id: "match", revision: 2, health: "healthy", members: options.members || [tmdb, tvdb] };
   const posts: Record<string, unknown>[] = [];
@@ -21,9 +21,10 @@ async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; sc
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body));
       posts.push(body);
-      if (body.action === "resolve") return Response.json({ preview: "reviewed", members: mapping.members.map(member => ({ ...member, reportMissing: undefined })) });
+      if (body.action === "resolve") return Response.json({ preview: "reviewed", members: (options.resolved || mapping.members).map(member => ({ ...member, reportMissing: undefined })) });
       const flags = (body.reportMissing || []) as { provider: string; id: number }[];
-      mapping = { ...mapping, revision: mapping.revision + 1, members: mapping.members.map(member => ({ ...member, reportMissing: flags.some(flag => flag.provider === member.provider && flag.id === member.id) })) };
+      const members = body.preview ? options.resolved || mapping.members : mapping.members;
+      mapping = { ...mapping, revision: mapping.revision + 1, members: members.map(member => ({ ...member, reportMissing: flags.some(flag => flag.provider === member.provider && flag.id === member.id) })) };
       return Response.json({ mapping, revision: mapping.revision, pending: 0 });
     }
     return Response.json({ mappings: [mapping], revision: mapping.revision, pending: 0 });
@@ -113,11 +114,73 @@ for (const dismissal of ["Close", "backdrop"]) {
   });
 }
 
-test("many-to-many mappings stay editable without Report Missing controls", async t => {
-  const ui = await mount(t, { members: [tmdb, { ...tmdb, id: 101, title: "Other half", episode: 19, url: "https://www.themoviedb.org/tv/10/season/3/episode/19" }, tvdb, { ...tvdb, id: 201, title: "Murder Pals (2)", episode: 20, url: "https://thetvdb.com/series/animaniacs/episodes/201" }] });
-  assert.equal(ui.checkboxes().length, 0);
-  assert.match(ui.editor().textContent || "", /Report Missing is available when one provider side has a single episode/);
-  assert.ok(ui.button("Resolve and review"));
+// Two TMDB episodes and two TVDB episodes describe the same content; neither side is a combined episode.
+const tmdbB = { ...tmdb, id: 101, title: "Other half", episode: 19, url: "https://www.themoviedb.org/tv/10/season/3/episode/19" };
+const tvdbB = { ...tvdb, id: 201, title: "Murder Pals (2)", episode: 20, url: "https://thetvdb.com/series/animaniacs/episodes/201" };
+const manyToMany = [tmdb, tmdbB, tvdb, tvdbB];
+const repairHint = /at least one (TMDB|TVDB) episode.*or clear Report Missing on every episode/;
+
+test("many-to-many drafts need an explicit Report Missing selection on both provider sides or none", async t => {
+  const ui = await mount(t, { members: manyToMany });
+  const save = () => ui.button("Save coverage mapping")!;
+  const validation = () => ui.editor().querySelector(".report-missing-validation")?.textContent || "";
+  assert.equal(ui.checkboxes().length, 4, "Every episode in either provider panel has Report Missing");
+  assert.match(ui.editor().textContent || "", /After saving.*every episode follows normal matching/i, "Zero flags are valid");
+
+  // A one-sided selection explains how to repair it and cannot be saved.
+  await ui.toggle(2);
+  assert.match(validation(), /at least one TMDB episode.*or clear Report Missing on every episode/);
+  assert.equal(save().disabled, true);
+  assert.ok(save().getAttribute("aria-describedby")?.split(" ").some(id => ui.container.querySelector(`[id="${id}"]`)?.textContent === validation()), "The disabled save is described by the validation message");
+  assert.doesNotMatch(ui.editor().textContent || "", /Incomplete · mapped part missing/, "Nothing is derived for the opposite side");
+  await ui.toggle(2);
+  await ui.toggle(1);
+  assert.match(validation(), /at least one TVDB episode/);
+  assert.equal(save().disabled, true);
+
+  // Flags on both sides are valid, previewed and saved as explicit selections only.
+  await ui.toggle(3);
+  assert.equal(validation(), "");
+  assert.equal(save().disabled, false);
+  assert.match(ui.editor().textContent || "", /After saving.*TMDB Other half, TVDB Murder Pals \(2\) stay missing as Reported missing in Plex results\. The other episodes follow normal matching\./);
+  assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing/, "Saved rows show saved state, not the draft");
+  await ui.click("Save coverage mapping");
+  assert.deepEqual(ui.last(), { action: "save", id: "match", revision: 2, reportMissing: [{ provider: "TMDB", id: 101 }, { provider: "TVDB", id: 201 }] });
+  const row = ui.container.querySelector("article")?.textContent || "";
+  assert.equal(row.match(/Reported missing/g)?.length, 2);
+  assert.doesNotMatch(row, /Incomplete/);
+  assert.match(ui.editor().textContent || "", /No unsaved changes/);
+
+  // Clearing every flag is valid too.
+  await ui.toggle(1);
+  assert.equal(save().disabled, true, "Clearing one side alone is one-sided");
+  await ui.toggle(3);
+  await ui.click("Save coverage mapping");
+  assert.deepEqual(ui.last()?.reportMissing, []);
+});
+
+test("a membership edit that makes the draft many-to-many must repair its retained one-sided flags", async t => {
+  const ui = await mount(t, { members: [tmdb, tvdb, { ...tvdbB, reportMissing: true }], resolved: manyToMany });
+  assert.equal(ui.editor().querySelector(".report-missing-validation"), null, "The saved one-to-many flag is valid");
+  // Re-resolving the edited membership reviews a second TMDB episode.
+  await ui.click("Resolve and review");
+  assert.equal(ui.checkboxes().length, 4);
+  assert.match(ui.editor().querySelector(".report-missing-validation")?.textContent || "", /at least one TMDB episode/);
+  assert.equal(ui.button("Save coverage mapping")?.disabled, true, "The retained flag alone cannot be saved with the new shape");
+  await ui.toggle(1);
+  await ui.click("Save coverage mapping");
+  assert.deepEqual(ui.last(), { action: "save", preview: "reviewed", id: "match", revision: 2, reportMissing: [{ provider: "TMDB", id: 101 }, { provider: "TVDB", id: 201 }] });
+});
+
+test("a saved one-sided many-to-many state stays visible and the next save requires repair or clearing", async t => {
+  // Automatic Ignore cleanup can leave flags on one side only.
+  const ui = await mount(t, { members: [tmdb, tmdbB, tvdb, { ...tvdbB, reportMissing: true }] });
+  assert.match(ui.container.querySelector("article")?.textContent || "", /Murder Pals \(2\).*Reported missing/, "The saved flag stays visible");
+  assert.match(ui.editor().querySelector(".report-missing-validation")?.textContent || "", repairHint);
+  await ui.toggle(3);
+  assert.equal(ui.editor().querySelector(".report-missing-validation"), null);
+  await ui.click("Save coverage mapping");
+  assert.deepEqual(ui.last()?.reportMissing, []);
 });
 
 // The real example: TMDB "Murder Pals" is one combined episode; TVDB lists it as two parts.

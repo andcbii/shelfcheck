@@ -31,8 +31,9 @@ publish port `3000` directly to the public internet.
   episodes, reporting a split episode missing also keeps the combined episode
   missing as **Incomplete · mapped part missing**, while the other parts stay
   collected. This is a local Shelfcheck override; nothing is reported to Plex,
-  TMDB, or TVDB. Matches with several episodes on both sides do not accept
-  Report Missing yet.
+  TMDB, or TVDB. When both sides of a match list several episodes, Shelfcheck
+  does not guess which episodes correspond, so saving Report Missing there
+  needs at least one checked episode on each side, or none.
 - Review incomplete coverage groups, repair broken mappings, and bulk-delete
   selected mappings from the Manual Matches report.
 - Retain downloadable, credential-safe diagnostic logs for the latest 10 scans.

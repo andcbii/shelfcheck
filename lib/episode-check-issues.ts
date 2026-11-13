@@ -41,6 +41,17 @@ export function recordedEpisodeCrosswalkFailures(ratingKey: string) {
     return match ? [{ crosswalk: match[1] as EpisodeCrosswalk, tvdbEpisodeId: Number(match[2]) }] : [];
   });
 }
+/**
+ * Whether a recorded current cause says a title-dependent check of this TVDB episode
+ * is blocked by its missing title (combined/split matching is the only one).
+ */
+export function recordedTitleDependentChecks(ratingKey: string) {
+  const blocked = new Set(coverageIssueIdsWithPrefix(`episode-check:${ratingKey}:compound-matching:TVDB:`).flatMap(id => {
+    const match = id.match(/:TVDB:(\d+)$/);
+    return match ? [Number(match[1])] : [];
+  }));
+  return (tvdbEpisodeId: number) => blocked.has(tvdbEpisodeId);
+}
 
 export function episodeCheckIssue(show: EpisodeCheckShow, failure: EpisodeCheckFailure): CoverageIssue {
   const { episode } = failure;

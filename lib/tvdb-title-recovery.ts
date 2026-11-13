@@ -19,14 +19,22 @@ const untitled = (episode: ProviderEpisode): episode is ProviderEpisode & { prov
  * Merging is by TVDB episode identity and touches only the title: valid default
  * titles, IDs, numbering, dates and runtimes are kept. A title already recovered
  * for the same episode (`previous`, the saved catalogue) is reused without a request.
+ *
+ * `answered` (a reused catalogue's recorded outcomes): an episode TVDB already answered
+ * with no English title is asked again only while a title-dependent check still `needed`
+ * it; that answer is otherwise kept. A failed request is always retried.
  * Never throws: each episode's failure stays with that episode.
  */
-export async function recoverTvdbTitles(episodes: ProviderEpisode[], previous: ProviderEpisode[] | undefined, requestEnglish: (tvdbEpisodeId: number) => Promise<unknown>, authenticationError?: unknown) {
+export async function recoverTvdbTitles(episodes: ProviderEpisode[], previous: ProviderEpisode[] | undefined, requestEnglish: (tvdbEpisodeId: number) => Promise<unknown>, authenticationError?: unknown, answered?: { state: TitleRecoveryState; needed: (tvdbEpisodeId: number) => boolean }) {
   const saved = new Map((previous || []).flatMap(episode => episode.source === "TVDB" && episode.titleLanguage === "eng" && episode.providerEpisodeId && usableTitle(episode.title) ? [[episode.providerEpisodeId, episode.title]] : []));
   const merged = episodes.map(episode => untitled(episode) && saved.has(episode.providerEpisodeId) ? { ...episode, title: saved.get(episode.providerEpisodeId), titleLanguage: "eng" as const } : episode);
-  const pending = [...new Set(merged.filter(untitled).map(episode => episode.providerEpisodeId))];
-  const titles = new Map<number, string>();
   const unresolved: TitleRecoveryState = {};
+  const pending = [...new Set(merged.filter(untitled).map(episode => episode.providerEpisodeId))].filter(id => {
+    if (answered?.state[id]?.outcome !== "no-english-title" || answered.needed(id)) return true;
+    unresolved[id] = { outcome: "no-english-title" };
+    return false;
+  });
+  const titles = new Map<number, string>();
   await Promise.all(pending.map(async id => {
     try {
       const body = await requestEnglish(id);

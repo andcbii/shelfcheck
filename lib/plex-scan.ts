@@ -15,7 +15,7 @@ import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { usableTitle, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
-import { reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
+import { reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures, recordedTitleDependentChecks } from "@/lib/episode-check-issues";
 import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
@@ -923,7 +923,7 @@ async function runPlexScan(targetRatingKey?: string) {
           if (!reuseTvdb && tvdbAuthenticationError) throw tvdbAuthenticationError;
           const tvdb = reuseTvdb ? {episodes:savedTvdb.episodes,malformed:savedTvdb.malformed || [],slug:savedTvdb.show.slug,name:savedTvdb.show.name} : await tvdbSeries(tvdbId, token, undefined, primary.title || "Unknown show");
           // Default catalogue first; only unusable titles are recovered, per TVDB episode, from English.
-          const recovery = await recoverTvdbTitles(tvdb.episodes, reuseTvdb ? undefined : savedTvdb?.episodes, tvdbEpisodeId => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : providerClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"), tvdbAuthenticationError);
+          const recovery = await recoverTvdbTitles(tvdb.episodes, reuseTvdb ? undefined : savedTvdb?.episodes, tvdbEpisodeId => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : providerClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"), tvdbAuthenticationError, reuseTvdb ? {state: savedTvdb.titleRecovery || {}, needed: recordedTitleDependentChecks(ratingKey)} : undefined);
           tvdb.episodes = recovery.episodes;
           titleRecovery = {state: recovery.unresolved, carried: false};
           for (const tvdbEpisodeId of recovery.recovered) logger.info("plex.show.episode-title-recovered", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId, language: "eng" });

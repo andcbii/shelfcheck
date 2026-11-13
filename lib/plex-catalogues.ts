@@ -55,11 +55,17 @@ export type PlexGeneratedInputs = {
    */
   pendingSafeguards: Record<string, true>;
 };
-/** Saved records are validated on every read, so reuse never compares a malformed record. */
+/**
+ * Saved records are validated on every read, so reuse never compares a malformed record.
+ * As with a fresh download, a saved catalogue whose records are all unusable is unavailable,
+ * never an empty verified catalogue: it is left out, so it is refreshed, and last-good
+ * comparison results are kept if that refresh fails.
+ */
 function savedCatalogues<T extends {id:number}>(provider: CoverageProvider, catalogues: Record<string, ProviderCatalogue<T>>) {
-  for (const catalogue of Object.values(catalogues)) {
+  for (const [key, catalogue] of Object.entries(catalogues)) {
     if (!usableProviderCatalogue(catalogue)) continue;
     const {episodes, malformed} = normaliseSavedEpisodes(provider, catalogue.show.id, catalogue.episodes, catalogue.malformed);
+    if (!episodes.length && malformed.length) { delete catalogues[key]; continue; }
     catalogue.episodes = episodes;
     if (malformed.length) catalogue.malformed = malformed; else delete catalogue.malformed;
     const titleRecovery = savedTitleRecovery(catalogue.titleRecovery);

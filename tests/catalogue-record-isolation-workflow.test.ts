@@ -181,3 +181,32 @@ test("a TVDB record with an ID but no numbering still takes part in ID-based che
   assert.equal(issue.episode?.id, 103, "the record is still reported as lacking numbering");
   assert.match(issue.impacts!.join(" "), /Manual Match/);
 });
+
+test("a saved catalogue whose records are all unusable is not reused as an empty verified catalogue", async t => {
+  const { rerun, requests, restart } = await harness(t, catalogue, owned);
+  assert.deepEqual(rows(await rerun()), ["TMDB:9002", "TVDB:102"]);
+  // The saved TVDB catalogue is damaged: no record has both identity and numbering.
+  const saved = sqlite.readPlexGeneratedInputs<{ episodes: unknown[] }>("tvdb:20")!;
+  sqlite.writePlexGeneratedInputs("tvdb:20", { ...saved, episodes: [null, { source: "TVDB", providerEpisodeId: 102, title: "Two" }] });
+  restart();
+  const before = requests.length;
+  const result = await rerun();
+  assert.ok(requests.slice(before).includes("/v4/series/20/episodes/default"), "the unusable saved catalogue is refreshed instead of reused");
+  assert.deepEqual(rows(result), ["TMDB:9002", "TVDB:102"], "TVDB 102 is still missing, not hidden by an empty catalogue");
+  assert.deepEqual(sharedIssues(result), []);
+});
+
+test("a saved catalogue whose records are all unusable keeps last-good results when its refresh fails", async t => {
+  const { rerun, state, restart } = await harness(t, catalogue, owned);
+  assert.deepEqual(rows(await rerun()), ["TMDB:9002", "TVDB:102"]);
+  const saved = sqlite.readPlexGeneratedInputs<{ episodes: unknown[] }>("tvdb:20")!;
+  sqlite.writePlexGeneratedInputs("tvdb:20", { ...saved, episodes: [null, { source: "TVDB", providerEpisodeId: 102, title: "Two" }] });
+  restart();
+  state.bodies.set("/v4/series/20/episodes/default", { data: { episodes: [null] } });
+  const result = await rerun();
+  const refresh = issuesOf(result).find(issue => issue.id === "catalogue-refresh:TVDB:ratingKey:target");
+  assert.ok(refresh, "the failed refresh is reported");
+  assert.match((refresh as Issue & { lookup?: { impact?: string } }).lookup?.impact || "", /No previous catalogue data is available/, "the unusable saved catalogue is not offered as last-good data");
+  assert.match(refresh.impacts!.join(" "), /comparison could not be checked.*Last-good comparison results were retained/);
+  assert.deepEqual(rows(result), ["TMDB:9002", "TVDB:102"], "last-good comparison results are retained");
+});

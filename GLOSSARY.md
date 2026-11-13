@@ -58,8 +58,12 @@ A relationship between two complete sets of episode records that represent the s
 An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.
 
 **Report Missing**:
-A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.
+A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It applies to the provider episode across all Plex libraries, not to a file or Plex item, and lasts until the user clears it or the member leaves its Manual Match. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.
 _Avoid_: Ownership correction, declared content
+
+**Reported missing**:
+The status of an episode whose Report Missing flag is set. It outranks every collected determination, so the episode and its show stay in Plex missing results. Flagging one member does not flag another member.
+_Avoid_: Keep missing, marked missing
 
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.

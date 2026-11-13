@@ -29,13 +29,20 @@ export async function POST(request: Request) {
     }
     if (body.id !== undefined && (typeof body.id !== "string" || !body.id))
       throw new CoverageError("Supply the mapping identity to edit.");
+    if (body.preview === undefined && body.id !== undefined && body.reportMissing !== undefined) {
+      // Changing only Report Missing keeps the saved members, so it needs no provider review.
+      const impact = captureCoverageImpact([body.id]);
+      const mapping = saveCoverageMapping(undefined, { id: body.id, revision: body.revision }, body.reportMissing);
+      await requestCoverageRecheck({members:[...impact.members,...mapping.members]});
+      return Response.json({ mapping, ...coverageState() }, { headers });
+    }
     const reviewed = reviewedCoverageMembers(body.preview);
     // Revalidate the exact reviewed canonical identities. Coordinates can locate a
     // different TMDB record since preview, but must never replace that identity.
     await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
     assertCoverageMutationAllowed();
     const impact=captureCoverageImpact(body.id ? [body.id] : []);
-    const mapping = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision });
+    const mapping = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision }, body.reportMissing);
     await requestCoverageRecheck({members:[...impact.members,...mapping.members]});
     return Response.json({ mapping, ...coverageState() }, { status: body.id === undefined ? 201 : 200, headers });
   } catch (error) {

@@ -29,7 +29,14 @@ An incomplete mapping with remaining missing episodes appears as one grouped res
 Spec #30 deliberately reopens two parts of this decision.
 
 - **Correction prerequisite.** Ownership corrections, their per-file fingerprints, selected-parts declarations, and the conflict gate that suppressed manual coverage for mixed combined/split items are removed. The complete-set Manual Match alone is sufficient: owning the complete combined episode covers every mapped part in either provider direction, owning every mapped part covers the combined episode, and owning only some parts grants no additional coverage through the mapping. Saved corrections are discarded on upgrade without conversion into any other decision; existing Manual Matches are retained unchanged. The correction mutation is no longer accepted.
-- **Preservation of earlier automatic collected decisions.** Report Missing, a per-member local exception saved with the Manual Match, will override direct ownership and every automatic and manual matching method, including decisions made before the manual check. Its controls, propagation, and lifecycle are delivered by the tickets following #36.
+- **Preservation of earlier automatic collected decisions.** Report Missing, a per-member local exception saved with the Manual Match, overrides direct ownership and every automatic and manual matching method, including decisions made before the manual check. Its controls, propagation, and lifecycle are delivered by the tickets following #36.
+
+### Report Missing for one-to-one Manual Matches (#37)
+
+- A flag is saved state on the mapping's membership row, keyed by provider episode, so it applies across all Plex libraries and is deleted with the member or mapping. Members that existed before the flag default to off.
+- The shared comparison checks a flag before coordinates, direct ownership, crosswalks, compound matching, and Manual Match coverage, and grouped results label it **Reported missing** ahead of direct ownership. A flag changes only its own episode: the flagged member's owned identities still count as source evidence for the other member, and the opposite member is never flagged automatically.
+- A save may change only the flags of an existing mapping without re-resolving its members. It uses the same revision check, scan lock, immediate cached recheck, and next-scan refresh obligations as any other Manual Match save. A flag-only save keeps the mapping's saved health because no provider record was re-reviewed.
+- Editing members without restating flags keeps flags on retained members and drops flags on removed members. Flags on larger mappings are rejected until their rules are delivered; larger mappings keep working without flags.
 
 The shared backend, immediate cached recheck, next-scan refresh obligations, and active-scan mutation protection of ADR-0003 are unchanged.
 

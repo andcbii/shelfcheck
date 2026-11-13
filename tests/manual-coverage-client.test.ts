@@ -95,7 +95,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const preview = container.querySelector('[aria-label="Resolved episode preview"]');
   assert.ok(preview);
   assert.match(preview.textContent || "", /Episode ID 100/);
-  assert.match(preview.textContent || "", /S8 E8/);
+  assert.match(preview.textContent || "", /S08E08/, "Each provider keeps its own numbering");
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
   rejectEdit = true;
@@ -177,7 +177,7 @@ test("linking another split episode retains the selected episode when opening an
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
   await act(async () => save.click());
-  assert.deepEqual(saved, { action: "save", id: "existing", revision: 4, preview: "complete" });
+  assert.deepEqual(saved, { action: "save", id: "existing", revision: 4, preview: "complete", reportMissing: [] }, "A larger match saves with Report Missing off");
 });
 
 

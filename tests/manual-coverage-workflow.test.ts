@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 const hook = registerHooks({ resolve(s, c, next) {
     return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c);
@@ -519,18 +519,21 @@ test("upgrading discards saved ownership corrections and keeps every Manual Matc
   });
   const member = (provider: string, id: number) => ({ provider, id, showId: 10, show: "Example", title: "Episode " + id, season: 1, episode: id, url: "https://example.com/" + id });
   const mapping = { id: "kept", revision: 4, createdAt: "2026-01-01T00:00:00.000Z", members: [member("TMDB", 100), member("TVDB", 200), member("TVDB", 201)] };
-  // A database written by a release that still supported ownership corrections.
-  const legacy = sqlite.coverageDatabase();
+  // A database written by a release that still supported ownership corrections,
+  // before mapping members carried Report Missing flags.
+  const legacy = new DatabaseSync(path.join(dir, "shelfcheck.db"));
+  legacy.exec(`CREATE TABLE shelfcheck_coverage_state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0);
+    INSERT INTO shelfcheck_coverage_state(id,revision,pending) VALUES(1,4,0);
+    CREATE TABLE shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+    CREATE TABLE shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, PRIMARY KEY(provider, episode_id));`);
   legacy.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run(mapping.id, JSON.stringify(mapping));
   for (const m of mapping.members) legacy.prepare("INSERT INTO shelfcheck_coverage_members VALUES(?,?,?)").run(m.provider, m.id, mapping.id);
-  legacy.exec("UPDATE shelfcheck_coverage_state SET revision=4,pending=0 WHERE id=1");
   legacy.exec("CREATE TABLE shelfcheck_coverage_corrections(mapping_id TEXT NOT NULL,show_key TEXT NOT NULL,item_key TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(mapping_id,show_key,item_key))");
   legacy.prepare("INSERT INTO shelfcheck_coverage_corrections VALUES(?,?,?,?)").run("kept", "show", "file", JSON.stringify({ mappingId: "kept", ratingKey: "file", showKey: "show", fingerprint: "v1", identities: [{ provider: "TVDB", id: 200 }] }));
   legacy.close();
-  delete cache.__shelfcheckDatabase;
 
   const upgraded = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
-  assert.deepEqual(upgraded.mappings, [{ ...mapping, evidence: [] }], "Manual Matches survive unchanged, with no inferred decisions");
+  assert.deepEqual(upgraded.mappings, [{ ...mapping, members: mapping.members.map(m => ({ ...m, reportMissing: false })), evidence: [] }], "Manual Matches survive unchanged with Report Missing off, with no inferred decisions");
   assert.ok(upgraded.revision > 4, "Discarding corrections advances the coverage revision");
   assert.ok(upgraded.issues.some((issue: { id: string }) => issue.id === "comparison-pending"), "Cached results shaped by corrections are flagged for comparison");
   assert.equal(sqlite.coverageDatabase().prepare("SELECT 1 FROM sqlite_master WHERE name='shelfcheck_coverage_corrections'").get(), undefined, "Saved corrections are discarded");

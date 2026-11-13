@@ -7,7 +7,7 @@ import { createRoot } from "react-dom/client";
 import { CoverageIssueReport, CoverageWarning } from "../app/reports/components/coverage-issue-report";
 import PlexPage from "../app/plex/page";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
-const { episodeCheckIssue } = await import("../lib/episode-check-issues");
+const { episodeCheckIssue, catalogueRecordIssue } = await import("../lib/episode-check-issues");
 hook.deregister();
 
 // An Episode-scoped failure is explained in 05 — Scan Issues while the affected
@@ -42,6 +42,18 @@ test("05 — Scan Issues explains the failed episode check, its identities, rela
   assert.ok(!content.includes("Source unknown"), "a matching check is not presented as a provider lookup");
   assert.ok(!content.includes("Response:"));
   assert.match(container.textContent!, /Scan Issues \(2\)/);
+  assert.equal(container.querySelectorAll("button").length, 0, "no retry control");
+});
+
+test("05 — Scan Issues explains malformed catalogue records with only the provider context available", async t => {
+  const unidentifiable = catalogueRecordIssue(show, { provider: "TVDB", showId: 20, position: "page 1 record 3", problem: "not-a-record" });
+  const numberedOnly = catalogueRecordIssue(show, { provider: "TMDB", showId: 10, position: "season 1 record 2", season: 1, episode: 5, title: "No identity", problem: "no-identity" });
+  const { container, root } = await dom(t, "http://localhost/reports/coverage-issues");
+  await act(async () => root.render(createElement(CoverageIssueReport, { issues: [unidentifiable, numberedOnly] })));
+  const content = container.querySelector('[aria-label="Show and episode issues"]')!.textContent!;
+  for (const value of ["Plex ratingKey:target · TMDB 10 · TVDB 20", "TVDB · Provider Catalogue", "A TVDB series 20 catalogue record (page 1 record 3) is not an episode record.", "no missing result was created",
+    "TMDB show 10 S01E05 No identity", "has no usable episode ID", "compared by its season and episode numbering only"]) assert.ok(content.includes(value), value);
+  assert.ok(!content.includes("Source unknown"), "a record problem is not presented as a provider lookup");
   assert.equal(container.querySelectorAll("button").length, 0, "no retry control");
 });
 

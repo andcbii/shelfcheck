@@ -34,8 +34,8 @@ export type CoverageIssue = {
   scope: "library" | "show" | "episode";
   cause: string;
   action: string;
-  /** Provider Lookup: a request or response failed. Episode Matching: a check over available evidence failed. */
-  category?: "Provider Lookup" | "Episode Matching";
+  /** Provider Lookup: a request or response failed. Episode Matching: a check over available evidence failed. Provider Catalogue: an individual catalogue record was unusable. */
+  category?: "Provider Lookup" | "Episode Matching" | "Provider Catalogue";
   lookup?: ProviderLookup;
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];

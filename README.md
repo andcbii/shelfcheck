@@ -53,7 +53,7 @@ erase Shelfcheck's configuration and data.
 Published releases are available from Docker Hub:
 
 ```bash
-docker pull andcbii/shelfcheck:2.5.2
+docker pull andcbii/shelfcheck:2.5.3
 ```
 
 An equivalent bind-mount example is:
@@ -65,7 +65,7 @@ docker run -d --name shelfcheck \
   -v /your/host/config:/config \
   -v /your/host/data:/data \
   --restart unless-stopped \
-  andcbii/shelfcheck:2.5.2
+  andcbii/shelfcheck:2.5.3
 ```
 
 The image runs as UID/GID `1001`. Both mounted directories must be writable by

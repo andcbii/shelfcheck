@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.5.3 - 2026-11-13
+
+### Fixed
+
+- Isolate malformed provider records and episode matching failures so usable
+  siblings and independent matching methods still complete.
+- Recover unusable TVDB episode titles from per-episode English translations,
+  save recovered titles, and retry unresolved lookups on later requested scans.
+- Keep unresolved checks visible in Scan Issues even when other evidence
+  establishes coverage; preserve normal Plex missing results and offline rechecks.
+- Preserve saved episode numbering, partial Trakt validation failures and retries,
+  unresolved combined/split causes, and last-good results for unusable catalogues.
+
 ## 2.5.2 - 2026-11-12
 
 ### Added

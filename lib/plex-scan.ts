@@ -15,7 +15,7 @@ import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, titleDependentTvdbEpisodeIds, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
-import { reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
+import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
 import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
@@ -646,6 +646,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           localEpisodes, localProviderEpisodes, localTmdbEpisodeIds, libraryTmdbEpisodeIds,
           coordinateMissingTvdbIds, directTvdbSatisfied, directImdbSatisfied, traktSatisfied,
           tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, autoCompoundEpisodes, crosswalkFailures,
+          compoundCausesRecorded: compoundMatchingCausesRecorded(ratingKey),
         });
         for (const { event, data } of diagnostics) logger.info(event, data);
         for (const failure of episodeFailures) logger[failure.existingOnly === "refresh" ? "info" : "warn"]("plex.show.episode-check-failed", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, ...failure });

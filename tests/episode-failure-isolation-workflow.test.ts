@@ -138,3 +138,28 @@ test("a complete-set Manual Match still collects an episode whose combined/split
   assert.equal(missing(reported)["TVDB:102"], "reported-missing");
   assert.deepEqual(episodeIssues(reported), []);
 });
+
+test("ownership at Plex coordinates skips the combined/split pass but does not resolve its unrepaired failed check", async t => {
+  const episodes = catalogue({ 102: { name: null } });
+  const plex = [...owned];
+  const { rerun, state } = await harness(t, episodes, plex);
+  const [issue, ...others] = episodeIssues(await rerun());
+  assert.deepEqual(others, []);
+  assert.equal(issue?.episode?.id, 102);
+  assert.equal(issue.operation, "compound-matching");
+
+  // Plex now owns TVDB 102 (and 104) at their ordinary numbering, so no TVDB coordinates
+  // remain missing and combined/split evidence is no longer needed. TVDB 102 still has no title.
+  plex.push(part2, tvdbThird);
+  const owning = await rerun();
+  assert.ok(!missingKeys(owning).includes("TVDB:102"), "coordinate ownership collects the episode");
+  const [retained, ...rest] = episodeIssues(owning);
+  assert.deepEqual(rest, []);
+  assert.equal(retained?.id, issue.id, "alternative ownership alone does not resolve the failed check");
+  assert.match(retained.cause, /no usable default or English title/);
+  assert.match(retained.impacts!.join(" "), /Plex season and episode numbering established coverage for this episode, so it remains collected/, "its ownership impact is updated");
+
+  // Only repaired evidence, verified by the check, clears it.
+  state.english.set(102, "Arrival (2)");
+  assert.deepEqual(episodeIssues(await rerun()), []);
+});

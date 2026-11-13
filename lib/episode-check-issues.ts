@@ -57,6 +57,10 @@ function recordedTvdbEpisodeIds(ratingKey: string, check: Pick<EpisodeCheckFailu
     return recorded !== undefined ? [recorded] : [];
   });
 }
+/** Whether one show has a recorded combined/split matching cause. */
+export function compoundMatchingCausesRecorded(ratingKey: string) {
+  return coverageIssueIdsWithPrefix(checkIssuePrefix(ratingKey, { operation: "compound-matching" })).length > 0;
+}
 /** The episode crosswalk causes currently recorded for one show, by crosswalk and TVDB episode. */
 export function recordedEpisodeCrosswalkFailures(ratingKey: string) {
   return episodeCrosswalks.flatMap(crosswalk => recordedTvdbEpisodeIds(ratingKey, { operation: "episode-crosswalk", crosswalk }).map(tvdbEpisodeId => ({ crosswalk, tvdbEpisodeId })));

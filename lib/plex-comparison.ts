@@ -88,6 +88,12 @@ export type PlexComparisonInput = {
   autoCompoundEpisodes: boolean;
   /** Episode-scoped identity/crosswalk failures from evidence gathering before these decisions. */
   crosswalkFailures?: EpisodeCheckFailure[];
+  /**
+   * The show has a recorded combined/split matching cause. Combined/split evidence is then
+   * checked again even when no TVDB coordinates are missing, so the cause is kept until its
+   * evidence is repaired and the check completes, not resolved by alternative ownership.
+   */
+  compoundCausesRecorded?: boolean;
 };
 
 /** Compare loaded catalogues and current inventory without HTTP, Plex enumeration, or persistence. */
@@ -103,7 +109,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
   const recordDiagnostic = (event: string, data: Record<string, unknown>) => { diagnostics.push({ event, data }); };
   const compoundCoverage: CompoundCoverage[] = [];
   const episodeFailures: EpisodeCheckFailure[] = [...(input.crosswalkFailures || [])];
-  if (autoCompoundEpisodes && tmdbShow && coordinateMissingTvdbIds.size && localTmdbEpisodeIds.size) {
+  if (autoCompoundEpisodes && tmdbShow && ((coordinateMissingTvdbIds.size && localTmdbEpisodeIds.size) || input.compoundCausesRecorded)) {
     const { coverage: compoundCovered, failures } = compoundTvdbEvidence(providerEpisodes, localProviderEpisodes);
     // A failed relationship is only a failed check when compound evidence was still
     // needed for one of its episodes; otherwise the check is unnecessary.

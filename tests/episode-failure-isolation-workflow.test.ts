@@ -57,7 +57,7 @@ test("a split episode whose combined/split check fails stays missing, with one c
   assert.equal(issue.provider, "TVDB");
   assert.deepEqual(issue.show, { ratingKey: "ratingKey:target", title: "Target", tmdbId: 10, tvdbId: 20 });
   assert.deepEqual(issue.episode, { provider: "TVDB", id: 102, showId: 20, season: 1, episode: 2 });
-  assert.match(issue.cause, /Combined\/split episode matching could not be checked: TVDB returned no usable default or English title for this episode./);
+  assert.match(issue.cause, /Combined\/split episode matching could not be checked: TVDB returned no usable default or English title for this episode\./);
   const impacts = issue.impacts!.join(" ");
   assert.match(impacts, /owned TMDB episode 9001 \(S01E01\)/);
   assert.match(impacts, /TVDB 101 \(S01E01\)/, "dependent relationship named");

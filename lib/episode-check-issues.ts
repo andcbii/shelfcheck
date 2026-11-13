@@ -55,6 +55,10 @@ export function episodeCheckIssue(show: EpisodeCheckShow, failure: EpisodeCheckF
   else if (failure.operation === "auto-match-record") impacts.push("Auto Match details for this episode are unavailable; its collected status is unchanged.");
   else impacts.push(failure.coveredBy
     ? `${methodLabels[failure.coveredBy]} established coverage for this episode, so it remains collected; this failed check is still unresolved.`
+    : failure.notListed === "special"
+    ? "No other method established coverage; as a special (season 0) without a readable Report Missing flag, this episode is not listed in missing results."
+    : failure.notListed === "missing-result-failed"
+    ? "No other method established coverage, but its missing result could not be built, so this episode is not listed in missing results."
     : "No other method established coverage, so this episode remains in missing results.");
   return {
     id: episodeCheckIssueId(show.ratingKey, failure),

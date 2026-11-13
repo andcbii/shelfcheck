@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
 import { comparePlexShow, type PlexComparisonInput, type ProviderEpisode } from "../lib/plex-comparison";
+const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
+const { episodeCheckIssue } = await import("../lib/episode-check-issues");
+hook.deregister();
 
 // The shared comparison engine (scans and cached rechecks) isolates an
 // Episode-scoped failure in a final decision to that episode and method.
@@ -40,10 +44,28 @@ test("a later complete-set Manual Match still collects an episode after an earli
   assert.equal(result.episodeFailures[0].coveredBy, "manual-match");
 });
 
-test("when Report Missing precedence cannot be evaluated, no coverage is granted over a possible flag", () => {
+/** The impact 05 — Scan Issues shows for one episode's failed check. */
+const impactOf = (result: ReturnType<typeof comparePlexShow>, id: number) => episodeCheckIssue({ ratingKey: "show" }, result.episodeFailures.find(failure => failure.episode.id === id && failure.method !== "manual-match")!).impacts!.join(" ");
+
+test("when Report Missing cannot be evaluated, other valid methods still collect and unflagged specials stay hidden", () => {
   const throwing = { id: "x", get members(): never { throw new Error("saved flags unreadable"); } };
-  const result = comparePlexShow(input({ mappings: [throwing] as unknown as PlexComparisonInput["mappings"] }));
-  // Every episode's precedence check failed, so even coordinate- and directly-owned episodes stay missing.
-  assert.deepEqual(missingIds(result), [1, 2, 3, 4]);
-  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["report-missing:1", "report-missing:2", "report-missing:3", "report-missing:4"]);
+  const special: ProviderEpisode = { source: "TMDB", season: 0, episode: 1, providerEpisodeId: 5, title: "Special" };
+  const result = comparePlexShow(input({ mappings: [throwing] as unknown as PlexComparisonInput["mappings"], providerEpisodes: [tmdb(1, 1), tmdb(2, 2), tmdb(3, 3), tmdb(4, 4), special] }));
+  // Coordinates collect 1 and owned TMDB identity collects 3; 2 and 4 stay missing; the unflagged special is not listed.
+  assert.deepEqual(missingIds(result), [2, 4]);
+  // The unreadable Manual Matches also fail the complete-set check of the uncollected episodes.
+  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["report-missing:1", "report-missing:2", "manual-match:2", "report-missing:3", "report-missing:4", "manual-match:4", "report-missing:5"]);
+  assert.match(impactOf(result, 1), /Plex season and episode numbering established coverage for this episode, so it remains collected/);
+  assert.match(impactOf(result, 3), /Automatic provider evidence established coverage for this episode, so it remains collected/);
+  assert.match(impactOf(result, 2), /remains in missing results/);
+  assert.match(impactOf(result, 5), /not listed in missing results/);
+  assert.doesNotMatch(impactOf(result, 5), /remains in missing results/);
+});
+
+test("a missing result that cannot be built is not claimed to remain in missing results", () => {
+  const broken = { source: "TMDB", season: 1, episode: 2, providerEpisodeId: 2, title: "Episode 2", get airDate(): string { throw new TypeError("air date unreadable"); } } as ProviderEpisode;
+  const result = comparePlexShow(input({ providerEpisodes: [tmdb(1, 1), broken, tmdb(4, 4)] }));
+  assert.deepEqual(missingIds(result), [4], "siblings are still listed");
+  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["missing-result:2"]);
+  assert.match(impactOf(result, 2), /missing result could not be built, so this episode is not listed in missing results/);
 });

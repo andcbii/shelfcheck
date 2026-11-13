@@ -37,6 +37,12 @@ export type EpisodeCheckFailure = {
   local?: CompoundEvidenceFailure["local"];
   coveredBy?: EpisodeCheckMethod;
   /**
+   * No method established coverage, yet the episode is not listed in missing results:
+   * `special`: an unflagged special (season 0), hidden by the normal visibility rule;
+   * `missing-result-failed`: its missing result could not be built.
+   */
+  notListed?: "special" | "missing-result-failed";
+  /**
    * False when the check still cannot be completed but an earlier method made it
    * unnecessary. It raises no new cause, yet does not resolve an existing one:
    * only repaired evidence or a completed check does.
@@ -46,6 +52,18 @@ export type EpisodeCheckFailure = {
 /** Identity/crosswalk lookups for a TVDB episode, in the order they are tried. */
 export type EpisodeCrosswalk = "IMDb" | "Trakt" | "TMDB";
 export type AutomaticEpisodeEvidence ={ method: PlexAutoMatchMethod; tmdbEpisodeId: number; tmdbEpisode?: TmdbFindEpisode };
+
+/**
+ * How one episode's final decision ended: the method that established coverage, reported
+ * missing, listed missing, or not listed (an unflagged special, or a missing result that
+ * could not be built).
+ */
+type EpisodeDecision = EpisodeCheckMethod | "reported" | "missing" | NonNullable<EpisodeCheckFailure["notListed"]>;
+/** Record on a failed check what the episode's decision still established. */
+function describeDecision(failure: EpisodeCheckFailure, decision: EpisodeDecision) {
+  if (decision === "special" || decision === "missing-result-failed") failure.notListed = decision;
+  else if (decision !== "reported" && decision !== "missing") failure.coveredBy = decision;
+}
 
 /** Inputs loaded by scan orchestration. No inferred or Manual Match coverage is direct inventory. */
 export type PlexComparisonInput = {
@@ -122,7 +140,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
   };
   // Final decisions, isolated per episode and per method. A failed method grants
   // no coverage; later independent methods still run in their existing order.
-  const decisions = new Map<string, EpisodeCheckMethod | "reported" | "missing">();
+  const decisions = new Map<string, EpisodeDecision>();
   const identity = (episode: ProviderEpisode) => `${episode.source}:${episode.providerEpisodeId ?? `${episode.season}x${episode.episode}`}`;
   for (const episode of providerEpisodes) {
     const failed: EpisodeCheckFailure[] = [];
@@ -134,11 +152,19 @@ export function comparePlexShow(input: PlexComparisonInput) {
         return undefined;
       }
     };
-    const collected = (method: EpisodeCheckMethod) => { for (const failure of failed) failure.coveredBy = method; decisions.set(identity(episode), method); };
+    const decide = (decision: EpisodeDecision) => { decisions.set(identity(episode), decision); for (const failure of failed) describeDecision(failure, decision); };
     const key = `${episode?.season}:${episode?.episode}`;
+    // A reported episode stays "reported" even when its row cannot be built: Report Missing
+    // still made the episode's other checks unnecessary.
+    const listMissing = (reported: boolean, missingParts?: CoverageIdentity[]) => {
+      const listed = attempt("missing-result", () => { addMissing(key, episode, reported, missingParts); return true; });
+      decide(reported ? "reported" : listed ? "missing" : "missing-result-failed");
+      if (!listed) for (const failure of failed) failure.notListed = "missing-result-failed";
+    };
     // An explicit Report Missing flag precedes every collected determination:
     // coordinates, direct ownership, crosswalks, compound matching and Manual Match coverage.
-    // If it cannot be evaluated, no coverage may be granted over a possible flag.
+    // If it cannot be evaluated, the episode is treated as unflagged: another valid method
+    // still establishes coverage and the season 0 visibility rule still applies.
     const precedence = attempt("report-missing", () => {
       const memberMapping = mappings.find(mapping => mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
       const reported = Boolean(episode.providerEpisodeId && memberMapping?.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId && member.reportMissing));
@@ -149,23 +175,17 @@ export function comparePlexShow(input: PlexComparisonInput) {
       const outcome: CoverageOutcome | undefined = memberMapping && episode.providerEpisodeId ? { provider: episode.source, id: episode.providerEpisodeId, status: "missing", season: episode.season, airDate: episode.airDate } : undefined;
       return { skip: false as const, reported, missingParts, outcome };
     });
-    if (precedence?.skip) continue;
-    if (!precedence) {
-      attempt("missing-result", () => addMissing(key, episode, false));
-      decisions.set(identity(episode), "missing");
-      continue;
-    }
-    const { reported, missingParts, outcome } = precedence;
+    const { skip, reported, missingParts, outcome } = precedence ?? { skip: episode?.season === 0, reported: false, missingParts: [], outcome: undefined };
+    if (skip) { decide("special"); continue; }
     if (outcome) coverageOutcomes.push(outcome);
     if (reported || missingParts.length) {
       if (reported) outcome!.reportedMissing = true;
       else outcome!.missingParts = missingParts;
-      attempt("missing-result", () => addMissing(key, episode, reported, missingParts));
-      decisions.set(identity(episode), "reported");
+      listMissing(reported, missingParts);
       continue;
     }
-    if (attempt("coordinates", () => localEpisodes.has(key))) { if (outcome) outcome.status = "automatic"; collected("coordinates"); continue; }
-    if (attempt("automatic-evidence", () => providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes }))) { if (outcome) outcome.status = "automatic"; collected("automatic-evidence"); continue; }
+    if (attempt("coordinates", () => localEpisodes.has(key))) { if (outcome) outcome.status = "automatic"; decide("coordinates"); continue; }
+    if (attempt("automatic-evidence", () => providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes }))) { if (outcome) outcome.status = "automatic"; decide("automatic-evidence"); continue; }
     const manual = attempt("manual-match", () => {
       const mapping = mappings.find(mapping => (!mapping.health || mapping.health === "healthy") && mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
       if (!mapping) return undefined;
@@ -177,18 +197,17 @@ export function comparePlexShow(input: PlexComparisonInput) {
     if (manual) {
       if (outcome) outcome.status = "manual";
       if (!manualCoverage.some(item => item.mappingId === manual.mapping.id)) manualCoverage.push({ mappingId: manual.mapping.id, source: manual.evidence });
-      collected("manual-match");
+      decide("manual-match");
       continue;
     }
-    attempt("missing-result", () => addMissing(key, episode, false));
-    decisions.set(identity(episode), "missing");
+    listMissing(false);
   }
   // Report Missing outranks every other method, so a check it made unnecessary is not a failure.
   // A failed check stays reported when another method established coverage.
   const reportedOrCovered = episodeFailures.filter(failure => {
     if ((failure.operation !== "compound-matching" && failure.operation !== "episode-crosswalk") || !failure.episode.id) return true;
     const decision = decisions.get(`${failure.episode.provider}:${failure.episode.id}`);
-    if (decision && decision !== "reported" && decision !== "missing") failure.coveredBy = decision;
+    if (decision) describeDecision(failure, decision);
     return decision !== "reported";
   });
   episodeFailures.splice(0, episodeFailures.length, ...reportedOrCovered);

@@ -71,6 +71,12 @@ const providerClient = new PlexProviderClient(
   },
 );
 
+/** The saved relationship key of one provider request: its provider and URL. */
+function relationshipKey(provider: ProviderName, url: string) { return `${provider}:${url}`; }
+function relationshipProvider(key: string) { return key.slice(0, key.indexOf(":")); }
+/** The Provider Lookup cause of a rejected relationship request for one show. */
+function episodeIdentityIssueId(ratingKey: string | undefined, relationship: string) { return `episode-identity:${ratingKey}:${relationship}`; }
+
 const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
 const replayScope = new AsyncLocalStorage<{missing:Set<string>}>();
@@ -81,19 +87,19 @@ const crosswalkLookupScope = new AsyncLocalStorage<true>();
  * attempted; the failure stays with that episode instead of discarding the show comparison.
  */
 class SavedRelationshipUnavailableError extends Error {
-  constructor(readonly relationship: string) { super(`The saved ${relationship.slice(0, relationship.indexOf(":"))} response for this episode is not available to the offline recheck; no request was made.`); }
+  constructor(readonly relationship: string) { super(`The saved ${relationshipProvider(relationship)} response for this episode is not available to the offline recheck; no request was made.`); }
 }
 const relationshipScope = new AsyncLocalStorage<SavedPlexComparison["relationships"]>();
 function relationshipIsReusable(key:string) {
   const relationships = relationshipScope.getStore();
   const show = comparisonIssueScope.getStore();
-  return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !getCoverageIssue(`episode-identity:${show?.ratingKey}:${key}`)));
+  return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !getCoverageIssue(episodeIdentityIssueId(show?.ratingKey, key))));
 }
 async function checkedJson<T>(url: string, init: RequestInit, provider: ProviderName, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}): Promise<T> {
   const relationships = relationshipScope.getStore();
-  const key = `${provider}:${url}`;
+  const key = relationshipKey(provider, url);
   const show = comparisonIssueScope.getStore();
-  const issueId = `episode-identity:${show?.ratingKey}:${key}`;
+  const issueId = episodeIdentityIssueId(show?.ratingKey, key);
   if (relationships && relationshipIsReusable(key)) return relationships[key].value as T;
   const replay=replayScope.getStore();
   if (replay && crosswalkLookupScope.getStore()) throw new SavedRelationshipUnavailableError(key);
@@ -196,8 +202,12 @@ function responseRecords<T>(provider: ProviderName, body: unknown, field: string
 const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
 /** The saved relationship key of one TVDB episode's crosswalk request. */
 function crosswalkRelationshipKey(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
-  return crosswalk === "IMDb" ? `TVDB:${TVDB}/episodes/${tvdbEpisodeId}/extended` : crosswalk === "Trakt" ? `Trakt:${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode` : `TMDB:${TMDB}/find/${tvdbEpisodeId}?external_source=tvdb_id`;
+  return crosswalk === "IMDb" ? relationshipKey("TVDB", `${TVDB}/episodes/${tvdbEpisodeId}/extended`) : crosswalk === "Trakt" ? relationshipKey("Trakt", `${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`) : relationshipKey("TMDB", `${TMDB}/find/${tvdbEpisodeId}?external_source=tvdb_id`);
 }
+/** A failed request or interpretation within one episode's crosswalk, with the saved relationship it concerns. */
+type CrosswalkCause = { error: unknown; relationship: string };
+/** When one crosswalk has causes of several kinds, the most actionable kind names it. */
+const crosswalkFailureKinds: EpisodeCheckFailure["kind"][] = ["request-failed", "unreadable-response", "relationship-unavailable", "exception"];
 
 async function findTmdbEpisodeByTvdbId(tvdbEpisodeId: number, token: string): Promise<TmdbEpisodeFindResult[]> {
   const found = await tmdbJson<unknown>(`/find/${tvdbEpisodeId}?external_source=tvdb_id`, token, {provider:"TVDB",id:tvdbEpisodeId});
@@ -219,24 +229,25 @@ async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | nul
  * are requested again instead of reused. `validationFailures` are failed validation lookups.
  */
 async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, credentials: TraktCredentials, tmdbToken: string, retry = false) {
-  const cached = relationshipIsReusable(`Trakt:${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`);
+  const cached = relationshipIsReusable(crosswalkRelationshipKey("Trakt", tvdbEpisodeId));
   const results = await traktJson<unknown>(`/search/tvdb/${tvdbEpisodeId}?type=episode`, credentials);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
   const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && Number.isFinite(result.episode.season) && Number.isFinite(result.episode.number));
-  if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[], validationFailures: [] as { error: unknown; relationship: string }[] };
+  if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[], validationFailures: [] as CrosswalkCause[] };
   const validations = await Promise.allSettled(completeMappings.map(async (result) => {
     const episode = result.episode!;
     const matchedTmdbShowId = result.show!.ids!.tmdb as number;
     const origin = comparisonIssueScope.getStore();
     const path = `/tv/${matchedTmdbShowId}/season/${episode.season}/episode/${episode.number}`;
-    if (retry && !replayScope.getStore()) delete relationshipScope.getStore()?.[`TMDB:${TMDB}${path}`];
+    const relationship = relationshipKey("TMDB", `${TMDB}${path}`);
+    if (retry && !replayScope.getStore()) delete relationshipScope.getStore()?.[relationship];
     const details = await lookupSourceScope.run([
       ...(origin?.tvdbSource || []),{provider:"TVDB",kind:"catalogue episode",id:tvdbEpisodeId,cached:origin?.tvdbCached},
       {provider:"Trakt",kind:"external TMDB show ID",id:matchedTmdbShowId,cached},
       {provider:"Trakt",kind:"external TMDB episode ID",id:episode.ids!.tmdb as number,cached},
-    ],()=>tmdbJson<unknown>(path, tmdbToken)).catch(error => { throw Object.assign(new Error("validation"), { cause: error, relationship: `TMDB:${TMDB}${path}` }); });
-    if (!isRecord(details)) throw Object.assign(new Error("validation"), { cause: new CrosswalkResponseError("TMDB", "the validating episode record is not an object"), relationship: `TMDB:${TMDB}${path}` });
+    ],()=>tmdbJson<unknown>(path, tmdbToken)).catch(error => { throw Object.assign(new Error("validation"), { cause: error, relationship }); });
+    if (!isRecord(details)) throw Object.assign(new Error("validation"), { cause: new CrosswalkResponseError("TMDB", "the validating episode record is not an object"), relationship });
     return details.id === episode.ids!.tmdb ? details.id as number : undefined;
   }));
   const validatedIds = validations.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
@@ -472,18 +483,25 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           const episode = tvdbEpisodeOf(id);
           return { provider: "TVDB", id, ...(episode ? { season: episode.season, episode: episode.episode, ...(usableTitle(episode.title) ? { title: episode.title } : {}) } : {}) };
         };
-        const failCrosswalk = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown, relationship = crosswalkRelationshipKey(crosswalk, tvdbEpisodeId)): EpisodeCheckFailure => {
-          // A rejected request has its own Provider Lookup cause; anything else is never relabelled as one.
-          const requestIssue = `episode-identity:${ratingKey}:${relationship}`;
+        /** One failed request or interpretation within a crosswalk: a rejected request has its own Provider Lookup cause; anything else is never relabelled as one. */
+        const crosswalkCause = ({ error, relationship }: CrosswalkCause) => {
+          const requestIssue = episodeIdentityIssueId(ratingKey, relationship);
           // A replay without a saved response keeps the scan's rejected-request cause when there is one.
-          const kind = error instanceof CrosswalkResponseError ? "unreadable-response" : getCoverageIssue(requestIssue) ? "request-failed" : error instanceof SavedRelationshipUnavailableError ? "relationship-unavailable" : "exception";
-          const provider = relationship.slice(0, relationship.indexOf(":"));
-          const failure: EpisodeCheckFailure = { operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId), kind,
-            reason: kind === "request-failed" ? `the ${provider} request failed.` : error instanceof Error ? error.message : String(error),
-            ...(kind === "request-failed" ? { causedBy: [requestIssue] } : {}) };
+          const kind: EpisodeCheckFailure["kind"] = error instanceof CrosswalkResponseError ? "unreadable-response" : getCoverageIssue(requestIssue) ? "request-failed" : error instanceof SavedRelationshipUnavailableError ? "relationship-unavailable" : "exception";
+          return kind === "request-failed" ? { kind, reason: `the ${relationshipProvider(relationship)} request failed.`, requestIssue } : { kind, reason: coverageIssueCause(error) };
+        };
+        /** Record one episode's failed crosswalk with every cause found for it (e.g. each failed Trakt validation). */
+        const failCrosswalk = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, causes: CrosswalkCause[]): EpisodeCheckFailure => {
+          const found = causes.map(crosswalkCause);
+          const causedBy = [...new Set(found.flatMap(cause => cause.requestIssue ? [cause.requestIssue] : []))];
+          const failure: EpisodeCheckFailure = { operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId),
+            kind: crosswalkFailureKinds.find(kind => found.some(cause => cause.kind === kind))!,
+            reason: [...new Set(found.map(cause => cause.reason))].join(" "),
+            ...(causedBy.length ? { causedBy } : {}) };
           crosswalkFailures.push(failure);
           return failure;
         };
+        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: crosswalkRelationshipKey(crosswalk, tvdbEpisodeId) }]);
         /** Run one crosswalk per TVDB episode; a failure is recorded against its episode only. */
         const settleCrosswalks = async <T,>(crosswalk: EpisodeCrosswalk, ids: number[], lookup: (tvdbEpisodeId: number) => Promise<T>) => {
           const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, () => lookup(tvdbEpisodeId)); }));
@@ -491,13 +509,13 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           const requestFailures: string[] = [];
           settled.forEach((result, index) => {
             if (result.status === "fulfilled") fulfilled.push({ tvdbEpisodeId: ids[index], value: result.value });
-            else if (failCrosswalk(crosswalk, ids[index], result.reason).kind === "request-failed") requestFailures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+            else if (failedLookup(crosswalk, ids[index], result.reason).kind === "request-failed") requestFailures.push(coverageIssueCause(result.reason));
           });
           return { fulfilled, requestFailures };
         };
         /** Interpret one episode's crosswalk evidence; an unexpected exception stays with that episode. */
         const interpret = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, run: () => void) => {
-          try { run(); } catch (error) { failCrosswalk(crosswalk, tvdbEpisodeId, error); }
+          try { run(); } catch (error) { failedLookup(crosswalk, tvdbEpisodeId, error); }
         };
         // A failed crosswalk is requested again on the next scan instead of reusing its saved response.
         const recordedCrosswalkFailures = recordedEpisodeCrosswalkFailures(ratingKey);
@@ -572,8 +590,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
               crosswalkDetails.set(tvdbEpisodeId, { traktTmdbIds: result.traktTmdbIds, validatedTmdbIds: result.validatedTmdbIds });
               if (!result.validated) {
                 // A validation that could not be completed is a failed check; a mismatch is not.
-                const [failed] = result.validationFailures;
-                if (failed) failCrosswalk("Trakt", tvdbEpisodeId, failed.error, failed.relationship);
+                if (result.validationFailures.length) failCrosswalk("Trakt", tvdbEpisodeId, result.validationFailures);
                 traktInvalid += 1;
                 crosswalkDecisions.set(tvdbEpisodeId, "trakt-invalid-tmdb-fallback");
                 return;

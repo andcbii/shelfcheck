@@ -142,3 +142,19 @@ test("a complete-set Manual Match collects an episode whose crosswalk failed; th
   assert.equal(missing(reported)["TVDB:301"], "reported-missing");
   assert.deepEqual(Object.keys(byEpisode(reported)), ["303"], "only the unrelated cause remains");
 });
+
+test("every failed Trakt validation of one episode is recorded as a cause of its failed crosswalk", async t => {
+  const { rerun, state } = await harness(t, catalogue, owned);
+  await connectTrakt();
+  // Trakt maps TVDB 301 to two TMDB episodes; validating each against TMDB fails.
+  const mapping = (episode: Episode) => ({ type: "episode", episode: { season: episode.season, number: episode.episode, ids: { tvdb: 301, tmdb: episode.id } }, show: { ids: { tmdb: 10, tvdb: 20 } } });
+  state.bodies.set("/search/tvdb/301", [mapping(tmdb1), mapping(tmdb2)]);
+  state.statuses.set("/3/tv/10/season/1/episode/1", 404);
+  state.statuses.set("/3/tv/10/season/1/episode/2", 403);
+  const result = await rerun();
+  assert.deepEqual(showFailures(result), []);
+  const validations = issuesOf(result).filter(issue => issue.operation === "episode-identity" && issue.provider === "TMDB" && issue.episode?.season === 1).sort((a, b) => a.episode!.episode! - b.episode!.episode!);
+  assert.deepEqual(validations.map(issue => issue.lookup?.status), [404, 403], "each rejected validation keeps its own Provider Lookup cause");
+  for (const issue of validations) assert.match(issue.impacts!.join(" "), /Trakt episode crosswalk could not be checked/, `the crosswalk failure is grouped under ${issue.id}`);
+  assert.ok(missingKeys(result).includes("TVDB:301"), "no coverage is guessed");
+});

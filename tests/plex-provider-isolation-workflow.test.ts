@@ -36,6 +36,10 @@ async function fixture(t: test.TestContext) {
     owned:new Set([10,30,50]),
     // Season downloads that wait until released, to interrupt a scan mid-library.
     heldTmdb:new Map<number,()=>void>(),
+    // Shows whose owned pilot Plex numbers S1E2 with TMDB and IMDb GUIDs only, so its TVDB pilot needs an identity lookup.
+    misnumberedInventory:new Set<number>(),
+    findEpisodes:new Map<number,{id:number;show_id:number;season_number:number;episode_number:number}[]>(),
+    tvdbEpisodeImdbIds:new Map<number,string[]>(),
   };
   const requests: URL[] = [];
   const shows = [10,30,50].map(id=>({ratingKey:String(id),title:`Show ${id}`,Guid:[{id:`tmdb://${id}`},{id:`tvdb://${id+10}`}],updatedAt:1}));
@@ -47,7 +51,7 @@ async function fixture(t: test.TestContext) {
       const leaves = u.pathname.match(/^\/library\/metadata\/(\d+)\/allLeaves$/);
       if(leaves && state.failedInventory.has(leaves[1])) return Response.json({},{status:404});
       const id = Number(leaves?.[1]);
-      if(leaves) return Response.json({MediaContainer:{Metadata:state.owned.has(id) ? [{ratingKey:`ep${id}`,parentIndex:1,index:1,Guid:[{id:`tmdb://${id*10}`},{id:`tvdb://${(id+10)*10}`}]}] : []}});
+      if(leaves) return Response.json({MediaContainer:{Metadata:state.owned.has(id) ? [{ratingKey:`ep${id}`,parentIndex:1,index:state.misnumberedInventory.has(id) ? 2 : 1,Guid:[{id:`tmdb://${id*10}`},...(state.misnumberedInventory.has(id) ? [{id:`imdb://tt${id}`}] : [{id:`tvdb://${(id+10)*10}`}])]}] : []}});
       return Response.json({MediaContainer:{Metadata:[shows.find(s=>u.pathname === `/library/metadata/${s.ratingKey}`)]}});
     }
     if(u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
@@ -70,7 +74,10 @@ async function fixture(t: test.TestContext) {
     if(tvdb && tvdb[2] && state.failedTvdb.has(Number(tvdb[1]))) return Response.json({},{status:404});
     if(tvdb && tvdb[2]) return Response.json({data:{episodes:[{id:Number(tvdb[1])*10,seasonNumber:1,number:1,name:"Pilot",aired:"2020-01-01"}]}});
     if(tvdb) return Response.json({data:{id:Number(tvdb[1]),name:`Show ${Number(tvdb[1])-10}`,slug:`show-${tvdb[1]}`}});
-    if(u.pathname.includes("/find/")) return Response.json({tv_results:[],tv_episode_results:[]});
+    const extended = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/);
+    if(extended) return Response.json({data:{remoteIds:(state.tvdbEpisodeImdbIds.get(Number(extended[1])) || []).map(id=>({id}))}});
+    const find = u.pathname.match(/\/find\/(\d+)$/);
+    if(find) return Response.json({tv_results:[],tv_episode_results:state.findEpisodes.get(Number(find[1])) || []});
     throw new Error("Unexpected HTTP: "+u);
   });
   const run = async (ratingKey?: string) => {
@@ -332,4 +339,54 @@ test("absent TVDB history verifies from its catalogues' own successful downloads
   await f.run();
   assert.equal(f.feed("TVDB"),tvdbSince(day(2)),"verified history continues from the successful check");
   assert.deepEqual(f.downloads(),[]);
+});
+
+test("a retained primary TMDB change refreshes its episode identity lookups once inventory is restored", async t => {
+  const f = await fixture(t);
+  // Plex owns TMDB episode 100 only; TMDB's /find maps TVDB pilot 200 to it.
+  f.state.misnumberedInventory.add(10);
+  f.state.findEpisodes.set(200,[{id:100,show_id:10,season_number:1,episode_number:1}]);
+  let result = await f.run();
+  assert.equal(missing(result,10),0,"the TVDB pilot is satisfied through the /find mapping");
+  // Upstream corrects the mapping and reports the primary TMDB show as changed.
+  f.state.findEpisodes.set(200,[]);
+  f.state.tmdbChanges.push({id:10,date:date(1)});
+  f.state.failedInventory.add("10");
+  for (const n of [1,2]) {
+    f.at(n);
+    result = await f.run();
+    assert.ok(result.coverage.issues.some((issue:Issue)=>issue.operation === "inventory"),`day ${n}: incomplete inventory blocks processing`);
+  }
+  f.at(3);
+  f.state.failedInventory.clear();
+  f.state.tmdbChanges.length = 0;
+  result = await f.run();
+  assert.deepEqual(tmdbCatalogueRequests(f).filter(p=>p.startsWith("/3/tv/10")),["/3/tv/10","/3/tv/10/season/1"],"the retained change downloads the TMDB catalogue");
+  assert.equal(missing(result,10),1,"the corrected mapping leaves the TVDB pilot missing");
+  assert.ok(f.requests.some(u=>u.pathname === "/3/find/200"),"the retained change re-requests the primary show's identity lookup");
+});
+
+test("a retained primary TVDB change refreshes its episode identity lookups once inventory is restored", async t => {
+  const f = await fixture(t);
+  // Plex owns IMDb episode tt10; TVDB lists it as the remote ID of TVDB pilot 200.
+  f.state.misnumberedInventory.add(10);
+  f.state.tvdbEpisodeImdbIds.set(200,["tt10"]);
+  let result = await f.run();
+  assert.equal(missing(result,10),0,"the TVDB pilot is satisfied through its IMDb remote ID");
+  // Upstream corrects the remote ID and reports the primary TVDB series as changed.
+  f.state.tvdbEpisodeImdbIds.set(200,[]);
+  f.state.tvdbChanges.push({id:20,at:day(1,"08:00:00")});
+  f.state.failedInventory.add("10");
+  for (const n of [1,2]) {
+    f.at(n);
+    result = await f.run();
+    assert.ok(result.coverage.issues.some((issue:Issue)=>issue.operation === "inventory"),`day ${n}: incomplete inventory blocks processing`);
+  }
+  f.at(3);
+  f.state.failedInventory.clear();
+  f.state.tvdbChanges.length = 0;
+  result = await f.run();
+  assert.deepEqual(f.downloads(),["/v4/series/20/episodes/default"],"the retained change downloads the TVDB catalogue");
+  assert.equal(missing(result,10),1,"the corrected remote ID leaves the TVDB pilot missing");
+  assert.ok(f.requests.some(u=>u.pathname === "/v4/episodes/200/extended"),"the retained change re-requests the primary series' identity lookup");
 });

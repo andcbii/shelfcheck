@@ -825,7 +825,8 @@ async function runPlexScan(targetRatingKey?: string) {
       const tmdbAliases = savedComparison?.tmdbAliases || [];
       const tvdbAliases = savedComparison?.tvdbAliases || [];
       const stale = savedComparison?.staleRelationships;
-      const reuseTmdbRelationships = !targetRatingKey && !stale?.tmdb && (tmdbChanges === null || !tmdbAliases.some(id => tmdbChanges.has(id) && !(id === tmdbShow?.id && tmdbCatalogueReused))) && tvdbId === savedComparison?.tvdbId;
+      // Retained changes count too: a deferred primary change is consumed by this scan's download.
+      const reuseTmdbRelationships = !targetRatingKey && !stale?.tmdb && !tmdbAliases.some(id => tmdbCatalogueChanges.has(id) && !(id === tmdbShow?.id && tmdbCatalogueReused)) && tvdbId === savedComparison?.tvdbId;
       const reuseTvdbRelationships = !targetRatingKey && !stale?.tvdb && (tvdbVerifiedChanges === null || !tvdbAliases.some(id => tvdbVerifiedChanges.has(id)));
       const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));

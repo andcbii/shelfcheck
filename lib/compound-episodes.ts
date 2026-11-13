@@ -1,3 +1,6 @@
+import type { CoverageProvider } from "@/lib/manual-coverage-model";
+import { coverageIssueCause } from "@/lib/value-guards";
+
 export type CompoundProviderEpisode = {
   season: number;
   episode: number;
@@ -5,7 +8,7 @@ export type CompoundProviderEpisode = {
   airDate?: string;
   runtime?: number;
   providerEpisodeId?: number;
-  source: "TMDB" | "TVDB";
+  source: CoverageProvider;
 };
 
 export type LocalCompoundEpisode = {
@@ -32,8 +35,8 @@ export type CompoundCoverage = {
  * the provider episodes whose coverage relied on the same relationship.
  */
 export type CompoundEvidenceFailure = {
-  episode: { provider: "TMDB" | "TVDB"; id?: number; season: number; episode: number; title?: string };
-  dependents: { provider: "TMDB" | "TVDB"; id: number; season: number; episode: number }[];
+  episode: EpisodeReference;
+  dependents: { provider: CoverageProvider; id: number; season: number; episode: number }[];
   local: { season: number; episode: number; tmdbEpisodeId?: number };
   kind: "missing-title" | "exception";
   reason: string;
@@ -42,6 +45,18 @@ export type CompoundEvidenceFailure = {
 /** Provider and Plex titles are untrusted: null, non-string and blank values are unavailable evidence. */
 export function usableTitle(title: unknown): title is string {
   return typeof title === "string" && Boolean(title.trim());
+}
+
+/** How a failed check identifies a provider episode: only the fields it has, never an unusable title. */
+export type EpisodeReference = { provider?: CoverageProvider; id?: number; season?: number; episode?: number; title?: string };
+export function episodeReference(provider: CoverageProvider | undefined, episode: { providerEpisodeId?: number; season?: number; episode?: number; title?: unknown } | undefined): EpisodeReference {
+  return {
+    ...(provider !== undefined ? { provider } : {}),
+    ...(episode?.providerEpisodeId !== undefined ? { id: episode.providerEpisodeId } : {}),
+    ...(episode?.season !== undefined ? { season: episode.season } : {}),
+    ...(episode?.episode !== undefined ? { episode: episode.episode } : {}),
+    ...(usableTitle(episode?.title) ? { title: episode.title } : {}),
+  };
 }
 
 function baseTitle(title: string) {
@@ -118,7 +133,8 @@ export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localE
       compoundForLocal(local);
     } catch (error) {
       const tmdb = tmdbEpisodes.find((episode) => episode.providerEpisodeId === local.tmdbEpisodeId);
-      failures.push({ episode: { provider: "TMDB", id: local.tmdbEpisodeId, season: tmdb?.season ?? local.season, episode: tmdb?.episode ?? local.episode, ...(usableTitle(tmdb?.title) ? { title: tmdb.title } : {}) }, dependents: [], local: { season: local.season, episode: local.episode, tmdbEpisodeId: local.tmdbEpisodeId }, kind: "exception", reason: error instanceof Error ? error.message : String(error) });
+      const episode = episodeReference("TMDB", { providerEpisodeId: local.tmdbEpisodeId, season: tmdb?.season ?? local.season, episode: tmdb?.episode ?? local.episode, title: tmdb?.title });
+      failures.push({ episode, dependents: [], local: { season: local.season, episode: local.episode, tmdbEpisodeId: local.tmdbEpisodeId }, kind: "exception", reason: coverageIssueCause(error) });
     }
   }
   return { coverage, failures };
@@ -134,7 +150,7 @@ export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localE
     const untitled = sameDay.filter((episode) => !usableTitle(episode.title));
     if (untitled.length) {
       for (const episode of untitled) failures.push({
-        episode: { provider: "TVDB", id: episode.providerEpisodeId, season: episode.season, episode: episode.episode },
+        episode: episodeReference("TVDB", episode),
         dependents: matches.map((match) => ({ provider: "TVDB" as const, id: match.providerEpisodeId!, season: match.season, episode: match.episode })),
         local: { season: local.season, episode: local.episode, tmdbEpisodeId: local.tmdbEpisodeId },
         kind: "missing-title",

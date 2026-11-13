@@ -1,11 +1,12 @@
-import { compoundTvdbEvidence, usableTitle, type CompoundCoverage, type CompoundEvidenceFailure, type LocalCompoundEpisode } from "@/lib/compound-episodes";
+import { compoundTvdbEvidence, episodeReference, type CompoundCoverage, type CompoundEvidenceFailure, type EpisodeReference, type LocalCompoundEpisode } from "@/lib/compound-episodes";
+import { coverageIssueCause } from "@/lib/value-guards";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
 import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-match";
-import { missingPartsOf, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome } from "@/lib/manual-coverage-model";
+import { missingPartsOf, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome, type CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
 /** `titleLanguage: "eng"`: the default TVDB title was unusable and `title` was recovered from TVDB's English translation. */
-export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; titleLanguage?: "eng"; airDate?: string; runtime?: number; providerEpisodeId?: number; source: "TMDB" | "TVDB" };
+export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; titleLanguage?: "eng"; airDate?: string; runtime?: number; providerEpisodeId?: number; source: CoverageProvider };
 /** Matching methods of the final per-episode decision, in precedence order. */
 export type EpisodeCheckMethod = "report-missing" | "coordinates" | "automatic-evidence" | "manual-match" | "missing-result";
 /**
@@ -18,7 +19,7 @@ export type EpisodeCheckFailure = {
   method?: EpisodeCheckMethod;
   /** For `episode-crosswalk`: the identity/crosswalk lookup that failed for this TVDB episode. */
   crosswalk?: EpisodeCrosswalk;
-  episode: { provider?: "TMDB" | "TVDB"; id?: number; season?: number; episode?: number; title?: string };
+  episode: EpisodeReference;
   /**
    * `request-failed`: the provider request was rejected (its own Provider Lookup cause is in `causedBy`).
    * `unreadable-response`: a successful response could not be interpreted.
@@ -29,10 +30,14 @@ export type EpisodeCheckFailure = {
   reason: string;
   causedBy?: string[];
   /**
-   * The failed lookup was not attempted again in this comparison (another method made it
-   * unnecessary). Its recorded cause is kept unchanged; only its coverage impact is refreshed.
+   * Applies only to a cause already recorded; it raises no new one, yet does not resolve it either
+   * (only repaired evidence or a completed check does):
+   * `refresh`: the check still cannot be completed, but an earlier method made it unnecessary;
+   * the recorded cause is updated.
+   * `carry`: the failed lookup was not attempted again in this comparison (another method made
+   * it unnecessary). Its recorded cause is kept unchanged; only its coverage impact is refreshed.
    */
-  carried?: true;
+  existingOnly?: "refresh" | "carry";
   dependents?: CompoundEvidenceFailure["dependents"];
   local?: CompoundEvidenceFailure["local"];
   coveredBy?: EpisodeCheckMethod;
@@ -42,16 +47,10 @@ export type EpisodeCheckFailure = {
    * `missing-result-failed`: its missing result could not be built.
    */
   notListed?: "special" | "missing-result-failed";
-  /**
-   * False when the check still cannot be completed but an earlier method made it
-   * unnecessary. It raises no new cause, yet does not resolve an existing one:
-   * only repaired evidence or a completed check does.
-   */
-  required?: false;
 };
 /** Identity/crosswalk lookups for a TVDB episode, in the order they are tried. */
 export type EpisodeCrosswalk = "IMDb" | "Trakt" | "TMDB";
-export type AutomaticEpisodeEvidence ={ method: PlexAutoMatchMethod; tmdbEpisodeId: number; tmdbEpisode?: TmdbFindEpisode };
+export type AutomaticEpisodeEvidence = { method: PlexAutoMatchMethod; tmdbEpisodeId: number; tmdbEpisode?: TmdbFindEpisode };
 
 /**
  * How one episode's final decision ended: the method that established coverage, reported
@@ -111,7 +110,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
     const needed = (id?: number) => Boolean(id && coordinateMissingTvdbIds.has(id) && !locallySatisfiedTvdbIds.has(id));
     for (const failure of failures) {
       const required = failure.kind === "exception" || needed(failure.episode.id) || failure.dependents.some(dependent => needed(dependent.id));
-      episodeFailures.push({ operation: "compound-matching", episode: failure.episode, kind: failure.kind, reason: failure.reason, dependents: failure.dependents, local: failure.local, ...(required ? {} : { required: false }) });
+      episodeFailures.push({ operation: "compound-matching", episode: failure.episode, kind: failure.kind, reason: failure.reason, dependents: failure.dependents, local: failure.local, ...(required ? {} : { existingOnly: "refresh" as const }) });
     }
     let reconciled = 0;
     for (const coverage of compoundCovered) if (coordinateMissingTvdbIds.has(coverage.tvdbEpisodeId) && !locallySatisfiedTvdbIds.has(coverage.tvdbEpisodeId)) {
@@ -147,7 +146,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
     const attempt = <T>(method: EpisodeCheckMethod, run: () => T): T | undefined => {
       try { return run(); }
       catch (error) {
-        const failure: EpisodeCheckFailure = { operation: "episode-decision", method, episode: { provider: episode?.source, id: episode?.providerEpisodeId, season: episode?.season, episode: episode?.episode, ...(usableTitle(episode?.title) ? { title: episode.title } : {}) }, kind: "exception", reason: error instanceof Error ? error.message : String(error) };
+        const failure: EpisodeCheckFailure = { operation: "episode-decision", method, episode: episodeReference(episode?.source, episode), kind: "exception", reason: coverageIssueCause(error) };
         failed.push(failure); episodeFailures.push(failure);
         return undefined;
       }
@@ -204,19 +203,19 @@ export function comparePlexShow(input: PlexComparisonInput) {
   }
   // Report Missing outranks every other method, so a check it made unnecessary is not a failure.
   // A failed check stays reported when another method established coverage.
-  const reportedOrCovered = episodeFailures.filter(failure => {
+  const notMadeUnnecessaryByReportMissing = episodeFailures.filter(failure => {
     if ((failure.operation !== "compound-matching" && failure.operation !== "episode-crosswalk") || !failure.episode.id) return true;
     const decision = decisions.get(`${failure.episode.provider}:${failure.episode.id}`);
     if (decision) describeDecision(failure, decision);
     return decision !== "reported";
   });
-  episodeFailures.splice(0, episodeFailures.length, ...reportedOrCovered);
+  episodeFailures.splice(0, episodeFailures.length, ...notMadeUnnecessaryByReportMissing);
   const autoMatches: PlexAutoMatch[] = [...autoMatchEvidence].flatMap(([tvdbEpisodeId, evidence]) => {
     const tvdbEpisode = providerEpisodes.find((episode) => episode?.source === "TVDB" && episode.providerEpisodeId === tvdbEpisodeId);
     if (!tvdbEpisode) return [];
     try { return autoMatchRecord(tvdbEpisodeId, tvdbEpisode, evidence); }
     catch (error) {
-      episodeFailures.push({ operation: "auto-match-record", episode: { provider: "TVDB", id: tvdbEpisodeId, season: tvdbEpisode.season, episode: tvdbEpisode.episode }, kind: "exception", reason: error instanceof Error ? error.message : String(error) });
+      episodeFailures.push({ operation: "auto-match-record", episode: episodeReference("TVDB", tvdbEpisode), kind: "exception", reason: coverageIssueCause(error) });
       return [];
     }
   }).sort((a, b) => a.tvdb.season - b.tvdb.season || a.tvdb.episode - b.tvdb.episode);

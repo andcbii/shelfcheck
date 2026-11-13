@@ -2,13 +2,15 @@ import "server-only";
 import type { ProviderEpisode } from "@/lib/plex-comparison";
 import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/catalogue-records";
 import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
-import type { CoverageEvidence } from "@/lib/manual-coverage-model";
+import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputs } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
-/** `episodes` are the usable records; `malformed` the individual records that could not be fully used. */
-/** `titleRecovery`: TVDB episodes whose unusable default title English fallback could not yet recover. */
+/**
+ * `episodes` are the usable records; `malformed` the individual records that could not be fully used.
+ * `titleRecovery`: TVDB episodes whose unusable default title English fallback could not yet recover.
+ */
 export type ProviderCatalogue<T> = { version: 1; downloadedAt: string; show: T; episodes: ProviderEpisode[]; malformed?: MalformedCatalogueRecord[]; titleRecovery?: TitleRecoveryState };
 /** Only complete downloaded inputs can be reused or used as last-good fallback. */
 export function usableProviderCatalogue<T extends {id:number}>(catalogue: ProviderCatalogue<T> | undefined): catalogue is ProviderCatalogue<T> {
@@ -54,7 +56,7 @@ export type PlexGeneratedInputs = {
   pendingSafeguards: Record<string, true>;
 };
 /** Saved records are validated on every read, so reuse never compares a malformed record. */
-function savedCatalogues<T extends {id:number}>(provider: "TMDB" | "TVDB", catalogues: Record<string, ProviderCatalogue<T>>) {
+function savedCatalogues<T extends {id:number}>(provider: CoverageProvider, catalogues: Record<string, ProviderCatalogue<T>>) {
   for (const catalogue of Object.values(catalogues)) {
     if (!usableProviderCatalogue(catalogue)) continue;
     const {episodes, malformed} = normaliseSavedEpisodes(provider, catalogue.show.id, catalogue.episodes, catalogue.malformed);

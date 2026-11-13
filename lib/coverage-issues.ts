@@ -87,4 +87,4 @@ export function coverageIssueIdsWithPrefix(prefix: string): string[] {
   return (store().prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id,1,length(?))=? ORDER BY id").all(prefix,prefix) as {id:string}[]).map(row=>row.id);
 }
 export function resolveCoverageIssue(id: string) { store().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=?").run(id); }
-export function coverageIssueCause(error: unknown) { return error instanceof Error ? error.message : String(error); }
+export { coverageIssueCause } from "@/lib/value-guards";

@@ -13,7 +13,7 @@ import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, trackScanIgnores, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
-import { titleDependentTvdbEpisodeIds, usableTitle, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
+import { episodeReference, titleDependentTvdbEpisodeIds, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
 import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
@@ -26,6 +26,8 @@ import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFing
 import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, mergeScanProgress, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
+import { isRecord } from "@/lib/value-guards";
+import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
@@ -190,7 +192,6 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCa
 class CrosswalkResponseError extends Error {
   constructor(readonly provider: ProviderName, detail: string) { super(`${provider} returned a successful response that could not be interpreted (${detail}).`); }
 }
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 /** An optional list of records in a successful response; absent means none. */
 function responseRecords<T>(provider: ProviderName, body: unknown, field: string): T[] {
   if (!isRecord(body)) throw new CrosswalkResponseError(provider, "the response is not an object");
@@ -277,7 +278,7 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
  * Individual malformed records are episode-scoped. A catalogue whose records are
  * all unusable is an unreadable catalogue, never an empty verified one.
  */
-function usableCatalogue(provider: "TMDB" | "TVDB", showId: number, catalogue: NormalisedCatalogue) {
+function usableCatalogue(provider: CoverageProvider, showId: number, catalogue: NormalisedCatalogue) {
   if (!catalogue.episodes.length && catalogue.malformed.length) throw new ProviderResponseError(provider,{provider,kind:provider === "TMDB" ? "show episode catalogue" : "series episode catalogue",id:showId});
   return catalogue;
 }
@@ -479,10 +480,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         const crosswalkFailures: EpisodeCheckFailure[] = [];
         const crosswalksAttempted = new Set<string>();
         const tvdbEpisodeOf = (id: number) => providerEpisodes.find((episode) => episode?.source === "TVDB" && episode.providerEpisodeId === id);
-        const crosswalkEpisode = (id: number): EpisodeCheckFailure["episode"] => {
-          const episode = tvdbEpisodeOf(id);
-          return { provider: "TVDB", id, ...(episode ? { season: episode.season, episode: episode.episode, ...(usableTitle(episode.title) ? { title: episode.title } : {}) } : {}) };
-        };
+        const crosswalkEpisode = (id: number) => episodeReference("TVDB", { ...tvdbEpisodeOf(id), providerEpisodeId: id });
         /** One failed request or interpretation within a crosswalk: a rejected request has its own Provider Lookup cause; anything else is never relabelled as one. */
         const crosswalkCause = ({ error, relationship }: CrosswalkCause) => {
           const requestIssue = episodeIdentityIssueId(ratingKey, relationship);
@@ -526,7 +524,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         }
         if (tvdbId) {
           tmdbSeriesMatches = await tmdbShowsForTvdbId(tvdbId, config.tmdbToken).catch((error) => {
-            logger.warn("plex.show.tmdb-equivalent-series-unavailable", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, error: error instanceof Error ? error.message : String(error) });
+            logger.warn("plex.show.tmdb-equivalent-series-unavailable", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, error: coverageIssueCause(error) });
             return [];
           });
         }
@@ -640,7 +638,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         // A recorded crosswalk failure that was not looked up again (another method made it
         // unnecessary) stays unresolved while its episode remains in the catalogue.
         for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) if (!crosswalksAttempted.has(`${crosswalk}:${tvdbEpisodeId}`) && tvdbEpisodeOf(tvdbEpisodeId)) {
-          crosswalkFailures.push({ operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId), kind: "exception", reason: "not checked again", carried: true });
+          crosswalkFailures.push({ operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId), kind: "exception", reason: "not checked again", existingOnly: "carry" });
         }
         const { missing, coverageOutcomes, autoMatches, compoundCoverage, manualCoverage, diagnostics, episodeFailures } = comparePlexShow({
           ratingKey, primary, tmdbShow, tvdbId, tvdbSlug, tmdbSeriesMatches, providerEpisodes,
@@ -649,7 +647,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, autoCompoundEpisodes, crosswalkFailures,
         });
         for (const { event, data } of diagnostics) logger.info(event, data);
-        for (const failure of episodeFailures) logger[failure.required === false ? "info" : "warn"]("plex.show.episode-check-failed", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, ...failure });
+        for (const failure of episodeFailures) logger[failure.existingOnly === "refresh" ? "info" : "warn"]("plex.show.episode-check-failed", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, ...failure });
         const linkedTvdbIds = [...new Set(tmdbSeriesMatches.flatMap((show) => show.external_ids?.tvdb_id ? [show.external_ids.tvdb_id] : []))];
         const missingTvdbSummaries = linkedTvdbIds.filter((id) => !tvdbSeriesMatches.some((show) => show.id === id));
         const linkedTvdbSummaries = await Promise.allSettled(missingTvdbSummaries.map((id) => tvdbShow(id, token)));

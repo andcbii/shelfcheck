@@ -1,7 +1,9 @@
 import "server-only";
-import { usableTitle } from "@/lib/compound-episodes";
+import { episodeReference, usableTitle } from "@/lib/compound-episodes";
 import { providerLookupContext } from "@/lib/coverage-issues";
 import { ProviderHttpError } from "@/lib/plex-provider-client";
+import { isRecord } from "@/lib/value-guards";
+import { titleRecoveryIssueId } from "@/lib/episode-check-issues";
 import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison";
 
 /**
@@ -11,7 +13,6 @@ import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison
  */
 export type TitleRecoveryState = Record<string, { outcome: "no-english-title" } | { outcome: "request-failed"; reason: string; causedBy?: string[] }>;
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const untitled = (episode: ProviderEpisode): episode is ProviderEpisode & { providerEpisodeId: number } => episode.source === "TVDB" && Boolean(episode.providerEpisodeId) && !usableTitle(episode.title);
 
 /**
@@ -84,13 +85,14 @@ export function withTitleRecovery(ratingKey: string, failures: EpisodeCheckFailu
   const requestFailures = Object.entries(state).flatMap(([id, entry]): EpisodeCheckFailure[] => {
     if (entry.outcome !== "request-failed") return [];
     const episode = episodes.find(item => item.source === "TVDB" && item.providerEpisodeId === Number(id));
-    return [{ operation: "title-recovery", episode: { provider: "TVDB", id: Number(id), ...(episode ? { season: episode.season, episode: episode.episode } : {}) }, kind: "request-failed", reason: `${entry.reason}.`, ...(entry.causedBy?.length ? { causedBy: entry.causedBy } : {}), ...(carried ? { carried: true as const } : {}) }];
+    return [{ operation: "title-recovery", episode: episodeReference("TVDB", { ...episode, providerEpisodeId: Number(id) }), kind: "request-failed", reason: `${entry.reason}.`, ...(entry.causedBy?.length ? { causedBy: entry.causedBy } : {}), ...(carried ? { existingOnly: "carry" as const } : {}) }];
   });
   const explained = failures.map(failure => {
-    const entry = failure.kind === "missing-title" && failure.episode.provider === "TVDB" && failure.episode.id !== undefined ? state[failure.episode.id] : undefined;
-    if (!entry) return failure;
+    const tvdbEpisodeId = failure.kind === "missing-title" && failure.episode.provider === "TVDB" ? failure.episode.id : undefined;
+    const entry = tvdbEpisodeId !== undefined ? state[tvdbEpisodeId] : undefined;
+    if (!entry || tvdbEpisodeId === undefined) return failure;
     if (entry.outcome === "no-english-title") return { ...failure, reason: "TVDB returned no usable default or English title for this episode." };
-    return { ...failure, reason: "TVDB returned no usable default title for this episode, and its English title could not be retrieved.", causedBy: [`episode-check:${ratingKey}:title-recovery:TVDB:${failure.episode.id}`] };
+    return { ...failure, reason: "TVDB returned no usable default title for this episode, and its English title could not be retrieved.", causedBy: [titleRecoveryIssueId(ratingKey, tvdbEpisodeId)] };
   });
   return [...requestFailures, ...explained];
 }

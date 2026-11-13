@@ -140,27 +140,30 @@ export function savePlexInputs(inputs: PlexGeneratedInputs) {
  * rechecks can explain the failure. It records a provider relationship, never ownership.
  */
 export type SharedTmdbCrosswalk = {value?: unknown; receivedAt?: string; rejectedAt?: string};
+const sharedTmdbCrosswalkKey = (tvdbEpisodeId: number) => `tmdb-crosswalk:${tvdbEpisodeId}`;
 export function readSharedTmdbCrosswalk(tvdbEpisodeId: number) {
-  return readPlexGeneratedInputs<SharedTmdbCrosswalk>(`tmdb-crosswalk:${tvdbEpisodeId}`);
+  return readPlexGeneratedInputs<SharedTmdbCrosswalk>(sharedTmdbCrosswalkKey(tvdbEpisodeId));
 }
 export function saveSharedTmdbCrosswalk(tvdbEpisodeId: number, evidence: SharedTmdbCrosswalk) {
-  writePlexGeneratedInputs(`tmdb-crosswalk:${tvdbEpisodeId}`, evidence);
+  writePlexGeneratedInputs(sharedTmdbCrosswalkKey(tvdbEpisodeId), evidence);
 }
-/** The TVDB episode of a saved TMDB external-ID lookup relationship key, if it is one. */
-const tmdbExternalIdLookup = (relationship: string) => relationship.startsWith("TMDB:") ? relationship.match(/\/find\/(\d+)\?external_source=tvdb_id$/)?.[1] : undefined;
-export function clearPlexInputs(ratingKey?: string) {
-  if (!ratingKey) { deletePlexGeneratedInputs(); return; }
+/**
+ * Forgets a usable shared response so the next lookup is requested again. A rejection is kept:
+ * other shows' offline rechecks rely on it so they cannot revive the rejected answer.
+ */
+export function forgetSharedTmdbCrosswalk(tvdbEpisodeId: number) {
+  const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
+  if (shared && !shared.rejectedAt) deletePlexGeneratedInput(sharedTmdbCrosswalkKey(tvdbEpisodeId));
+}
+/** Clears one show's saved comparison, or all generated inputs; returns the cleared show's relationship keys. */
+export function clearPlexInputs(ratingKey?: string): string[] {
+  if (!ratingKey) { deletePlexGeneratedInputs(); return []; }
   const previous = readPlexGeneratedInputs<SavedPlexComparison>(`comparison:${ratingKey}`);
-  if (previous) {
-    // Clearing one show also drops the shared crosswalk evidence it saved, so its next lookup
-    // is requested again and other shows cannot keep reusing the cleared answer.
-    for (const relationship of Object.keys(previous.relationships)) {
-      const tvdbEpisodeId = tmdbExternalIdLookup(relationship);
-      if (tvdbEpisodeId) deletePlexGeneratedInput(`tmdb-crosswalk:${tvdbEpisodeId}`);
-    }
-    previous.refresh = {tmdb:true, tvdb:true};
-    previous.complete = false;
-    previous.relationships = {};
-    savePlexComparison(ratingKey, previous);
-  }
+  if (!previous) return [];
+  const relationships = Object.keys(previous.relationships);
+  previous.refresh = {tmdb:true, tvdb:true};
+  previous.complete = false;
+  previous.relationships = {};
+  savePlexComparison(ratingKey, previous);
+  return relationships;
 }

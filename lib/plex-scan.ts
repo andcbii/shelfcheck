@@ -1,7 +1,7 @@
 import { reuseProviderCatalogue, tmdbFeedCovers, tmdbVerificationPlan, tvdbVerificationFrom } from "@/lib/plex-catalogue-policy";
 import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, forgetSharedTmdbCrosswalk, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
@@ -248,7 +248,7 @@ type TmdbCrosswalkScan = {startedAt: string; forced: boolean; requested: Set<num
  * only a usable response this scan requested. Neither renews the receipt time, and no receipt
  * date is ever inferred.
  */
-function currentTmdbCrosswalk(tvdbEpisodeId: number, scan: TmdbCrosswalkScan) {
+function tmdbCrosswalkNeedsRequest(tvdbEpisodeId: number, scan: TmdbCrosswalkScan) {
   const relationships = relationshipScope.getStore();
   if (!relationships) return false;
   const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
@@ -261,20 +261,31 @@ function currentTmdbCrosswalk(tvdbEpisodeId: number, scan: TmdbCrosswalkScan) {
   resolveCoverageIssue(episodeIdentityIssueId(comparisonIssueScope.getStore()?.ratingKey, key));
   return false;
 }
+/** The TVDB episode whose TMDB external-ID crosswalk a saved relationship key names, if any. */
+function tmdbCrosswalkEpisode(relationship: string) {
+  const tvdbEpisodeId = Number(relationship.match(/\/find\/(\d+)\?/)?.[1]);
+  return Number.isSafeInteger(tvdbEpisodeId) && relationship === crosswalkRelationshipKey("TMDB", tvdbEpisodeId) ? tvdbEpisodeId : undefined;
+}
 /**
- * An offline recheck replays this comparison's saved crosswalk response, unless a later live
- * refresh of the shared lookup rejected it, possibly in another show's comparison: then the
- * saved copy grants nothing, and only an unreadable payload is kept to explain the failure.
+ * An offline recheck replays this comparison's saved crosswalk response, unless the shared
+ * outcome is newer (an undated copy counts as older): a later live refresh, possibly in another
+ * show's comparison, replaced or rejected it. A replacing usable response is replayed with its
+ * original receipt time; a rejection grants nothing, and only an unreadable payload is kept to
+ * explain the failure. Replay makes no request and renews nothing.
  */
 function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
   const relationships = relationshipScope.getStore();
   const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
-  const rejected = Date.parse(shared?.rejectedAt || "");
-  if (!relationships || !Number.isFinite(rejected)) return;
+  const outcomeAt = Date.parse(shared?.receivedAt || shared?.rejectedAt || "");
+  if (!relationships || !shared || !Number.isFinite(outcomeAt)) return;
   const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
-  const saved = Date.parse(relationships[key]?.receivedAt || "");
-  if (Number.isFinite(saved) && saved > rejected) return;
-  if (Object.hasOwn(shared!, "value")) relationships[key] = {provider: "TMDB", value: shared!.value};
+  // Without a saved copy there is nothing to replay; the shared outcome never fills the gap.
+  if (!Object.hasOwn(relationships, key)) return;
+  const savedAt = Date.parse(relationships[key].receivedAt || "");
+  if (Number.isFinite(savedAt) && savedAt >= outcomeAt) return;
+  if (shared.receivedAt) relationships[key] = {provider: "TMDB", value: shared.value, receivedAt: shared.receivedAt};
+  else if (Object.hasOwn(shared, "value")) relationships[key] = {provider: "TMDB", value: shared.value};
+  // A rejection without an unreadable payload leaves no saved response.
   else delete relationships[key];
 }
 /**
@@ -289,13 +300,13 @@ function rejectTmdbCrosswalk(tvdbEpisodeId: number) {
 }
 /**
  * A last-good comparison retained after a failed live scan keeps its saved evidence, except
- * that this scan's TMDB external-ID crosswalk outcomes replace it: a rejected expired response
- * is not retained, and responses received during the scan replace older ones. Offline
+ * that the outcomes of the TMDB external-ID crosswalks this scan checked (`checked`) replace
+ * it: a rejected expired response is not retained, and a response this scan used replaces the
+ * older one. Other provider relationships received during the scan are not merged. Offline
  * rechecks therefore cannot revive evidence the live scan rejected.
  */
-function withLiveCrosswalkOutcomes(saved: SavedPlexComparison, live: SavedPlexComparison["relationships"], checked: Set<string>, startedAt: string): SavedPlexComparison {
+function withLiveCrosswalkOutcomes(saved: SavedPlexComparison, live: SavedPlexComparison["relationships"], checked: Set<string>): SavedPlexComparison {
   const relationships = {...saved.relationships};
-  for (const [key, relationship] of Object.entries(live)) if (relationship.receivedAt && relationship.receivedAt >= startedAt) relationships[key] = relationship;
   for (const key of checked) if (Object.hasOwn(live, key)) relationships[key] = live[key]; else delete relationships[key];
   return {...saved, relationships};
 }
@@ -707,7 +718,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             if (!replayScope.getStore()) input.checkedTmdbCrosswalks?.add(crosswalkRelationshipKey("TMDB", tvdbEpisodeId));
             const scan = input.tmdbCrosswalkScan;
             if (replayScope.getStore()) replayedTmdbCrosswalk(tvdbEpisodeId);
-            else if (scan && currentTmdbCrosswalk(tvdbEpisodeId, {...scan, forced: scan.forced || retryCrosswalks.has(`TMDB:${tvdbEpisodeId}`)})) {
+            else if (scan && tmdbCrosswalkNeedsRequest(tvdbEpisodeId, {...scan, forced: scan.forced || retryCrosswalks.has(`TMDB:${tvdbEpisodeId}`)})) {
               // Recorded once settled, so a forced lookup never adopts the older response this request replaces.
               return findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken).finally(() => scan.requested.add(tvdbEpisodeId));
             }
@@ -1122,7 +1133,7 @@ async function runPlexScan(targetRatingKey?: string) {
       const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
       const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
       const checkedTmdbCrosswalks = new Set<string>();
-      const retainedComparison = (saved: SavedPlexComparison) => ({...withLiveCrosswalkOutcomes(saved,relationships,checkedTmdbCrosswalks,startedAt),refresh});
+      const retainedComparison = (saved: SavedPlexComparison) => ({...withLiveCrosswalkOutcomes(saved,relationships,checkedTmdbCrosswalks),refresh});
       try {
       await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError}, () => relationshipScope.run(relationships, async () => {
         const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat,tmdbCrosswalkScan:{startedAt,forced:!reuseTmdbRelationships,requested:requestedTmdbCrosswalks},checkedTmdbCrosswalks});
@@ -1216,7 +1227,12 @@ export function getPlexReport(): PlexReport | null {
 export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
   if ((globalThis as ScanGlobal).__shelfcheckPlexScan) throw new Error("Wait for the current Plex scan to finish before clearing the cache.");
   const report = readPlexReport() as PlexReport | null;
-  clearPlexInputs(ratingKey);
+  // Clearing one show forgets the usable shared crosswalk evidence it saved, so its next lookup is
+  // requested again; rejections stay, so other shows' offline rechecks cannot revive them.
+  for (const relationship of clearPlexInputs(ratingKey)) {
+    const tvdbEpisodeId = tmdbCrosswalkEpisode(relationship);
+    if (tvdbEpisodeId !== undefined) forgetSharedTmdbCrosswalk(tvdbEpisodeId);
+  }
   if (ratingKey) {
     const hadReportCache = Boolean(report?.scanCache?.[ratingKey]);
     if (report?.scanCache) {

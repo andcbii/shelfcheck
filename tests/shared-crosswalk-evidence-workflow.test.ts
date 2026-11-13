@@ -298,3 +298,151 @@ test("clearing one show's cache and provider-change invalidation replace the sha
   assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
   for (const name of ["target", "other"] as const) assert.deepEqual(autoMatches(later, name), [matched]);
 });
+
+/** Saves an unrelated Manual Match, which runs an offline recheck; returns its mapping ID. */
+async function saveUnrelatedMatch(save: (members: Episode[]) => Promise<Response>) {
+  const unrelated = await save([tmdb3, tvdb3]);
+  assert.ok(unrelated.ok, await unrelated.clone().text());
+  return (await unrelated.json()).mapping.id as string;
+}
+
+test("an offline recheck replays a later shared outcome instead of its older copy, so a rejected and then replaced answer is never revived", async t => {
+  const { rerun, state, requests, restart, save, setFlags, status } = await sharedDayOne(t);
+  await rerun();
+
+  // Day two: a single-show rescan of Target fails, rejecting the shared answer; a second rescan
+  // receives a valid empty answer that replaces the rejection. Other keeps its day-one copy.
+  state.statuses.set("/3/find/301", 404);
+  t.mock.timers.setTime(Date.parse("2026-11-13T09:00:00Z"));
+  await rerun("ratingKey:target");
+  state.statuses.delete("/3/find/301");
+  state.bodies.set("/3/find/301", empty);
+  t.mock.timers.setTime(Date.parse("2026-11-13T10:00:00Z"));
+  assert.deepEqual(autoMatches(await rerun("ratingKey:target"), "target"), []);
+
+  const mappingId = await saveUnrelatedMatch(save);
+  for (const restarting of [false, true]) {
+    if (restarting) { restart(); await setFlags(mappingId, [tvdb3]); }
+    requests.length = 0;
+    const rechecked = await settled(status);
+    assert.deepEqual([...requests], [], "the cached recheck stays offline");
+    assert.deepEqual(autoMatches(rechecked, "other"), [], "Other's older copy of the match is not revived");
+    assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+    assert.deepEqual(crosswalkIssues(rechecked, "other"), [], "the replayed valid empty answer is not a Coverage Issue");
+  }
+
+  // The replayed answer kept its original receipt time: later that day it is reused, the next day refreshed.
+  t.mock.timers.setTime(Date.parse("2026-11-13T11:00:00Z"));
+  requests.length = 0;
+  await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), []);
+  t.mock.timers.setTime(Date.parse("2026-11-14T00:00:01Z"));
+  requests.length = 0;
+  await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
+});
+
+for (const failure of ["a failed request", "an unreadable response"] as const) test(`clearing one show's cache keeps a rejection by ${failure} that other shows' offline rechecks depend on`, async t => {
+  const { rerun, state, requests, clearCache, save, status } = await sharedDayOne(t);
+  await rerun();
+
+  // Target's forced refresh fails, rejecting the shared answer; then the user clears Target.
+  if (failure === "a failed request") state.statuses.set("/3/find/301", 404);
+  else state.bodies.set("/3/find/301", { tv_episode_results: "unreadable" });
+  t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
+  const failed = await rerun("ratingKey:target");
+  assert.match(crosswalkIssues(failed, "target")[0], failure === "a failed request" ? /^301: .*TMDB request failed/ : /^301: /);
+  assert.deepEqual(autoMatches(failed, "target"), []);
+  await clearCache("ratingKey:target");
+
+  await saveUnrelatedMatch(save);
+  requests.length = 0;
+  const rechecked = await settled(status);
+  assert.deepEqual([...requests], [], "the cached recheck stays offline");
+  assert.deepEqual(autoMatches(rechecked, "other"), [], "the rejected answer is not revived from Other's saved copy");
+  assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+
+  // An independent complete-set Manual Match still covers TVDB 301 offline.
+  const manual = await save([tmdb1, tvdb1]);
+  assert.ok(manual.ok, await manual.clone().text());
+  requests.length = 0;
+  const covered = await settled(status);
+  assert.deepEqual([...requests], []);
+  assert.ok(!missingKeys(covered, "other").includes("TVDB:301"));
+});
+
+test("a rejection from another show's ordinary next-day refresh stops Other's offline recheck before and after restart", async t => {
+  const { rerun, state, requests, restart, save, setFlags, status } = await sharedDayOne(t);
+  await rerun();
+
+  // Day two: Other's Plex metadata is unavailable, so its last-good comparison (and its day-one
+  // copy of the match) is retained without reaching the lookup; Target's ordinary refresh fails.
+  state.statuses.set("/3/find/301", 404);
+  state.statuses.set("/library/metadata/other", 404);
+  t.mock.timers.setTime(Date.parse("2026-11-13T09:00:00Z"));
+  requests.length = 0;
+  const failed = await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"], "only Target requested the lookup");
+  assert.match(crosswalkIssues(failed, "target")[0], /^301: .*TMDB request failed/);
+  state.statuses.delete("/library/metadata/other");
+
+  const mappingId = await saveUnrelatedMatch(save);
+  for (const restarting of [false, true]) {
+    if (restarting) { restart(); await setFlags(mappingId, [tvdb3]); }
+    requests.length = 0;
+    const rechecked = await settled(status);
+    assert.deepEqual([...requests], [], "the cached recheck stays offline");
+    assert.deepEqual(autoMatches(rechecked, "other"), [], "the rejected answer is not revived from Other's saved copy");
+    assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+    assert.match(crosswalkIssues(rechecked, "other")[0], /^301: .*not available to the offline recheck/);
+  }
+
+  const manual = await save([tmdb1, tvdb1]);
+  assert.ok(manual.ok, await manual.clone().text());
+  requests.length = 0;
+  const covered = await settled(status);
+  assert.deepEqual([...requests], []);
+  assert.ok(!missingKeys(covered, "other").includes("TVDB:301"), "independent Manual Match coverage is usable offline");
+});
+
+test("a forced retry and another show's ordinary lookup of the same episode share one in-flight request", async t => {
+  const { rerun, state, requests } = await sharedDayOne(t);
+  await rerun();
+  // Target's failed rescan records a failed crosswalk, so its next lookup is a forced retry.
+  state.statuses.set("/3/find/301", 404);
+  t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
+  await rerun("ratingKey:target");
+  state.statuses.delete("/3/find/301");
+
+  let release!: () => void;
+  state.hold.set("/3/find/301", new Promise<void>(resolve => { release = resolve; }));
+  state.onRequest = pathname => { if (pathname === "/3/find/301") setTimeout(release, 50); };
+  t.mock.timers.setTime(Date.parse("2026-11-12T12:00:00Z"));
+  requests.length = 0;
+  const result = await rerun();
+  state.onRequest = undefined;
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"], "exactly one request serves both lookups");
+  for (const name of ["target", "other"] as const) {
+    assert.deepEqual(autoMatches(result, name), [matched], `${name} receives the shared result`);
+    assert.deepEqual(crosswalkIssues(result, name), []);
+  }
+});
+
+test("same-day reuse during a scan that crosses UTC midnight does not renew the shared receipt time", async t => {
+  const { rerun, state, requests } = await sharedDayOne(t);
+  await rerun();
+  // A scan starting on 2026-11-12 reuses the 2026-11-12 answer after the clock passes midnight.
+  t.mock.timers.setTime(Date.parse("2026-11-12T23:59:58Z"));
+  state.onRequest = pathname => { if (pathname.startsWith("/library/metadata/")) t.mock.timers.setTime(Date.parse("2026-11-13T00:00:05Z")); };
+  requests.length = 0;
+  const crossing = await rerun();
+  state.onRequest = undefined;
+  assert.deepEqual(sharedFinds(requests), [], "the scan's starting UTC date makes the answer current");
+  for (const name of ["target", "other"] as const) assert.deepEqual(autoMatches(crossing, name), [matched]);
+
+  // Had reuse renewed it, the answer would look received on 2026-11-13 and be reused today.
+  t.mock.timers.setTime(Date.parse("2026-11-13T08:00:00Z"));
+  requests.length = 0;
+  await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"], "the answer received on 2026-11-12 is refreshed once");
+});

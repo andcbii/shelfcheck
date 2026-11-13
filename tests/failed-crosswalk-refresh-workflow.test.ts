@@ -161,3 +161,31 @@ for (const payload of unreadablePayloads) test(`an expired crosswalk refreshed w
   assert.deepEqual(crosswalkIssues(recovered), []);
   assert.ok(issuesOf(recovered).some(issue => issue.id === "catalogue-refresh:TVDB:ratingKey:target"), "the unrelated catalogue failure stays unresolved");
 });
+
+test("a retained last-good comparison takes only the failed scan's TMDB crosswalk outcomes, not its other provider relationships", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-12T12:00:00Z") });
+  const h = await harness(t, [tmdb1, tmdb2, tmdb3, tvdb1, tvdb2, tvdb3], [tmdb1, tmdb2]);
+  const { rerun, state, requests, save, status } = h;
+  state.bodies.set("/3/find/302", found(tmdb2));
+  // Day one: TVDB 301 has a valid empty TMDB answer, and Plex carries no IMDb IDs.
+  assert.deepEqual(missingKeys(await rerun()), ["TMDB:9003", "TVDB:301", "TVDB:303"]);
+
+  // Day two: the TVDB catalogue download fails, so the last-good comparison is retained. Plex now
+  // carries an IMDb ID that TVDB lists for TVDB 301, which this live scan uses.
+  failTvdbCatalogueDownload(h);
+  state.imdb.set(tmdb1.id, "tt1");
+  state.bodies.set("/v4/episodes/301/extended", { data: { id: 301, seriesId: 20, seasonNumber: 2, number: 1, name: "One", remoteIds: [{ id: "tt1", sourceName: "IMDB" }] } });
+  t.mock.timers.setTime(Date.parse("2026-11-13T12:00:00Z"));
+  requests.length = 0;
+  const live = await rerun();
+  assert.ok(requests.includes("/v4/episodes/301/extended"), "the IMDb crosswalk was requested");
+  assert.ok(!missingKeys(live).includes("TVDB:301"), "the live scan covers TVDB 301 through IMDb");
+
+  // The offline recheck replays the retained last-good evidence, which has no IMDb response.
+  const unrelated = await save([tmdb3, tvdb3]);
+  assert.ok(unrelated.ok, await unrelated.clone().text());
+  requests.length = 0;
+  const rechecked = await settled(status);
+  assert.deepEqual([...requests], [], "the cached recheck stays offline");
+  assert.ok(missingKeys(rechecked).includes("TVDB:301"), "the failed scan's IMDb response was not merged into the retained comparison");
+});

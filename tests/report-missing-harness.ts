@@ -57,7 +57,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `imdb`: an IMDb GUID Plex also carries on the owned file of a provider episode.
   // `english`: TVDB English episode translations by TVDB episode ID (null name = translation without a title); others are 404.
   // `onRequest`: called with each request's pathname before it is answered (e.g. to advance a controlled clock).
-  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
+  // `raw`: per-pathname successful (HTTP 200) response bodies sent as-is, e.g. one that is not JSON.
+  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, raw: new Map<string, string>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -68,6 +69,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     requests.push(u.pathname);
     state.onRequest?.(u.pathname);
     if (state.statuses.has(u.pathname)) return Response.json({}, { status: state.statuses.get(u.pathname) });
+    if (state.raw.has(u.pathname)) return new Response(state.raw.get(u.pathname), { status: 200, headers: { "Content-Type": "application/json" } });
     if (state.bodies.has(u.pathname)) return Response.json(state.bodies.get(u.pathname));
     let body: unknown;
     let match: RegExpMatchArray | null;

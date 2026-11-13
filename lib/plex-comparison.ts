@@ -4,7 +4,8 @@ import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-
 import { missingPartsOf, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome } from "@/lib/manual-coverage-model";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
-export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; airDate?: string; runtime?: number; providerEpisodeId?: number; source: "TMDB" | "TVDB" };
+/** `titleLanguage: "eng"`: the default TVDB title was unusable and `title` was recovered from TVDB's English translation. */
+export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; titleLanguage?: "eng"; airDate?: string; runtime?: number; providerEpisodeId?: number; source: "TMDB" | "TVDB" };
 /** Matching methods of the final per-episode decision, in precedence order. */
 export type EpisodeCheckMethod = "report-missing" | "coordinates" | "automatic-evidence" | "manual-match" | "missing-result";
 /**
@@ -13,7 +14,7 @@ export type EpisodeCheckMethod = "report-missing" | "coordinates" | "automatic-e
  * independent method that still established coverage, if any.
  */
 export type EpisodeCheckFailure = {
-  operation: "compound-matching" | "episode-decision" | "auto-match-record" | "episode-crosswalk";
+  operation: "compound-matching" | "episode-decision" | "auto-match-record" | "episode-crosswalk" | "title-recovery";
   method?: EpisodeCheckMethod;
   /** For `episode-crosswalk`: the identity/crosswalk lookup that failed for this TVDB episode. */
   crosswalk?: EpisodeCrosswalk;

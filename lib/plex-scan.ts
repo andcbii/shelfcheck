@@ -16,6 +16,7 @@ import { SHELFCHECK_VERSION } from "@/lib/version";
 import { usableTitle, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
+import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
@@ -843,6 +844,8 @@ async function runPlexScan(targetRatingKey?: string) {
       const providerEpisodes: ProviderEpisode[] = [];
       // Individual catalogue records that could not be used, from whichever catalogue was compared.
       const malformedRecords: MalformedCatalogueRecord[] = [];
+      // English title fallback outcome for the compared TVDB catalogue; `carried` when not attempted this scan.
+      let titleRecovery: {state: TitleRecoveryState; carried: boolean} = {state: {}, carried: false};
       let tmdbShow: TmdbShow | null = null;
       let tvdbResolved = false;
       let tvdbCatalogueReused = false;
@@ -906,8 +909,20 @@ async function runPlexScan(targetRatingKey?: string) {
           tvdbCatalogueReused = reuseTvdb;
           if (!reuseTvdb && tvdbAuthenticationError) throw tvdbAuthenticationError;
           const tvdb = reuseTvdb ? {episodes:savedTvdb.episodes,malformed:savedTvdb.malformed || [],slug:savedTvdb.show.slug,name:savedTvdb.show.name} : await tvdbSeries(tvdbId, token, undefined, primary.title || "Unknown show");
+          // Default catalogue first; only unusable titles are recovered, per TVDB episode, from English.
+          const recovery = await recoverTvdbTitles(tvdb.episodes, reuseTvdb ? undefined : savedTvdb?.episodes, tvdbEpisodeId => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : providerClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"), tvdbAuthenticationError);
+          tvdb.episodes = recovery.episodes;
+          titleRecovery = {state: recovery.unresolved, carried: false};
+          for (const tvdbEpisodeId of recovery.recovered) logger.info("plex.show.episode-title-recovered", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId, language: "eng" });
+          for (const [tvdbEpisodeId, entry] of Object.entries(recovery.unresolved)) logger.warn("plex.show.episode-title-unrecovered", { ratingKey, tvdbShowId: tvdbId, tvdbEpisodeId: Number(tvdbEpisodeId), ...entry });
+          if (reuseTvdb && recovery.attempted) {
+            // Recovered titles join the reusable catalogue without changing its download time.
+            inputs.tvdb[String(tvdbId)] = {...savedTvdb, episodes:tvdb.episodes, titleRecovery:recovery.unresolved};
+            if (!Object.keys(recovery.unresolved).length) delete inputs.tvdb[String(tvdbId)].titleRecovery;
+            savePlexCatalogue("tvdb", tvdbId, inputs.tvdb[String(tvdbId)]);
+          }
           if (!reuseTvdb) {
-            inputs.tvdb[String(tvdbId)] = {version:1, downloadedAt:new Date().toISOString(), show:{id:tvdbId, name:tvdb.name, slug:tvdb.slug}, episodes:tvdb.episodes, ...(tvdb.malformed.length ? {malformed:tvdb.malformed} : {})};
+            inputs.tvdb[String(tvdbId)] = {version:1, downloadedAt:new Date().toISOString(), show:{id:tvdbId, name:tvdb.name, slug:tvdb.slug}, episodes:tvdb.episodes, ...(tvdb.malformed.length ? {malformed:tvdb.malformed} : {}), ...(Object.keys(recovery.unresolved).length ? {titleRecovery:recovery.unresolved} : {})};
             delete refresh.tvdb;
             if (inputs.pendingTvdbChanges[String(tvdbId)]) {
               delete inputs.pendingTvdbChanges[String(tvdbId)];
@@ -928,7 +943,7 @@ async function runPlexScan(targetRatingKey?: string) {
         refresh.tvdb = true;
         setCoverageIssue({id:`catalogue-refresh:TVDB:${ratingKey}`,...(tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...providerLookupContext(error,{source:tvdbSource,requested:{provider:"TVDB",kind:"series",id:tvdbId},impact:`TVDB episode coverage could not be fully verified. ${usableProviderCatalogue(inputs.tvdb[String(tvdbId)]) ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${savedComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`})});
         const savedTvdb = inputs.tvdb[String(tvdbId)];
-        if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); malformedRecords.push(...savedTvdb.malformed || []); }
+        if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); malformedRecords.push(...savedTvdb.malformed || []); titleRecovery = {state: savedTvdb.titleRecovery || {}, carried: true}; }
         else unavailableCatalogueCauses.push(`catalogue-refresh:TVDB:${ratingKey}`);
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");
@@ -955,7 +970,7 @@ async function runPlexScan(targetRatingKey?: string) {
         const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,addWarning,setHeartbeat});
         ({tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds}=compared);
         // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
-        reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},compared.episodeFailures,malformedRecords);
+        reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords);
         for (const record of malformedRecords) logger.warn("plex.show.catalogue-record-unusable", { ratingKey, ...record });
         results.push({...compared.result,...(warning ? {warning} : {})});
         inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? {...savedComparison,refresh} : {group,details,localMetadata,tmdbId,tvdbId,relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
@@ -1202,7 +1217,7 @@ async function recheckCoverage(impact: CoverageImpact) {
         tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},addWarning:()=>{},setHeartbeat:()=>{},
       }))));
       if (replay.missing.size) throw new Error(`Saved provider identity relationships are incomplete (${[...replay.missing].join(", ")}).`);
-      reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},compared.episodeFailures,[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
+      reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
       const index=results.findIndex(show=>show.ratingKey===key);
       if (index>=0) results[index]=compared.result; else results.push(compared.result);
       resolveCoverageIssue(`comparison-inputs:${key}`);

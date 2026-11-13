@@ -11,6 +11,7 @@ const operationLabels: Record<EpisodeCheckFailure["operation"], string> = {
   "episode-decision": "Episode coverage decision",
   "auto-match-record": "Auto Match record",
   "episode-crosswalk": "Episode crosswalk",
+  "title-recovery": "English title recovery",
 };
 const crosswalkLabels: Record<EpisodeCrosswalk, string> = {
   IMDb: "IMDb identity crosswalk",
@@ -51,7 +52,8 @@ export function episodeCheckIssue(show: EpisodeCheckShow, failure: EpisodeCheckF
     impacts.push(`Coverage from owned TMDB episode ${failure.local.tmdbEpisodeId ?? "unknown"} (${numbering(failure.local)}) could not be established for this episode${dependents.length ? ` or its related split episodes ${dependents.join(", ")}` : ""}.`);
   }
   if (failure.crosswalk) impacts.push("This crosswalk granted no coverage for this episode; the remaining matching methods were still checked.");
-  if (failure.operation === "auto-match-record") impacts.push("Auto Match details for this episode are unavailable; its collected status is unchanged.");
+  if (failure.operation === "title-recovery") impacts.push("TVDB's default title for this episode is unusable, so checks that need its title are skipped and grant no coverage; other matching methods were still checked.");
+  else if (failure.operation === "auto-match-record") impacts.push("Auto Match details for this episode are unavailable; its collected status is unchanged.");
   else impacts.push(failure.coveredBy
     ? `${methodLabels[failure.coveredBy]} established coverage for this episode, so it remains collected; this failed check is still unresolved.`
     : "No other method established coverage, so this episode remains in missing results.");
@@ -76,7 +78,7 @@ export function episodeCheckIssue(show: EpisodeCheckShow, failure: EpisodeCheckF
     action: failure.kind === "missing-title"
       ? `Check this episode's title at ${episode.provider || "the provider"}; the check runs again on the next Plex scan.`
       : failure.kind === "request-failed"
-      ? `Retry the Plex scan after ${provider || "the provider"} availability recovers; this crosswalk is requested again then.`
+      ? `Retry the Plex scan after ${provider || "the provider"} availability recovers; ${failure.operation === "title-recovery" ? "its English title is" : "this crosswalk is"} requested again then.`
       : failure.kind === "unreadable-response"
       ? `Run a Plex scan to request this crosswalk again; if ${provider || "the provider"} keeps returning an unreadable response, report it with this Scan Issue.`
       : "Run a Plex scan to check this episode again; if the problem continues, report it with this Scan Issue.",

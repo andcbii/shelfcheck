@@ -30,6 +30,8 @@ function requestIdentity(url:string, provider:PlexProviderName):ProviderRequestI
   if (path === "/v4/updates") return {provider,kind:"series update feed"};
   const episode = path.match(/\/episodes\/(\d+)\/extended$/);
   if (episode) return {provider,kind:"episode",id:Number(episode[1])};
+  const translation = path.match(/\/episodes\/(\d+)\/translations\/eng$/);
+  if (translation) return {provider,kind:"episode English translation",id:Number(translation[1])};
   const search = path.match(/\/search\/tvdb\/(\d+)$/);
   if (search) return {provider,kind:"TVDB episode search",id:Number(search[1])};
   const coordinate = path.match(/\/tv\/(\d+)\/season\/(\d+)\/episode\/(\d+)$/);

@@ -1,13 +1,15 @@
 import "server-only";
 import type { ProviderEpisode } from "@/lib/plex-comparison";
 import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/catalogue-records";
+import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import type { CoverageEvidence } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputs } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
 /** `episodes` are the usable records; `malformed` the individual records that could not be fully used. */
-export type ProviderCatalogue<T> = { version: 1; downloadedAt: string; show: T; episodes: ProviderEpisode[]; malformed?: MalformedCatalogueRecord[] };
+/** `titleRecovery`: TVDB episodes whose unusable default title English fallback could not yet recover. */
+export type ProviderCatalogue<T> = { version: 1; downloadedAt: string; show: T; episodes: ProviderEpisode[]; malformed?: MalformedCatalogueRecord[]; titleRecovery?: TitleRecoveryState };
 /** Only complete downloaded inputs can be reused or used as last-good fallback. */
 export function usableProviderCatalogue<T extends {id:number}>(catalogue: ProviderCatalogue<T> | undefined): catalogue is ProviderCatalogue<T> {
   return catalogue?.version === 1 && Number.isFinite(catalogue.show?.id) && Array.isArray(catalogue.episodes) && Number.isFinite(Date.parse(catalogue.downloadedAt));
@@ -58,6 +60,8 @@ function savedCatalogues<T extends {id:number}>(provider: "TMDB" | "TVDB", catal
     const {episodes, malformed} = normaliseSavedEpisodes(provider, catalogue.show.id, catalogue.episodes, catalogue.malformed);
     catalogue.episodes = episodes;
     if (malformed.length) catalogue.malformed = malformed; else delete catalogue.malformed;
+    const titleRecovery = savedTitleRecovery(catalogue.titleRecovery);
+    if (Object.keys(titleRecovery).length) catalogue.titleRecovery = titleRecovery; else delete catalogue.titleRecovery;
   }
   return catalogues;
 }

@@ -25,7 +25,7 @@ const number = (value: unknown) => typeof value === "number" && Number.isSafeInt
 const text = (value: unknown) => typeof value === "string" && value.trim() ? value : undefined;
 const runtime = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 
-type Fields = { id: unknown; season: unknown; episode: unknown; title: unknown; airDate: unknown; runtime: unknown };
+type Fields = { id: unknown; season: unknown; episode: unknown; title: unknown; titleLanguage?: unknown; airDate: unknown; runtime: unknown };
 
 function normaliseRecord(provider: "TMDB" | "TVDB", showId: number, showTitle: string | undefined, position: string, raw: unknown, fields: (item: Record<string, unknown>) => Fields | null, into: NormalisedCatalogue) {
   if (!record(raw)) { into.malformed.push({ provider, showId, position, problem: "not-a-record" }); return; }
@@ -33,7 +33,7 @@ function normaliseRecord(provider: "TMDB" | "TVDB", showId: number, showTitle: s
   if (!read) return;
   const id = identity(read.id), season = number(read.season), episode = number(read.episode), title = text(read.title);
   const numbered = season !== undefined && episode !== undefined;
-  if (numbered) into.episodes.push({ ...(showTitle !== undefined ? { showTitle } : {}), season, episode, ...(title !== undefined ? { title } : {}), ...(text(read.airDate) ? { airDate: read.airDate as string } : {}), ...(runtime(read.runtime) ? { runtime: read.runtime as number } : {}), ...(id !== undefined ? { providerEpisodeId: id } : {}), source: provider });
+  if (numbered) into.episodes.push({ ...(showTitle !== undefined ? { showTitle } : {}), season, episode, ...(title !== undefined ? { title, ...(read.titleLanguage === "eng" ? { titleLanguage: "eng" as const } : {}) } : {}), ...(text(read.airDate) ? { airDate: read.airDate as string } : {}), ...(runtime(read.runtime) ? { runtime: read.runtime as number } : {}), ...(id !== undefined ? { providerEpisodeId: id } : {}), source: provider });
   if (numbered && id !== undefined) return;
   into.malformed.push({ provider, showId, position, ...(id !== undefined ? { id } : {}), ...(numbered ? { season, episode } : {}), ...(title !== undefined ? { title } : {}), problem: numbered ? "no-identity" : id !== undefined ? "no-numbering" : "no-identity-or-numbering" });
 }
@@ -61,7 +61,7 @@ export function normaliseTvdbRecords(seriesId: number, showTitle: string | undef
 /** Saved catalogue episodes are untrusted too: older saved catalogues were stored without record validation. */
 export function normaliseSavedEpisodes(provider: "TMDB" | "TVDB", showId: number, episodes: unknown[], malformed: unknown = []): NormalisedCatalogue {
   const into: NormalisedCatalogue = { episodes: [], malformed: Array.isArray(malformed) ? malformed.filter((item): item is MalformedCatalogueRecord => record(item) && item.provider === provider && typeof item.position === "string") : [] };
-  episodes.forEach((raw, index) => normaliseRecord(provider, showId, record(raw) ? text(raw.showTitle) : undefined, `saved record ${index + 1}`, raw, item => ({ id: item.providerEpisodeId, season: item.season, episode: item.episode, title: item.title, airDate: item.airDate, runtime: item.runtime }), into));
+  episodes.forEach((raw, index) => normaliseRecord(provider, showId, record(raw) ? text(raw.showTitle) : undefined, `saved record ${index + 1}`, raw, item => ({ id: item.providerEpisodeId, season: item.season, episode: item.episode, title: item.title, titleLanguage: item.titleLanguage, airDate: item.airDate, runtime: item.runtime }), into));
   // A saved record without identity is kept for numbering and was already reported when downloaded.
   const seen = new Set<string>();
   into.malformed = into.malformed.filter(item => !seen.has(catalogueRecordKey(item)) && Boolean(seen.add(catalogueRecordKey(item))));

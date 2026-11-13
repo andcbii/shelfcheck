@@ -55,7 +55,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `tmdbRecords` (by season) and `tvdbRecords`: raw, possibly malformed, catalogue records appended to Target's provider responses.
   // `bodies`/`statuses`: per-pathname provider response overrides (e.g. a malformed `/3/find/301` payload or a 404).
   // `imdb`: an IMDb GUID Plex also carries on the owned file of a provider episode.
-  const state = { secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>() };
+  // `english`: TVDB English episode translations by TVDB episode ID (null name = translation without a title); others are 404.
+  const state = { secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -92,6 +93,10 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     else if ((match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/))) {
       const episode = tvdbAll.find(item => item.id === Number(match![1]))!;
       body = { data: { id: episode.id, seriesId: tvdbShowId(episode), seasonNumber: episode.season, number: episode.episode, name: episode.name } };
+    }
+    else if ((match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/translations\/eng$/))) {
+      if (!state.english.has(Number(match[1]))) return Response.json({ status: "failure", message: "Not found" }, { status: 404 });
+      body = { status: "success", data: { name: state.english.get(Number(match[1])), overview: null, language: "eng" } };
     }
     else if (u.pathname === "/3/tv/changes") body = { results: [], total_pages: 1 };
     else if (u.pathname === "/v4/updates") body = { data: state.tvdbChanged.map(recordId => ({ entityType: "series", recordId })) };

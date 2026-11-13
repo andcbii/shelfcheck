@@ -1,30 +1,41 @@
-# Shelfcheck 2.5.1
+# Shelfcheck 2.5.2
 
-Shelfcheck 2.5.1 makes failed scan checks easier to investigate.
+Shelfcheck 2.5.2 replaces ownership corrections with **Report Missing** and fixes
+provider-cache recovery and stale Plex results.
 
-## Scan Issues
+## Report Missing in Manual Matches
 
-The former Coverage Issues report is now **05 — Scan Issues**. The Plex results
-warning links to the report and shows the number of current grouped issues.
+Each episode in a Manual Match has a **Report Missing** checkbox in the TMDB or
+TVDB provider panel. Selections remain a draft until saved, with a preview of
+their effect. This is a local Shelfcheck override; nothing is sent to Plex,
+TMDB, or TVDB.
 
-Provider Lookup issues explain where a requested ID came from, the provider and
-record whose lookup failed, the response, the impact on verification, and a
-relevant next step. Saved provider data is identified when it supplied the ID.
-Failure-time provenance survives restarts and later metadata changes; older
-issues without recorded provenance show **Source unknown**.
+Complete-set Manual Matches now recognize equivalent owned content without a
+second declaration. Report Missing takes precedence over collected results
+across Plex libraries. Reporting a split part missing also keeps its combined
+episode missing, while other parts retain their normal coverage. Many-to-many
+matches require explicit selections on both provider sides or no flags.
 
-Missing records are distinguished from rejected access, connectivity problems,
-and provider outages. A 404 is reported as **record not found**, without assuming
-that the record was deleted or merged. A failed lookup and the comparison it
-blocks appear together as one issue, while independent failures remain visible.
+Saved overrides survive scans, restarts, and inventory changes. Saving or
+clearing them updates affected cached results without a full scan or provider
+download, including TVDB specials missing from older saved catalogues.
 
-Existing last-good results, provider refresh requirements, matching behavior,
-and request retry and rate-limit policies are preserved. Reading the report does
-not start scans or provider requests.
+Applying a show or season Ignore clears flags only in its scope and immediately
+updates related results. Restore and expiry do not bring deleted flags back.
+
+## Provider-cache fixes
+
+Provider failures no longer force unrelated successful downloads to repeat.
+TMDB verification recovery preserves completed work and outstanding refresh
+requirements, including invalidation of stale episode relationships when
+previously deferred provider changes are processed.
 
 ## Upgrading
 
-Use Docker image `andcbii/shelfcheck:2.5.1` or `andcbii/shelfcheck:latest` and keep
-your existing `/config` and `/data` mounts. No configuration or database reset is
-required. Run a new Plex scan to capture detailed context for current failures.
-This release does not correct external provider IDs or alter Plex metadata.
+Use `andcbii/shelfcheck:2.5.2` or `andcbii/shelfcheck:latest` and retain your
+existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
+
+Existing Manual Matches are retained. Saved ownership corrections are
+permanently discarded, with Report Missing initially off; they are not converted
+into missing flags. Back up `/data` before upgrading if you need to retain those
+old declarations. No configuration or database reset is required.

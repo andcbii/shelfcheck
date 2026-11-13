@@ -34,7 +34,8 @@ export type CoverageIssue = {
   scope: "library" | "show" | "episode";
   cause: string;
   action: string;
-  category?: "Provider Lookup";
+  /** Provider Lookup: a request or response failed. Episode Matching: a check over available evidence failed. */
+  category?: "Provider Lookup" | "Episode Matching";
   lookup?: ProviderLookup;
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];
@@ -78,6 +79,10 @@ export function getCoverageIssue(id: string): CoverageIssue | undefined {
 }
 export function setCoverageIssue(issue: CoverageIssue) {
   store().prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(issue.id,JSON.stringify(issue));
+}
+/** Current cause IDs owned by one operation family, e.g. one show's episode checks. */
+export function coverageIssueIdsWithPrefix(prefix: string): string[] {
+  return (store().prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id,1,length(?))=? ORDER BY id").all(prefix,prefix) as {id:string}[]).map(row=>row.id);
 }
 export function resolveCoverageIssue(id: string) { store().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=?").run(id); }
 export function coverageIssueCause(error: unknown) { return error instanceof Error ? error.message : String(error); }

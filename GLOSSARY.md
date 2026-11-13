@@ -10,6 +10,28 @@ A provider's description of a show and its episodes, including their identities,
 **Library inventory**:
 The shows and episode items present in the Plex libraries included in a scan, together with the identities Plex assigns to them.
 
+**Completed full scan**:
+A scan that obtains the complete library inventory and finishes processing the library, even when individual checks leave unresolved issues. Interrupted scans and scans with incomplete library inventory do not qualify.
+
+**Provider verification position**:
+The point through which a provider's catalogue changes have been checked, with identified changes either handled or retained for follow-up. TMDB and TVDB have independent verification positions.
+
+**TMDB verification recovery**:
+Refreshing the TMDB catalogues whose freshness TMDB's change feed cannot vouch for, because TMDB's provider verification position is missing or older than the feed can cover. A catalogue is current as of its own successful download.
+_Avoid_: Blanket refresh, baseline recovery
+
+**Refresh obligation**:
+A show's durable requirement to download a fresh catalogue from one provider on the next full scan, satisfied only by a successful download from that provider. Manual Match changes, cache clearing, and the fifth-scan safeguard create one.
+_Avoid_: Refresh flag, pending refresh
+
+**Fifth-scan safeguard**:
+On a UTC day's fifth, tenth, and every later fifth completed full scan, the refresh of TMDB catalogues for library shows in that day's TMDB change list, bypassing same-day reuse. It never forces TVDB refreshes.
+_Avoid_: Periodic refresh, fifth-scan refresh
+
+**Pending safeguard**:
+A fifth-scan safeguard whose required TMDB change list could not be retrieved. It keeps its original UTC day's interval across later scans, restarts, and UTC midnight until it is fulfilled or covered by TMDB verification recovery.
+_Avoid_: Missed safeguard, overdue refresh
+
 **Manual Match**:
 A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes.
 _Avoid_: Manual Coverage, Link Episodes (as names for the saved match)

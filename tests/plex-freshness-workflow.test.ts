@@ -71,7 +71,7 @@ async function fixture(t: TestContext) {
   };
 }
 
-test("deferred TMDB changes survive successful baselines, UTC midnight and restart", async t => {
+test("deferred TMDB changes survive advancing verification, UTC midnight and restart", async t => {
   const f = await fixture(t);
   await f.run(); f.correction(); f.changed([10]); f.requests.length = 0;
   assert.equal((await f.run()).shows[0].missing.length,0,"a later same-day correction may wait"); assert.deepEqual(f.counts(),[0,0]);
@@ -83,9 +83,12 @@ test("deferred TMDB changes survive successful baselines, UTC midnight and resta
   assert.deepEqual(f.counts(),[0,0],"successful download consumes the deferred correction");
 });
 
-test("successful full-scan gaps refresh only TMDB strictly beyond fourteen elapsed days", async t => {
+// Superseded: this gap was measured from the last clean full scan, and refreshed every TMDB
+// catalogue. It is now TMDB's own verification position; recovery refreshes only catalogues
+// whose own successful download the change feed cannot cover.
+test("TMDB verification recovery refreshes only TMDB catalogues strictly beyond the fourteen-day change-feed window", async t => {
   const f = await fixture(t); await f.run();
-  // Targeted work must not advance the full-library baseline.
+  // Targeted work must not advance provider verification positions.
   f.at("2026-11-25T11:59:59Z"); await f.run("ratingKey:1");
   f.at("2026-11-25T12:00:00Z"); await f.run();
   assert.deepEqual(f.counts(),[0,0],"exactly fourteen days is reusable");
@@ -133,9 +136,12 @@ test("independent sixty-day provider ages expire strictly, retain last-good data
   f.requests.length=0; await f.run(); assert.deepEqual(f.counts(),[1,2],"explicit clearing beats same-day reuse");
 });
 
-test("targeted checks do not renew the preceding successful full scan", async t => {
+// The targeted check leaves the position unadvanced; the isolation suite proves that with
+// several shows. Its own complete download is current, so only the change feed must verify it.
+test("targeted downloads are verified by the TMDB change feed once the verification position is out of window", async t => {
   const f = await fixture(t); await f.run();
   f.at("2026-11-25T11:59:59Z"); await f.run("ratingKey:1");
   f.at("2026-11-25T12:00:00.001Z"); f.restart(); await f.run();
-  assert.deepEqual(f.counts(),[1,0],"targeted fresh catalogues do not mask the full-scan gap or force TVDB");
+  assert.deepEqual(f.counts(),[0,0],"a catalogue downloaded within the feed window is not refreshed again, and TVDB is not forced");
+  assert.ok(f.requests.includes("/3/tv/changes"),"its freshness is verified by the change feed rather than assumed");
 });

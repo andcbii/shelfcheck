@@ -184,7 +184,9 @@ export default function PlexPage() {
   const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => activeShows.some(show => show.ratingKey === member.showKey && matchesSearch(show.title, query) && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
   const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
     ...group,
-    members: group.members.map(member => member.status === "missing" && !group.missing.some(missing => missing.provider === member.provider && missing.id === member.id && visibleCoverageMissing(missing)) ? { ...member, status: "alternative" as const } : member),
+    // Every missing variant (missing, Reported missing, incomplete) obeys Ignore and aired-date
+    // visibility; hidden members stay as alternative context.
+    members: group.members.map(member => (member.status === "missing" || member.status === "reported-missing" || member.status === "incomplete") && !group.missing.some(missing => missing.provider === member.provider && missing.id === member.id && visibleCoverageMissing(missing)) ? { ...member, status: "alternative" as const } : member),
   }));
   const groupedIdentities = new Set(coverageGroups.flatMap(group => group.members.map(member => `${member.provider}:${member.id}`)));
   function ungroupedMissing(show: Show) {

@@ -546,3 +546,38 @@ test("a successful Ignore that clears flags reloads rechecked results, withdrawi
   assert.equal(container.querySelector('[aria-label="Incomplete coverage group"]'), null, "The derived incomplete status is withdrawn without a reload or scan");
   assert.doesNotMatch(container.querySelector(".show-list")?.textContent || "", /Incomplete/);
 });
+
+test("Ignore demotes Reported missing and incomplete members of a surviving coverage group to alternative context", async (t) => {
+  // Show one's combined episode is incomplete because show two's part C is reported missing;
+  // show two's part D is ordinarily missing, so the group survives either Ignore.
+  const members = [
+    { provider: "TMDB", id: 100, showId: 10, show: "Combined show", title: "Whole", season: 1, episode: 1, url: "https://example.com/100", reportMissing: false, status: "incomplete", missingParts: [{ provider: "TVDB", id: 202 }] },
+    { provider: "TVDB", id: 202, showId: 21, show: "Parts show", title: "Part C", season: 2, episode: 3, url: "https://example.com/202", reportMissing: true, status: "reported-missing" },
+    { provider: "TVDB", id: 203, showId: 21, show: "Parts show", title: "Part D", season: 3, episode: 1, url: "https://example.com/203", reportMissing: false, status: "missing" },
+  ];
+  const grouped = { ...report, shows: [
+    { ...report.shows[0], missing: [{ season: 1, episode: 1, airDate: "2020-01-01", tmdbEpisodeId: 100, sources: ["TMDB"], incomplete: { TMDB: [{ provider: "TVDB", id: 202 }] } }] },
+    { ratingKey: "two", title: "Parts show", plexEpisodes: 1, missing: [
+      { season: 2, episode: 3, airDate: "2020-01-01", tvdbEpisodeId: 202, sources: ["TVDB"], reportedMissing: ["TVDB"] },
+      { season: 3, episode: 1, airDate: "2020-01-01", tvdbEpisodeId: 203, sources: ["TVDB"] },
+    ] },
+  ], coverageGroups: [{ mappingId: "cross", members, missing: [
+    { provider: "TMDB", id: 100, status: "missing", missingParts: [{ provider: "TVDB", id: 202 }], season: 1, airDate: "2020-01-01", showKey: "one" },
+    { provider: "TVDB", id: 202, status: "missing", reportedMissing: true, season: 2, airDate: "2020-01-01", showKey: "two" },
+    { provider: "TVDB", id: 203, status: "missing", season: 3, airDate: "2020-01-01", showKey: "two" },
+  ] }] };
+  const label = (container: HTMLElement, id: number) => [...container.querySelectorAll('[aria-label="Incomplete coverage group"] li')].find(row => (row.querySelector("a")?.textContent || "").endsWith(`Episode ID ${id}`))?.querySelector("strong")?.textContent;
+  for (const [settings, expected] of [
+    [{ ignoredShows: [{ ratingKey: "one", title: "Combined show" }], ignoredSeasons: [] }, { 100: "Alternative · outside this comparison", 202: "Reported missing" }],
+    [{ ignoredShows: [], ignoredSeasons: [{ ratingKey: "one", title: "Combined show", seasons: [1] }] }, { 100: "Alternative · outside this comparison", 202: "Reported missing" }],
+    [{ ignoredShows: [], ignoredSeasons: [{ ratingKey: "two", title: "Parts show", seasons: [2] }] }, { 100: "Incomplete · mapped part missing", 202: "Alternative · outside this comparison" }],
+  ] as const) await t.test(JSON.stringify(settings), async subtest => {
+    const defaults = configuredFetch(async () => json({ ...completed, report: grouped }));
+    const { container } = await mountPage(subtest, async (input, init) => input === "/api/plex/state" ? json({ settings }) : String(input).startsWith("/api/plex/manual-coverage") ? json({ revision: 1, mappings: [], pending: 0 }) : defaults(input, init));
+    assert.ok(container.querySelector('[aria-label="Incomplete coverage group"]'), "The group survives through a visible member");
+    assert.equal(label(container, 100), expected[100]);
+    assert.equal(label(container, 202), expected[202]);
+    assert.equal(label(container, 203), "Missing");
+    if (expected[100] !== "Incomplete · mapped part missing") assert.doesNotMatch(container.querySelector('[aria-label="Incomplete coverage group"]')?.textContent || "", /which you reported missing/, "The hidden member's explanation is not shown");
+  });
+});

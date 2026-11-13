@@ -176,6 +176,8 @@ test("a TVDB record with an ID but no numbering still takes part in ID-based che
   await setFlags((await saved.json()).mapping.id, [tvdb3]);
   const reported = await rerun();
   assert.equal(missing(reported)["TVDB:103"], "reported-missing", "the flag on its ID keeps it missing, at its saved Manual Match numbering");
+  const row = target(reported).missing.find(item => item.tvdbEpisodeId === 103)!;
+  assert.deepEqual([row.season, row.episode], [1, 3], "a regular-season record keeps its saved season, not season 0");
   const [issue, ...others] = recordIssues(reported);
   assert.deepEqual(others, []);
   assert.equal(issue.episode?.id, 103, "the record is still reported as lacking numbering");

@@ -453,7 +453,7 @@ export function mappedMembersMissingFromCatalogue(catalogueEpisodes: ProviderEpi
     const ownShow = member.provider === "TMDB" ? show.tmdbId === member.showId : show.tvdbId === member.showId;
     if ((member.season !== 0 && !unnumberedIds.has(key)) || !ownShow || present.has(key) || added.has(key)) return [];
     added.add(key);
-    return [{ showTitle: member.show, season: 0, episode: member.episode, title: member.title, providerEpisodeId: member.id, source: member.provider }];
+    return [{ showTitle: member.show, season: member.season, episode: member.episode, title: member.title, providerEpisodeId: member.id, source: member.provider }];
   });
 }
 

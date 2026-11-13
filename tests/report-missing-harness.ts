@@ -52,7 +52,9 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // Plex owns each `owned` episode by provider identity and by Plex coordinates.
   const guid = (episode: Episode) => ({ id: `${episode.provider.toLowerCase()}://${episode.id}` });
   // `tvdbChanged`: TVDB series the update feed reports changed, so their catalogues are downloaded again.
-  const state = { secondLibrary: false, tvdbChanged: [] as number[] };
+  // `bodies`/`statuses`: per-pathname provider response overrides (e.g. a malformed `/3/find/301` payload or a 404).
+  // `imdb`: an IMDb GUID Plex also carries on the owned file of a provider episode.
+  const state = { secondLibrary: false, tvdbChanged: [] as number[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -61,6 +63,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
+    if (state.statuses.has(u.pathname)) return Response.json({}, { status: state.statuses.get(u.pathname) });
+    if (state.bodies.has(u.pathname)) return Response.json(state.bodies.get(u.pathname));
     let body: unknown;
     let match: RegExpMatchArray | null;
     if (u.hostname === "plex") {
@@ -69,7 +73,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
       else if (u.pathname.includes("allLeaves")) body = { MediaContainer: { Metadata: u.pathname.includes("/copy/")
         // Another library also reports owning the first owned episode.
         ? [{ ratingKey: "copy-1", updatedAt: 1, parentIndex: 7, index: 7, Guid: [guid(owned[0])] }]
-        : owned.filter(episode => Boolean(episode.show) === u.pathname.includes("/other/")).map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, ...(episode.runtime && episode.name ? { title: episode.name, duration: episode.runtime * 60_000 } : {}), Guid: [guid(episode)] })) } };
+        : owned.filter(episode => Boolean(episode.show) === u.pathname.includes("/other/")).map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, ...(episode.runtime && episode.name ? { title: episode.name, duration: episode.runtime * 60_000 } : {}), Guid: [guid(episode), ...(state.imdb.has(episode.id) ? [{ id: `imdb://${state.imdb.get(episode.id)}` }] : [])] })) } };
       else body = { MediaContainer: { Metadata: [u.pathname.includes("/copy") ? copy : u.pathname.includes("/other") ? otherShow : show] } };
     }
     else if (u.pathname === "/v4/login") body = { data: { token: "test" } };
@@ -91,6 +95,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     else if (u.pathname === "/3/tv/changes") body = { results: [], total_pages: 1 };
     else if (u.pathname === "/v4/updates") body = { data: state.tvdbChanged.map(recordId => ({ entityType: "series", recordId })) };
     else if (u.pathname.includes("/find/")) body = { tv_results: [], tv_episode_results: [] };
+    else if (u.pathname.startsWith("/search/tvdb/")) body = [];
     else throw new Error("Unexpected HTTP: " + u);
     return Response.json(body);
   });

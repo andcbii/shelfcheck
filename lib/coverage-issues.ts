@@ -53,6 +53,8 @@ function store() {
 export function listCoverageIssues(): CoverageIssue[] {
   const issues: CoverageIssue[] = (store().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
   const byId = new Map(issues.map(issue=>[issue.id,issue]));
+  // A dependent issue's own recorded impacts travel with it into its root, never impacts folded into it here.
+  const ownImpacts = new Map(issues.map(issue=>[issue.id,issue.impacts || []]));
   const rootsFor = (id:string, seen:Set<string>): CoverageIssue[] | undefined => {
     const issue = byId.get(id);
     if (!issue || seen.has(id)) return undefined;
@@ -66,7 +68,7 @@ export function listCoverageIssues(): CoverageIssue[] {
     if (!issue.causedBy?.length) return true;
     const roots = rootsFor(issue.id,new Set());
     if (!roots) return true;
-    const impact = `${issue.show?.title ? `${issue.show.title}: ` : ""}${issue.cause}${issue.lookup ? ` ${issue.lookup.impact}` : ""}`;
+    const impact = `${issue.show?.title ? `${issue.show.title}: ` : ""}${issue.cause}${issue.lookup ? ` ${issue.lookup.impact}` : ""}${ownImpacts.get(issue.id)!.map(item=>` ${item}`).join("")}`;
     for (const root of roots) {
       root.impacts = [...new Set([...(root.impacts || []),impact])];
     }

@@ -13,11 +13,23 @@ export type EpisodeCheckMethod = "report-missing" | "coordinates" | "automatic-e
  * independent method that still established coverage, if any.
  */
 export type EpisodeCheckFailure = {
-  operation: "compound-matching" | "episode-decision" | "auto-match-record";
+  operation: "compound-matching" | "episode-decision" | "auto-match-record" | "episode-crosswalk";
   method?: EpisodeCheckMethod;
+  /** For `episode-crosswalk`: the identity/crosswalk lookup that failed for this TVDB episode. */
+  crosswalk?: EpisodeCrosswalk;
   episode: { provider?: "TMDB" | "TVDB"; id?: number; season?: number; episode?: number; title?: string };
-  kind: CompoundEvidenceFailure["kind"];
+  /**
+   * `request-failed`: the provider request was rejected (its own Provider Lookup cause is in `causedBy`).
+   * `unreadable-response`: a successful response could not be interpreted.
+   */
+  kind: CompoundEvidenceFailure["kind"] | "request-failed" | "unreadable-response";
   reason: string;
+  causedBy?: string[];
+  /**
+   * The failed lookup was not attempted again in this comparison (another method made it
+   * unnecessary). Its recorded cause is kept unchanged; only its coverage impact is refreshed.
+   */
+  carried?: true;
   dependents?: CompoundEvidenceFailure["dependents"];
   local?: CompoundEvidenceFailure["local"];
   coveredBy?: EpisodeCheckMethod;
@@ -28,6 +40,8 @@ export type EpisodeCheckFailure = {
    */
   required?: false;
 };
+/** Identity/crosswalk lookups for a TVDB episode, in the order they are tried. */
+export type EpisodeCrosswalk = "IMDb" | "Trakt" | "TMDB";
 export type AutomaticEpisodeEvidence ={ method: PlexAutoMatchMethod; tmdbEpisodeId: number; tmdbEpisode?: TmdbFindEpisode };
 
 /** Inputs loaded by scan orchestration. No inferred or Manual Match coverage is direct inventory. */
@@ -52,6 +66,8 @@ export type PlexComparisonInput = {
   mappings: CoverageMapping[];
   manualInventory: CoverageEvidence[];
   autoCompoundEpisodes: boolean;
+  /** Episode-scoped identity/crosswalk failures from evidence gathering before these decisions. */
+  crosswalkFailures?: EpisodeCheckFailure[];
 };
 
 /** Compare loaded catalogues and current inventory without HTTP, Plex enumeration, or persistence. */
@@ -66,7 +82,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
   const diagnostics: { event: string; data: Record<string, unknown> }[] = [];
   const recordDiagnostic = (event: string, data: Record<string, unknown>) => { diagnostics.push({ event, data }); };
   const compoundCoverage: CompoundCoverage[] = [];
-  const episodeFailures: EpisodeCheckFailure[] = [];
+  const episodeFailures: EpisodeCheckFailure[] = [...(input.crosswalkFailures || [])];
   if (autoCompoundEpisodes && tmdbShow && coordinateMissingTvdbIds.size && localTmdbEpisodeIds.size) {
     const { coverage: compoundCovered, failures } = compoundTvdbEvidence(providerEpisodes, localProviderEpisodes);
     // A failed relationship is only a failed check when compound evidence was still
@@ -167,7 +183,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
   // Report Missing outranks every other method, so a check it made unnecessary is not a failure.
   // A failed check stays reported when another method established coverage.
   const reportedOrCovered = episodeFailures.filter(failure => {
-    if (failure.operation !== "compound-matching" || !failure.episode.id) return true;
+    if ((failure.operation !== "compound-matching" && failure.operation !== "episode-crosswalk") || !failure.episode.id) return true;
     const decision = decisions.get(`${failure.episode.provider}:${failure.episode.id}`);
     if (decision && decision !== "reported" && decision !== "missing") failure.coveredBy = decision;
     return decision !== "reported";

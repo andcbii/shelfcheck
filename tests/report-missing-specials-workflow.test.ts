@@ -26,7 +26,7 @@ test("Report Missing on a TVDB special keeps it in the missing results and its c
   assert.deepEqual(h.missing(await h.status()), {}, "Clearing the flag hides the special again");
 });
 
-test("a TVDB catalogue saved without specials is downloaded again by the next scan after a flag is saved", async t => {
+test("a TVDB catalogue saved without specials shows a saved Report Missing decision immediately", async t => {
   const h = await harness(t);
   const mapping = (await (await h.save([owned, special])).json()).mapping;
   await h.rerun();
@@ -34,16 +34,25 @@ test("a TVDB catalogue saved without specials is downloaded again by the next sc
   const catalogues = await import("../lib/plex-catalogues");
   const saved = catalogues.readPlexInputs().tvdb["20"];
   catalogues.savePlexCatalogue("tvdb", 20, { ...saved, episodes: saved.episodes.filter(episode => episode.season > 0) });
-  // Saving the flag records a TVDB refresh obligation for the affected show (ADR-0003).
-  await h.setFlags(mapping.id, [special]);
-  assert.deepEqual(h.missing(await h.status()), {}, "The old catalogue cannot show the special yet");
 
   const before = h.requests.length;
-  const result = await h.rerun();
-  assert.ok(h.requests.slice(before).includes("/v4/series/20/episodes/default"), "The next scan downloads the TVDB catalogue again");
-  assert.deepEqual(h.missing(result), { [key(special)]: "reported-missing" });
+  await h.setFlags(mapping.id, [special]);
+  assert.equal(h.requests.length, before, "The cached recheck downloads nothing");
+  let result = await h.status() as Awaited<ReturnType<typeof h.status>> & { coverage: { pending: number; issues: unknown[] } };
+  assert.deepEqual(h.missing(result), { [key(special)]: "reported-missing" }, "The special is rebuilt from the saved member and shown at once");
+  assert.deepEqual(h.group(result, mapping.id), { [key(owned)]: "direct", [key(special)]: "reported-missing" });
+  assert.equal(result.coverage.pending, 0);
+  assert.deepEqual(result.coverage.issues, [], "Every comparison input was available");
 
-  const again = h.requests.length;
-  await h.rerun();
-  assert.ok(!h.requests.slice(again).includes("/v4/series/20/episodes/default"), "Once refreshed, the catalogue is reused");
+  await h.setFlags(mapping.id, []);
+  assert.deepEqual(h.missing(await h.status()), {}, "Clearing the flag hides it at once too");
+  assert.deepEqual(h.missing(await h.status(), "target"), {});
+
+  // The saved flag still recorded a TVDB refresh obligation for the next full scan (ADR-0003).
+  await h.setFlags(mapping.id, [special]);
+  const scanStart = h.requests.length;
+  result = await h.rerun() as typeof result;
+  assert.ok(h.requests.slice(scanStart).includes("/v4/series/20/episodes/default"), "The next full scan downloads the TVDB catalogue again");
+  assert.ok(catalogues.readPlexInputs().tvdb["20"].episodes.some(episode => episode.providerEpisodeId === special.id), "The real special replaces the rebuilt one");
+  assert.deepEqual(h.missing(result), { [key(special)]: "reported-missing" });
 });

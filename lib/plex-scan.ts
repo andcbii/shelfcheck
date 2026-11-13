@@ -360,10 +360,30 @@ function localComparisonInventory(localMetadata: PlexMetadata[]) {
   });
   return {localEpisodes,localProviderEpisodes,localTmdbEpisodeIds:new Set(localProviderEpisodes.flatMap(e=>e.tmdbEpisodeId ? [e.tmdbEpisodeId] : []))};
 }
+/**
+ * Specials (season 0) that a Manual Match includes but this show's saved provider
+ * catalogue lacks, rebuilt from the saved member records. Catalogues saved before
+ * specials were kept have none, so without this a saved Report Missing decision on
+ * a special would stay hidden until the next download. Only resolved catalogues of
+ * this show's own provider IDs are supplemented; real catalogue records always win.
+ */
+export function mappedSpecialsMissingFromCatalogue(catalogueEpisodes: ProviderEpisode[], mappings: { members: CoverageMember[] }[], show: { tmdbId?: number; tvdbId?: number }): ProviderEpisode[] {
+  const present = new Set(catalogueEpisodes.flatMap(episode => episode.providerEpisodeId ? [`${episode.source}:${episode.providerEpisodeId}`] : []));
+  const added = new Set<string>();
+  return mappings.flatMap(mapping => mapping.members).flatMap(member => {
+    const key = `${member.provider}:${member.id}`;
+    const ownShow = member.provider === "TMDB" ? show.tmdbId === member.showId : show.tvdbId === member.showId;
+    if (member.season !== 0 || !ownShow || present.has(key) || added.has(key)) return [];
+    added.add(key);
+    return [{ showTitle: member.show, season: 0, episode: member.episode, title: member.title, providerEpisodeId: member.id, source: member.provider }];
+  });
+}
+
 /** Resolve automatic evidence once, using either live saved relationships or strict saved-input replay. */
 async function compareLoadedPlexShow(input: LoadedComparison) {
-  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,addWarning,setHeartbeat}=input;
+  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,addWarning,setHeartbeat}=input;
   let {cachedTvdbEpisodeImdbIds}=input;
+  const providerEpisodes=[...input.providerEpisodes,...mappedSpecialsMissingFromCatalogue(input.providerEpisodes,mappings,{tmdbId:tmdbShow ? tmdbShow.id : undefined,tvdbId:tvdbResolved ? tvdbId : undefined})];
   let warning: string | undefined;
   const primary=group.records[0], ratingKey=group.identity;
   const plexGuids=[...new Set(details.flatMap(d=>d.guid?.startsWith("plex://show/") ? [d.guid] : []))];

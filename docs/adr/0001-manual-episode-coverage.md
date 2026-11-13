@@ -54,7 +54,7 @@ Spec #30 deliberately reopens two parts of this decision.
 
 The shared backend, immediate cached recheck, next-scan refresh obligations, and active-scan mutation protection of ADR-0003 are unchanged.
 
-Specials (season 0) follow the same rules on both providers. TVDB catalogues now keep specials, as TMDB catalogues already did, and the comparator still leaves unflagged specials out of missing results. A catalogue saved before this change lacks its specials until it is downloaded again. Saving a flag records that show's refresh obligation, so the next scan downloads it.
+Specials (season 0) follow the same rules on both providers. TVDB catalogues now keep specials, as TMDB catalogues already did, and the comparator still leaves unflagged specials out of missing results. A catalogue saved before this change lacks its specials. Until it is downloaded again, comparisons rebuild a special that a Manual Match includes from the saved member record. This applies to the show's own resolved catalogue only, and real catalogue records always win. Saving or clearing a flag therefore updates cached results immediately, with no download. The flag also records that show's refresh obligation, so the next full scan downloads the real catalogue.
 
 ### Ignore clears Report Missing (#40)
 

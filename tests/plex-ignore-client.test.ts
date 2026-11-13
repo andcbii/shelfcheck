@@ -350,9 +350,9 @@ test("a cached episode mapping mutation refreshes results once and leaves New Pl
   assert.equal(scanReads,3,"Initial page load, dialog lock check, then one local comparison refresh");
 });
 
-for (const mutation of ["save", "correct"]) test(`Matching Episodes ${mutation} refreshes affected results and preserves unrelated results in place`,async t=>{
+test("Matching Episodes save refreshes affected results and preserves unrelated results in place",async t=>{
   const members=[matchingMember,{provider:"TVDB",id:200,showId:20,show:"Parts",title:"Equivalent",season:8,episode:8,url:"https://thetvdb.com/series/parts/episodes/200"}];
-  const item={ratingKey:"file",showKey:"one",fingerprint:"v1",identities:[{provider:"TMDB",id:100},{provider:"TVDB",id:200}]};
+  const item={ratingKey:"file",showKey:"one",identities:[{provider:"TMDB",id:100},{provider:"TVDB",id:200}]};
   const unrelated={ratingKey:"two",title:"Unrelated show",plexEpisodes:2,missing:[{season:2,episode:3,sources:["TMDB"]}]};
   const before={...matchingReport,shows:[...matchingReport.shows,unrelated]};
   let changed=false;let scanPosts=0;let submitted:Record<string,unknown>|undefined;
@@ -373,9 +373,9 @@ for (const mutation of ["save", "correct"]) test(`Matching Episodes ${mutation} 
   });
   const unrelatedBefore=[...container.querySelectorAll(".show-list article")].find(row=>row.textContent?.includes("Unrelated show"))!.querySelector(".show-info")!.textContent;
   await click("S01E02");await click("Matching Episodes");
-  if(mutation==="save"){await click("Resolve and review");await click("Save coverage mapping");}
-  else await click("Declare complete TVDB set");
-  assert.equal(submitted?.action,mutation);
+  assert.equal([...container.querySelectorAll('[role="dialog"] button')].some(button=>/Declare/.test(button.textContent||"")),false,"Ownership declarations are retired");
+  await click("Resolve and review");await click("Save coverage mapping");
+  assert.equal(submitted?.action,"save");
   assert.ok(container.querySelector('[role="dialog"]'),"The dialog stays open after the cached recheck");
   assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing mapping saved/);
   await click("Close Matching Episodes");

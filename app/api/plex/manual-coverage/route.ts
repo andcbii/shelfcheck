@@ -1,13 +1,13 @@
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
 import { captureCoverageImpact, requestCoverageRecheck } from "@/lib/plex-scan";
-import { assertCoverageMutationAllowed, CoverageError, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping, listCoverageCorrections, saveOwnershipCorrection } from "@/lib/manual-coverage";
+import { assertCoverageMutationAllowed, CoverageError, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping } from "@/lib/manual-coverage";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const headers = { "Cache-Control": "private, no-store" };
 export async function GET(request: Request) {
   const id = new URL(request.url).searchParams.get("id");
   const evidence = readCoverageEvidence();
-  const mappings = listCoverageMappings().map(mapping => ({ ...mapping, corrections: listCoverageCorrections().filter(c=>c.mappingId===mapping.id), evidence: evidence.filter(item => item.identities.some(identity => mapping.members.some(member => identity.provider === member.provider && identity.id === member.id))) }));
+  const mappings = listCoverageMappings().map(mapping => ({ ...mapping, evidence: evidence.filter(item => item.identities.some(identity => mapping.members.some(member => identity.provider === member.provider && identity.id === member.id))) }));
   return Response.json({ ...coverageState(), mappings: id ? mappings.filter(m => m.id === id) : mappings }, { headers });
 }
 
@@ -18,13 +18,10 @@ export async function POST(request: Request) {
     });
     if (!body || typeof body !== "object")
       throw new CoverageError("Supply a valid request.");
+    // Only mapping resolution and saves are accepted; ownership corrections were retired.
+    if (body.action !== "resolve" && body.action !== "save" && body.action !== undefined)
+      throw new CoverageError("This Manual Match action is not supported.", 400, "unsupported-action");
     if (body.action !== "resolve") assertCoverageMutationAllowed();
-    if (body.action === "correct") {
-      const impact=captureCoverageImpact([body.mappingId]);
-      const correction=saveOwnershipCorrection(body.mappingId,body.revision,body.item,body.identities);
-      await requestCoverageRecheck({...impact,showKeys:[...impact.showKeys,correction.showKey]});
-      return Response.json({correction,...coverageState()},{headers});
-    }
     if (body.action === "resolve") {
       const resolved = await resolveCoverageUrls(body.urls);
       const existingMapping = body.id === undefined ? listCoverageMappings().find(mapping => mapping.members.some(member => resolved.members.some(candidate => candidate.provider === member.provider && candidate.id === member.id))) : undefined;
@@ -39,7 +36,7 @@ export async function POST(request: Request) {
     assertCoverageMutationAllowed();
     const impact=captureCoverageImpact(body.id ? [body.id] : []);
     const mapping = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision });
-    await requestCoverageRecheck({members:[...impact.members,...mapping.members],showKeys:impact.showKeys});
+    await requestCoverageRecheck({members:[...impact.members,...mapping.members]});
     return Response.json({ mapping, ...coverageState() }, { status: body.id === undefined ? 201 : 200, headers });
   } catch (error) {
     return failure(error);

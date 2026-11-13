@@ -4,7 +4,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { correctedCoverageInventory, listCoverageCorrections, coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import type { CoverageMember, CoverageEvidence, CoverageOutcome, CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -492,7 +492,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           ratingKey, primary, tmdbShow, tvdbId, tvdbSlug, tmdbSeriesMatches, providerEpisodes,
           localEpisodes, localProviderEpisodes, localTmdbEpisodeIds, libraryTmdbEpisodeIds,
           coordinateMissingTvdbIds, directTvdbSatisfied, directImdbSatisfied, traktSatisfied,
-          tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, corrections: listCoverageCorrections(), autoCompoundEpisodes,
+          tmdbSatisfied, autoMatchEvidence, mappings, manualInventory, autoCompoundEpisodes,
         });
         for (const { event, data } of diagnostics) logger.info(event, data);
         const linkedTvdbIds = [...new Set(tmdbSeriesMatches.flatMap((show) => show.external_ids?.tvdb_id ? [show.external_ids.tvdb_id] : []))];
@@ -653,7 +653,7 @@ async function runPlexScan(targetRatingKey?: string) {
       for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
         const ids = idsFromGuids(item.Guid);
         manualInventory.push({
-          ratingKey: item.ratingKey || "", showKey: group.identity, fingerprint: JSON.stringify([config.plexUrl,item]),
+          ratingKey: item.ratingKey || "", showKey: group.identity,
           identities: [
             ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
             ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
@@ -661,7 +661,7 @@ async function runPlexScan(targetRatingKey?: string) {
         });
       }
     }
-    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory, allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))));
+    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
     inputs.inventory = {capturedAt: startedAt, complete: allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))), groups: allShows, items: Object.fromEntries([...localResponsesByRatingKey].map(([key,value]) => [key,value.MediaContainer?.Metadata || []])), evidence: manualInventory};
     savePlexInventory(inputs.inventory);
     // Catalogue reuse does not certify ownership. Rebuild every comparison against this inventory.
@@ -955,18 +955,17 @@ export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
   return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
 }
 
-export type CoverageImpact = {members: CoverageMember[]; showKeys: string[]};
+export type CoverageImpact = {members: CoverageMember[]};
 export function captureCoverageImpact(ids: string[]): CoverageImpact {
-  return {members:listCoverageMappings().filter(mapping=>ids.includes(mapping.id)).flatMap(mapping=>mapping.members),showKeys:listCoverageCorrections().filter(correction=>ids.includes(correction.mappingId)).map(correction=>correction.showKey)};
+  return {members:listCoverageMappings().filter(mapping=>ids.includes(mapping.id)).flatMap(mapping=>mapping.members)};
 }
 function coverageGroupsForResults(results: PlexShowResult[], manualInventory: CoverageEvidence[]): CoverageGroup[] {
   return listCoverageMappings().flatMap(mapping=>{
     const outcomes=results.flatMap(show=>(show.coverageOutcomes || []).filter(outcome=>mapping.members.some(member=>member.provider===outcome.provider && member.id===outcome.id)).map(outcome=>({...outcome,showKey:show.ratingKey})));
     const missing=outcomes.filter(outcome=>outcome.status==="missing");
     if (!missing.length) return [];
-    const inventory=correctedCoverageInventory(mapping,manualInventory);
     return [{mappingId:mapping.id,health:mapping.health,missing,members:mapping.members.map(member=>{
-      const direct=inventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
+      const direct=manualInventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
       const matched=outcomes.filter(outcome=>outcome.provider===member.provider && outcome.id===member.id);
       const status=direct ? "direct" : matched.some(o=>o.status==="missing") ? "missing" : matched.some(o=>o.status==="automatic") ? "automatic" : matched.some(o=>o.status==="manual") ? "manual" : "alternative";
       return {...member,status};
@@ -986,7 +985,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
   const settings=parsePlexPreferences(readPlexSettings());
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
-  const targets=new Set(impact.showKeys);
+  const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {
     if (impact.members.some(member=> member.provider==="TMDB"
       ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || input.tmdbEpisodeAliases?.includes(member.showId) || inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id)

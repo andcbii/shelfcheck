@@ -1,9 +1,8 @@
 import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
-import { applyCoverageCorrections } from "@/lib/manual-coverage-inventory";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { coverageDatabase } from "@/lib/sqlite";
-import type { CoverageCorrection, CoverageEvidence, CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
+import type { CoverageEvidence, CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 export class CoverageError extends Error {
   constructor(message: string, public status = 400, public code = "validation", public mappingId?: string) {
     super(message);
@@ -24,7 +23,7 @@ export function listCoverageMappings(): CoverageMapping[] {
 }
 
 export function assertCoverageMutationAllowed() {
-  if ((globalThis as typeof globalThis & {__shelfcheckPlexScan?:Promise<void>}).__shelfcheckPlexScan) throw new CoverageError("Wait for the current Plex scan to finish before changing Manual Matches or ownership corrections.",409,"scan-active");
+  if ((globalThis as typeof globalThis & {__shelfcheckPlexScan?:Promise<void>}).__shelfcheckPlexScan) throw new CoverageError("Wait for the current Plex scan to finish before changing Manual Matches.",409,"scan-active");
 }
 
 export function saveCoverageMapping(members: CoverageMember[], edit?: { id: string; revision: number }): CoverageMapping {
@@ -51,19 +50,7 @@ export function saveCoverageMapping(members: CoverageMember[], edit?: { id: stri
     }
     const mapping: CoverageMapping = { id: existing?.id || randomUUID(), revision: coverageState().revision + 1, members, createdAt: existing?.createdAt || new Date().toISOString() };
     db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(mapping.id, JSON.stringify(mapping));
-    if (existing) {
-      db.prepare("DELETE FROM shelfcheck_coverage_members WHERE mapping_id=?").run(existing.id);
-      for (const correction of listCoverageCorrections().filter(c => c.mappingId === existing.id)) {
-        // A complete-side declaration changes meaning whenever that side changes.
-        const compatible = correction.identities.every(identity => members.some(m => sameIdentity(m, identity))) &&
-          ["TMDB", "TVDB"].every(provider => {
-            const selected = correction.identities.filter(i => i.provider === provider);
-            const oldSide = existing!.members.filter(m => m.provider === provider);
-            return !selected.length || selected.length !== oldSide.length || members.filter(m => m.provider === provider).every(m => oldSide.some(old => sameIdentity(old,m))) && members.filter(m => m.provider === provider).length === oldSide.length;
-          });
-        if (!compatible) db.prepare("DELETE FROM shelfcheck_coverage_corrections WHERE mapping_id=? AND show_key=? AND item_key=?").run(correction.mappingId,correction.showKey,correction.ratingKey);
-      }
-    }
+    if (existing) db.prepare("DELETE FROM shelfcheck_coverage_members WHERE mapping_id=?").run(existing.id);
     for (const m of members)
       db.prepare("INSERT INTO shelfcheck_coverage_members VALUES(?,?,?)").run(m.provider, m.id, mapping.id);
     db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(mapping.revision);
@@ -94,7 +81,6 @@ export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missi
     for (const id of new Set<string>(ids)) {
       const result = db.prepare("DELETE FROM shelfcheck_coverage_mappings WHERE id=?").run(id);
       if (result.changes) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === id)) resolveCoverageIssue(issue.id);
-      if (result.changes) correctionTable().prepare("DELETE FROM shelfcheck_coverage_corrections WHERE mapping_id=?").run(id);
       (result.changes ? deleted : missing).push(id);
     }
     if (deleted.length) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
@@ -106,9 +92,7 @@ export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missi
   }
 }
 
-export function saveCoverageEvidence(evidence: CoverageEvidence[], complete = true) {
-  const db = correctionTable();
-  for (const correction of listCoverageCorrections()) if ((complete || evidence.some(item=>item.showKey===correction.showKey && item.ratingKey===correction.ratingKey)) && !evidence.some(item=>item.showKey===correction.showKey && item.ratingKey===correction.ratingKey && item.fingerprint===correction.fingerprint)) db.prepare("DELETE FROM shelfcheck_coverage_corrections WHERE mapping_id=? AND show_key=? AND item_key=?").run(correction.mappingId,correction.showKey,correction.ratingKey);
+export function saveCoverageEvidence(evidence: CoverageEvidence[]) {
   coverageDatabase().prepare("INSERT INTO shelfcheck_coverage_evidence VALUES(1,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(JSON.stringify(evidence));
 }
 
@@ -125,36 +109,6 @@ export function completeCoverageRecheck(revision: number) {
 
 export function beginCoverageRecheck(revision: number) {
   coverageDatabase().prepare("UPDATE shelfcheck_coverage_state SET pending=1 WHERE id=1 AND revision=?").run(revision);
-}
-
-function correctionTable() {
-  const db=coverageDatabase();
-  db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_coverage_corrections(mapping_id TEXT NOT NULL,show_key TEXT NOT NULL,item_key TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(mapping_id,show_key,item_key))");
-  return db;
-}
-function sameIdentity(a: {provider:string;id:number}, b: {provider:string;id:number}) { return a.provider===b.provider && a.id===b.id; }
-export function listCoverageCorrections(): CoverageCorrection[] {
-  return (correctionTable().prepare("SELECT payload FROM shelfcheck_coverage_corrections").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
-}
-export function saveOwnershipCorrection(mappingId: unknown, revision: unknown, item: CoverageEvidence, identities: CoverageEvidence["identities"]) {
-  assertCoverageMutationAllowed();
-  const db=correctionTable();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (revision!==coverageState().revision) throw new CoverageError("Coverage changed. Reload the latest inventory.",409,"stale-revision");
-    const mapping=listCoverageMappings().find(m=>m.id===mappingId);
-    const current=readCoverageEvidence().find(e=>e.ratingKey===item?.ratingKey && e.showKey===item?.showKey && e.fingerprint===item?.fingerprint);
-    if (!mapping || !current || !current.ratingKey || !current.identities.some(i=>mapping.members.some(m=>sameIdentity(m,i)))) throw new CoverageError("This item or mapping changed. Scan and review it again.",409,"stale-evidence");
-    if (!Array.isArray(identities) || !identities.length || identities.some(i => !i || typeof i !== "object" || Array.isArray(i) || (i.provider !== "TMDB" && i.provider !== "TVDB") || !Number.isSafeInteger(i.id) || i.id <= 0) || new Set(identities.map(i=>i.provider)).size!==1 || new Set(identities.map(i=>i.id)).size!==identities.length || identities.some(i=>!mapping.members.some(m=>sameIdentity(m,i)))) throw new CoverageError("Declare one complete provider side or selected parts from one side of this mapping.");
-    const correction: CoverageCorrection={...current,mappingId:mapping.id,identities};
-    db.prepare("INSERT INTO shelfcheck_coverage_corrections VALUES(?,?,?,?) ON CONFLICT(mapping_id,show_key,item_key) DO UPDATE SET payload=excluded.payload").run(mapping.id,current.showKey,current.ratingKey,JSON.stringify(correction));
-    db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
-    db.exec("COMMIT");
-    return correction;
-  } catch(error) {db.exec("ROLLBACK");throw error;}
-}
-export function correctedCoverageInventory(mapping: CoverageMapping, inventory: CoverageEvidence[]): CoverageEvidence[] {
-  return applyCoverageCorrections(mapping, inventory, listCoverageCorrections());
 }
 
 // Lookup results must never overwrite a mapping repaired or deleted during an HTTP request.

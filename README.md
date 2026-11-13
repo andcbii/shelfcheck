@@ -24,7 +24,7 @@ publish port `3000` directly to the public internet.
 - Recognize conservative compound-episode mappings where one owned,
   double-length TMDB episode represents multiple split TVDB episodes.
 - Link complete TMDB and TVDB episode sets with persistent Manual Matches,
-  including cross-show mappings and corrections for ambiguous Plex items.
+  including cross-show mappings. Owning either complete side covers the other.
 - Review incomplete coverage groups, repair broken mappings, and bulk-delete
   selected mappings from the Manual Matches report.
 - Retain downloadable, credential-safe diagnostic logs for the latest 10 scans.

@@ -12,13 +12,11 @@ export type CoverageMember = {
 export type CoverageEvidence = {
   ratingKey: string;
   showKey: string;
-  fingerprint: string;
   identities: {
     provider: CoverageProvider;
     id: number;
   }[];
 };
-export type CoverageCorrection = CoverageEvidence & { mappingId: string };
 export type CoverageMapping = {
   id: string;
   revision: number;
@@ -27,7 +25,6 @@ export type CoverageMapping = {
   health?: "healthy" | "pending" | "needs-review";
   healthMessage?: string;
   evidence?: CoverageEvidence[];
-  corrections?: CoverageCorrection[];
 };
 
 export type CoverageOutcome = {

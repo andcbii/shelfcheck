@@ -1,8 +1,7 @@
 import { compoundTvdbCoverage, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
 import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-match";
-import { applyCoverageCorrections } from "@/lib/manual-coverage-inventory";
-import type { CoverageCorrection, CoverageEvidence, CoverageMapping, CoverageOutcome } from "@/lib/manual-coverage-model";
+import type { CoverageEvidence, CoverageMapping, CoverageOutcome } from "@/lib/manual-coverage-model";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
 export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; airDate?: string; runtime?: number; providerEpisodeId?: number; source: "TMDB" | "TVDB" };
@@ -29,7 +28,6 @@ export type PlexComparisonInput = {
   autoMatchEvidence: ReadonlyMap<number, AutomaticEpisodeEvidence>;
   mappings: CoverageMapping[];
   manualInventory: CoverageEvidence[];
-  corrections: CoverageCorrection[];
   autoCompoundEpisodes: boolean;
 };
 
@@ -38,7 +36,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
   const { ratingKey, primary, tmdbShow, tvdbId, tvdbSlug, tmdbSeriesMatches, providerEpisodes,
     localEpisodes, localProviderEpisodes, localTmdbEpisodeIds, libraryTmdbEpisodeIds,
     coordinateMissingTvdbIds, directTvdbSatisfied, directImdbSatisfied, traktSatisfied,
-    tmdbSatisfied, mappings, manualInventory, corrections, autoCompoundEpisodes } = input;
+    tmdbSatisfied, mappings, manualInventory, autoCompoundEpisodes } = input;
   const autoMatchEvidence = new Map(input.autoMatchEvidence);
   const locallySatisfiedTvdbIds = new Set([...directTvdbSatisfied, ...directImdbSatisfied, ...traktSatisfied, ...tmdbSatisfied]);
   const compoundSatisfied = new Set<number>();
@@ -72,7 +70,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
     const mapping = mappings.find(mapping => (!mapping.health || mapping.health === "healthy") && mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
     if (mapping) {
       const sourceMembers = mapping.members.filter(member => member.provider !== episode.source);
-      const evidence = applyCoverageCorrections(mapping, manualInventory, corrections).filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
+      const evidence = manualInventory.filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
       const sourceComplete = sourceMembers.length && sourceMembers.every(member => evidence.some(item => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
       if (sourceComplete) {
         if (outcome) outcome.status = "manual";

@@ -52,13 +52,14 @@ An episode record containing content that another provider lists as multiple epi
 One of the parts of a combined episode, listed as a separate episode by a provider.
 
 **Coverage mapping**:
-A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content.
+A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content. Directly owning every record in one set covers every record in the other, even when a Plex item also carries an identity from the other set; owning only part of a set adds no coverage.
 
 **Show mapping**:
 An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.
 
-**Ownership correction**:
-A user's declaration of the content actually contained in a Plex item whose provider identities describe conflicting episode coverage.
+**Report Missing**:
+A user's local Shelfcheck exception, saved on a member of a Manual Match, stating that the library lacks that episode's content even though ownership or matching would mark it collected. It is never sent to Plex, TMDB, or TVDB. It replaces ownership corrections, which declared the content of individual Plex items and were retired without conversion.
+_Avoid_: Ownership correction, declared content
 
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.

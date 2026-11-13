@@ -13,7 +13,7 @@ const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 const scan = await import("../app/api/plex/scan/route");
 hook.deregister();
-test("complete sets require corrected direct inventory and corrections survive only compatible evidence", async (t) => {
+test("complete-set Manual Matches cover equivalent owned content in both directions without ownership corrections", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "coverage-"));
   const previous = process.env.SHELFCHECK_DATA_DIR;
   process.env.SHELFCHECK_DATA_DIR = dir;
@@ -119,48 +119,46 @@ test("complete sets require corrected direct inventory and corrections survive o
   assert.equal(incomplete.report.coverageGroups.length, 1);
   assert.deepEqual(incomplete.report.coverageGroups[0].members.map((m: {id:number,status:string}) => [m.id,m.status]), [[6741845,"missing"],[11551379,"direct"],[11551380,"alternative"]]);
   assert.equal(incomplete.report.coverageGroups[0].mappingId,mapping.id);
+  ambiguous=true;
+  const partialMixed=await rescan();
+  assert.equal(partialMixed.report.shows[0].missing[0]?.tmdbEpisodeId,6741845,"a part also reporting the combined identity cannot stand in for the missing part");
+  assert.equal(partialMixed.report.shows[0].manualCoverage,undefined);
+  ambiguous=false;
   parts=[11551379,11551380];
   const complete = await rescan();
   assert.deepEqual(complete.report.shows[0].missing,[]);
   assert.deepEqual(complete.report.coverageGroups,[]);
   assert.ok((await state()).mappings.some((m:{id:string})=>m.id===mapping.id),"complete mappings remain in the manager");
-  // Reverse direction: a single combined item covers both parts, but a conflicting
-  // combined-plus-part item must first declare its actual content.
+  // Reverse direction: a single combined item covers both parts, including when
+  // the same Plex item also carries a split identity.
   show.Guid=[{id:"tvdb://20"}]; source.Guid=[{id:"tmdb://10"}];
   parts=[6741845]; sourceProvider="tmdb";
   await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
   assert.deepEqual((await rescan()).report.shows[0].missing,[]);
   parts=[11551379]; sourceProvider="tvdb"; ambiguous=true;
-  const unresolved=await rescan();
-  assert.equal(unresolved.report.shows[0].missing[0].tvdbEpisodeId,11551380,"conflicting combined identity cannot manufacture part two");
-  assert.equal(unresolved.report.coverageGroups.length,1);
-  assert.deepEqual(unresolved.report.coverageGroups[0].members.map((m:{id:number,status:string})=>[m.id,m.status]),[[6741845,"alternative"],[11551379,"missing"],[11551380,"missing"]]);
+  const mixed=await rescan();
+  assert.deepEqual(mixed.report.shows[0].missing,[],"a combined episode also reporting a split identity covers every mapped part");
+  assert.deepEqual(mixed.report.shows[0].manualCoverage.map((item:{mappingId:string})=>item.mappingId),[mapping.id]);
+  ambiguous=false;
+  const partialReverse=await rescan();
+  assert.deepEqual(partialReverse.report.shows[0].missing.map((e:{tvdbEpisodeId:number})=>e.tvdbEpisodeId),[11551380,11551379],"one part held outside the target show grants no Manual Match coverage for either part");
+  assert.equal(partialReverse.report.shows[0].manualCoverage,undefined);
 
-  // Direct TMDB normal matching elsewhere is preserved; the correction applies only to manual fallback.
-  await rescan();
-  const correct=async(identities: {provider:string,id:number}[])=>{const current=await state(); const item=current.mappings[0].evidence[0]; const result=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item,identities})); assert.equal(result.status,200,await result.clone().text()); return wait();};
-  const partReport=await correct([{provider:"TVDB",id:11551379}]);
-  assert.equal(partReport.report.shows[0].missing[0].tvdbEpisodeId,11551380);
-  assert.deepEqual(partReport.report.coverageGroups[0].members.map((m:{id:number,status:string})=>[m.id,m.status]),[[6741845,"alternative"],[11551379,"direct"],[11551380,"missing"]]);
-  assert.deepEqual((await state()).mappings[0].corrections[0].identities,[{provider:"TVDB",id:11551379}]);
-  const beforeMalformed = await state();
-  for (const identity of [null, [], "TMDB", {}, { provider: "IMDB", id: 11551379 }, { provider: "TVDB", id: "11551379" }, { provider: "TVDB", id: 0 }, { provider: "TVDB", id: -1 }, { provider: "TVDB", id: 1.5 }, { provider: "TVDB", id: 9007199254740992 }]) {
-    const rejected = await api.POST(request({ action: "correct", mappingId: mapping.id, revision: beforeMalformed.revision, item: beforeMalformed.mappings[0].evidence[0], identities: [{ provider: "TVDB", id: 11551379 }, identity] }));
-    assert.equal(rejected.status, 400, await rejected.clone().text());
-    assert.equal((await rejected.json()).code, "validation");
-    const afterMalformed = await state();
-    assert.equal(afterMalformed.revision, beforeMalformed.revision);
-    assert.deepEqual(afterMalformed.mappings[0].corrections, beforeMalformed.mappings[0].corrections);
-  }
-  const fullReport=await correct([{provider:"TMDB",id:6741845}]);
-  assert.deepEqual(fullReport.report.shows[0].missing,[]);
-  assert.deepEqual((await state()).mappings[0].corrections[0].identities,[{provider:"TMDB",id:6741845}]);
+  // The obsolete ownership-correction mutation is no longer accepted.
+  ambiguous=true; await rescan();
+  const beforeObsolete=await state();
+  assert.equal("corrections" in beforeObsolete.mappings[0],false,"no correction display state is returned");
+  assert.ok(beforeObsolete.mappings[0].evidence.length,"independently useful inventory evidence remains available");
+  const obsolete=await api.POST(request({action:"correct",mappingId:mapping.id,revision:beforeObsolete.revision,item:beforeObsolete.mappings[0].evidence[0],identities:[{provider:"TVDB",id:11551379}]}));
+  assert.equal(obsolete.status,400);
+  assert.equal((await obsolete.json()).code,"unsupported-action");
+  assert.deepEqual(await state(),beforeObsolete);
+  assert.equal((await (await scan.GET()).json()).scan.status,"completed","the rejected mutation starts no recheck or scan");
   sqlite.clearPlexReport(); cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase;
-  assert.equal((await state()).mappings[0].corrections.length,1);
-  // Compatible edits preserve a declaration; an unrelated mapping deletion does too.
+  assert.deepEqual((await state()).mappings.map((m:{id:string})=>m.id),[mapping.id],"mappings survive restart");
+  // Edits and an unrelated batch deletion retain the complete-set mapping.
   const unchanged=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:preview.preview}));
   assert.equal(unchanged.status,200); mapping.revision=(await unchanged.json()).mapping.revision; await wait();
-  assert.equal((await state()).mappings[0].corrections.length,1);
   const independentPreview=await resolve(["tmdb:101 show:10 season:1 episode:2","tvdb:201"]);
   const independent=await (await api.POST(request({action:"save",preview:independentPreview.preview}))).json(); await wait();
   const batchDelete=await api.DELETE(new Request("http://localhost/api/plex/manual-coverage",{method:"DELETE",body:JSON.stringify({ids:[independent.mapping.id,"already-removed"]})}));
@@ -168,16 +166,11 @@ test("complete sets require corrected direct inventory and corrections survive o
   assert.deepEqual(batchResult.deleted,[independent.mapping.id]);
   assert.deepEqual(batchResult.missing,["already-removed"]);
   await wait();
-  assert.equal((await state()).mappings[0].corrections.length,1);
   contentVersion++;
-  await rescan();
-  assert.equal((await state()).mappings[0].corrections.length,0,"changed item invalidates its declaration");
-  assert.equal((await (await scan.GET()).json()).report.shows[0].missing[0].tvdbEpisodeId,11551380);
-  await correct([{provider:"TMDB",id:6741845}]);
+  assert.deepEqual((await rescan()).report.shows[0].missing,[],"changed Plex content needs no repeated ownership declaration");
   const expanded=await resolve(["tmdb:6741845 show:10 season:1 episode:1","tmdb:101 show:10 season:1 episode:2","tvdb:11551379","tvdb:11551380"]);
   const edit=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:expanded.preview}));
   assert.equal(edit.status,200); mapping.revision=(await edit.json()).mapping.revision; await wait();
-  assert.equal((await state()).mappings[0].corrections.length,0,"expanding the declared complete side invalidates it");
   ambiguous=false; parts=[6741845]; sourceProvider="tmdb";
   assert.equal((await rescan()).report.shows[0].missing.length,2,"many-to-many needs every directly held member");
   parts=[6741845,101];
@@ -192,26 +185,24 @@ test("complete sets require corrected direct inventory and corrections survive o
   const manySave=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:manyToOne.preview}));
   assert.equal(manySave.status,200); mapping.revision=(await manySave.json()).mapping.revision; await wait();
   parts=[11551379]; assert.deepEqual((await rescan()).report.shows[0].missing,[]);
-  // A correction during an active scan is rejected without changing saved evidence.
-  parts=[11551379]; ambiguous=true; await rescan();
-  await correct([{provider:"TVDB",id:11551379}]);
+  // A held part that also reports a combined identity still completes its one-member side.
+  ambiguous=true;
+  assert.deepEqual((await rescan()).report.shows[0].missing,[],"a mixed-identity item retains the complete TVDB side");
+  // Mapping saves during an active scan are rejected without changing saved state.
   const blocked=new Promise<void>(resolve=>{unblock=resolve;});
   const started=new Promise<void>(resolve=>{entered=resolve;}); blockSeason=true;
   await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
   await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"})); await started;
   const current=await state();
-  const revised=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TMDB",id:6741845}]}));
-  assert.equal(revised.status,409);
-  assert.equal((await revised.json()).code,"scan-active");
-  const unchangedDuringScan=await state();
-  assert.equal(unchangedDuringScan.revision,current.revision);
-  assert.deepEqual(unchangedDuringScan.mappings,current.mappings);
-  const stale=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TVDB",id:11551379}]})); assert.equal(stale.status,409);
+  const duringScan=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:manyToOne.preview}));
+  assert.equal(duringScan.status,409);
+  assert.equal((await duringScan.json()).code,"scan-active");
+  const obsoleteDuringScan=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TMDB",id:6741845}]}));
+  assert.equal(obsoleteDuringScan.status,400);
+  assert.deepEqual(await state(),current);
   blockSeason=false;unblock();
   await wait();
-  const acceptedCorrection=await api.POST(request({action:"correct",mappingId:mapping.id,revision:current.revision,item:current.mappings[0].evidence[0],identities:[{provider:"TMDB",id:6741845}]}));
-  assert.equal(acceptedCorrection.status,200);
-  assert.deepEqual((await wait()).report.shows[0].missing.map((e:{tmdbEpisodeId:number})=>e.tmdbEpisodeId),[6741845,101],"partial TMDB declaration cannot complete a two-member side");
+  ambiguous=false;
 
 
   // X is directly held and automatically satisfies Y, but Y is not direct

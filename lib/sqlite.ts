@@ -287,7 +287,28 @@ export function coverageDatabase() {
     CREATE TABLE IF NOT EXISTS shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, PRIMARY KEY(provider, episode_id));
     CREATE TABLE IF NOT EXISTS shelfcheck_coverage_evidence(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);`);
+  retireOwnershipCorrections(db);
   return db;
+}
+
+// Ownership corrections were retired: complete-set Manual Matches stand alone.
+// Discard saved corrections without converting them into any other decision, and
+// ask for a comparison when they may have shaped the cached results.
+const retiredCorrectionDatabases = new WeakSet<DatabaseSync>();
+function retireOwnershipCorrections(db: DatabaseSync) {
+  if (retiredCorrectionDatabases.has(db)) return;
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shelfcheck_coverage_corrections'").get()) { retiredCorrectionDatabases.add(db); return; }
+  const saved = db.prepare("SELECT COUNT(*) AS count FROM shelfcheck_coverage_corrections").get() as { count: number };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec("DROP TABLE shelfcheck_coverage_corrections");
+    if (saved.count) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+    db.exec("COMMIT");
+    retiredCorrectionDatabases.add(db);
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 // Generated provider catalogues and inputs do not pass through report ignore pruning.

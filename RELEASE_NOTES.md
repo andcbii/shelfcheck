@@ -1,26 +1,25 @@
-# Shelfcheck 2.5.3
+# Shelfcheck 2.5.4
 
-Shelfcheck 2.5.3 keeps episode matching problems from stopping comparison of an
-entire Plex show and recovers missing TVDB titles from English translations.
+Shelfcheck 2.5.4 refreshes needed TMDB episode crosswalks on a later UTC day,
+so newly added or corrected TVDB external IDs can update Plex episode coverage
+without a manual cache clear.
 
-## Episode matching and recovery
+## Episode crosswalk freshness and recovery
 
-- Individual malformed catalogue records and failed episode lookups are isolated
-  to the affected episode and dependent relationships. Other episodes and
-  independent matching methods continue normally.
-- TVDB's default catalogue remains the first source. When an episode's title is
-  unusable, Shelfcheck requests that episode's English translation, preserving
-  provider identities and numbering. Recovered titles are saved for reuse.
-- Unresolved episode lookups retry on subsequent user-requested scans, even when
-  the rest of the catalogue is reused. Recovery state survives restarts.
-- Failed checks appear in **05 — Scan Issues**, including when another method
-  establishes coverage. Episodes without established coverage remain in normal
-  Plex missing results under the existing visibility rules.
-- Cached Manual Match rechecks stay offline and isolate unavailable episode
-  relationships. Unusable shared catalogues retain existing last-good safeguards.
+- Needed TMDB external-ID episode crosswalks refresh independently of show
+  change feeds. Usable matches and valid empty answers are reused on the same
+  UTC day, with their original receipt times preserved across restarts.
+- Show comparisons needing the same TVDB episode lookup share provider evidence
+  and in-flight requests. Each comparison checks current library inventory.
+- Failed or unreadable refreshes stop the older answer from granting coverage
+  and remain retryable. Independent matching methods remain available.
+- Offline Manual Match rechecks preserve rejected evidence and adopt later
+  recovered answers durably across repeated rechecks and restarts.
+- Explicit rescans, cache clearing and provider-change invalidation continue to
+  override same-day reuse. Provider catalogue freshness rules are unchanged.
 
 ## Upgrading
 
-Use `andcbii/shelfcheck:2.5.3` or `andcbii/shelfcheck:latest` and retain your
+Use `andcbii/shelfcheck:2.5.4` or `andcbii/shelfcheck:latest` and retain your
 existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
 No configuration or database reset is required.

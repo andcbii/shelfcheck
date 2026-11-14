@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.5.4 - 2026-11-13
+
+### Fixed
+
+- Refresh needed TMDB episode crosswalks on a later UTC day, independently of
+  show change feeds, so added or corrected external IDs update episode coverage.
+- Share crosswalk evidence across show comparisons while evaluating ownership
+  against the current library inventory.
+- Keep failed refreshes rejected through offline Manual Match rechecks and
+  restarts, and preserve recovered evidence across repeated offline rechecks.
+
 ## 2.5.3 - 2026-11-13
 
 ### Fixed

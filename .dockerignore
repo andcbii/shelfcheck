@@ -9,3 +9,37 @@ node_modules
 *.log
 *.tar.gz
 .env*
+outputs
+work
+coverage
+
+# local config and credentials
+config.yml
+config.yaml
+config.*.yml
+config.*.yaml
+!config.example.yml
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+.aws
+
+# local agent instructions and private tracker notes
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+.claude
+.codex
+.cursor
+.aider*
+docs/agents
+docs/jira-automation-smoke-test.md
+
+# local data
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.db-*
+**/*.sqlite-*
+**/*.sqlite3-*

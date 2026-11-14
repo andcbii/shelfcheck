@@ -481,7 +481,7 @@ test("same-day reuse during a scan that crosses UTC midnight does not renew the 
 });
 
 for (const restarting of [false, true]) test(`an offline recheck adopts a shared answer recovered after its own failed lookup${restarting ? ", across restart" : ""}`, async t => {
-  const { rerun, state, requests, restart, save, status } = await sharedDayOne(t);
+  const { rerun, state, requests, restart, save, setFlags, status } = await sharedDayOne(t);
   await rerun();
 
   // Other's rescan fails, leaving it no saved copy and a failed check; Target's later rescan
@@ -496,13 +496,24 @@ for (const restarting of [false, true]) test(`an offline recheck adopts a shared
   assert.deepEqual(autoMatches(await rerun("ratingKey:target"), "target"), [matched]);
 
   if (restarting) restart();
-  await saveUnrelatedMatch(save);
+  const mappingId = await saveUnrelatedMatch(save);
   requests.length = 0;
   const rechecked = await settled(status);
   assert.deepEqual([...requests], [], "the cached recheck stays offline");
   assert.deepEqual(autoMatches(rechecked, "other"), [matched], "Other adopts the recovered shared answer");
   assert.ok(!missingKeys(rechecked, "other").includes("TVDB:301"), "TVDB 301 is covered");
   assert.deepEqual(crosswalkIssues(rechecked, "other"), [], "the usable answer to this lookup resolves Other's failed check");
+
+  // The adoption is durable: later offline rechecks, before and after a restart, keep it.
+  for (const [flags, restartFirst] of [[[tvdb3], false], [[], true]] as const) {
+    if (restartFirst) restart();
+    await setFlags(mappingId, [...flags]);
+    const again = await settled(status);
+    assert.deepEqual([...requests], [], "repeated cached rechecks stay offline");
+    assert.deepEqual(autoMatches(again, "other"), [matched], `Other keeps the adopted answer${restartFirst ? " after restart" : ""}`);
+    assert.ok(!missingKeys(again, "other").includes("TVDB:301"));
+    assert.deepEqual(crosswalkIssues(again, "other"), []);
+  }
 
   // The adopted answer kept its original receipt time: reused later that day, refreshed the next.
   t.mock.timers.setTime(Date.parse("2026-11-12T13:00:00Z"));

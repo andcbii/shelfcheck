@@ -81,7 +81,12 @@ function episodeIdentityIssueId(ratingKey: string | undefined, relationship: str
 
 const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
-const replayScope = new AsyncLocalStorage<{missing:Set<string>}>();
+/**
+ * An offline recheck: the saved relationships it found missing, and the TMDB crosswalk answers it
+ * recovered from shared crosswalk evidence after this show's own failed lookup, by relationship
+ * key, with the failed-request issue each one resolves once the recovered answer is saved.
+ */
+const replayScope = new AsyncLocalStorage<{missing:Set<string>; recovered:Map<string,string>}>();
 /** Set while one TVDB episode's crosswalk lookup runs: its saved relationships are episode-scoped. */
 const crosswalkLookupScope = new AsyncLocalStorage<true>();
 /**
@@ -287,7 +292,8 @@ function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
     const failedAt = Date.parse(getCoverageIssue(issueId)?.failedAt || "");
     if (!shared.receivedAt || !Number.isFinite(failedAt) || outcomeAt <= failedAt) return;
     relationships[key] = {provider: "TMDB", value: shared.value, receivedAt: shared.receivedAt};
-    resolveCoverageIssue(issueId);
+    // Resolved only after the recheck saves the recovered answer, so it stays recoverable.
+    replayScope.getStore()?.recovered.set(key, issueId);
     return;
   }
   const savedAt = Date.parse(relationships[key].receivedAt || "");
@@ -1391,7 +1397,10 @@ async function recheckCoverage(impact: CoverageImpact) {
       const tmdb=inputs.tmdb[String(input.tmdbId)],tvdb=inputs.tvdb[String(input.tvdbId)];
       if (input.tmdbId && !usableProviderCatalogue(tmdb)) throw new Error("Saved TMDB catalogue is missing or incomplete. Run a Plex scan to download the TMDB catalogue.");
       if (input.tvdbId && !usableProviderCatalogue(tvdb)) throw new Error("Saved TVDB catalogue is missing or incomplete. Run a Plex scan to download the TVDB catalogue.");
-      const replay={missing:new Set<string>()};
+      const replay={missing:new Set<string>(),recovered:new Map<string,string>()};
+      // The recheck saves only the answers it recovered after this show's own failed lookup; its other
+      // replay changes stay in memory, so a later shared recovery remains adoptable offline.
+      const savedRelationships={...input.relationships};
       const compared=await replayScope.run(replay,()=>comparisonIssueScope.run({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},()=>relationshipScope.run(input.relationships,()=>compareLoadedPlexShow({
         ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
         providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},
@@ -1400,6 +1409,11 @@ async function recheckCoverage(impact: CoverageImpact) {
         tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},setHeartbeat:()=>{},
       }))));
       if (replay.missing.size) throw new Error(`Saved provider identity relationships are incomplete (${[...replay.missing].join(", ")}).`);
+      if (replay.recovered.size) {
+        for (const relationship of replay.recovered.keys()) savedRelationships[relationship]=input.relationships[relationship];
+        savePlexComparison(key,{...input,relationships:savedRelationships});
+        for (const issueId of replay.recovered.values()) resolveCoverageIssue(issueId);
+      }
       reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
       const index=results.findIndex(show=>show.ratingKey===key);
       if (index>=0) results[index]=compared.result; else results.push(compared.result);

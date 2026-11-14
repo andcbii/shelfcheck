@@ -50,3 +50,30 @@ next-env.d.ts
 /.runtime/
 /outputs/
 /work/
+
+# local AI-agent instructions and private tracker notes (public repo)
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.codex/
+.cursor/
+.aider*
+/docs/agents/
+/docs/jira-automation-smoke-test.md
+
+# editors and OS files
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# local data and logs
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

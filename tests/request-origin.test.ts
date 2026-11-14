@@ -8,15 +8,15 @@ test("uses the request origin without proxy headers", () => {
 });
 
 test("uses the configured public origin behind a reverse proxy", () => {
-  process.env.SHELFCHECK_PUBLIC_URL = "https://shelfcheck.alderaan.co/path";
+  process.env.SHELFCHECK_PUBLIC_URL = "https://shelfcheck.example.com/path";
   const request = new Request("http://shelfcheck:3000/api/auth/trakt/login", {
     headers: {
       "x-forwarded-proto": "https",
-      "x-forwarded-host": "shelfcheck.alderaan.co",
+      "x-forwarded-host": "shelfcheck.example.com",
     },
   });
 
-  assert.equal(requestOrigin(request), "https://shelfcheck.alderaan.co");
+  assert.equal(requestOrigin(request), "https://shelfcheck.example.com");
   delete process.env.SHELFCHECK_PUBLIC_URL;
 });
 
@@ -24,7 +24,7 @@ test("does not trust forwarding headers without a configured public origin", () 
   const request = new Request("http://shelfcheck:3000/api/auth/trakt/login", {
     headers: {
       "x-forwarded-proto": "https, http",
-      "x-forwarded-host": "shelfcheck.alderaan.co, shelfcheck:3000",
+      "x-forwarded-host": "shelfcheck.example.com, shelfcheck:3000",
     },
   });
 

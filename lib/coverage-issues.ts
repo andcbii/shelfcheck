@@ -37,6 +37,8 @@ export type CoverageIssue = {
   /** Provider Lookup: a request or response failed. Episode Matching: a check over available evidence failed. Provider Catalogue: an individual catalogue record was unusable. */
   category?: "Provider Lookup" | "Episode Matching" | "Provider Catalogue";
   lookup?: ProviderLookup;
+  /** Provider Lookup: when this request last failed (ISO time). Absent on causes recorded before it was kept. */
+  failedAt?: string;
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];
   /** Dependent impacts projected from the same durable current issue state. */

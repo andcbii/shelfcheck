@@ -479,3 +479,38 @@ test("same-day reuse during a scan that crosses UTC midnight does not renew the 
   await rerun();
   assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"], "the answer received on 2026-11-12 is refreshed once");
 });
+
+for (const restarting of [false, true]) test(`an offline recheck adopts a shared answer recovered after its own failed lookup${restarting ? ", across restart" : ""}`, async t => {
+  const { rerun, state, requests, restart, save, status } = await sharedDayOne(t);
+  await rerun();
+
+  // Other's rescan fails, leaving it no saved copy and a failed check; Target's later rescan
+  // receives a usable answer, which replaces the shared rejection.
+  state.statuses.set("/3/find/301", 404);
+  t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
+  const failed = await rerun("ratingKey:other");
+  assert.deepEqual(autoMatches(failed, "other"), []);
+  assert.match(crosswalkIssues(failed, "other")[0], /^301: .*TMDB request failed/);
+  state.statuses.delete("/3/find/301");
+  t.mock.timers.setTime(Date.parse("2026-11-12T12:00:00Z"));
+  assert.deepEqual(autoMatches(await rerun("ratingKey:target"), "target"), [matched]);
+
+  if (restarting) restart();
+  await saveUnrelatedMatch(save);
+  requests.length = 0;
+  const rechecked = await settled(status);
+  assert.deepEqual([...requests], [], "the cached recheck stays offline");
+  assert.deepEqual(autoMatches(rechecked, "other"), [matched], "Other adopts the recovered shared answer");
+  assert.ok(!missingKeys(rechecked, "other").includes("TVDB:301"), "TVDB 301 is covered");
+  assert.deepEqual(crosswalkIssues(rechecked, "other"), [], "the usable answer to this lookup resolves Other's failed check");
+
+  // The adopted answer kept its original receipt time: reused later that day, refreshed the next.
+  t.mock.timers.setTime(Date.parse("2026-11-12T13:00:00Z"));
+  requests.length = 0;
+  assert.deepEqual(autoMatches(await rerun(), "other"), [matched]);
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), []);
+  t.mock.timers.setTime(Date.parse("2026-11-13T00:00:01Z"));
+  requests.length = 0;
+  await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
+});

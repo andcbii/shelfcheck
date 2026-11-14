@@ -123,7 +123,7 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
   catch (error) {
     if (show && matching) {
       const externalId = episodeIdentity?.id;
-      setCoverageIssue({id:issueId,...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
+      setCoverageIssue({id:issueId,failedAt:new Date().toISOString(),...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
         ...(tvdbEpisodeId || externalId ? {episode:{provider:"TVDB" as const,id:Number(tvdbEpisodeId || externalId),showId:show.tvdbId,...((e)=>e ? {season:e.season,episode:e.episode,title:e.title} : {})(show.providerEpisodes?.find(e=>e.source === "TVDB" && e.providerEpisodeId === Number(tvdbEpisodeId || externalId)))}} : coordinate ? {episode:{provider:"TMDB" as const,...(lookupSourceScope.getStore()?.at(-1)?.kind === "external TMDB episode ID" ? {id:lookupSourceScope.getStore()!.at(-1)!.id} : {}),showId:Number(coordinate[1]),season:Number(coordinate[2]),episode:Number(coordinate[3])}} : {}),
         ...providerLookupContext(error,{
           source: lookupSourceScope.getStore() || (tvdbEpisodeId || externalId
@@ -271,7 +271,10 @@ function tmdbCrosswalkEpisode(relationship: string) {
  * outcome is newer (an undated copy counts as older): a later live refresh, possibly in another
  * show's comparison, replaced or rejected it. A replacing usable response is replayed with its
  * original receipt time; a rejection grants nothing, and only an unreadable payload is kept to
- * explain the failure. Replay makes no request and renews nothing.
+ * explain the failure. Without a saved copy, a usable shared response fills the gap only when
+ * this show's own live request for the lookup failed (its failed request is still recorded)
+ * before that response was received; it then resolves that failed request, as live reuse does.
+ * A copy missing for any other reason stays unavailable. Replay makes no request and renews nothing.
  */
 function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
   const relationships = relationshipScope.getStore();
@@ -279,8 +282,14 @@ function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
   const outcomeAt = Date.parse(shared?.receivedAt || shared?.rejectedAt || "");
   if (!relationships || !shared || !Number.isFinite(outcomeAt)) return;
   const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
-  // Without a saved copy there is nothing to replay; the shared outcome never fills the gap.
-  if (!Object.hasOwn(relationships, key)) return;
+  if (!Object.hasOwn(relationships, key)) {
+    const issueId = episodeIdentityIssueId(comparisonIssueScope.getStore()?.ratingKey, key);
+    const failedAt = Date.parse(getCoverageIssue(issueId)?.failedAt || "");
+    if (!shared.receivedAt || !Number.isFinite(failedAt) || outcomeAt <= failedAt) return;
+    relationships[key] = {provider: "TMDB", value: shared.value, receivedAt: shared.receivedAt};
+    resolveCoverageIssue(issueId);
+    return;
+  }
   const savedAt = Date.parse(relationships[key].receivedAt || "");
   if (Number.isFinite(savedAt) && savedAt >= outcomeAt) return;
   if (shared.receivedAt) relationships[key] = {provider: "TMDB", value: shared.value, receivedAt: shared.receivedAt};

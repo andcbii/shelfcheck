@@ -226,6 +226,10 @@ pnpm build
 pnpm audit --prod --audit-level high
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
+
 ## License
 
 Shelfcheck is available under the [MIT License](LICENSE).

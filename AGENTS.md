@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues and specs live in GitHub Issues for `andcbii/shelfcheck`.
+Issues and specs live in the Jira project `SHELFCHECK`.
 Before reading or changing issues, read `docs/agents/issue-tracker.md`.
 
 ### Triage labels

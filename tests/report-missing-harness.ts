@@ -56,7 +56,10 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `bodies`/`statuses`: per-pathname provider response overrides (e.g. a malformed `/3/find/301` payload or a 404).
   // `imdb`: an IMDb GUID Plex also carries on the owned file of a provider episode.
   // `english`: TVDB English episode translations by TVDB episode ID (null name = translation without a title); others are 404.
-  const state = { secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
+  // `onRequest`: called with each request's pathname before it is answered (e.g. to advance a controlled clock).
+  // `raw`: per-pathname successful (HTTP 200) response bodies sent as-is, e.g. one that is not JSON.
+  // `hold`: per-pathname gates; a matching request is recorded at once but answered only when its gate settles.
+  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -65,7 +68,10 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
+    state.onRequest?.(u.pathname);
+    await state.hold.get(u.pathname);
     if (state.statuses.has(u.pathname)) return Response.json({}, { status: state.statuses.get(u.pathname) });
+    if (state.raw.has(u.pathname)) return new Response(state.raw.get(u.pathname), { status: 200, headers: { "Content-Type": "application/json" } });
     if (state.bodies.has(u.pathname)) return Response.json(state.bodies.get(u.pathname));
     let body: unknown;
     let match: RegExpMatchArray | null;
@@ -107,8 +113,9 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   });
   const post = (body: unknown) => api.POST(new Request("http://localhost/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
   const status = async (): Promise<Result & { scan: { status: string; error?: string } }> => (await scan.GET()).json();
-  const rerun = async () => {
-    await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
+  /** Runs a full scan, or a single-show rescan when `ratingKey` is given, and waits for it to complete. */
+  const rerun = async (ratingKey?: string) => {
+    await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify(ratingKey ? { ratingKey } : {}) }));
     for (let i = 0; i < 300; i++) {
       const result = await status();
       if (result.scan.status !== "running") { assert.equal(result.scan.status, "completed", result.scan.error); return result; }
@@ -143,8 +150,24 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=0 WHERE mapping_id=?").run(id);
     for (const member of members) db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=1 WHERE mapping_id=? AND provider=? AND episode_id=?").run(id, member.provider, member.id);
   };
+  // Rewrites saved provider relationships in the format of releases that did not record a receipt
+  // time, which also had no shared TMDB crosswalk evidence.
+  const writeUndatedRelationships = () => {
+    const db = cache.__shelfcheckDatabase!;
+    db.prepare("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE 'tmdb-crosswalk:%'").run();
+    for (const row of db.prepare("SELECT cache_key, payload FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE 'comparison:%'").all() as { cache_key: string; payload: string }[]) {
+      const comparison = JSON.parse(row.payload) as { relationships: Record<string, { receivedAt?: string }> };
+      for (const relationship of Object.values(comparison.relationships)) delete relationship.receivedAt;
+      db.prepare("UPDATE shelfcheck_plex_generated_inputs SET payload=? WHERE cache_key=?").run(JSON.stringify(comparison), row.cache_key);
+    }
+  };
   // Saves Plex preferences (Ignore rules) as the Plex page sends them.
   const patchSettings = (patch: Record<string, unknown>) => preferences.PATCH(new Request("http://localhost/api/plex/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }));
+  /** Clears the Plex scan cache as the Plex page does: one show's when `ratingKey` is given, otherwise all of it. */
+  const clearCache = async (ratingKey?: string) => {
+    const response = await scan.DELETE(new Request(`http://localhost/api/plex/scan${ratingKey ? `?ratingKey=${encodeURIComponent(ratingKey)}` : ""}`, { method: "DELETE" }));
+    assert.equal(response.status, 200, await response.clone().text());
+  };
   const restart = () => { cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase; };
-  return { state, requests, patchSettings, post, status, rerun, mappings, save, setFlags, flags, missing, group, restart, writeFlags };
+  return { state, requests, patchSettings, post, status, rerun, clearCache, mappings, save, setFlags, flags, missing, group, restart, writeFlags, writeUndatedRelationships };
 }

@@ -114,11 +114,12 @@ test("unresolved episode recovery survives restart, is retried narrowly on reuse
   assert.deepEqual(missingKeys(repaired), ["TMDB:9002"]);
 
   // Successful recovery is saved and reused after restart without repeating its requests.
+  // Only the needed TMDB crosswalk is requested again, as on every later UTC day.
   restart();
   t.mock.timers.tick(day);
   before = requests.length;
   const reused = await rerun();
-  assert.deepEqual(providerRequests(requests.slice(before)), []);
+  assert.deepEqual(providerRequests(requests.slice(before)), ["/3/find/102"]);
   assert.deepEqual(currentIssues(reused), []);
   assert.deepEqual(missingKeys(reused), ["TMDB:9002"]);
 

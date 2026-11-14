@@ -21,7 +21,9 @@ export type SavedPlexComparison = {
   tmdbId?: number; tvdbId?: number;
   // Raw successful HTTP identity relationships, including successful empty responses.
   // Ownership must always be derived against current inventory, never reused from a result.
-  relationships: Record<string, {provider: string; value: unknown}>;
+  // `receivedAt`: when the response was actually received; reuse, replay and restart never
+  // renew it, and responses saved before it was recorded have none.
+  relationships: Record<string, {provider: string; value: unknown; receivedAt?: string}>;
   tmdbAliases: number[]; tvdbAliases: number[];
   tmdbEpisodeAliases?: number[];
   tvdbEpisodeImdbIds?: Record<string, string[]>;
@@ -130,13 +132,41 @@ export function savePlexInputs(inputs: PlexGeneratedInputs) {
   for (const [key,input] of Object.entries(inputs.comparisons)) savePlexComparison(key, input);
   if (inputs.inventory) savePlexInventory(inputs.inventory);
 }
-export function clearPlexInputs(ratingKey?: string) {
-  if (!ratingKey) { deletePlexGeneratedInputs(); return; }
+/**
+ * Shared crosswalk evidence: the latest outcome of one TVDB episode's TMDB external-ID
+ * crosswalk, shared by every show comparison that needs that lookup. A usable response (a
+ * match or a valid empty answer) has `receivedAt`, the time it was actually received. A
+ * rejected one has `rejectedAt` instead, and keeps an unreadable payload only so offline
+ * rechecks can explain the failure. It records a provider relationship, never ownership.
+ */
+export type SharedTmdbCrosswalk = {value?: unknown; receivedAt?: string; rejectedAt?: string;
+  /** When clearing one show's cache made this usable response not current for live scans; offline rechecks still replay it. */
+  invalidatedAt?: string};
+const sharedTmdbCrosswalkKey = (tvdbEpisodeId: number) => `tmdb-crosswalk:${tvdbEpisodeId}`;
+export function readSharedTmdbCrosswalk(tvdbEpisodeId: number) {
+  return readPlexGeneratedInputs<SharedTmdbCrosswalk>(sharedTmdbCrosswalkKey(tvdbEpisodeId));
+}
+export function saveSharedTmdbCrosswalk(tvdbEpisodeId: number, evidence: SharedTmdbCrosswalk) {
+  writePlexGeneratedInputs(sharedTmdbCrosswalkKey(tvdbEpisodeId), evidence);
+}
+/**
+ * Marks a usable shared response not current for live scans, so the next lookup is requested
+ * again; it keeps its receipt time so other shows' offline rechecks cannot revive an older copy.
+ * A rejection is kept unchanged for the same reason.
+ */
+export function invalidateSharedTmdbCrosswalk(tvdbEpisodeId: number) {
+  const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
+  if (shared?.receivedAt && !shared.invalidatedAt) saveSharedTmdbCrosswalk(tvdbEpisodeId, {...shared, invalidatedAt: new Date().toISOString()});
+}
+/** Clears one show's saved comparison, or all generated inputs; returns the cleared show's relationship keys. */
+export function clearPlexInputs(ratingKey?: string): string[] {
+  if (!ratingKey) { deletePlexGeneratedInputs(); return []; }
   const previous = readPlexGeneratedInputs<SavedPlexComparison>(`comparison:${ratingKey}`);
-  if (previous) {
-    previous.refresh = {tmdb:true, tvdb:true};
-    previous.complete = false;
-    previous.relationships = {};
-    savePlexComparison(ratingKey, previous);
-  }
+  if (!previous) return [];
+  const relationships = Object.keys(previous.relationships);
+  previous.refresh = {tmdb:true, tvdb:true};
+  previous.complete = false;
+  previous.relationships = {};
+  savePlexComparison(ratingKey, previous);
+  return relationships;
 }

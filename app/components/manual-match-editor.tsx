@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { ManualMatchForm } from "@/app/components/manual-match-form";
 import { matchesHealthFilter, type HealthFilter } from "@/app/components/manual-match-card";
 import { ManualMatchList } from "@/app/components/manual-match-list";
+import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
   initialUrls: string[];
@@ -32,6 +33,11 @@ function identifiesMember(input: string, member: CoverageMember) {
   return false;
 }
 const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
+// Names a saved Manual Match by its show and episode, preferring the TMDB side.
+function editorTitle(editing: CoverageMapping | null) {
+  const member = editing?.members.find(item => item.provider === "TMDB") || editing?.members[0];
+  return member ? `Edit Manual Match · ${member.show} · ${member.title}` : "Add Manual Match";
+}
 // Holds a Manual Match draft and the saved Manual Matches, and composes the editor form and the list.
 export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, episodeScope = false, scanActive = false }: Props) {
   const [formOpen, setFormOpen] = useState(!report);
@@ -79,8 +85,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setSelected(current => current.filter(id => next.some(mapping => mapping.id === id && matchesHealthFilter(mapping, healthFilter))));
     setConfirmation(null);
   }
+  // Loads a saved Manual Match into the draft. Opening the form is separate, so a
+  // save or refresh that finishes after the popup closed does not reopen it.
   function openMapping(mapping: CoverageMapping) {
-    setFormOpen(true);
     setEditing(mapping);
     setUrls(mapping.members.map(member => member.url));
     setPreview(null);
@@ -94,6 +101,17 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setUrls(["", ""]);
     setPreview(null);
     setDraftFlags([]);
+    setError("");
+    setMessage("");
+  }
+  function editMapping(mapping: CoverageMapping) {
+    openMapping(mapping);
+    setFormOpen(true);
+  }
+  // The single close hook for the editor popup: Close, Esc, a click outside and Cancel all
+  // ask to close here, so a later prompt for unsaved changes can intercept them.
+  function requestFormClose() {
+    setFormOpen(false);
     setError("");
     setMessage("");
   }
@@ -141,7 +159,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setConfirmation(null);
         setPage(1);
         const existing = body.mappings.find((mapping: CoverageMapping) => initialMappingId ? mapping.id === initialMappingId : mapping.members.some(member => initialUrls.some(input => identifiesMember(input, member))));
-        if (existing) openMapping(existing);
+        if (existing) { openMapping(existing); setFormOpen(true); }
         setPending(Boolean(body.pending));
       }
     }).catch(error => {
@@ -266,12 +284,18 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       setError(error instanceof Error ? error.message : "Could not delete selected mappings.");
     } finally { setBusy(false); }
   }
+  // On the Manual Matches page the whole editor opens in a popup; Matching Episodes is already one.
+  const form = <ManualMatchForm editing={editing} creatable={!episodeScope && !report} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
+   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked, onToggle: toggleFlag }} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
+   inPopup={report} onCancel={report ? requestFormClose : cancelDraft} onSave={saveDraft}/>;
+  const feedback = <>{error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}</>;
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
  {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
- {report && <button className="primary" disabled={locked} onClick={createMapping}>Add Manual Match</button>}
- {formOpen && <ManualMatchForm editing={editing} creatable={!episodeScope} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
-   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked, onToggle: toggleFlag }} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty} onCancel={cancelDraft} onSave={saveDraft}/>}
- {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
+ {report && <button className="primary" disabled={locked} onClick={createMapping}>+ Add Manual Match</button>}
+ {formOpen && !report && form}
+ {formOpen && report
+   ? <Popup title={editorTitle(editing)} className="manual-match-form-popup" onRequestClose={requestFormClose}>{form}{feedback}</Popup>
+   : feedback}
  <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    healthFilter={healthFilter} onHealthFilterChange={filter => {
     setHealthFilter(filter);
@@ -281,6 +305,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
-   onDeleteSelected={ids => void removeSelected(ids)} onEdit={openMapping} onDelete={id => void remove(id)}/>
+   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)}/>
  </section>;
 }

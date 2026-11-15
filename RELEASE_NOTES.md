@@ -1,25 +1,27 @@
-# Shelfcheck 2.5.4
+# Shelfcheck 2.5.5
 
-Shelfcheck 2.5.4 refreshes needed TMDB episode crosswalks on a later UTC day,
-so newly added or corrected TVDB external IDs can update Plex episode coverage
-without a manual cache clear.
+Shelfcheck 2.5.5 improves the Manual Matches report and editing workflow.
 
-## Episode crosswalk freshness and recovery
+## Manual Match improvements
 
-- Needed TMDB external-ID episode crosswalks refresh independently of show
-  change feeds. Usable matches and valid empty answers are reused on the same
-  UTC day, with their original receipt times preserved across restarts.
-- Show comparisons needing the same TVDB episode lookup share provider evidence
-  and in-flight requests. Each comparison checks current library inventory.
-- Failed or unreadable refreshes stop the older answer from granting coverage
-  and remain retryable. Independent matching methods remain available.
-- Offline Manual Match rechecks preserve rejected evidence and adopt later
-  recovered answers durably across repeated rechecks and restarts.
-- Explicit rescans, cache clearing and provider-change invalidation continue to
-  override same-day reuse. Provider catalogue freshness rules are unchanged.
+- Compact cards group episodes by show and keep the report easier to scan.
+- Add and edit Manual Matches in a focused popup with keyboard navigation.
+- Saving closes the editor and shows a brief Saved confirmation. Closing with
+  unsaved changes asks whether to discard them, and saving pauses during a
+  Plex scan.
+- Single and bulk deletes require confirmation. Bulk actions appear only when
+  matches are selected.
+- Manual Match wording is consistent throughout the report and editor.
+
+## Support and packaging
+
+The README links release history, support and the security policy, with guidance
+on supplying version information and credential-safe diagnostic logs. Local agent
+instructions, private runtime context and generated artifacts are excluded from
+published sources and Docker build contexts.
 
 ## Upgrading
 
-Use `andcbii/shelfcheck:2.5.4` or `andcbii/shelfcheck:latest` and retain your
+Use `andcbii/shelfcheck:2.5.5` or `andcbii/shelfcheck:latest` and retain your
 existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
 No configuration or database reset is required.

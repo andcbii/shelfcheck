@@ -144,3 +144,9 @@ test("a provider column with episodes from two shows groups each episode under i
   assert.equal(ui.panel("TMDB").querySelector("header")?.textContent, "TMDBCrossoverShow 11 episode", "A single-show column keeps the show in its header");
   assert.equal(ui.panel("TMDB").querySelectorAll(".manual-match-show-group").length, 0);
 });
+
+test("the Delete confirmation popup's width rules don't reach the card's Delete button", () => {
+  // The card's Delete button carries .manual-match-delete; the confirmation popup has its own class.
+  assert.equal(cssRules.find(rule => rule.selector === ".manual-match-delete" && !rule.media), undefined, "No rule sizes every .manual-match-delete");
+  assert.equal(cssValue(".manual-match-delete-confirm", "width"), "min(480px, 100%)");
+});

@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { MATCH_HEALTH_LABELS, ManualMatchCard, matchesHealthFilter, type HealthFilter, type MatchHealth } from "@/app/components/manual-match-card";
 import { Popup } from "@/app/components/popup";
 import { ReportPagination } from "@/app/reports/report-pagination";
@@ -59,9 +59,12 @@ export function ManualMatchList({ matches, report, filterSelectAndPage, locked, 
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const deleting = matches.find(match => match.id === deletingId) || null;
   if (deletingId && !deleting) setDeletingId(null);
-  // A bulk confirmation shows only while every Manual Match it names is still listed, never a shrunken one.
+  // A bulk confirmation shows only while every Manual Match it names is still listed; otherwise it is
+  // cleared rather than shrunk, so it cannot reopen if the Manual Match comes back.
   const confirming = confirmation?.map(id => matches.find(match => match.id === id)).filter(match => match !== undefined);
   const bulkConfirmation = confirming?.length && confirming.length === confirmation?.length ? confirming : null;
+  const staleConfirmation = Boolean(confirmation && !bulkConfirmation);
+  useEffect(() => { if (staleConfirmation) onConfirmationChange(null); }, [staleConfirmation, onConfirmationChange]);
   return <>
  {filterSelectAndPage && <><label>Mapping health<select aria-label="Mapping health" value={healthFilter} disabled={locked} onChange={event => onHealthFilterChange(event.target.value as HealthFilter)}><option value="all">All mappings</option>{(Object.keys(MATCH_HEALTH_LABELS) as MatchHealth[]).map(health => <option key={health} value={health}>{MATCH_HEALTH_LABELS[health]}</option>)}</select></label>
  <p role="status">{pending ? <>Some coverage checks need attention. <a href="/reports/coverage-issues">See Scan Issues</a> for details.</> : ""}</p><h3>{report ? "Manual Matches" : "Saved mappings"} ({matches.length})</h3>{!matches.length && <div className="empty auto-match-empty"><h3>{report ? "No Manual Matches" : "No manual coverage mappings saved."}</h3><p>Create a Manual Match to link complete episode sets, even before either set is owned.</p></div>}

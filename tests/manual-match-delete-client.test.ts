@@ -33,98 +33,106 @@ async function mountPage(t: test.TestContext) {
   };
   const click = async (scope: ParentNode, label: string | RegExp) => { const button = buttonIn(scope, label); await act(async () => button.click()); };
   const dialog = () => container.querySelector<HTMLElement>('[role="dialog"]');
-  const card = (title: string) => [...container.querySelectorAll("article")].find(article => article.textContent?.includes(title))!;
-  const tick = async (title: string) => { const box = card(title).querySelector<HTMLInputElement>('input[type="checkbox"]')!; await act(async () => box.click()); };
+  const card = (title: string) => { const found = [...container.querySelectorAll("article")].find(article => article.textContent?.includes(title)); assert.ok(found, `card ${title}`); return found; };
+  const tick = async (title: string) => { const box = card(title).querySelector<HTMLInputElement>('input[type="checkbox"]'); assert.ok(box, `checkbox on ${title}`); await act(async () => box.click()); };
   const bulkBar = () => container.querySelector('[aria-label="Selected Manual Matches"]');
-  return { container, deletes, buttonIn, click, dialog, card, tick, bulkBar };
+  // The open confirmation or bulk bar, failing with a message rather than a TypeError when it is missing.
+  const open = (element: Element | null, name: string) => { assert.ok(element, `${name} is open`); return element; };
+  return { container, deletes, buttonIn, click, dialog, card, tick, bulkBar, open };
 }
 
 test("deleting one Manual Match asks first, and Cancel deletes nothing", async t => {
-  const { deletes, click, dialog, card } = await mountPage(t);
+  const { deletes, click, dialog, card, open } = await mountPage(t);
   await click(card("Murder Pals"), /^Delete/);
   assert.equal(dialog()?.getAttribute("aria-label"), "Delete Manual Match");
   assert.match(dialog()?.textContent || "", /Delete this match\?/);
   assert.match(dialog()?.textContent || "", /Animaniacs · Murder Pals \(1 TMDB episode, 2 TVDB episodes\)/);
   assert.match(dialog()?.textContent || "", /This can’t be undone/);
-  await click(dialog()!, "Cancel");
-  assert.equal(dialog(), null);
+  await click(open(dialog(), "confirmation"), "Cancel");
+  assert.equal(dialog()?.getAttribute("aria-label") ?? null, null);
   assert.deepEqual(deletes, []);
   assert.ok(card("Murder Pals"));
 });
 
 for (const [way, dismiss] of [
-  ["Close", (dialog: HTMLElement) => act(async () => dialog.querySelector<HTMLButtonElement>('button[aria-label="Close Delete Manual Match"]')!.click())],
+  ["Close", (dialog: HTMLElement) => act(async () => dialog.querySelector<HTMLButtonElement>('button[aria-label="Close Delete Manual Match"]')?.click())],
   ["Esc", () => act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); })],
   ["a click outside", (dialog: HTMLElement) => act(async () => (dialog.parentElement as HTMLElement).click())],
 ] as const) {
   test(`dismissing the single delete confirmation with ${way} deletes nothing`, async t => {
-    const { deletes, click, dialog, card } = await mountPage(t);
+    const { deletes, click, dialog, card, open } = await mountPage(t);
     await click(card("Murder Pals"), /^Delete/);
     assert.equal(dialog()?.getAttribute("aria-label"), "Delete Manual Match");
-    await dismiss(dialog()!);
-    assert.equal(dialog(), null);
+    await dismiss(open(dialog(), "confirmation") as HTMLElement);
+    assert.equal(dialog()?.getAttribute("aria-label") ?? null, null);
     assert.deepEqual(deletes, []);
     assert.ok(card("Murder Pals"));
   });
 }
 
 test("confirming the single delete removes only that Manual Match", async t => {
-  const { container, deletes, click, dialog, card } = await mountPage(t);
+  const { container, deletes, click, dialog, card, open } = await mountPage(t);
   await click(card("Hooray"), /^Delete/);
   assert.match(dialog()?.textContent || "", /Animaniacs · Hooray for North Hollywood \(1 TMDB episode, 1 TVDB episode\)/);
-  await click(dialog()!, "Delete match");
-  assert.equal(dialog(), null);
+  await click(open(dialog(), "confirmation"), "Delete match");
+  assert.equal(dialog()?.getAttribute("aria-label") ?? null, null);
   assert.deepEqual(deletes, ["hooray"]);
   assert.equal(container.querySelectorAll("article").length, 1);
 });
 
 test("the bulk bar appears only while a card is ticked", async t => {
-  const { buttonIn, bulkBar, tick } = await mountPage(t);
-  assert.equal(bulkBar(), null);
+  const { buttonIn, bulkBar, tick, open } = await mountPage(t);
+  assert.equal(bulkBar()?.textContent ?? null, null);
   await tick("Murder Pals");
   assert.match(bulkBar()?.textContent || "", /1 selected/);
-  assert.ok(buttonIn(bulkBar()!, "Delete 1 selected match"));
+  assert.ok(buttonIn(open(bulkBar(), "bulk bar"), "Delete 1 selected match"));
   await tick("Hooray");
-  assert.ok(buttonIn(bulkBar()!, "Delete 2 selected matches"));
+  assert.ok(buttonIn(open(bulkBar(), "bulk bar"), "Delete 2 selected matches"));
   await tick("Murder Pals");
   await tick("Hooray");
-  assert.equal(bulkBar(), null);
+  assert.equal(bulkBar()?.textContent ?? null, null);
 });
 
 test("bulk delete confirms in the same popup style; Cancel deletes nothing and Delete removes the ticked matches", async t => {
-  const { container, deletes, click, dialog, bulkBar, tick } = await mountPage(t);
+  const { container, deletes, click, dialog, bulkBar, tick, open } = await mountPage(t);
   await tick("Murder Pals");
   await tick("Hooray");
-  await click(bulkBar()!, "Delete 2 selected matches");
+  await click(open(bulkBar(), "bulk bar"), "Delete 2 selected matches");
   assert.equal(dialog()?.getAttribute("aria-label"), "Delete Manual Matches");
   assert.match(dialog()?.textContent || "", /Delete 2 matches\?/);
   assert.match(dialog()?.textContent || "", /Animaniacs · Murder Pals/);
   assert.match(dialog()?.textContent || "", /Animaniacs · Hooray for North Hollywood/);
-  await click(dialog()!, "Cancel");
-  assert.equal(dialog(), null);
+  await click(open(dialog(), "confirmation"), "Cancel");
+  assert.equal(dialog()?.getAttribute("aria-label") ?? null, null);
   assert.deepEqual(deletes, []);
   assert.match(bulkBar()?.textContent || "", /2 selected/, "Cancel keeps the selection");
-  await click(bulkBar()!, "Delete 2 selected matches");
-  await click(dialog()!, "Delete 2 matches");
-  assert.equal(dialog(), null);
+  await click(open(bulkBar(), "bulk bar"), "Delete 2 selected matches");
+  await click(open(dialog(), "confirmation"), "Delete 2 matches");
+  assert.equal(dialog()?.getAttribute("aria-label") ?? null, null);
   assert.deepEqual(deletes, ["murder-pals,hooray"]);
   assert.equal(container.querySelectorAll("article").length, 0);
-  assert.equal(bulkBar(), null);
+  assert.equal(bulkBar()?.textContent ?? null, null);
 });
 
 // The Manual Match list alone, so a test can refresh its matches while a confirmation is open.
 function mountList(t: test.TestContext) {
   const { container, root } = mountDom(t);
+  const confirmations: (string[] | null)[] = [];
   const render = (matches: CoverageMapping[], confirmation: string[] | null = null) => act(async () => root.render(createElement(ManualMatchList, {
     matches, report: true, filterSelectAndPage: true, locked: false, pending: false, healthFilter: "all", onHealthFilterChange() {},
     paging: { page: 1, pageSize: 10, onPageChange() {}, onPageSizeChange() {} },
-    selection: { selected: confirmation || [], onSelectionChange() {}, confirmation, onConfirmationChange() {} },
+    selection: { selected: confirmation || [], onSelectionChange() {}, confirmation, onConfirmationChange: ids => { confirmations.push(ids); } },
     onDeleteSelected() {}, onEdit() {}, onDelete() {},
   })));
   // The open confirmation's text, or null; a failing assertion then prints text, not a whole DOM node.
   const dialogText = () => container.querySelector('[role="dialog"]')?.textContent ?? null;
-  const deleteButton = (title: string) => [...container.querySelectorAll("article")].find(article => article.textContent?.includes(title))!.querySelector<HTMLButtonElement>("button:last-child")!;
-  return { render, dialogText, deleteButton };
+  const deleteButton = (title: string) => {
+    const card = [...container.querySelectorAll("article")].find(article => article.textContent?.includes(title));
+    const button = card && [...card.querySelectorAll("button")].find(b => /^Delete/.test(b.textContent || ""));
+    assert.ok(button, `Delete on ${title}`);
+    return button;
+  };
+  return { render, dialogText, deleteButton, confirmations };
 }
 
 test("a refresh that removes the Manual Match awaiting a single delete closes its confirmation for good", async t => {
@@ -138,10 +146,11 @@ test("a refresh that removes the Manual Match awaiting a single delete closes it
   assert.equal(dialogText(), null, "the confirmation does not come back with the Manual Match");
 });
 
-test("a refresh that removes any Manual Match awaiting a bulk delete hides the confirmation rather than shrinking it", async t => {
-  const { render, dialogText } = mountList(t);
+test("a refresh that removes any Manual Match awaiting a bulk delete closes the confirmation rather than shrinking it", async t => {
+  const { render, dialogText, confirmations } = mountList(t);
   await render([murderPals, hooray], ["murder-pals", "hooray"]);
   assert.match(dialogText() || "", /Delete 2 matches\?/);
   await render([murderPals], ["murder-pals", "hooray"]);
   assert.equal(dialogText(), null, "no shrunken confirmation");
+  assert.deepEqual(confirmations, [null], "the confirmation is cleared, so it cannot reopen if the Manual Match comes back");
 });

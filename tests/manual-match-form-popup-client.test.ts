@@ -142,3 +142,49 @@ test("Close, Cancel and Esc close the popup without saving", async t => {
   assert.deepEqual(page.posts, []);
   assert.equal(document.body.style.overflow, "", "The page scrolls again once the popup closes");
 });
+
+// Changes the saved Manual Match's first episode in the open editor popup.
+async function editFirstEpisode(page: Awaited<ReturnType<typeof mountPage>>) {
+  await page.click(/^Edit/, page.container.querySelector("article")!);
+  await page.type(page.episodeInputs()[0], "tmdb:1 show:2 season:3 episode:4");
+}
+const prompt = () => document.querySelector<HTMLElement>('[role="dialog"][aria-label="Discard your changes?"]');
+
+test("closing with unsaved changes asks Discard your changes?, and Keep editing returns to the draft", async t => {
+  const page = await mountPage(t);
+  await editFirstEpisode(page);
+  await page.click("Close Edit Manual Match · Animaniacs · Murder Pals");
+  const asked = prompt();
+  assert.ok(asked, "Close asks before throwing the changes away");
+  assert.equal(asked.querySelector("h2")?.textContent, "Discard your changes?");
+  assert.deepEqual(page.buttons(asked).filter(button => !button.getAttribute("aria-label")).map(button => button.textContent), ["Keep editing", "Discard changes"]);
+  await page.click("Keep editing", asked);
+  assert.ok(!prompt(), "Keep editing dismisses the question");
+  assert.equal(page.episodeInputs()[0].value, "tmdb:1 show:2 season:3 episode:4", "The draft is untouched");
+  assert.ok(page.dialog()?.contains(document.activeElement), "Focus is back in the editor");
+});
+
+test("Discard changes closes the editor popup without saving", async t => {
+  const page = await mountPage(t);
+  await editFirstEpisode(page);
+  await page.click("Cancel", page.dialog()!);
+  await page.click("Discard changes", prompt()!);
+  assert.ok(!prompt());
+  assert.ok(!page.dialog(), "The editor popup closes");
+  assert.deepEqual(page.posts, []);
+  await page.click(/^Edit/, page.container.querySelector("article")!);
+  assert.equal(page.episodeInputs()[0].value, tmdb.url, "Reopening starts from the saved Manual Match");
+});
+
+test("Esc and a click outside ask too, and Esc on the question keeps editing", async t => {
+  const page = await mountPage(t);
+  await editFirstEpisode(page);
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  assert.ok(prompt(), "Esc asks");
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  assert.ok(!prompt(), "Esc on the question keeps editing");
+  assert.ok(page.dialog(), "The editor stays open");
+  await act(async () => page.dialog()!.parentElement!.click());
+  assert.ok(prompt(), "A click outside asks");
+  assert.ok(page.dialog(), "The editor stays open behind the question");
+});

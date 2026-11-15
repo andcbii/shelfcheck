@@ -36,9 +36,13 @@ function identifiesMember(input: string, member: CoverageMember) {
 const SAVED_NOTE_MS = 4000;
 const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
 // Names a saved Manual Match by its show and episode, preferring the TMDB side.
-function editorTitle(editing: CoverageMapping | null) {
+function matchName(editing: CoverageMapping | null) {
   const member = editing?.members.find(item => item.provider === "TMDB") || editing?.members[0];
-  return member ? `Edit Manual Match · ${member.show} · ${member.title}` : "Add Manual Match";
+  return member ? `${member.show} · ${member.title}` : null;
+}
+function editorTitle(editing: CoverageMapping | null) {
+  const name = matchName(editing);
+  return name ? `Edit Manual Match · ${name}` : "Add Manual Match";
 }
 // Holds a Manual Match draft and the saved Manual Matches, and composes the editor form and the list.
 export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, episodeScope = false, scanActive = false }: Props) {
@@ -65,6 +69,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [draftFlags, setDraftFlags] = useState<string[]>([]);
   // The Manual Match the popup just saved, whose card briefly says so.
   const [savedId, setSavedId] = useState<string | null>(null);
+  // Asking "Discard your changes?" before the editor popup closes on unsaved changes.
+  const [discardAsked, setDiscardAsked] = useState(false);
   const locked = busy || scanActive || scanning;
   const defaultUrls = initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""];
   const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
@@ -113,8 +119,13 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setFormOpen(true);
   }
   // The single close hook for the editor popup: Close, Esc, a click outside and Cancel all
-  // ask to close here, so a later prompt for unsaved changes can intercept them.
+  // ask to close here, and unsaved changes are only thrown away once the user agrees.
   function requestFormClose() {
+    if (dirty) setDiscardAsked(true);
+    else closeForm();
+  }
+  function closeForm() {
+    setDiscardAsked(false);
     setFormOpen(false);
     setError("");
     setMessage("");
@@ -244,6 +255,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         onChanged(result.revision);
         if (report) {
           // The popup closes, and the saved card's own note confirms the save.
+          setDiscardAsked(false);
           setFormOpen(false);
           setSavedId(result.mapping?.id ?? null);
           setMessage("");
@@ -310,6 +322,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
  {formOpen && report
    ? <Popup title={editorTitle(editing)} className="manual-match-form-popup" onRequestClose={requestFormClose}>{form}{feedback}</Popup>
    : feedback}
+ {formOpen && report && discardAsked && <Popup title="Discard your changes?" className="manual-match-discard-popup" onRequestClose={() => setDiscardAsked(false)}>
+   <p>{matchName(editing) ? <>You changed <strong>{matchName(editing)}</strong> but haven&apos;t saved it.</> : "You haven't saved this new Manual Match."} Closing now throws those changes away.</p>
+   <footer className="modal-actions"><button onClick={() => setDiscardAsked(false)}>Keep editing</button><button className="manual-match-discard" onClick={closeForm}>Discard changes</button></footer>
+ </Popup>}
  <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    healthFilter={healthFilter} onHealthFilterChange={filter => {
     setHealthFilter(filter);

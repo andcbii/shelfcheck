@@ -221,6 +221,13 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .manual-match-editor .manual-match-form-footer .manual-match-draft-state { flex: 1; margin: 0; }
 .manual-match-editor .manual-match-form-footer button { margin: 0; }
 .manual-match-form-popup .manual-match-form-footer { position: sticky; bottom: 0; margin: 16px -28px 0; padding: 14px 28px; background: var(--paper); }
+/* "Discard your changes?" over the editor popup. */
+.manual-match-discard-popup { width: min(480px, 100%); padding: 24px 28px 14px; }
+.manual-match-discard-popup > header { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+.manual-match-discard-popup > header h2 { margin: 0; font-size: 24px; letter-spacing: -.02em; }
+.manual-match-discard-popup .modal-actions { margin: 16px -28px 0; padding: 14px 28px 0; border-top: 1px solid var(--line); }
+.manual-match-editor .manual-match-discard-popup .modal-actions button { margin: 0; min-height: 44px; }
+.manual-match-editor .manual-match-discard-popup button.manual-match-discard { background: #9b2318; border-color: #9b2318; color: #fff; font-weight: 600; }
 @media (max-width: 520px) {
   .manual-match-form-popup { padding: 0 16px; }
   .manual-match-form-popup > header, .manual-match-form-popup .manual-match-form-footer { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }

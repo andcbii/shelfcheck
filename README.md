@@ -229,6 +229,7 @@ pnpm audit --prod --audit-level high
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
+[RELEASE_NOTES.md](RELEASE_NOTES.md) summarizes the latest release.
 
 ## License
 

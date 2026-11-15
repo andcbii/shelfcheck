@@ -32,11 +32,17 @@ function identifiesMember(input: string, member: CoverageMember) {
   } catch { /* Unresolved or incomplete draft input has no saved membership. */ }
   return false;
 }
+// How long a saved card says "Saved".
+const SAVED_NOTE_MS = 4000;
 const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
 // Names a saved Manual Match by its show and episode, preferring the TMDB side.
-function editorTitle(editing: CoverageMapping | null) {
+function matchName(editing: CoverageMapping | null) {
   const member = editing?.members.find(item => item.provider === "TMDB") || editing?.members[0];
-  return member ? `Edit Manual Match · ${member.show} · ${member.title}` : "Add Manual Match";
+  return member ? `${member.show} · ${member.title}` : null;
+}
+function editorTitle(editing: CoverageMapping | null) {
+  const name = matchName(editing);
+  return name ? `Edit Manual Match · ${name}` : "Add Manual Match";
 }
 // Holds a Manual Match draft and the saved Manual Matches, and composes the editor form and the list.
 export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, report = false, episodeScope = false, scanActive = false }: Props) {
@@ -61,7 +67,15 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [confirmation, setConfirmation] = useState<string[] | null>(null);
   // Report Missing selections are a draft until the Manual Match is saved.
   const [draftFlags, setDraftFlags] = useState<string[]>([]);
-  const locked = busy || scanActive || scanning;
+  // The Manual Match the popup just saved, whose card briefly says so.
+  // Each save is a new note, so saving the same Manual Match again restarts its time.
+  const [savedNote, setSavedNote] = useState<{ id: string } | null>(null);
+  // Asking "Discard your changes?" before the editor popup closes on unsaved changes.
+  const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
+  const scanRunning = scanActive || scanning;
+  const locked = busy || scanRunning;
+  // A scan only pauses saving in the editor popup, so its draft stays editable; elsewhere it locks the form.
+  const draftLocked = report ? busy : locked;
   const defaultUrls = initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""];
   const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
   // Saved members are editable in place; changed membership needs a reviewed preview first.
@@ -109,8 +123,16 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setFormOpen(true);
   }
   // The single close hook for the editor popup: Close, Esc, a click outside and Cancel all
-  // ask to close here, so a later prompt for unsaved changes can intercept them.
+  // ask to close here, and unsaved changes are only thrown away once the user agrees. While a
+  // save is in flight they wait for it, so a save cannot land after its changes were discarded.
   function requestFormClose() {
+    if (busy) return;
+    if (dirty) setDiscardPromptOpen(true);
+    else closeForm();
+  }
+  // Closes the editor popup and any question over it; opening it again loads a fresh draft.
+  function closeForm() {
+    setDiscardPromptOpen(false);
     setFormOpen(false);
     setError("");
     setMessage("");
@@ -128,7 +150,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setDraftFlags(current => (checked ? [...current.filter(item => item !== key), key] : current.filter(item => item !== key)).sort());
   }
   function saveDraft() {
-    if (!draftMembers || selectionProblem) return;
+    if (!draftMembers || selectionProblem || scanRunning) return;
     const reportMissing = draftFlagged.map(({ provider, id }) => ({ provider, id }));
     void action(preview
       ? { action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision, reportMissing }
@@ -171,6 +193,11 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     };
   }, [initialUrls, initialMappingId]);
   useEffect(() => {
+    if (!savedNote) return;
+    const timer = setTimeout(() => setSavedNote(null), SAVED_NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [savedNote]);
+  useEffect(() => {
     let active = true;
     async function poll() {
       try {
@@ -183,8 +210,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     const timer = setInterval(() => void poll(), 1000);
     return () => { active = false; clearInterval(timer); };
   }, []);
-  async function action(body: unknown) {
-    if (locked) return;
+  async function action(body: { action: "resolve" | "save" } & Record<string, unknown>) {
+    // Resolving only reviews episodes, which the server allows during a scan.
+    if (busy || (scanRunning && !(report && body.action === "resolve"))) return;
     setError("");
     setBusy(true);
     try {
@@ -233,7 +261,11 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         if (result.mapping) openMapping(result.mapping);
         else if (!episodeScope) setEditing(null);
         onChanged(result.revision);
-        setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+        if (report) {
+          // The popup closes, and the saved card's own note confirms the save.
+          closeForm();
+          setSavedNote(result.mapping ? { id: result.mapping.id } : null);
+        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
         await load();
       }
     } catch (error) {
@@ -286,16 +318,24 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   // On the Manual Matches page the whole editor opens in a popup; Matching Episodes is already one.
   const form = <ManualMatchForm editing={editing} creatable={!episodeScope && !report} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
-   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked, onToggle: toggleFlag }} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
+   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked: draftLocked, onToggle: toggleFlag }} savePaused={scanRunning} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
    inPopup={report} onCancel={report ? requestFormClose : cancelDraft} onSave={saveDraft}/>;
+  const editedName = matchName(editing);
   const feedback = <>{error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}</>;
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
- {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
+ {scanRunning ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
  {report && <button className="primary" disabled={locked} onClick={createMapping}>+ Add Manual Match</button>}
  {formOpen && !report && form}
  {formOpen && report
-   ? <Popup title={editorTitle(editing)} className="manual-match-form-popup" onRequestClose={requestFormClose}>{form}{feedback}</Popup>
+   ? <Popup title={editorTitle(editing)} className="manual-match-form-popup" onRequestClose={requestFormClose}>
+     {scanRunning && <p role="status" className="manual-match-scan-paused"><strong>A Plex scan is running.</strong> Saving is paused until it finishes. Your changes are kept.</p>}
+     {form}{feedback}
+   </Popup>
    : feedback}
+ {formOpen && report && discardPromptOpen && <Popup title="Discard your changes?" className="manual-match-discard-confirm" onRequestClose={() => setDiscardPromptOpen(false)}>
+   <p className="modal-copy">{editedName ? <>You changed <strong>{editedName}</strong> but haven&apos;t saved it.</> : "You haven't saved this new Manual Match."} Closing now throws those changes away.</p>
+   <div className="modal-actions"><button className="secondary" onClick={() => setDiscardPromptOpen(false)}>Keep editing</button><button className="danger" onClick={closeForm}>Discard changes</button></div>
+ </Popup>}
  <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    healthFilter={healthFilter} onHealthFilterChange={filter => {
     setHealthFilter(filter);
@@ -305,6 +345,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
-   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)}/>
+   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedNote?.id}/>
  </section>;
 }

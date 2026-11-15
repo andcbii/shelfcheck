@@ -32,6 +32,8 @@ type Props = {
   onDeleteSelected: (ids: string[]) => void;
   onEdit: (match: CoverageMapping) => void;
   onDelete: (id: string) => void;
+  // The Manual Match just saved, whose card says so.
+  savedId?: string | null;
 };
 
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
@@ -50,7 +52,7 @@ function DeleteConfirmation({ matches, locked, onCancel, onConfirm }: { matches:
   </Popup>;
 }
 
-export function ManualMatchList({ matches, report, filterSelectAndPage, locked, pending, healthFilter, onHealthFilterChange, paging: { page, pageSize, onPageChange, onPageSizeChange }, selection: { selected, onSelectionChange, confirmation, onConfirmationChange }, onDeleteSelected, onEdit, onDelete }: Props) {
+export function ManualMatchList({ matches, report, filterSelectAndPage, locked, pending, healthFilter, onHealthFilterChange, paging: { page, pageSize, onPageChange, onPageSizeChange }, selection: { selected, onSelectionChange, confirmation, onConfirmationChange }, onDeleteSelected, onEdit, onDelete, savedId }: Props) {
   const visibleMatches = matches.filter(match => matchesHealthFilter(match, healthFilter));
   const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleMatches.length / pageSize)));
   const selectedIds = selected.filter(id => visibleMatches.some(match => match.id === id));
@@ -72,7 +74,7 @@ export function ManualMatchList({ matches, report, filterSelectAndPage, locked, 
  {bulkConfirmation && <DeleteConfirmation matches={bulkConfirmation} locked={locked} onCancel={() => onConfirmationChange(null)} onConfirm={() => { onConfirmationChange(null); onDeleteSelected(bulkConfirmation.map(match => match.id)); }}/>}
  <ReportPagination total={visibleMatches.length} page={currentPage} pageSize={pageSize} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange}/>
  </>}
- {pageMatches.map(match => <ManualMatchCard key={match.id} match={match} locked={locked} selection={filterSelectAndPage ? { selected: selectedIds.includes(match.id), onChange: checked => onSelectionChange(checked ? [...selectedIds, match.id] : selectedIds.filter(id => id !== match.id)) } : undefined} onEdit={() => onEdit(match)} onDelete={() => setDeletingId(match.id)}/>)}
+ {pageMatches.map(match => <ManualMatchCard key={match.id} match={match} locked={locked} saved={match.id === savedId} selection={filterSelectAndPage ? { selected: selectedIds.includes(match.id), onChange: checked => onSelectionChange(checked ? [...selectedIds, match.id] : selectedIds.filter(id => id !== match.id)) } : undefined} onEdit={() => onEdit(match)} onDelete={() => setDeletingId(match.id)}/>)}
  {deleting && <DeleteConfirmation matches={[deleting]} locked={locked} onCancel={() => setDeletingId(null)} onConfirm={() => { setDeletingId(null); onDelete(deleting.id); }}/>}
  </>;
 }

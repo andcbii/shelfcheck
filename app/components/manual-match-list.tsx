@@ -42,7 +42,7 @@ const episodeCounts = (match: CoverageMapping) => (["TMDB", "TVDB"] as const).ma
 // Asks before deleting one or several Manual Matches; Cancel, Close, Esc and a click outside delete nothing.
 function DeleteConfirmation({ matches, locked, onCancel, onConfirm }: { matches: CoverageMapping[]; locked: boolean; onCancel: () => void; onConfirm: () => void }) {
   const single = matches.length === 1 && matches[0];
-  return <Popup title={single ? "Delete Manual Match" : "Delete Manual Matches"} className="manual-match-delete" onRequestClose={onCancel}>
+  return <Popup title={single ? "Delete Manual Match" : "Delete Manual Matches"} className="manual-match-delete-confirm" onRequestClose={onCancel}>
     <p className="manual-match-delete-question">{single ? "Delete this match?" : `Delete ${plural(matches.length, "match", "matches")}?`}</p>
     {single ? <p>{matchName(single)} ({episodeCounts(single)}).</p> : <ul>{matches.map(match => <li key={match.id}>{matchName(match)}</li>)}</ul>}
     <p className="modal-copy">Plex comparisons will be rechecked. This can’t be undone.</p>

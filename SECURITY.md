@@ -2,4 +2,6 @@
 
 ## Reporting a vulnerability
 
-To report a security vulnerability in Shelfcheck, [open a public GitHub issue](https://github.com/andcbii/shelfcheck/issues/new) with details about the problem and how to reproduce it.
+To report a security vulnerability in Shelfcheck, use GitHub's [private vulnerability reporting](https://github.com/andcbii/shelfcheck/security/advisories/new). Include details about the problem and how to reproduce it.
+
+Please do not report security vulnerabilities through public GitHub issues, discussions or pull requests.

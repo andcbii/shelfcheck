@@ -1,31 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
 import { Popup, type PopupCloseReason } from "../app/components/popup";
+import { mountDom } from "./dom-environment";
 
 async function mount(t: test.TestContext) {
-  const browser = new Window({ url: "http://localhost/plex" });
-  const previous = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, KeyboardEvent: browser.KeyboardEvent, IS_REACT_ACT_ENVIRONMENT: true })) {
-    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
-  const container = document.createElement("div");
-  document.body.append(container);
-  const root = createRoot(container);
+  const { container, root } = mountDom(t);
   const requests: PopupCloseReason[] = [];
-  t.after(async () => {
-    await act(async () => root.unmount());
-    await browser.happyDOM.close();
-    for (const [key, value] of previous) { if (value) Object.defineProperty(globalThis, key, value); else Reflect.deleteProperty(globalThis, key); }
-  });
-  // The owner decides whether a close request closes the popup; here it never does,
-  // so every trigger can be observed reaching the one close hook.
-  const render = (open = true) => root.render(open ? createElement(Popup, { title: "Matching Episodes", className: "manual-coverage-manager", onRequestClose(reason: PopupCloseReason) { requests.push(reason); } }, createElement("p", null, "Popup content")) : null);
+  const requestsFrom: Record<string, PopupCloseReason[]> = {};
+  // The owner decides whether a close request closes a popup; here it never does,
+  // so every trigger can be observed reaching the one close hook. Later titles open on top.
+  const popup = (title: string) => createElement(Popup, { key: title, title, className: "manual-coverage-manager", onRequestClose(reason: PopupCloseReason) { requests.push(reason); (requestsFrom[title] ||= []).push(reason); },
+    children: [createElement("p", { key: "content" }, "Popup content"), createElement("button", { key: "action" }, `${title} action`)] });
+  const render = (titles: string[] = ["Matching Episodes"]) => root.render(createElement("div", null, createElement("button", null, "Opener"), ...titles.map(popup)));
   await act(async () => render());
-  return { container, browser, requests, render };
+  const escape = () => act(async () => { (document.activeElement || document).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+  const tab = (shiftKey = false) => act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true })); });
+  const button = (label: string) => [...container.querySelectorAll("button")].find(item => item.textContent === label || item.getAttribute("aria-label") === label)!;
+  // Names the focused control (comparing DOM nodes directly makes assertion diffs huge).
+  const focused = () => { const item = document.activeElement; return item?.getAttribute("aria-label") || item?.textContent; };
+  return { container, requests, requestsFrom, render, escape, tab, button, focused };
 }
 
 test("Popup asks its owner to close on Close, Esc and a click outside, through one close hook", async t => {
@@ -40,7 +34,7 @@ test("Popup asks its owner to close on Close, Esc and a click outside, through o
   await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
   assert.deepEqual(ui.requests, []);
 
-  await act(async () => ui.container.querySelector<HTMLElement>('[aria-label="Close Matching Episodes"]')!.click());
+  await act(async () => ui.button("Close Matching Episodes").click());
   await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   await act(async () => ui.container.querySelector<HTMLElement>(".modal-backdrop")!.click());
   assert.deepEqual(ui.requests, ["close", "escape", "outside"]);
@@ -49,12 +43,52 @@ test("Popup asks its owner to close on Close, Esc and a click outside, through o
 
 test("Popup content scrolls inside it while the page behind it does not", async t => {
   const ui = await mount(t);
-  await act(async () => ui.render(false));
+  await act(async () => ui.render([]));
   document.body.style.overflow = "auto";
-  await act(async () => ui.render(true));
+  await act(async () => ui.render());
   assert.equal(document.body.style.overflow, "hidden");
-  await act(async () => ui.render(false));
+  await act(async () => ui.render([]));
   assert.equal(document.body.style.overflow, "auto");
   await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   assert.deepEqual(ui.requests, [], "a closed popup no longer listens for Esc");
+});
+
+test("with popups stacked, one Esc asks only the topmost popup to close", async t => {
+  const ui = await mount(t);
+  await act(async () => ui.render(["Matching Episodes", "Confirm"]));
+  await ui.escape();
+  assert.deepEqual(ui.requestsFrom, { Confirm: ["escape"] });
+  // Esc reaches the topmost popup even when focus has left every popup.
+  await act(async () => { (document.activeElement as HTMLElement | null)?.blur(); });
+  await ui.escape();
+  assert.deepEqual(ui.requestsFrom, { Confirm: ["escape", "escape"] });
+  await act(async () => ui.render(["Matching Episodes"]));
+  await ui.escape();
+  assert.deepEqual(ui.requestsFrom, { Confirm: ["escape", "escape"], "Matching Episodes": ["escape"] });
+});
+
+test("the page behind stacked popups stays still until the last popup closes, then gets its scrolling back", async t => {
+  const ui = await mount(t);
+  await act(async () => ui.render([]));
+  document.body.style.overflow = "auto";
+  await act(async () => ui.render(["Matching Episodes"]));
+  await act(async () => ui.render(["Matching Episodes", "Confirm"]));
+  await act(async () => ui.render(["Confirm"]));
+  assert.equal(document.body.style.overflow, "hidden", "closing the popup underneath keeps the page still under the other");
+  await act(async () => ui.render([]));
+  assert.equal(document.body.style.overflow, "auto");
+});
+
+test("Popup takes focus when it opens, keeps Tab inside it, and gives focus back when it closes", async t => {
+  const ui = await mount(t);
+  await act(async () => ui.render([]));
+  ui.button("Opener").focus();
+  await act(async () => ui.render(["Matching Episodes"]));
+  assert.equal(ui.focused(), "Close Matching Episodes", "focus moves into the popup");
+  await ui.tab(true);
+  assert.equal(ui.focused(), "Matching Episodes action", "Shift+Tab from the first control wraps to the last");
+  await ui.tab();
+  assert.equal(ui.focused(), "Close Matching Episodes", "Tab from the last control wraps to the first");
+  await act(async () => ui.render([]));
+  assert.equal(ui.focused(), "Opener", "focus returns to where it was");
 });

@@ -9,7 +9,7 @@ type Props = {
   // the owner closes the popup by no longer rendering it, so it can intercept
   // (for example, to ask "Discard your changes?") before doing so.
   onRequestClose: (reason: PopupCloseReason) => void;
-  children: ReactNode;
+  children?: ReactNode;
 };
 
 export function Popup({ title, className = "", onRequestClose, children }: Props) {

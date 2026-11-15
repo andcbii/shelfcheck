@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.5.5 - 2026-11-15
+
+### Changed
+
+- Show Manual Matches as compact cards with grouped episode columns and edit or
+  add matches in a focused popup with keyboard focus handling.
+- Close the editor after saving, show a brief Saved confirmation, ask before
+  discarding unsaved changes, and pause saving while a Plex scan runs.
+- Confirm single and bulk deletions, and show bulk actions only when matches
+  are selected.
+- Use Manual Match wording consistently in the report, editor and server messages.
+- Add support and private security reporting guidance, and keep local agent
+  instructions, runtime context and generated artifacts out of published sources
+  and Docker build contexts.
+
 ## 2.5.4 - 2026-11-13
 
 ### Fixed

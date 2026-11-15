@@ -179,7 +179,8 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .manual-match-panels .manual-match-episode-line > a:hover, .manual-match-panels .manual-match-episode-line > a:focus-visible { background: rgba(215,255,67,.3); outline: 2px solid var(--ink); outline-offset: -2px; }
 .manual-match-episode-status { margin-top: -2px; padding: 0 14px 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; }
 .manual-match-episode-status small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.manual-match-tag { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border: 1px solid #d9825f; background: #ffe6dc; color: #8a2c0c; font: 600 11px var(--font-sans); }
+.manual-match-tag { display: inline-flex; align-items: center; min-height: 22px; padding: 0 8px; border: 1px solid; font: 600 11px var(--font-sans); }
+.manual-match-tag.missing { border-color: #d9825f; background: #ffe6dc; color: #8a2c0c; }
 .manual-match-tag.incomplete { border-color: #c9a227; background: #fff2c2; color: #5e4500; }
 .manual-match-editor label.report-missing-toggle { margin: 0 0 0 auto; display: flex; align-items: center; gap: 8px; min-height: 32px; font: 13px var(--font-sans); letter-spacing: normal; text-transform: none; cursor: pointer; }
 .manual-match-editor .manual-match-card { margin: 0 0 14px; padding: 0; border: 1px solid var(--line); background: rgba(255,255,255,.3); }
@@ -187,15 +188,17 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .manual-match-editor .manual-match-card > header input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--ink); cursor: pointer; }
 .manual-match-card-spacer { flex: 1; }
 .manual-match-editor .manual-match-card > header button { margin: 0; min-height: 40px; padding: 0 16px; font-weight: 500; }
-.manual-match-editor .manual-match-card > header button.danger { color: #9b2318; border-color: #d1a39c; }
+.manual-match-editor .manual-match-card > header button.manual-match-delete { color: #9b2318; border-color: #d1a39c; }
 .manual-match-health { display: inline-flex; align-items: center; height: 26px; padding: 0 9px; background: var(--acid); font: 600 11px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
 .manual-match-health.needs-review, .manual-match-health.pending { background: #ffd9a8; color: #6b3300; }
 .manual-match-editor .manual-match-card > .manual-match-health-message { margin: 0; padding: 8px 16px; border-bottom: 1px solid var(--line); background: #fff6ea; font-size: 13px; }
-/* A 1px gap over a line-coloured grid divides the columns, side by side or stacked. */
-.manual-match-card .manual-match-panels { margin: 0; gap: 1px; background: var(--line); align-items: stretch; }
+/* TMDB | TVDB side by side; a 1px gap over a line-coloured grid divides the columns. The columns
+   share one background with no box of their own, so a shorter column never shows as stretched. */
+.manual-match-card .manual-match-panels { margin: 0; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--line); align-items: stretch; }
 .manual-match-card .manual-match-panels > section { border: 0; background: #f5f4ef; }
 @media (max-width: 760px) {
   .manual-match-report .manual-match-form { padding: 14px; }
+  .manual-match-card .manual-match-panels { grid-template-columns: 1fr; }
 }
 
 .plex-episode-trigger, .plex-episode-menu button { cursor: pointer; }

@@ -31,6 +31,7 @@ test("the card header holds the select checkbox, the health label and the Edit a
   assert.ok(box, "The select checkbox is in the header");
   assert.equal(header.querySelector(".manual-match-health")?.textContent, "Healthy");
   assert.deepEqual([...header.querySelectorAll("button")].map(button => button.textContent), ["Edit", "Delete"]);
+  assert.equal(header.querySelector("button.manual-match-delete")?.textContent, "Delete", "Delete carries the card's own danger styling");
   await act(async () => box.click());
   for (const button of header.querySelectorAll("button")) await act(async () => button.click());
   assert.deepEqual(ticks, [true]);
@@ -73,9 +74,45 @@ test("Reported missing and the derived incomplete status sit on a status line un
   assert.match(status("TMDB", 0)?.textContent || "", /^Incomplete · mapped part missing Contains TVDB Murder Pals \(2\)/);
 });
 
+// Each rule in globals.css as its selector, its @media condition (if any) and its declarations.
+const cssRules = (() => {
+  const rules: { selector: string; media?: string; body: string }[] = [];
+  let media: string | undefined;
+  for (const chunk of readFileSync(new URL("../app/globals.css", import.meta.url), "utf8").split("}")) {
+    const parts = chunk.split("{");
+    if (parts.length < 2) { media = undefined; continue; }
+    if (parts.length > 2) media = parts[parts.length - 3].split("\n").pop()!.trim();
+    rules.push({ selector: parts[parts.length - 2].split("\n").pop()!.trim(), media, body: parts[parts.length - 1] });
+  }
+  return rules;
+})();
+// The value of `property` in the rule whose whole selector is `selector`, at the top level or inside `media`.
+function cssValue(selector: string, property: string, media?: string) {
+  const rule = cssRules.find(item => item.selector === selector && item.media === media);
+  assert.ok(rule, `${selector} has a rule${media ? ` in ${media}` : ""}`);
+  return rule.body.split(";").map(item => item.split(":")).find(([name]) => name.trim() === property)?.slice(1).join(":").trim();
+}
+
 test("the TMDB column keeps its own height beside a taller TVDB column", () => {
-  const css = readFileSync(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.manual-match-panels\s*\{[^}]*align-items:\s*start/, "Columns align to the top instead of stretching");
+  // The card's columns share one background with only a 1px divider between them, so a shorter column shows no box to stretch.
+  assert.equal(cssValue(".manual-match-card .manual-match-panels > section", "border"), "0", "Card columns draw no border of their own");
+  assert.equal(cssValue(".manual-match-card .manual-match-panels", "gap"), "1px", "Columns are divided by a 1px line only");
+  // Episode lines keep their own height whatever the other column holds.
+  assert.equal(cssValue(".manual-match-episode-line", "flex"), undefined);
+  assert.equal(cssValue(".manual-match-episode-line", "height"), undefined);
+});
+
+test("the editor's review panels align their columns to the top", () => {
+  assert.equal(cssValue(".manual-match-panels", "align-items"), "start");
+});
+
+test("the card shows TMDB and TVDB side by side, stacking only on small screens", () => {
+  assert.equal(cssValue(".manual-match-card .manual-match-panels", "grid-template-columns"), "repeat(2, minmax(0, 1fr))");
+  assert.equal(cssValue(".manual-match-card .manual-match-panels", "grid-template-columns", "@media (max-width: 760px)"), "1fr");
+});
+
+test("Reported missing has its own tag colours", () => {
+  assert.deepEqual(["border-color", "background", "color"].map(property => cssValue(".manual-match-tag.missing", property)), ["#d9825f", "#ffe6dc", "#8a2c0c"]);
 });
 
 test("the Matching Episodes popup shows saved episodes in the same compact layout", async t => {

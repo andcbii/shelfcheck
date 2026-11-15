@@ -34,7 +34,7 @@ _Avoid_: Missed safeguard, overdue refresh
 
 **Manual Match**:
 A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes.
-_Avoid_: Manual Coverage, Link Episodes (as names for the saved match)
+_Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
 
 **Auto Match**:
 A match determined and controlled by Shelfcheck through automatic matching.

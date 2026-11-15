@@ -73,7 +73,7 @@ test("Edit opens the saved Manual Match in a popup titled by show and episode, w
   assert.equal(dialog.querySelectorAll('.manual-match-panels input[type="checkbox"]').length, 2);
 });
 
-test("resolving inside the popup reviews the episodes side by side, and the popup stays open after saving", async t => {
+test("resolving inside the popup reviews the episodes side by side before saving", async t => {
   const page = await mountPage(t);
   await page.click("+ Add Manual Match");
   const [first, second] = page.episodeInputs();
@@ -90,10 +90,21 @@ test("resolving inside the popup reviews the episodes side by side, and the popu
   assert.equal(dialog.querySelector(".manual-match-review-divider")?.textContent, "Review", "A Review divider leads into the resolved episodes");
   assert.equal(dialog.querySelector(".manual-match-draft-state")?.textContent, "● Unsaved changes");
   assert.match(dialog.textContent || "", /Report Missing keeps an episode missing in your Plex results when your copy lacks its content\. It stays in Shelfcheck and is never sent to Plex, TMDB or TVDB\./);
-  await page.click("Save coverage mapping", dialog);
+});
+
+test("Save closes the popup, and the edited card shows a brief Saved note in its header row", async t => {
+  const page = await mountPage(t);
+  await page.click(/^Edit/, page.container.querySelector("article")!);
+  await page.click("Resolve and review", page.dialog()!);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  await page.click("Save coverage mapping", page.dialog()!);
   assert.equal(page.posts.at(-1)?.action, "save");
-  assert.ok(page.dialog(), "The popup stays open after saving, as the form did before");
-  assert.match(page.dialog()!.textContent || "", /Saved\./);
+  assert.ok(!page.dialog(), "Saving closes the popup");
+  const header = page.container.querySelector("article header")!;
+  assert.equal(header.querySelector(".manual-match-saved")?.textContent, "Saved", "The edited card says Saved in its header row");
+  assert.doesNotMatch(page.container.textContent || "", /Saved\. /, "The card's note replaces the long saved message");
+  await act(async () => t.mock.timers.tick(5000));
+  assert.ok(!page.container.querySelector(".manual-match-saved"), "The Saved note is brief");
 });
 
 test("a failed save keeps the popup open and shows the error inside it", async t => {

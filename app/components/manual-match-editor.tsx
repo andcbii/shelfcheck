@@ -32,6 +32,8 @@ function identifiesMember(input: string, member: CoverageMember) {
   } catch { /* Unresolved or incomplete draft input has no saved membership. */ }
   return false;
 }
+// How long a saved card says "Saved".
+const SAVED_NOTE_MS = 4000;
 const flaggedKeys = (members: CoverageMember[]) => members.filter(member => member.reportMissing).map(memberKey).sort();
 // Names a saved Manual Match by its show and episode, preferring the TMDB side.
 function editorTitle(editing: CoverageMapping | null) {
@@ -61,6 +63,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [confirmation, setConfirmation] = useState<string[] | null>(null);
   // Report Missing selections are a draft until the Manual Match is saved.
   const [draftFlags, setDraftFlags] = useState<string[]>([]);
+  // The Manual Match the popup just saved, whose card briefly says so.
+  const [savedId, setSavedId] = useState<string | null>(null);
   const locked = busy || scanActive || scanning;
   const defaultUrls = initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""];
   const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
@@ -171,6 +175,11 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     };
   }, [initialUrls, initialMappingId]);
   useEffect(() => {
+    if (!savedId) return;
+    const timer = setTimeout(() => setSavedId(null), SAVED_NOTE_MS);
+    return () => clearTimeout(timer);
+  }, [savedId]);
+  useEffect(() => {
     let active = true;
     async function poll() {
       try {
@@ -233,7 +242,12 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         if (result.mapping) openMapping(result.mapping);
         else if (!episodeScope) setEditing(null);
         onChanged(result.revision);
-        setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+        if (report) {
+          // The popup closes, and the saved card's own note confirms the save.
+          setFormOpen(false);
+          setSavedId(result.mapping?.id ?? null);
+          setMessage("");
+        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
         await load();
       }
     } catch (error) {
@@ -305,6 +319,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
-   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)}/>
+   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedId}/>
  </section>;
 }

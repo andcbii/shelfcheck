@@ -38,6 +38,7 @@ async function mount(t:test.TestContext, initialUrl:string|string[], initialMapp
 test("Matching Episodes opens an unmatched episode without exposing another episode's saved match",async t=>{
  const ui=await mount(t,"tvdb:999",[{id:"unrelated",revision:1,members}]);
  assert.match(ui.container.querySelector('[role="dialog"]')?.textContent||"",/Matching Episodes/);
+ assert.match(ui.container.textContent||"",/Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context/);
  assert.deepEqual([...ui.container.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])')].map(i=>i.value),["tvdb:999",""]);
  assert.equal(ui.container.querySelectorAll("article").length,0);
  assert.doesNotMatch(ui.container.textContent||"",/Saved mappings|Mapping health|unrelated|Combined/);

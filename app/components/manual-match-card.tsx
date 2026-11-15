@@ -28,7 +28,7 @@ export function ManualMatchCard({ match, locked, saved = false, selection, onEdi
   const health = healthOf(match);
   return <article className="manual-match-card">
     <header>
-      {selection && <input type="checkbox" aria-label={`Select mapping ${match.id}`} disabled={locked} checked={selection.selected} onChange={event => selection.onChange(event.target.checked)}/>}
+      {selection && <input type="checkbox" aria-label={`Select Manual Match ${match.id}`} disabled={locked} checked={selection.selected} onChange={event => selection.onChange(event.target.checked)}/>}
       <span className={`manual-match-health ${health}`}>{MATCH_HEALTH_LABELS[health]}</span>
       <span className="manual-match-card-spacer"/>
       {saved && <span className="manual-match-saved" role="status"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>Saved</span>}

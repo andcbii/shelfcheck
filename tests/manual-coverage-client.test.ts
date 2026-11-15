@@ -62,7 +62,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.match(container.textContent || "", /Needs review/);
   assert.match(container.textContent || "", /Provider confirmed deletion/);
   assert.equal(container.querySelectorAll("article").length,2);
-  const healthFilter = container.querySelector<HTMLSelectElement>('[aria-label="Mapping health"]');
+  const healthFilter = container.querySelector<HTMLSelectElement>('[aria-label="Health"]');
   assert.ok(healthFilter);
   await act(async () => {healthFilter.value="needs-review";healthFilter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   assert.equal(container.querySelectorAll("article").length,1);
@@ -79,7 +79,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   const edit = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit");
   assert.ok(edit);
   await act(async () => edit.click());
-  assert.match(container.textContent || "", /Editing mapping/);
+  assert.match(container.textContent || "", /Editing Manual Match/);
   const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Delete");
   assert.ok(button);
   await act(async () => button.click());
@@ -89,7 +89,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   await act(async () => confirmDelete.click());
   assert.equal(deleted, "/api/plex/manual-coverage?id=saved");
   assert.equal(changed, 1);
-  assert.ok(![...container.querySelectorAll("button")].some(button => button.textContent === "Save coverage mapping"));
+  assert.ok(![...container.querySelectorAll("button")].some(button => button.textContent === "Save Manual Match"));
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
   const reopen = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit");
@@ -100,7 +100,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(preview);
   assert.match(preview.textContent || "", /#100/);
   assert.match(preview.textContent || "", /S08E08/, "Each provider keeps its own numbering");
-  const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
+  const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save Manual Match");
   assert.ok(save);
   rejectEdit = true;
   await act(async () => save.click());
@@ -118,7 +118,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.equal(savedId, "saved");
   assert.equal(savedRevision, 1);
   assert.equal(changed, 2);
-  const create = [...container.querySelectorAll("button")].find(button => button.textContent === "Create mapping");
+  const create = [...container.querySelectorAll("button")].find(button => button.textContent === "Create Manual Match");
   assert.ok(create, "The manager provides a standalone create action");
   await act(async () => create.click());
   assert.deepEqual([...container.querySelectorAll<HTMLInputElement>("input:not([type=checkbox])")].map(input => input.value), ["", ""]);
@@ -170,7 +170,7 @@ test("linking another split episode retains the selected episode when opening an
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
   await act(async () => resolve.click());
-  assert.match(container.textContent || "", /Editing mapping existing · Revision 4/);
+  assert.match(container.textContent || "", /Editing Manual Match existing · Revision 4/);
   assert.deepEqual([...container.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])')].map(input => input.value), [added.url, members[0].url, members[1].url]);
   assert.match(container.textContent || "", /kept.*resolve and review/i);
   assert.equal(container.querySelector('[aria-label="Resolved episode preview"]'), null);
@@ -178,7 +178,7 @@ test("linking another split episode retains the selected episode when opening an
   await act(async () => resolve.click());
   assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /#201/);
   assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /#200/);
-  const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
+  const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save Manual Match");
   assert.ok(save);
   await act(async () => save.click());
   assert.deepEqual(saved, { action: "save", id: "existing", revision: 4, preview: "complete", reportMissing: [] }, "A larger match saves with Report Missing off");
@@ -222,14 +222,14 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
     assert.ok(button,`button ${label}`);
     await act(async()=>button.click());
   };
-  const filter=container.querySelector<HTMLSelectElement>('[aria-label="Mapping health"]')!;
+  const filter=container.querySelector<HTMLSelectElement>('[aria-label="Health"]')!;
   const changeFilter=async(value:string)=>act(async()=>{filter.value=value;filter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   const next=()=>click("Next \u2192");
   await changeFilter("needs-review");
   assert.equal(container.querySelectorAll("article").length,10);
   assert.equal(container.querySelector('[aria-label="Selected Manual Matches"]'),null,"No bulk bar before a card is ticked");
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  await click("Select all 12 matching mappings");
+  await click("Select all 12 Manual Matches");
   assert.match(container.textContent||"",/12 selected/);
   await next();
   assert.equal(container.querySelectorAll("article").length,2);
@@ -253,7 +253,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   assert.match(container.textContent||"",/Selection cleared/);
   await changeFilter("needs-review");
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  await click("Select all 9 matching mappings");
+  await click("Select all 9 Manual Matches");
   await click("Delete 9 selected matches");
   fail=true;
   await click("Delete 9 matches");
@@ -264,7 +264,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   await click("Delete 9 matches");
   assert.deepEqual(deleted,[...Array.from({length:8},(_,i)=>`mapping-${i+2}`),"mapping-11"]);
   assert.equal(changed,1);
-  assert.match(container.textContent||"",/Deleted 9 mappings/);
+  assert.match(container.textContent||"",/Deleted 9 Manual Matches/);
   assert.equal(container.querySelector('[aria-label="Selected Manual Matches"]'),null);
   assert.equal(container.querySelectorAll("article").length,0);
   await changeFilter("all");

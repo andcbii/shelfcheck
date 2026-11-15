@@ -41,7 +41,7 @@ test("Matching Episodes opens an unmatched episode without exposing another epis
  assert.match(ui.container.textContent||"",/Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context/);
  assert.deepEqual([...ui.container.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])')].map(i=>i.value),["tvdb:999",""]);
  assert.equal(ui.container.querySelectorAll("article").length,0);
- assert.doesNotMatch(ui.container.textContent||"",/Saved mappings|Mapping health|unrelated|Combined/);
+ assert.doesNotMatch(ui.container.textContent||"",/Saved Manual Matches|All Manual Matches|unrelated|Combined/);
 });
 for(const selected of ["tmdb:100 show:10 season:1 episode:1","http://themoviedb.org/tv/10-target/season/1/episode/1/?language=en-US","tvdb:201","https://www.thetvdb.com/series/renamed/episodes/200/?lang=en","https://thetvdb.com/dereferrer/episode/201"]){
  test(`Matching Episodes loads every member by provider episode identity: ${selected}`,async t=>{
@@ -55,11 +55,11 @@ for(const selected of ["tmdb:100 show:10 season:1 episode:1","http://themoviedb.
 
 test("Matching Episodes stays open after saving and retains the saved complete match for another edit",async t=>{
  const ui=await mount(t,["tmdb:100 show:10 season:1 episode:1","tvdb:200"]);
- await ui.click("Resolve and review");await ui.click("Save coverage mapping");
+ await ui.click("Resolve and review");await ui.click("Save Manual Match");
  assert.ok(ui.container.querySelector('[role="dialog"]'));
  assert.equal(ui.container.querySelectorAll("article").length,1);
- assert.match(ui.container.textContent||"",/Editing mapping complete/);
- await ui.click("Resolve and review");await ui.click("Save coverage mapping");
+ assert.match(ui.container.textContent||"",/Editing Manual Match complete/);
+ await ui.click("Resolve and review");await ui.click("Save Manual Match");
  assert.equal(ui.posts.at(-1)?.id,"complete");assert.equal(ui.posts.at(-1)?.revision,2);
 });
 for(const dismissal of ["Close","backdrop"]){

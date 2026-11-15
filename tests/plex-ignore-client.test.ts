@@ -264,7 +264,7 @@ test("incomplete coverage displays one identity-preserving group and opens its s
   assert.equal(container.querySelectorAll('.plex-episode-item').length,1,"the ungrouped provider at the same coordinates keeps its tile");
   assert.equal(container.querySelectorAll('.show-list article').length,2,"Plex show comparisons remain separate");
   await click("Edit coverage mapping");
-  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing mapping group/);
+  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing Manual Match group/);
 });
 
 
@@ -413,10 +413,10 @@ test("Matching Episodes save refreshes affected results and preserves unrelated 
   const unrelatedBefore=[...container.querySelectorAll(".show-list article")].find(row=>row.textContent?.includes("Unrelated show"))!.querySelector(".show-info")!.textContent;
   await click("S01E02");await click("Matching Episodes");
   assert.equal([...container.querySelectorAll('[role="dialog"] button')].some(button=>/Declare/.test(button.textContent||"")),false,"Ownership declarations are retired");
-  await click("Resolve and review");await click("Save coverage mapping");
+  await click("Resolve and review");await click("Save Manual Match");
   assert.equal(submitted?.action,"save");
   assert.ok(container.querySelector('[role="dialog"]'),"The dialog stays open after the cached recheck");
-  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing mapping saved/);
+  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Editing Manual Match saved/);
   await click("Close Matching Episodes");
   assert.equal(container.querySelectorAll('.plex-episode-item').length,1,"Affected episode coverage is refreshed");
   assert.equal([...container.querySelectorAll(".show-list article")].find(row=>row.textContent?.includes("Unrelated show"))!.querySelector(".show-info")!.textContent,unrelatedBefore);
@@ -438,7 +438,7 @@ test("Matching Episodes retains its reviewed draft when the API rejects a scan-t
     }
     return defaults(input,init);
   });
-  await click("S01E02");await click("Matching Episodes");await click("Resolve and review");await click("Save coverage mapping");
+  await click("S01E02");await click("Matching Episodes");await click("Resolve and review");await click("Save Manual Match");
   assert.match(container.querySelector('[role="alert"]')?.textContent||"",/Plex scan is running/);
   assert.ok(container.querySelector('[aria-label="Resolved episode preview"]'));
   assert.doesNotMatch(container.querySelector('[role="dialog"]')?.textContent||"",/Saved\./);

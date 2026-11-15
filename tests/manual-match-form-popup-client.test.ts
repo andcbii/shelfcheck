@@ -81,7 +81,7 @@ test("resolving inside the popup reviews the episodes side by side before saving
   const [first, second] = page.episodeInputs();
   await page.type(first, tmdb.url);
   await page.type(second, tvdb.url);
-  assert.ok(!page.buttons(page.dialog()!).some(button => button.textContent === "Save coverage mapping"), "Save appears once the episodes are reviewed");
+  assert.ok(!page.buttons(page.dialog()!).some(button => button.textContent === "Save Manual Match"), "Save appears once the episodes are reviewed");
   await page.click("Resolve and review", page.dialog()!);
   assert.deepEqual(page.posts.at(-1), { action: "resolve", urls: [tmdb.url, tvdb.url] });
   const dialog = page.dialog()!;
@@ -99,7 +99,7 @@ test("Save closes the popup, and the edited card shows a brief Saved note in its
   await page.click(/^Edit/, page.container.querySelector("article")!);
   await page.click("Resolve and review", page.dialog()!);
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  await page.click("Save coverage mapping", page.dialog()!);
+  await page.click("Save Manual Match", page.dialog()!);
   assert.equal(page.posts.at(-1)?.action, "save");
   assert.ok(!page.dialog(), "Saving closes the popup");
   const header = page.container.querySelector("article header")!;
@@ -113,7 +113,7 @@ test("a failed save keeps the popup open and shows the error inside it", async t
   const page = await mountPage(t, { saveError: "Each side needs at least one episode." });
   await page.click(/^Edit/, page.container.querySelector("article")!);
   await page.click("Resolve and review", page.dialog()!);
-  await page.click("Save coverage mapping", page.dialog()!);
+  await page.click("Save Manual Match", page.dialog()!);
   assert.equal(page.posts.at(-1)?.action, "save");
   assert.equal(page.dialog()?.querySelector('[role="alert"]')?.textContent, "Each side needs at least one episode.");
   assert.equal(page.container.querySelectorAll('[role="alert"]').length, 1, "The error is shown only inside the popup");
@@ -199,7 +199,7 @@ test("a scan that starts mid-edit keeps the draft and pauses saving until it end
   const page = await mountPage(t, { scan });
   await editFirstEpisode(page);
   await page.click("Resolve and review", page.dialog()!);
-  const save = () => page.buttons(page.dialog()!).find(button => button.textContent === "Save coverage mapping")!;
+  const save = () => page.buttons(page.dialog()!).find(button => button.textContent === "Save Manual Match")!;
   assert.equal(save().disabled, false);
   scan.running = true;
   await nextScanPoll();
@@ -210,13 +210,13 @@ test("a scan that starts mid-edit keeps the draft and pauses saving until it end
   assert.equal(page.episodeInputs()[0].value, "tmdb:1 show:2 season:3 episode:4", "The draft is kept");
   assert.equal(dialog.querySelector(".manual-match-draft-state")?.textContent, "● Unsaved changes");
   assert.ok(page.episodeInputs().every(input => !input.disabled), "Editing carries on during the scan");
-  await page.click("Save coverage mapping", dialog);
+  await page.click("Save Manual Match", dialog);
   assert.ok(!page.posts.some(post => post.action === "save"), "Nothing is saved during the scan");
   scan.running = false;
   await nextScanPoll();
   assert.ok(!page.dialog()!.querySelector(".manual-match-scan-paused"), "The notice goes when the scan ends");
   assert.equal(save().disabled, false, "Save works again");
-  await page.click("Save coverage mapping", page.dialog()!);
+  await page.click("Save Manual Match", page.dialog()!);
   assert.equal(page.posts.at(-1)?.action, "save");
   assert.ok(!page.dialog(), "The save goes through and closes the popup");
 });
@@ -226,7 +226,7 @@ test("while a save is in flight, Close and Esc wait for it instead of offering t
   const page = await mountPage(t, { saveGate: new Promise<void>(resolve => { release = resolve; }) });
   await editFirstEpisode(page);
   await page.click("Resolve and review", page.dialog()!);
-  await page.click("Save coverage mapping", page.dialog()!);
+  await page.click("Save Manual Match", page.dialog()!);
   await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   await page.click("Close Edit Manual Match · Animaniacs · Murder Pals");
   assert.ok(!prompt(), "Nothing offers to discard changes that are being saved");
@@ -243,7 +243,7 @@ test("saving the same Manual Match again restarts its Saved note", async t => {
     await page.click(/^Edit/, page.container.querySelector("article")!);
     await page.type(page.episodeInputs()[0], episode);
     await page.click("Resolve and review", page.dialog()!);
-    await page.click("Save coverage mapping", page.dialog()!);
+    await page.click("Save Manual Match", page.dialog()!);
     await act(async () => t.mock.timers.tick(3000));
   }
   assert.ok(page.container.querySelector("article .manual-match-saved"), "The second save's note runs its full time");

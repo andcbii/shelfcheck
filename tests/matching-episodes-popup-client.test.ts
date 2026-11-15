@@ -31,7 +31,7 @@ test("Esc in a Delete confirmation over Matching Episodes closes only the confir
   } });
   let dismissed = 0;
   await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["tvdb:9623972"], onClose() { dismissed++; }, onChanged() {} })));
-  const deleteButton = [...container.querySelectorAll("article button")].find(button => button.textContent === "Delete mapping") as HTMLButtonElement | undefined;
+  const deleteButton = [...container.querySelectorAll("article button")].find(button => button.textContent === "Delete") as HTMLButtonElement | undefined;
   assert.ok(deleteButton, "the Manual Match card is shown in Matching Episodes");
   await act(async () => deleteButton.click());
   const dialogs = () => [...container.querySelectorAll('[role="dialog"]')].map(dialog => dialog.getAttribute("aria-label"));

@@ -66,8 +66,8 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(healthFilter);
   await act(async () => {healthFilter.value="needs-review";healthFilter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   assert.equal(container.querySelectorAll("article").length,1);
-  // Coverage evidence stays visible, but ownership declarations are retired.
-  assert.match(container.textContent || "", /TMDB 100, TVDB 200/);
+  // Coverage evidence is no longer on the card, and ownership declarations are retired.
+  assert.doesNotMatch(container.textContent || "", /Coverage evidence|TMDB 100, TVDB 200/);
   assert.equal([...container.querySelectorAll("button")].some(button=>/Declare/.test(button.textContent || "")),false,"no ownership declaration controls");
   assert.equal(container.querySelectorAll('fieldset input[type="checkbox"]').length,0,"no selected-parts controls");
   assert.doesNotMatch(container.textContent || "", /ownership correction/i);
@@ -76,11 +76,11 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(initialResolve);
   await act(async () => initialResolve.click());
   assert.deepEqual(resolvedInputs, members.map(member => member.url));
-  const edit = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit mapping");
+  const edit = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit");
   assert.ok(edit);
   await act(async () => edit.click());
   assert.match(container.textContent || "", /Editing mapping/);
-  const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Delete mapping");
+  const button = [...container.querySelectorAll("button")].find(b => b.textContent === "Delete");
   assert.ok(button);
   await act(async () => button.click());
   assert.equal(deleted, "", "Delete asks for confirmation first");
@@ -92,13 +92,13 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(![...container.querySelectorAll("button")].some(button => button.textContent === "Save coverage mapping"));
   const resolve = [...container.querySelectorAll("button")].find(button => button.textContent === "Resolve and review");
   assert.ok(resolve);
-  const reopen = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit mapping");
+  const reopen = [...container.querySelectorAll("button")].find(b => b.textContent === "Edit");
   assert.ok(reopen);
   await act(async () => reopen.click());
   await act(async () => resolve.click());
   const preview = container.querySelector('[aria-label="Resolved episode preview"]');
   assert.ok(preview);
-  assert.match(preview.textContent || "", /Episode ID 100/);
+  assert.match(preview.textContent || "", /#100/);
   assert.match(preview.textContent || "", /S08E08/, "Each provider keeps its own numbering");
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
@@ -176,8 +176,8 @@ test("linking another split episode retains the selected episode when opening an
   assert.equal(container.querySelector('[aria-label="Resolved episode preview"]'), null);
   assert.equal(saves, 0);
   await act(async () => resolve.click());
-  assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /Episode ID 201/);
-  assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /Episode ID 200/);
+  assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /#201/);
+  assert.match(container.querySelector('[aria-label="Resolved episode preview"]')?.textContent || "", /#200/);
   const save = [...container.querySelectorAll("button")].find(button => button.textContent === "Save coverage mapping");
   assert.ok(save);
   await act(async () => save.click());
@@ -242,7 +242,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   assert.deepEqual(deleted,[]);
   // A refresh after a row deletion also removes vanished and newly healthy
   // identities from the selection and clamps the former last page.
-  await click("Delete mapping");
+  await click("Delete");
   await click("Delete match");
   assert.match(container.textContent||"",/9 selected/);
   assert.match(container.textContent||"",/Showing 1.9 of 9/);

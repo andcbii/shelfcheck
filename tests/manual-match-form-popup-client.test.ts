@@ -8,7 +8,7 @@ const tmdb = { provider: "TMDB", id: 4245050, showId: 107124, show: "Animaniacs"
 const tvdb = { provider: "TVDB", id: 9623973, showId: 386114, show: "Animaniacs", title: "Murder Pals (3)", season: 8, episode: 22, url: "https://thetvdb.com/series/animaniacs/episodes/9623973" };
 
 // The Manual Matches page with one saved Manual Match.
-async function mountPage(t: test.TestContext) {
+async function mountPage(t: test.TestContext, { saveError }: { saveError?: string } = {}) {
   let mapping = { id: "animaniacs-match", revision: 7, health: "healthy", members: [tmdb, tvdb] };
   const posts: Record<string, unknown>[] = [];
   const { browser, container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
@@ -17,6 +17,7 @@ async function mountPage(t: test.TestContext) {
       const body = JSON.parse(String(init.body));
       posts.push(body);
       if (body.action === "resolve") return Response.json({ preview: "reviewed", members: [tmdb, tvdb] });
+      if (saveError) return Response.json({ error: saveError }, { status: 400 });
       mapping = { ...mapping, revision: mapping.revision + 1 };
       return Response.json({ mapping, revision: mapping.revision, pending: 0 });
     }
@@ -91,6 +92,27 @@ test("resolving inside the popup reviews the episodes side by side, and Save kee
   assert.equal(page.posts.at(-1)?.action, "save");
   assert.ok(page.dialog(), "The popup stays open after saving, as the form did before");
   assert.match(page.dialog()!.textContent || "", /Saved\./);
+});
+
+test("a failed save keeps the popup open and shows the error inside it", async t => {
+  const page = await mountPage(t, { saveError: "Each side needs at least one episode." });
+  await page.click(/^Edit/, page.container.querySelector("article")!);
+  await page.click("Resolve and review", page.dialog()!);
+  await page.click("Save coverage mapping", page.dialog()!);
+  assert.equal(page.posts.at(-1)?.action, "save");
+  assert.equal(page.dialog()?.querySelector('[role="alert"]')?.textContent, "Each side needs at least one episode.");
+  assert.equal(page.container.querySelectorAll('[role="alert"]').length, 1, "The error is shown only inside the popup");
+});
+
+test("closing the popup returns to the Edit button the user opened it from", async t => {
+  const page = await mountPage(t);
+  const edit = page.buttons(page.container.querySelector("article")!).find(button => /^Edit/.test(button.textContent || ""))!;
+  edit.focus();
+  await act(async () => edit.click());
+  assert.ok(page.dialog()?.contains(document.activeElement), "Focus moves into the popup");
+  await page.click("Cancel", page.dialog()!);
+  assert.equal(page.dialog(), null);
+  assert.equal(document.activeElement, edit, "The user is back on the card they edited");
 });
 
 test("Close, Cancel and Esc close the popup without saving", async t => {

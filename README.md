@@ -231,6 +231,11 @@ pnpm audit --prod --audit-level high
 See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 [RELEASE_NOTES.md](RELEASE_NOTES.md) summarizes the latest release.
 
+## Support
+
+Report problems by
+[opening a GitHub issue](https://github.com/andcbii/shelfcheck/issues).
+
 ## License
 
 Shelfcheck is available under the [MIT License](LICENSE).

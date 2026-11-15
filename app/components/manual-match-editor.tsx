@@ -68,13 +68,14 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   // Report Missing selections are a draft until the Manual Match is saved.
   const [draftFlags, setDraftFlags] = useState<string[]>([]);
   // The Manual Match the popup just saved, whose card briefly says so.
-  const [savedId, setSavedId] = useState<string | null>(null);
+  // Each save is a new note, so saving the same Manual Match again restarts its time.
+  const [savedNote, setSavedNote] = useState<{ id: string } | null>(null);
   // Asking "Discard your changes?" before the editor popup closes on unsaved changes.
-  const [discardAsked, setDiscardAsked] = useState(false);
+  const [discardPromptOpen, setDiscardPromptOpen] = useState(false);
   const scanRunning = scanActive || scanning;
   const locked = busy || scanRunning;
   // A scan only pauses saving in the editor popup, so its draft stays editable; elsewhere it locks the form.
-  const formLocked = report ? busy : locked;
+  const draftLocked = report ? busy : locked;
   const defaultUrls = initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""];
   const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
   // Saved members are editable in place; changed membership needs a reviewed preview first.
@@ -122,13 +123,16 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setFormOpen(true);
   }
   // The single close hook for the editor popup: Close, Esc, a click outside and Cancel all
-  // ask to close here, and unsaved changes are only thrown away once the user agrees.
+  // ask to close here, and unsaved changes are only thrown away once the user agrees. While a
+  // save is in flight they wait for it, so a save cannot land after its changes were discarded.
   function requestFormClose() {
-    if (dirty) setDiscardAsked(true);
+    if (busy) return;
+    if (dirty) setDiscardPromptOpen(true);
     else closeForm();
   }
+  // Closes the editor popup and any question over it; opening it again loads a fresh draft.
   function closeForm() {
-    setDiscardAsked(false);
+    setDiscardPromptOpen(false);
     setFormOpen(false);
     setError("");
     setMessage("");
@@ -189,10 +193,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     };
   }, [initialUrls, initialMappingId]);
   useEffect(() => {
-    if (!savedId) return;
-    const timer = setTimeout(() => setSavedId(null), SAVED_NOTE_MS);
+    if (!savedNote) return;
+    const timer = setTimeout(() => setSavedNote(null), SAVED_NOTE_MS);
     return () => clearTimeout(timer);
-  }, [savedId]);
+  }, [savedNote]);
   useEffect(() => {
     let active = true;
     async function poll() {
@@ -259,10 +263,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         onChanged(result.revision);
         if (report) {
           // The popup closes, and the saved card's own note confirms the save.
-          setDiscardAsked(false);
-          setFormOpen(false);
-          setSavedId(result.mapping?.id ?? null);
-          setMessage("");
+          closeForm();
+          setSavedNote(result.mapping ? { id: result.mapping.id } : null);
         } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
         await load();
       }
@@ -316,8 +318,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   // On the Manual Matches page the whole editor opens in a popup; Matching Episodes is already one.
   const form = <ManualMatchForm editing={editing} creatable={!episodeScope && !report} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
-   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked: formLocked, onToggle: toggleFlag }} savePaused={scanRunning} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
+   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked: draftLocked, onToggle: toggleFlag }} savePaused={scanRunning} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
    inPopup={report} onCancel={report ? requestFormClose : cancelDraft} onSave={saveDraft}/>;
+  const editedName = matchName(editing);
   const feedback = <>{error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}</>;
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
  {scanRunning ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
@@ -329,9 +332,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
      {form}{feedback}
    </Popup>
    : feedback}
- {formOpen && report && discardAsked && <Popup title="Discard your changes?" className="manual-match-discard-popup" onRequestClose={() => setDiscardAsked(false)}>
-   <p>{matchName(editing) ? <>You changed <strong>{matchName(editing)}</strong> but haven&apos;t saved it.</> : "You haven't saved this new Manual Match."} Closing now throws those changes away.</p>
-   <footer className="modal-actions"><button onClick={() => setDiscardAsked(false)}>Keep editing</button><button className="manual-match-discard" onClick={closeForm}>Discard changes</button></footer>
+ {formOpen && report && discardPromptOpen && <Popup title="Discard your changes?" className="manual-match-discard-confirm" onRequestClose={() => setDiscardPromptOpen(false)}>
+   <p className="modal-copy">{editedName ? <>You changed <strong>{editedName}</strong> but haven&apos;t saved it.</> : "You haven't saved this new Manual Match."} Closing now throws those changes away.</p>
+   <div className="modal-actions"><button className="secondary" onClick={() => setDiscardPromptOpen(false)}>Keep editing</button><button className="danger" onClick={closeForm}>Discard changes</button></div>
  </Popup>}
  <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    healthFilter={healthFilter} onHealthFilterChange={filter => {
@@ -342,6 +345,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
-   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedId}/>
+   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedNote?.id}/>
  </section>;
 }

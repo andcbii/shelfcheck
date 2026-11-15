@@ -7,8 +7,9 @@ import { mountDom } from "./dom-environment";
 const tmdb = { provider: "TMDB", id: 4245050, showId: 107124, show: "Animaniacs", title: "Murder Pals", season: 3, episode: 18, url: "https://www.themoviedb.org/tv/107124/season/3/episode/18" };
 const tvdb = { provider: "TVDB", id: 9623973, showId: 386114, show: "Animaniacs", title: "Murder Pals (3)", season: 8, episode: 22, url: "https://thetvdb.com/series/animaniacs/episodes/9623973" };
 
-// The Manual Matches page with one saved Manual Match. A Plex scan runs while scan.running is set.
-async function mountPage(t: test.TestContext, { saveError, scan = { running: false } }: { saveError?: string; scan?: { running: boolean } } = {}) {
+// The Manual Matches page with one saved Manual Match. A Plex scan runs while scan.running is set,
+// and saves wait for saveGate when one is given.
+async function mountPage(t: test.TestContext, { saveError, scan = { running: false }, saveGate }: { saveError?: string; scan?: { running: boolean }; saveGate?: Promise<void> } = {}) {
   let mapping = { id: "animaniacs-match", revision: 7, health: "healthy", members: [tmdb, tvdb] };
   const posts: Record<string, unknown>[] = [];
   const { browser, container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
@@ -17,6 +18,7 @@ async function mountPage(t: test.TestContext, { saveError, scan = { running: fal
       const body = JSON.parse(String(init.body));
       posts.push(body);
       if (body.action === "resolve") return Response.json({ preview: "reviewed", members: [tmdb, tvdb] });
+      await saveGate;
       if (saveError) return Response.json({ error: saveError }, { status: 400 });
       mapping = { ...mapping, revision: mapping.revision + 1 };
       return Response.json({ mapping, revision: mapping.revision, pending: 0 });
@@ -217,4 +219,32 @@ test("a scan that starts mid-edit keeps the draft and pauses saving until it end
   await page.click("Save coverage mapping", page.dialog()!);
   assert.equal(page.posts.at(-1)?.action, "save");
   assert.ok(!page.dialog(), "The save goes through and closes the popup");
+});
+
+test("while a save is in flight, Close and Esc wait for it instead of offering to discard what is being saved", async t => {
+  let release = () => {};
+  const page = await mountPage(t, { saveGate: new Promise<void>(resolve => { release = resolve; }) });
+  await editFirstEpisode(page);
+  await page.click("Resolve and review", page.dialog()!);
+  await page.click("Save coverage mapping", page.dialog()!);
+  await act(async () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+  await page.click("Close Edit Manual Match · Animaniacs · Murder Pals");
+  assert.ok(!prompt(), "Nothing offers to discard changes that are being saved");
+  assert.ok(page.dialog(), "The popup waits for the save");
+  await act(async () => { release(); await new Promise(resolve => setTimeout(resolve, 0)); });
+  assert.ok(!page.dialog(), "The save closes the popup");
+  assert.equal(page.container.querySelector("article .manual-match-saved")?.textContent, "Saved");
+});
+
+test("saving the same Manual Match again restarts its Saved note", async t => {
+  const page = await mountPage(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const episode of ["tmdb:1 show:2 season:3 episode:4", "tmdb:5 show:6 season:7 episode:8"]) {
+    await page.click(/^Edit/, page.container.querySelector("article")!);
+    await page.type(page.episodeInputs()[0], episode);
+    await page.click("Resolve and review", page.dialog()!);
+    await page.click("Save coverage mapping", page.dialog()!);
+    await act(async () => t.mock.timers.tick(3000));
+  }
+  assert.ok(page.container.querySelector("article .manual-match-saved"), "The second save's note runs its full time");
 });

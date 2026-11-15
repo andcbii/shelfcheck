@@ -128,3 +128,19 @@ test("the Matching Episodes popup shows saved episodes in the same compact layou
   const editorLines = [...container.querySelectorAll('[aria-label="Manual Match editor"] .manual-match-episode-line')].filter(line => !card.contains(line));
   assert.equal(editorLines.length, 3, "The editor's episodes use the same one-line layout");
 });
+
+test("a provider column with episodes from two shows groups each episode under its own show", async t => {
+  // ADR-0001: a Manual Match may span shows, so same-numbered episodes must still say which show owns them.
+  const tmdb = { provider: "TMDB" as const, id: 100, showId: 1, show: "Crossover", title: "Pilot", season: 1, episode: 1, url: "https://www.themoviedb.org/tv/1/season/1/episode/1" };
+  const showA = { provider: "TVDB" as const, id: 200, showId: 10, show: "Show A", title: "Pilot", season: 1, episode: 1, url: "https://thetvdb.com/series/a/episodes/200" };
+  const showB = { provider: "TVDB" as const, id: 201, showId: 11, show: "Show B", title: "Pilot", season: 1, episode: 1, url: "https://thetvdb.com/series/b/episodes/201" };
+  const ui = await renderCard(t, { ...split, members: [tmdb, showA, showB] });
+  assert.equal(ui.panel("TVDB").querySelector("header")?.textContent, "TVDB2 episodes", "The column header names the provider and count only");
+  const groups = [...ui.panel("TVDB").querySelectorAll(".manual-match-show-group")];
+  assert.deepEqual(groups.map(group => [group.querySelector(".manual-match-show-heading")?.textContent, [...group.querySelectorAll(".manual-match-episode-line")].map(line => line.textContent)]), [
+    ["Show AShow 10", ["S01E01Pilot#200"]],
+    ["Show BShow 11", ["S01E01Pilot#201"]],
+  ]);
+  assert.equal(ui.panel("TMDB").querySelector("header")?.textContent, "TMDBCrossoverShow 11 episode", "A single-show column keeps the show in its header");
+  assert.equal(ui.panel("TMDB").querySelectorAll(".manual-match-show-group").length, 0);
+});

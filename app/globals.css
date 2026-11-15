@@ -173,6 +173,8 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .manual-match-panels .provider-badge { font-size: 10px; }
 .manual-match-episode-line { min-width: 0; padding: 6px 8px 6px 14px; display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); font-size: 14px; }
 .manual-match-panels .show-provider-matches > header + .manual-match-episode-line { border-top: 0; }
+.manual-match-panels .manual-match-show-heading { padding: 6px 14px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; border-top: 1px solid var(--line); background: rgba(255,255,255,.2); }
+.manual-match-panels .manual-match-show-heading strong { font: 600 13px var(--font-sans); overflow-wrap: anywhere; }
 .manual-match-episode-code { font: 600 13px var(--font-mono); white-space: nowrap; }
 .manual-match-episode-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .manual-match-panels .manual-match-episode-line > a { width: 28px; height: 28px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; color: #3f433d; }

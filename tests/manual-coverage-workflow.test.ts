@@ -550,3 +550,25 @@ test("upgrading discards saved ownership corrections and keeps every Manual Matc
   const repeat = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   assert.equal(repeat.revision, upgraded.revision, "The migration runs once");
 });
+
+test("a needs-review message saved before Manual Match wording reads as a Manual Match", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "coverage-wording-"));
+  const previous = process.env.SHELFCHECK_DATA_DIR;
+  process.env.SHELFCHECK_DATA_DIR = dir;
+  const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+  t.after(() => {
+    cache.__shelfcheckDatabase?.close();
+    delete cache.__shelfcheckDatabase;
+    if (previous === undefined) delete process.env.SHELFCHECK_DATA_DIR;
+    else process.env.SHELFCHECK_DATA_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const member = (provider: string, id: number) => ({ provider, id, showId: 10, show: "Example", title: "Episode " + id, season: 1, episode: 1, url: "https://example.com/" + id });
+  // Needs-review matches are skipped by health rechecks, so this text stays stored until the match is repaired.
+  const stored = { id: "broken", revision: 1, createdAt: "2026-01-01T00:00:00.000Z", health: "needs-review", healthMessage: "A provider episode record was not found. Resolve and review replacements to repair this mapping.", members: [member("TMDB", 100), member("TVDB", 200)] };
+  const db = sqlite.coverageDatabase();
+  db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run(stored.id, JSON.stringify(stored));
+  for (const m of stored.members) db.prepare("INSERT INTO shelfcheck_coverage_members(provider,episode_id,mapping_id) VALUES(?,?,?)").run(m.provider, m.id, stored.id);
+  const listed = (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings[0];
+  assert.equal(listed.healthMessage, "A provider episode record was not found. Resolve and review replacements to repair this Manual Match.");
+});

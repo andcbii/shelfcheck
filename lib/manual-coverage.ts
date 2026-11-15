@@ -23,7 +23,13 @@ function flaggedMembers(db: ReturnType<typeof coverageDatabase>, mappingId?: str
     : db.prepare("SELECT mapping_id,provider,episode_id FROM shelfcheck_coverage_members WHERE mapping_id=? AND report_missing=1").all(mappingId)) as { mapping_id: string; provider: string; episode_id: number }[];
   return new Set(rows.map(row => `${row.mapping_id}|${row.provider}:${row.episode_id}`));
 }
+// The needs-review message a health recheck saves when a provider episode record is gone.
+export const MISSING_MEMBER_MESSAGE = "A provider episode record was not found. Resolve and review replacements to repair this Manual Match.";
+// The same message as saved before it said Manual Match. Rechecks skip needs-review matches, so it
+// stays stored until the match is repaired; reading shows the current wording instead.
+const LEGACY_MISSING_MEMBER_MESSAGE = "A provider episode record was not found. Resolve and review replacements to repair this mapping.";
 function withFlags(db: ReturnType<typeof coverageDatabase>, mapping: CoverageMapping, flagged = flaggedMembers(db, mapping.id)): CoverageMapping {
+  if (mapping.healthMessage === LEGACY_MISSING_MEMBER_MESSAGE) mapping = { ...mapping, healthMessage: MISSING_MEMBER_MESSAGE };
   return { ...mapping, members: mapping.members.map(member => ({ ...member, reportMissing: flagged.has(`${mapping.id}|${memberKey(member)}`) })) };
 }
 

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { ManualMatchForm } from "@/app/components/manual-match-form";
+import { matchesHealthFilter, type HealthFilter } from "@/app/components/manual-match-card";
 import { ManualMatchList } from "@/app/components/manual-match-list";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
@@ -47,7 +48,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [message, setMessage] = useState("");
   const acceptedRevision = useRef(0);
   const [pending, setPending] = useState(false);
-  const [healthFilter, setHealthFilter] = useState("all");
+  const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [selected, setSelected] = useState<string[]>([]);
@@ -73,9 +74,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   function acceptMappings(next: CoverageMapping[]) {
     setMappings(next);
-    const matchingCount = next.filter(mapping => healthFilter === "all" || (mapping.health || "healthy") === healthFilter).length;
+    const matchingCount = next.filter(mapping => matchesHealthFilter(mapping, healthFilter)).length;
     setPage(current => Math.min(current, Math.max(1, Math.ceil(matchingCount / pageSize))));
-    setSelected(current => current.filter(id => next.some(mapping => mapping.id === id && (healthFilter === "all" || (mapping.health || "healthy") === healthFilter))));
+    setSelected(current => current.filter(id => next.some(mapping => mapping.id === id && matchesHealthFilter(mapping, healthFilter))));
     setConfirmation(null);
   }
   function openMapping(mapping: CoverageMapping) {
@@ -268,18 +269,18 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
  {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
  {report && <button className="primary" disabled={locked} onClick={createMapping}>Add Manual Match</button>}
- {formOpen && <ManualMatchForm editing={editing} creatable={!episodeScope} locked={locked} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
-   draftMembers={draftMembers} draftState={draftState} draftFlags={draftFlags} onToggleFlag={toggleFlag} reviewed={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty} onCancel={cancelDraft} onSave={saveDraft}/>}
+ {formOpen && <ManualMatchForm editing={editing} creatable={!episodeScope} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
+   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked, onToggle: toggleFlag }} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty} onCancel={cancelDraft} onSave={saveDraft}/>}
  {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
- <ManualMatchList mappings={scopedMappings} report={report} controls={!episodeScope} locked={locked} pending={pending}
+ <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    healthFilter={healthFilter} onHealthFilterChange={filter => {
     setHealthFilter(filter);
     setPage(1);
     changeSelection([]);
     setMessage("Selection cleared because the health filter changed.");
   }}
-   page={page} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1); }}
-   selected={selected} onSelectionChange={changeSelection} confirmation={confirmation} onConfirmationChange={setConfirmation}
+   paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
+   selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
    onDeleteSelected={ids => void removeSelected(ids)} onEdit={openMapping} onDelete={id => void remove(id)}/>
  </section>;
 }

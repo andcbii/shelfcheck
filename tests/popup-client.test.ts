@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, createElement } from "react";
+import { act, createElement, type Attributes, type ComponentProps } from "react";
 import { Popup, type PopupCloseReason } from "../app/components/popup";
 import { mountDom } from "./dom-environment";
+
+// Popup requires children; createElement receives them as arguments after the props.
+type PopupProps = Attributes & ComponentProps<typeof Popup>;
 
 async function mount(t: test.TestContext) {
   const { container, root } = mountDom(t);
@@ -10,8 +13,8 @@ async function mount(t: test.TestContext) {
   const requestsFrom: Record<string, PopupCloseReason[]> = {};
   // The owner decides whether a close request closes a popup; here it never does,
   // so every trigger can be observed reaching the one close hook. Later titles open on top.
-  const popup = (title: string) => createElement(Popup, { key: title, title, className: "manual-coverage-manager", onRequestClose(reason: PopupCloseReason) { requests.push(reason); (requestsFrom[title] ||= []).push(reason); },
-    children: [createElement("p", { key: "content" }, "Popup content"), createElement("button", { key: "action" }, `${title} action`)] });
+  const popup = (title: string) => createElement(Popup, { key: title, title, className: "manual-coverage-manager", onRequestClose(reason: PopupCloseReason) { requests.push(reason); (requestsFrom[title] ||= []).push(reason); } } as PopupProps,
+    createElement("p", null, "Popup content"), createElement("button", null, `${title} action`));
   const render = (titles: string[] = ["Matching Episodes"]) => root.render(createElement("div", null, createElement("button", null, "Opener"), ...titles.map(popup)));
   await act(async () => render());
   const escape = () => act(async () => { (document.activeElement || document).dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });

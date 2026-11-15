@@ -1,25 +1,23 @@
 "use client";
 import { useId } from "react";
-import { episodeName, ManualMatchPanels } from "@/app/components/manual-match-panels";
+import { episodeName, ManualMatchPanels, type ReportMissingDraft } from "@/app/components/manual-match-panels";
 import { INCOMPLETE_LABEL, memberKey, missingPartsOf, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 
 type Props = {
   editing: CoverageMapping | null;
   // Offers starting a new Manual Match from the form.
   creatable: boolean;
-  locked: boolean;
   urls: string[];
-  // Edits the episode inputs; any change discards the reviewed preview.
+  // Edits the episode inputs; any change discards the preview.
   onUrlsChange: (update: (urls: string[]) => string[]) => void;
   onResolve: () => void;
   onCreate: () => void;
   // The reviewed episodes being edited, with null before the first review.
   draftMembers: CoverageMember[] | null;
-  // The draft as it would be saved: explicit Report Missing flags only.
-  draftState: CoverageMember[];
-  draftFlags: string[];
-  onToggleFlag: (member: CoverageMember, checked: boolean) => void;
-  reviewed: boolean;
+  // The draft as it would be saved (explicit Report Missing flags only). Its lock applies to the whole form.
+  draft: ReportMissingDraft;
+  // A resolved preview of changed episodes is waiting to be saved.
+  hasPreview: boolean;
   selectionProblem?: string | null;
   flagsChanged: boolean;
   dirty: boolean;
@@ -28,14 +26,15 @@ type Props = {
 };
 
 // The Manual Match editor form: episode inputs, Resolve and review, Report Missing and Save.
-export function ManualMatchForm({ editing, creatable, locked, urls, onUrlsChange, onResolve, onCreate, draftMembers, draftState, draftFlags, onToggleFlag, reviewed, selectionProblem, flagsChanged, dirty, onCancel, onSave }: Props) {
+export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onResolve, onCreate, draftMembers, draft, hasPreview, selectionProblem, flagsChanged, dirty, onCancel, onSave }: Props) {
+  const { members: draftState, locked } = draft;
   const uid = useId();
   const draftFlagged = draftState.filter(member => member.reportMissing);
   const draftIncomplete = draftState.filter(member => !member.reportMissing && missingPartsOf(draftState, member).length);
   function draftEditor(members: CoverageMember[]) {
-    return <section aria-label={reviewed ? "Resolved episode preview" : "Manual Match episodes"}>
+    return <section aria-label={hasPreview ? "Resolved episode preview" : "Manual Match episodes"}>
       <p className="report-missing-explanation"><strong>Report Missing</strong> keeps an episode missing in your Plex results when your local copy lacks its content, even if matching would mark it collected. Reporting a split episode missing also keeps its combined episode missing. When both sides list several episodes, report at least one episode missing on each side, or none. It is a local Shelfcheck override: Shelfcheck sends no report to Plex, TMDB, or TVDB.</p>
-      <ManualMatchPanels members={members} scope="draft" draft={{ members: draftState, flags: draftFlags, locked, onToggle: onToggleFlag }}/>
+      <ManualMatchPanels members={members} idPrefix="draft" draft={draft}/>
       {selectionProblem
         ? <p className="report-missing-validation" id={`${uid}-report-missing-validation`} aria-live="polite">{selectionProblem}</p>
         : <p className="report-missing-impact" aria-live="polite"><strong>After saving</strong> {draftFlagged.length
@@ -45,7 +44,7 @@ export function ManualMatchForm({ editing, creatable, locked, urls, onUrlsChange
         : "every episode follows normal matching."}</p>}
       <p className="manual-match-draft-state">{dirty ? "Unsaved changes" : "No unsaved changes"}</p>
       <button disabled={locked || !dirty} onClick={onCancel}>Cancel</button>
-      <button disabled={locked || (!reviewed && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>
+      <button disabled={locked || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>
     </section>;
   }
   return <section className="manual-match-form" aria-label="Manual Match editor">

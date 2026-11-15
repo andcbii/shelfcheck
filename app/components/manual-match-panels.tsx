@@ -2,7 +2,7 @@
 import { useId } from "react";
 import { INCOMPLETE_LABEL, memberKey, missingPartsExplanation, missingPartsOf, type CoverageMember } from "@/lib/manual-coverage-model";
 
-export const episodeCode = (member: CoverageMember) => `S${String(member.season).padStart(2, "0")}E${String(member.episode).padStart(2, "0")}`;
+const episodeCode = (member: CoverageMember) => `S${String(member.season).padStart(2, "0")}E${String(member.episode).padStart(2, "0")}`;
 export const episodeName = (member: CoverageMember) => `${member.provider} ${member.title}`;
 
 // A combined episode is incomplete while any of its split episodes is reported missing.
@@ -21,17 +21,18 @@ export type ReportMissingDraft = {
   locked: boolean;
   onToggle: (member: CoverageMember, checked: boolean) => void;
 };
-type Props = { members: CoverageMember[]; scope: string; draft?: ReportMissingDraft };
+// idPrefix keeps element ids unique between several panel sets on one page.
+type Props = { members: CoverageMember[]; idPrefix: string; draft?: ReportMissingDraft };
 
 // One presentation for saved Manual Match cards, the Matching Episodes popup and the editor form:
 // a panel per provider, preserving each provider's identities, numbering and links.
-export function ManualMatchPanels({ members, scope, draft }: Props) {
+export function ManualMatchPanels({ members, idPrefix, draft }: Props) {
   const uid = useId();
   return <div className="manual-match-panels">{(["TMDB", "TVDB"] as const).map(provider => {
     const side = members.filter(member => member.provider === provider);
     return <section className="show-provider-matches" key={provider}><header><span className={`provider-badge ${provider.toLowerCase()}`}>{provider}</span><strong>{side.length} {side.length === 1 ? "episode" : "episodes"}</strong></header>
       {side.map(member => {
-        const contextId = `${uid}-${scope}-${memberKey(member)}`;
+        const contextId = `${uid}-${idPrefix}-${memberKey(member)}`;
         return <div className="provider-record manual-match-record" key={memberKey(member)}>
           <div id={contextId}><strong>{member.provider} / {member.show}</strong><p>{member.title} / {episodeCode(member)} / Episode ID {member.id}</p><p>Show ID {member.showId}</p></div>
           <a href={member.url} target="_blank" rel="noreferrer">{member.url}</a>

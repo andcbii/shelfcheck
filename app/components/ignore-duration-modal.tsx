@@ -1,40 +1,12 @@
 "use client";
 
-import { useEffect, useRef } from "react";
 import type { IgnoreDuration } from "@/lib/ignored-shows";
 import { IgnoreDurationOptions } from "@/app/components/ignore-duration-controls";
+import { useDialogFocus } from "@/app/components/dialog-focus";
 
+// Ignore dialogs close on Esc only while focus is inside them.
 export function useIgnoreDialogFocus(onClose: () => void) {
-  const dialogRef = useRef<HTMLElement>(null);
-  const onCloseRef = useRef(onClose);
-  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialog.querySelector<HTMLElement>("button, select, input")?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        onCloseRef.current();
-      }
-      if (event.key !== "Tab") return;
-      const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]'));
-      const first = controls[0];
-      const last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    };
-    dialog.addEventListener("keydown", onKeyDown);
-    return () => {
-      dialog.removeEventListener("keydown", onKeyDown);
-      if (previousFocus?.isConnected) previousFocus.focus();
-    };
-  }, []);
-
-  return dialogRef;
+  return useDialogFocus(onClose);
 }
 
 type Props = {

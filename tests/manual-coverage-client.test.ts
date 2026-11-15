@@ -229,7 +229,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   assert.equal(container.querySelectorAll("article").length,10);
   assert.equal(container.querySelector('[aria-label="Selected Manual Matches"]'),null,"No bulk bar before a card is ticked");
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  await click("Select all 12 Manual Matches");
+  await click("Select all 12 matching Manual Matches");
   assert.match(container.textContent||"",/12 selected/);
   await next();
   assert.equal(container.querySelectorAll("article").length,2);
@@ -253,7 +253,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
   assert.match(container.textContent||"",/Selection cleared/);
   await changeFilter("needs-review");
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  await click("Select all 9 Manual Matches");
+  await click("Select all 9 matching Manual Matches");
   await click("Delete 9 selected matches");
   fail=true;
   await click("Delete 9 matches");

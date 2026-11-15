@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
+import type { Root } from "react-dom/client";
 import { ManualMatchEditor } from "../app/components/manual-match-editor";
 import { ManualCoverageManager } from "../app/components/manual-coverage-manager";
+import { mountDom } from "./dom-environment";
 
 // GLOSSARY.md: a saved match is a Manual Match, never a "mapping".
 const tmdb = {provider:"TMDB",id:100,showId:10,show:"Animaniacs",title:"Combined",season:3,episode:18,url:"https://www.themoviedb.org/tv/10/season/3/episode/18"};
@@ -15,20 +15,13 @@ const saved = [
 ];
 
 type Reply = (method: string, body: Record<string, unknown> | null) => Promise<Response> | Response;
-async function mount(t: test.TestContext, element: (root: ReturnType<typeof createRoot>) => void, reply: Reply, mappings: unknown[]) {
-  const browser = new Window({url:"http://localhost/reports/manual-matches"});
-  const previous = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key,value] of Object.entries({window:browser,document:browser.document,HTMLElement:browser.HTMLElement,IS_REACT_ACT_ENVIRONMENT:true,fetch:async(input: unknown, init?: RequestInit)=>{
+async function mount(t: test.TestContext, element: (root: Root) => void, reply: Reply, mappings: unknown[]) {
+  const { container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
     if (String(input) === "/api/plex/scan") return Response.json({scan:{status:"completed"}});
     const method = init?.method || "GET";
     if (method === "GET") return Response.json({mappings,revision:1,pending:0});
     return reply(method, init?.body ? JSON.parse(String(init.body)) : null);
-  }})) {
-    previous.set(key,Object.getOwnPropertyDescriptor(globalThis,key));
-    Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});
-  }
-  const container = document.createElement("div"); const root = createRoot(container);
-  t.after(async()=>{await act(async()=>root.unmount()); await browser.happyDOM.close(); for(const [key,value] of previous) {if(value)Object.defineProperty(globalThis,key,value);else Reflect.deleteProperty(globalThis,key);}});
+  } });
   await act(async()=>element(root));
   const button = (label: string) => [...container.querySelectorAll("button")].find(item => item.textContent === label);
   const click = async (label: string) => { const target = button(label); assert.ok(target, label); await act(async()=>target.click()); };
@@ -39,7 +32,7 @@ async function mount(t: test.TestContext, element: (root: ReturnType<typeof crea
       assert.doesNotMatch(element.getAttribute(name) || "", /mapping/i, `${state}: ${name} on <${element.tagName.toLowerCase()}>`);
     }
   };
-  return { container, browser, button, click, sayNoMapping };
+  return { container, button, click, sayNoMapping };
 }
 
 test("the Manual Matches page renders no mapping text when empty", async t => {
@@ -63,10 +56,10 @@ test("the Manual Matches page says Manual Match through its list, selection, edi
   const tick = ui.container.querySelector<HTMLInputElement>('article input[type="checkbox"]');
   assert.equal(tick?.getAttribute("aria-label"), "Select Manual Match first");
   await act(async()=>tick!.click());
-  assert.ok(ui.button("Select all 2 Manual Matches"));
+  assert.ok(ui.button("Select all 2 matching Manual Matches"));
   ui.sayNoMapping("Selection");
 
-  await ui.click("Select all 2 Manual Matches");
+  await ui.click("Select all 2 matching Manual Matches");
   await ui.click("Delete 2 selected matches");
   await ui.click("Delete 2 matches");
   assert.match(ui.container.textContent || "", /Deleted 1 Manual Match\. 1 selected Manual Match was already removed\./);

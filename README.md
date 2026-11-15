@@ -235,6 +235,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 
 Report problems by
 [opening a GitHub issue](https://github.com/andcbii/shelfcheck/issues).
+When reporting a bug, include your Shelfcheck version and relevant diagnostic
+logs. Remove provider tokens and other credentials from logs before sharing them.
 Report security vulnerabilities as described in the
 [security policy](SECURITY.md).
 

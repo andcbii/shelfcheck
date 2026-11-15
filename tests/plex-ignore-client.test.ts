@@ -234,7 +234,7 @@ test("manual mapping deletion cannot be overwritten by an older initial Plex rep
   }, true);
   await click("S01E02");
   await click("Matching Episodes");
-  await click("Delete mapping");
+  await click("Delete");
   await act(async () => { initialReport.resolve(json({ ...completed, coverage: { revision: 1, pending: 0 } })); });
   await click("Close Matching Episodes");
   assert.equal(container.querySelector(".show-name-button")?.textContent, "Fresh coverage revision");
@@ -381,7 +381,7 @@ test("a cached episode mapping mutation refreshes results once and leaves New Pl
     }
     return defaults(input,init);
   });
-  await click("S01E02");await click("Matching Episodes");await click("Delete mapping");await click("Close Matching Episodes");
+  await click("S01E02");await click("Matching Episodes");await click("Delete");await click("Close Matching Episodes");
   const search=[...container.querySelectorAll("button")].find(button=>button.textContent?.includes("New Plex search"));
   assert.ok(search,"A local recheck must not put the page into scan polling");
   assert.equal(search.disabled,false);

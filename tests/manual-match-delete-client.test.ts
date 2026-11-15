@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ManualMatchEditor } from "../app/components/manual-match-editor";
+import { ManualMatchList } from "../app/components/manual-match-list";
+import type { CoverageMapping } from "../lib/manual-coverage-model";
 import { mountDom } from "./dom-environment";
 
 const member = (provider: "TMDB" | "TVDB", id: number, title: string, episode: number) => ({ provider, id, showId: provider === "TMDB" ? 107124 : 72879, show: "Animaniacs", title, season: 3, episode, url: `https://example.com/${id}` });
-const murderPals = { id: "murder-pals", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245050, "Murder Pals", 18), member("TVDB", 9623972, "Murder Pals (2)", 20), member("TVDB", 9623973, "Murder Pals (3)", 22)] };
-const hooray = { id: "hooray", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245001, "Hooray for North Hollywood", 1), member("TVDB", 9623001, "Hooray for North Hollywood (1)", 1)] };
+const murderPals: CoverageMapping = { id: "murder-pals", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245050, "Murder Pals", 18), member("TVDB", 9623972, "Murder Pals (2)", 20), member("TVDB", 9623973, "Murder Pals (3)", 22)] };
+const hooray: CoverageMapping = { id: "hooray", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245001, "Hooray for North Hollywood", 1), member("TVDB", 9623001, "Hooray for North Hollywood (1)", 1)] };
 
 // The Manual Matches page over a stubbed API that records each DELETE request.
 async function mountPage(t: test.TestContext) {
@@ -108,4 +110,38 @@ test("bulk delete confirms in the same popup style; Cancel deletes nothing and D
   assert.deepEqual(deletes, ["murder-pals,hooray"]);
   assert.equal(container.querySelectorAll("article").length, 0);
   assert.equal(bulkBar(), null);
+});
+
+// The Manual Match list alone, so a test can refresh its matches while a confirmation is open.
+function mountList(t: test.TestContext) {
+  const { container, root } = mountDom(t);
+  const render = (matches: CoverageMapping[], confirmation: string[] | null = null) => act(async () => root.render(createElement(ManualMatchList, {
+    matches, report: true, filterSelectAndPage: true, locked: false, pending: false, healthFilter: "all", onHealthFilterChange() {},
+    paging: { page: 1, pageSize: 10, onPageChange() {}, onPageSizeChange() {} },
+    selection: { selected: confirmation || [], onSelectionChange() {}, confirmation, onConfirmationChange() {} },
+    onDeleteSelected() {}, onEdit() {}, onDelete() {},
+  })));
+  // The open confirmation's text, or null; a failing assertion then prints text, not a whole DOM node.
+  const dialogText = () => container.querySelector('[role="dialog"]')?.textContent ?? null;
+  const deleteButton = (title: string) => [...container.querySelectorAll("article")].find(article => article.textContent?.includes(title))!.querySelector<HTMLButtonElement>("button:last-child")!;
+  return { render, dialogText, deleteButton };
+}
+
+test("a refresh that removes the Manual Match awaiting a single delete closes its confirmation for good", async t => {
+  const { render, dialogText, deleteButton } = mountList(t);
+  await render([murderPals, hooray]);
+  await act(async () => deleteButton("Hooray").click());
+  assert.match(dialogText() || "", /Hooray for North Hollywood/);
+  await render([murderPals]);
+  assert.equal(dialogText(), null);
+  await render([murderPals, hooray]);
+  assert.equal(dialogText(), null, "the confirmation does not come back with the Manual Match");
+});
+
+test("a refresh that removes any Manual Match awaiting a bulk delete hides the confirmation rather than shrinking it", async t => {
+  const { render, dialogText } = mountList(t);
+  await render([murderPals, hooray], ["murder-pals", "hooray"]);
+  assert.match(dialogText() || "", /Delete 2 matches\?/);
+  await render([murderPals], ["murder-pals", "hooray"]);
+  assert.equal(dialogText(), null, "no shrunken confirmation");
 });

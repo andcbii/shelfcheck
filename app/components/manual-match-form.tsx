@@ -21,6 +21,8 @@ type Props = {
   selectionProblem?: string | null;
   flagsChanged: boolean;
   dirty: boolean;
+  // A Plex scan is running: Save waits for it to end, whatever the draft's lock.
+  savePaused?: boolean;
   // The form fills the Manual Matches page's editor popup: the popup title names the edited
   // Manual Match instead of its ID and revision, the help text is short, a Review divider leads
   // into the reviewed episodes, and Cancel closes the popup, so it stays available without
@@ -33,7 +35,7 @@ type Props = {
 // The Manual Match editor form: one column of episode inputs, the reviewed episodes with
 // Report Missing, and a footer with Cancel, Resolve and review (always, so an expired preview can
 // be resolved again), and Save once there are reviewed or saved episodes.
-export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onResolve, onCreate, draftMembers, draft, hasPreview, selectionProblem, flagsChanged, dirty, inPopup = false, onCancel, onSave }: Props) {
+export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onResolve, onCreate, draftMembers, draft, hasPreview, selectionProblem, flagsChanged, dirty, savePaused = false, inPopup = false, onCancel, onSave }: Props) {
   const { members: draftState, locked } = draft;
   const uid = useId();
   const draftFlagged = draftState.filter(member => member.reportMissing);
@@ -70,7 +72,7 @@ export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onReso
    <p className="manual-match-draft-state">{!draftMembers ? "Nothing changes until you review and save." : dirty ? `${inPopup ? "● " : ""}Unsaved changes` : "No unsaved changes"}</p>
    <button disabled={locked || !(dirty || inPopup)} onClick={onCancel}>Cancel</button>
    <button className={draftMembers ? undefined : "primary"} disabled={locked || urls.some(url => !url.trim())} onClick={onResolve}>Resolve and review</button>
-   {draftMembers && <button className="primary" disabled={locked || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>}
+   {draftMembers && <button className="primary" disabled={locked || savePaused || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>}
  </footer>
  </section>;
 }

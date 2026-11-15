@@ -71,7 +71,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [savedId, setSavedId] = useState<string | null>(null);
   // Asking "Discard your changes?" before the editor popup closes on unsaved changes.
   const [discardAsked, setDiscardAsked] = useState(false);
-  const locked = busy || scanActive || scanning;
+  const scanRunning = scanActive || scanning;
+  const locked = busy || scanRunning;
+  // A scan only pauses saving in the editor popup, so its draft stays editable; elsewhere it locks the form.
+  const formLocked = report ? busy : locked;
   const defaultUrls = initialUrls.length > 1 ? initialUrls : [initialUrls[0] || "", ""];
   const savedUrls = Boolean(editing && urls.length === editing.members.length && urls.every((url, index) => url === editing.members[index].url));
   // Saved members are editable in place; changed membership needs a reviewed preview first.
@@ -143,7 +146,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setDraftFlags(current => (checked ? [...current.filter(item => item !== key), key] : current.filter(item => item !== key)).sort());
   }
   function saveDraft() {
-    if (!draftMembers || selectionProblem) return;
+    if (!draftMembers || selectionProblem || scanRunning) return;
     const reportMissing = draftFlagged.map(({ provider, id }) => ({ provider, id }));
     void action(preview
       ? { action: "save", preview: preview.preview, id: editing?.id, revision: editing?.revision, reportMissing }
@@ -203,8 +206,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     const timer = setInterval(() => void poll(), 1000);
     return () => { active = false; clearInterval(timer); };
   }, []);
-  async function action(body: unknown) {
-    if (locked) return;
+  async function action(body: { action: "resolve" | "save" } & Record<string, unknown>) {
+    // Resolving only reviews episodes, which the server allows during a scan.
+    if (busy || (scanRunning && !(report && body.action === "resolve"))) return;
     setError("");
     setBusy(true);
     try {
@@ -312,15 +316,18 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   // On the Manual Matches page the whole editor opens in a popup; Matching Episodes is already one.
   const form = <ManualMatchForm editing={editing} creatable={!episodeScope && !report} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
-   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked, onToggle: toggleFlag }} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
+   draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked: formLocked, onToggle: toggleFlag }} savePaused={scanRunning} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
    inPopup={report} onCancel={report ? requestFormClose : cancelDraft} onSave={saveDraft}/>;
   const feedback = <>{error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}</>;
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
- {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
+ {scanRunning ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}
  {report && <button className="primary" disabled={locked} onClick={createMapping}>+ Add Manual Match</button>}
  {formOpen && !report && form}
  {formOpen && report
-   ? <Popup title={editorTitle(editing)} className="manual-match-form-popup" onRequestClose={requestFormClose}>{form}{feedback}</Popup>
+   ? <Popup title={editorTitle(editing)} className="manual-match-form-popup" onRequestClose={requestFormClose}>
+     {scanRunning && <p role="status" className="manual-match-scan-paused"><strong>A Plex scan is running.</strong> Saving is paused until it finishes. Your changes are kept.</p>}
+     {form}{feedback}
+   </Popup>
    : feedback}
  {formOpen && report && discardAsked && <Popup title="Discard your changes?" className="manual-match-discard-popup" onRequestClose={() => setDiscardAsked(false)}>
    <p>{matchName(editing) ? <>You changed <strong>{matchName(editing)}</strong> but haven&apos;t saved it.</> : "You haven't saved this new Manual Match."} Closing now throws those changes away.</p>

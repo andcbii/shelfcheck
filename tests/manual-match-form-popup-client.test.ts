@@ -7,12 +7,12 @@ import { mountDom } from "./dom-environment";
 const tmdb = { provider: "TMDB", id: 4245050, showId: 107124, show: "Animaniacs", title: "Murder Pals", season: 3, episode: 18, url: "https://www.themoviedb.org/tv/107124/season/3/episode/18" };
 const tvdb = { provider: "TVDB", id: 9623973, showId: 386114, show: "Animaniacs", title: "Murder Pals (3)", season: 8, episode: 22, url: "https://thetvdb.com/series/animaniacs/episodes/9623973" };
 
-// The Manual Matches page with one saved Manual Match.
-async function mountPage(t: test.TestContext, { saveError }: { saveError?: string } = {}) {
+// The Manual Matches page with one saved Manual Match. A Plex scan runs while scan.running is set.
+async function mountPage(t: test.TestContext, { saveError, scan = { running: false } }: { saveError?: string; scan?: { running: boolean } } = {}) {
   let mapping = { id: "animaniacs-match", revision: 7, health: "healthy", members: [tmdb, tvdb] };
   const posts: Record<string, unknown>[] = [];
   const { browser, container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
-    if (String(input) === "/api/plex/scan") return Response.json({ scan: { status: "completed" } });
+    if (String(input) === "/api/plex/scan") return Response.json({ scan: { status: scan.running ? "running" : "completed" } });
     if (init?.method === "POST") {
       const body = JSON.parse(String(init.body));
       posts.push(body);
@@ -187,4 +187,34 @@ test("Esc and a click outside ask too, and Esc on the question keeps editing", a
   await act(async () => page.dialog()!.parentElement!.click());
   assert.ok(prompt(), "A click outside asks");
   assert.ok(page.dialog(), "The editor stays open behind the question");
+});
+
+// The page polls the scan status every second.
+const nextScanPoll = () => act(async () => { await new Promise(resolve => setTimeout(resolve, 1100)); });
+
+test("a scan that starts mid-edit keeps the draft and pauses saving until it ends", async t => {
+  const scan = { running: false };
+  const page = await mountPage(t, { scan });
+  await editFirstEpisode(page);
+  await page.click("Resolve and review", page.dialog()!);
+  const save = () => page.buttons(page.dialog()!).find(button => button.textContent === "Save coverage mapping")!;
+  assert.equal(save().disabled, false);
+  scan.running = true;
+  await nextScanPoll();
+  const dialog = page.dialog()!;
+  assert.ok(dialog, "The popup stays open");
+  assert.match(dialog.querySelector('[role="status"].manual-match-scan-paused')?.textContent || "", /A Plex scan is running\. Saving is paused until it finishes\. Your changes are kept\./);
+  assert.equal(save().disabled, true, "Save waits for the scan");
+  assert.equal(page.episodeInputs()[0].value, "tmdb:1 show:2 season:3 episode:4", "The draft is kept");
+  assert.equal(dialog.querySelector(".manual-match-draft-state")?.textContent, "● Unsaved changes");
+  assert.ok(page.episodeInputs().every(input => !input.disabled), "Editing carries on during the scan");
+  await page.click("Save coverage mapping", dialog);
+  assert.ok(!page.posts.some(post => post.action === "save"), "Nothing is saved during the scan");
+  scan.running = false;
+  await nextScanPoll();
+  assert.ok(!page.dialog()!.querySelector(".manual-match-scan-paused"), "The notice goes when the scan ends");
+  assert.equal(save().disabled, false, "Save works again");
+  await page.click("Save coverage mapping", page.dialog()!);
+  assert.equal(page.posts.at(-1)?.action, "save");
+  assert.ok(!page.dialog(), "The save goes through and closes the popup");
 });

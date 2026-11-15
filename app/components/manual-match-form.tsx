@@ -31,8 +31,8 @@ type Props = {
 };
 
 // The Manual Match editor form: one column of episode inputs, the reviewed episodes with
-// Report Missing, and a footer with Cancel, Resolve and review until the episodes are freshly
-// reviewed, and Save once there are reviewed or saved episodes.
+// Report Missing, and a footer with Cancel, Resolve and review (always, so an expired preview can
+// be resolved again), and Save once there are reviewed or saved episodes.
 export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onResolve, onCreate, draftMembers, draft, hasPreview, selectionProblem, flagsChanged, dirty, inPopup = false, onCancel, onSave }: Props) {
   const { members: draftState, locked } = draft;
   const uid = useId();
@@ -69,7 +69,7 @@ export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onReso
  <footer className="manual-match-form-footer">
    <p className="manual-match-draft-state">{!draftMembers ? "Nothing changes until you review and save." : dirty ? `${inPopup ? "● " : ""}Unsaved changes` : "No unsaved changes"}</p>
    <button disabled={locked || !(dirty || inPopup)} onClick={onCancel}>Cancel</button>
-   {!hasPreview && <button className={draftMembers ? undefined : "primary"} disabled={locked || urls.some(url => !url.trim())} onClick={onResolve}>Resolve and review</button>}
+   <button className={draftMembers ? undefined : "primary"} disabled={locked || urls.some(url => !url.trim())} onClick={onResolve}>Resolve and review</button>
    {draftMembers && <button className="primary" disabled={locked || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>}
  </footer>
  </section>;

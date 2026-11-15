@@ -187,8 +187,8 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 /* Manual Match deletes: the bulk bar shows only while a card is ticked; deletes confirm in a popup. */
 .manual-match-bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0; padding: 10px 14px; border: 1px solid var(--ink); background: rgba(255,255,255,.55); }
 .manual-match-bulk-bar p { flex: 1 1 220px; margin: 0; font-size: 13px; }
-.manual-match-editor button.danger, .manual-match-delete button.danger { min-height: 44px; padding: 0 16px; border: 1px solid #9b2318; background: #9b2318; color: #fff; font-weight: 600; cursor: pointer; }
-.manual-match-bulk-bar button.danger { border-color: #d1a39c; background: transparent; color: #9b2318; }
+.manual-match-delete button.danger { min-height: 44px; padding: 0 16px; border: 1px solid #9b2318; background: #9b2318; color: #fff; font-weight: 600; cursor: pointer; }
+.manual-match-bulk-bar button.danger { min-height: 44px; padding: 0 16px; border: 1px solid #d1a39c; background: transparent; color: #9b2318; font-weight: 600; cursor: pointer; }
 .manual-match-delete { width: min(480px, 100%); }
 .manual-match-delete .manual-match-delete-question { font-size: 22px; font-weight: 600; margin: 8px 0 12px; }
 .manual-match-delete ul { margin: 0 0 8px; padding-left: 18px; }

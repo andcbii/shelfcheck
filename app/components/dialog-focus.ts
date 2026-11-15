@@ -10,6 +10,9 @@ type EscapeScope =
   // Esc closes the topmost open dialog wherever focus is.
   | "document";
 
+// Every native tab stop, so Tab wraps only after the dialog's real last one (often a link).
+const TAB_STOPS = 'a[href], button:not(:disabled), select:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+
 // Moves focus into the dialog when it opens, keeps Tab within it, closes it on Esc
 // (always calling the latest onEscape) and gives focus back when it closes.
 export function useDialogFocus<T extends HTMLElement = HTMLElement>(onEscape: () => void, escapeScope: EscapeScope = "dialog") {
@@ -32,7 +35,7 @@ export function useDialogFocus<T extends HTMLElement = HTMLElement>(onEscape: ()
     };
     const keepTabInside = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;
-      const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), input:not(:disabled), [tabindex="0"]'));
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>(TAB_STOPS));
       const first = controls[0];
       const last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }

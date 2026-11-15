@@ -95,3 +95,15 @@ test("Popup takes focus when it opens, keeps Tab inside it, and gives focus back
   await act(async () => ui.render([]));
   assert.equal(ui.focused(), "Opener", "focus returns to where it was");
 });
+
+test("Popup keeps links and other native tab stops after its last button reachable before Tab wraps", async t => {
+  const { container, root } = mountDom(t);
+  await act(async () => root.render(createElement(Popup, { title: "Matching Episodes", className: "manual-coverage-manager", onRequestClose(reason: PopupCloseReason) { void reason; } } as PopupProps,
+    createElement("button", null, "Delete"), createElement("a", { href: "https://thetvdb.com/series/x/episodes/1" }, "Open on TVDB"))));
+  const tab = (from: HTMLElement) => { from.focus(); const event = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }); act(() => { from.dispatchEvent(event); }); return event.defaultPrevented; };
+  const remove = [...container.querySelectorAll("button")].find(item => item.textContent === "Delete")!;
+  const link = container.querySelector("a")!;
+  assert.equal(tab(remove), false, "Tab from Delete moves on to the link instead of wrapping");
+  assert.equal(tab(link), true, "Tab from the last link wraps");
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "Close Matching Episodes");
+});

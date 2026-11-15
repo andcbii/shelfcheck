@@ -64,7 +64,7 @@ test("Matching Episodes stays open after saving and retains the saved complete m
 for(const dismissal of ["Close","backdrop"]){
  test(`Matching Episodes ${dismissal} discards drafts without saving and inside clicks stay open`,async t=>{
   const ui=await mount(t,"tvdb:999");
-  await ui.click("Add episode");
+  await ui.click("+ Add episode");
   assert.equal(ui.container.querySelectorAll('input:not([type="checkbox"])').length,3);
   await act(async()=>ui.container.querySelector<HTMLElement>('[role="dialog"]')!.click());
   assert.equal(ui.dismissed(),0);

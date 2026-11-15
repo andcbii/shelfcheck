@@ -118,7 +118,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.ok(create, "The manager provides a standalone create action");
   await act(async () => create.click());
   assert.deepEqual([...container.querySelectorAll<HTMLInputElement>("input:not([type=checkbox])")].map(input => input.value), ["", ""]);
-  assert.match(container.textContent || "", /tmdb:100 show:10 season:1 episode:2/);
+  assert.match(container.textContent || "", /TMDB or TVDB link .* in any order/);
   assert.match(container.textContent || "", /tvdb:200/);
   assert.deepEqual(resolvedInputs, members.map(member => member.url));
   assert.equal(posted.includes("correct"), false, "the manager never submits the retired correction mutation");

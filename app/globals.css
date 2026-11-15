@@ -181,5 +181,26 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
   .manual-match-report .provider-match-row { padding: 16px 0; }
   .manual-match-report .manual-match-form { padding: 14px; }
 }
+/* The Manual Match editor popup: header and footer stay put while its body scrolls. */
+.manual-match-form-popup { width: min(760px, 100%); padding: 0 28px; }
+.manual-match-form-popup > header { position: sticky; top: 0; z-index: 1; display: flex; justify-content: space-between; align-items: start; gap: 16px; margin: 0 -28px; padding: 24px 28px 16px; background: var(--paper); }
+.manual-match-form-popup > header h2 { margin: 0; font-size: 24px; letter-spacing: -.02em; overflow-wrap: anywhere; }
+.manual-match-report .manual-match-form-popup .manual-match-form { margin: 0; padding: 0; border: 0; }
+.manual-match-editor .manual-match-help code { font: 13px var(--font-mono); }
+.manual-match-editor .manual-match-episodes { display: flex; flex-direction: column; gap: 12px; }
+.manual-match-editor .manual-match-episode { display: flex; align-items: flex-end; gap: 8px; }
+.manual-match-editor .manual-match-episode > label { flex: 1; min-width: 0; margin: 0; }
+.manual-match-editor .manual-match-episode > button { min-height: 48px; margin: 0; }
+.manual-match-editor .manual-match-add-episode { border-style: dashed; }
+.manual-match-form-popup .manual-match-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.manual-match-editor .manual-match-form-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.manual-match-editor .manual-match-form-footer .manual-match-draft-state { flex: 1; margin: 0; }
+.manual-match-editor .manual-match-form-footer button { margin: 0; }
+.manual-match-form-popup .manual-match-form-footer { position: sticky; bottom: 0; margin: 16px -28px 0; padding: 14px 28px; background: var(--paper); }
+@media (max-width: 520px) {
+  .manual-match-form-popup { padding: 0 16px; }
+  .manual-match-form-popup > header, .manual-match-form-popup .manual-match-form-footer { margin-left: -16px; margin-right: -16px; padding-left: 16px; padding-right: 16px; }
+  .manual-match-form-popup .manual-match-panels { grid-template-columns: 1fr; }
+}
 
 .plex-episode-trigger, .plex-episode-menu button { cursor: pointer; }

@@ -18,9 +18,9 @@ test("Manual Matches offers creation at zero and groups the complete Animaniacs 
   await act(async()=>root.render(createElement(ManualMatchEditor,{key:mappings.length,initialUrls:[],onChanged(){},report:true})));
   assert.equal(container.querySelector('[role="dialog"]'),null);
   assert.match(container.textContent||"",/No Manual Matches/);
-  const add = [...container.querySelectorAll("button")].find(button=>button.textContent==="Add Manual Match");
+  const add = [...container.querySelectorAll("button")].find(button=>button.textContent==="+ Add Manual Match");
   assert.ok(add); await act(async()=>add.click());
-  assert.ok(container.querySelector('[aria-label="Episode URL or provider-qualified ID 1"]'));
+  assert.equal(container.querySelector('[role="dialog"] input')?.closest("label")?.textContent,"Episode 1");
   mappings=[{id:"animaniacs",revision:1,health:"healthy",members:[{provider:"TMDB",id:300,showId:107124,show:"Animaniacs",title:"Combined",season:3,episode:18,url:"https://www.themoviedb.org/tv/107124/season/3/episode/18"},...[9623383,9623973].map((id,index)=>({provider:"TVDB",id,showId:386114,show:"Animaniacs",title:`Part ${index+1}`,season:3,episode:18+index,url:`https://thetvdb.com/dereferrer/episode/${id}`}))]}];
   const second=root;
   await act(async()=>second.render(createElement(ManualMatchEditor,{key:mappings.length,initialUrls:[],onChanged(){},report:true})));

@@ -63,8 +63,7 @@ test("each one-to-one episode has a keyboard-usable Report Missing checkbox in i
     assert.equal(box.closest("section")?.querySelector("a")?.getAttribute("href"), member.url, "Provider links are preserved");
   }
   assert.match(editor.textContent || "", /S03E18.*S08E22/, "Each provider keeps its own numbering");
-  assert.match(editor.textContent || "", /local Shelfcheck override/);
-  assert.match(editor.textContent || "", /sends no report to Plex, TMDB, or TVDB/);
+  assert.match(editor.textContent || "", /It stays in Shelfcheck and is never sent to Plex, TMDB or TVDB./);
   await ui.toggle(1);
   assert.equal(ui.checkboxes()[1].checked, true);
   assert.equal(document.activeElement, ui.checkboxes()[1]);

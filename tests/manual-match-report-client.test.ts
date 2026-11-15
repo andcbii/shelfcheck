@@ -48,7 +48,7 @@ test("Manual Match editor locks an already open form and ownership controls when
   t.after(async()=>{await act(async()=>root.unmount());await browser.happyDOM.close();for(const[key,value]of previous){if(value)Object.defineProperty(globalThis,key,value);else Reflect.deleteProperty(globalThis,key);}});
   const render=(scanActive:boolean)=>root.render(createElement(ManualMatchEditor,{initialUrls,onChanged(){},scanActive}));
   await act(async()=>render(false));
-  const health=container.querySelector<HTMLSelectElement>('[aria-label="Mapping health"]')!;
+  const health=container.querySelector<HTMLSelectElement>('[aria-label="Health"]')!;
   await act(async()=>{health.value="healthy";health.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   assert.equal(container.querySelectorAll("article").length,1,"Unset health is Healthy");
   const resolve=[...container.querySelectorAll("button")].find(button=>button.textContent==="Resolve and review")!;

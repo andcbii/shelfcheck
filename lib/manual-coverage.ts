@@ -23,7 +23,13 @@ function flaggedMembers(db: ReturnType<typeof coverageDatabase>, mappingId?: str
     : db.prepare("SELECT mapping_id,provider,episode_id FROM shelfcheck_coverage_members WHERE mapping_id=? AND report_missing=1").all(mappingId)) as { mapping_id: string; provider: string; episode_id: number }[];
   return new Set(rows.map(row => `${row.mapping_id}|${row.provider}:${row.episode_id}`));
 }
+// The needs-review message a health recheck saves when a provider episode record is gone.
+export const MISSING_MEMBER_MESSAGE = "A provider episode record was not found. Resolve and review replacements to repair this Manual Match.";
+// The same message as saved before it said Manual Match. Rechecks skip needs-review matches, so it
+// stays stored until the match is repaired; reading shows the current wording instead.
+const LEGACY_MISSING_MEMBER_MESSAGE = "A provider episode record was not found. Resolve and review replacements to repair this mapping.";
 function withFlags(db: ReturnType<typeof coverageDatabase>, mapping: CoverageMapping, flagged = flaggedMembers(db, mapping.id)): CoverageMapping {
+  if (mapping.healthMessage === LEGACY_MISSING_MEMBER_MESSAGE) mapping = { ...mapping, healthMessage: MISSING_MEMBER_MESSAGE };
   return { ...mapping, members: mapping.members.map(member => ({ ...member, reportMissing: flagged.has(`${mapping.id}|${memberKey(member)}`) })) };
 }
 
@@ -64,10 +70,10 @@ export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?
     let existing: CoverageMapping | undefined;
     if (edit) {
       const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(edit.id) as { payload: string } | undefined;
-      if (!row) throw new CoverageError("This mapping was deleted. Reload the manager.", 404, "not-found", edit.id);
+      if (!row) throw new CoverageError("This Manual Match was deleted. Reload the page.", 404, "not-found", edit.id);
       existing = withFlags(db, JSON.parse(row.payload));
       if (!Number.isInteger(edit.revision) || edit.revision !== existing!.revision)
-        throw new CoverageError("This mapping changed since you opened it. Reopen it and review the latest records.", 409, "stale-revision", edit.id);
+        throw new CoverageError("This Manual Match changed since you opened it. Reopen it and review the latest records.", 409, "stale-revision", edit.id);
     }
     const flagsOnly = !members;
     // Flags are stored on membership rows, never in the member descriptions.
@@ -84,7 +90,7 @@ export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?
         mapping_id: string;
       } | undefined;
       if (row && row.mapping_id !== existing?.id)
-        throw new CoverageError("This episode already belongs to a mapping. Open the existing mapping.", 409, "membership-conflict", row.mapping_id);
+        throw new CoverageError("This episode already belongs to a Manual Match. Open that Manual Match.", 409, "membership-conflict", row.mapping_id);
     }
     // A flag-only save reviews no provider records, so it keeps the saved health.
     const kept = flagsOnly && existing ? { ...(existing.health ? { health: existing.health } : {}), ...(existing.healthMessage ? { healthMessage: existing.healthMessage } : {}) } : {};
@@ -143,14 +149,14 @@ export function clearReportMissingFlags(members: CoverageIdentity[], alongside: 
 
 export function deleteCoverageMapping(id: string) {
   const result = deleteCoverageMappings([id]);
-  if (!result.deleted.length) throw new CoverageError("Mapping not found.", 404, "not-found");
+  if (!result.deleted.length) throw new CoverageError("Manual Match not found.", 404, "not-found");
   return id;
 }
 
 export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missing: string[] } {
   assertCoverageMutationAllowed();
   if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== "string" || !id.trim()))
-    throw new CoverageError("Select explicit mapping identities to delete.");
+    throw new CoverageError("Select the Manual Matches to delete.");
   const db = coverageDatabase();
   db.exec("BEGIN IMMEDIATE");
   try {

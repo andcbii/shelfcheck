@@ -27,11 +27,11 @@ test("after a preview expires, Resolve and review stays available and Save then 
   const click = async (label: string) => { const item = button(label); assert.ok(item, `${label} is shown`); await act(async () => item.click()); };
 
   await click("Resolve and review");
-  await click("Save coverage mapping");
+  await click("Save Manual Match");
   assert.match(container.textContent || "", /The preview expired\. Resolve the episode inputs again\./);
   assert.ok(button("Resolve and review"), "the recovery the error asks for is offered without changing the inputs");
 
   await click("Resolve and review");
-  await click("Save coverage mapping");
+  await click("Save Manual Match");
   assert.deepEqual(saved, ["preview-1", "preview-2"], "Save sends the fresh preview, not the expired one");
 });

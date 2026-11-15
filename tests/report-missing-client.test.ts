@@ -82,7 +82,7 @@ test("Report Missing stays a draft until the Manual Match is saved, with a match
   assert.equal(ui.checkboxes()[1].checked, false);
   assert.deepEqual(ui.posts, []);
   await ui.toggle(1);
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.posts, [{ action: "save", id: "match", revision: 2, reportMissing: [{ provider: "TVDB", id: 200 }] }]);
   assert.ok(ui.container.querySelector('[role="dialog"]'), "Saving keeps Matching Episodes open");
   assert.match(ui.container.querySelector("article")?.textContent || "", /Murder Pals \(3\).*Reported missing/);
@@ -90,7 +90,7 @@ test("Report Missing stays a draft until the Manual Match is saved, with a match
   assert.match(ui.editor().textContent || "", /No unsaved changes/);
   // Clearing is saved the same way.
   await ui.toggle(1);
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.last()?.reportMissing, []);
   assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing/);
 });
@@ -100,7 +100,7 @@ test("resolved mapping edits carry the drafted flags with the reviewed preview",
   await ui.toggle(0);
   await ui.click("Resolve and review");
   assert.equal(ui.checkboxes()[0].checked, true, "Resolving keeps the draft");
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.posts.at(-1), { action: "save", preview: "reviewed", id: "match", revision: 2, reportMissing: [{ provider: "TMDB", id: 100 }] });
 });
 
@@ -125,7 +125,7 @@ const repairHint = /at least one (TMDB|TVDB) episode.*or clear Report Missing on
 
 test("many-to-many drafts need an explicit Report Missing selection on both provider sides or none", async t => {
   const ui = await mount(t, { members: manyToMany });
-  const save = () => ui.button("Save coverage mapping")!;
+  const save = () => ui.button("Save Manual Match")!;
   const validation = () => ui.editor().querySelector(".report-missing-validation")?.textContent || "";
   assert.equal(ui.checkboxes().length, 4, "Every episode in either provider panel has Report Missing");
   assert.match(ui.editor().textContent || "", /After saving.*every episode follows normal matching/i, "Zero flags are valid");
@@ -147,7 +147,7 @@ test("many-to-many drafts need an explicit Report Missing selection on both prov
   assert.equal(save().disabled, false);
   assert.match(ui.editor().textContent || "", /After saving.*TMDB Other half, TVDB Murder Pals \(2\) stay missing as Reported missing in Plex results\. The other episodes follow normal matching\./);
   assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing/, "Saved rows show saved state, not the draft");
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.last(), { action: "save", id: "match", revision: 2, reportMissing: [{ provider: "TMDB", id: 101 }, { provider: "TVDB", id: 201 }] });
   const row = ui.container.querySelector("article")?.textContent || "";
   assert.equal(row.match(/Reported missing/g)?.length, 2);
@@ -158,7 +158,7 @@ test("many-to-many drafts need an explicit Report Missing selection on both prov
   await ui.toggle(1);
   assert.equal(save().disabled, true, "Clearing one side alone is one-sided");
   await ui.toggle(3);
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.last()?.reportMissing, []);
 });
 
@@ -169,9 +169,9 @@ test("a membership edit that makes the draft many-to-many must repair its retain
   await ui.click("Resolve and review");
   assert.equal(ui.checkboxes().length, 4);
   assert.match(ui.editor().querySelector(".report-missing-validation")?.textContent || "", /at least one TMDB episode/);
-  assert.equal(ui.button("Save coverage mapping")?.disabled, true, "The retained flag alone cannot be saved with the new shape");
+  assert.equal(ui.button("Save Manual Match")?.disabled, true, "The retained flag alone cannot be saved with the new shape");
   await ui.toggle(1);
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.last(), { action: "save", preview: "reviewed", id: "match", revision: 2, reportMissing: [{ provider: "TMDB", id: 101 }, { provider: "TVDB", id: 201 }] });
 });
 
@@ -182,7 +182,7 @@ test("a saved one-sided many-to-many state stays visible and the next save requi
   assert.match(ui.editor().querySelector(".report-missing-validation")?.textContent || "", repairHint);
   await ui.toggle(3);
   assert.equal(ui.editor().querySelector(".report-missing-validation"), null);
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.last()?.reportMissing, []);
 });
 
@@ -216,7 +216,7 @@ for (const [name, members, combined, part, otherPart] of [
     assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing|Incomplete/, "Saved rows show saved state, not the draft");
     assert.equal(ui.checkboxes()[wholeIndex].checked, false, "The derived status is not a checkbox selection");
 
-    await ui.click("Save coverage mapping");
+    await ui.click("Save Manual Match");
     assert.deepEqual(ui.last(), { action: "save", id: "match", revision: 2, reportMissing: [{ provider: flagged.provider, id: flagged.id }] }, "Only the explicit flag is saved");
     const row = ui.container.querySelector("article")?.textContent || "";
     assert.match(row, new RegExp(`${part.replace(/^\w+ /, "")}.*Reported missing`));
@@ -238,7 +238,7 @@ test("Report Missing controls lock when a scan starts after the dialog opens", a
   assert.equal(ui.checkboxes()[0].disabled, false);
   await act(async () => { status = "running"; await new Promise(resolve => setTimeout(resolve, 1100)); });
   assert.ok(ui.checkboxes().every(box => box.disabled));
-  assert.equal(ui.button("Save coverage mapping")?.disabled, true);
+  assert.equal(ui.button("Save Manual Match")?.disabled, true);
 });
 
 test("Manual Matches rows show saved Report Missing state in the same provider panels", async t => {
@@ -246,7 +246,7 @@ test("Manual Matches rows show saved Report Missing state in the same provider p
   const row = ui.container.querySelector("article")!;
   assert.equal(row.querySelectorAll(".manual-match-panels > section").length, 2, "One row, both provider panels");
   assert.match(row.textContent || "", /Murder Pals \(3\).*Reported missing/);
-  assert.equal(row.querySelectorAll('input[type="checkbox"]:not([aria-label^="Select mapping"])').length, 0, "Saved rows are not editors");
+  assert.equal(row.querySelectorAll('input[type="checkbox"]:not([aria-label^="Select Manual Match"])').length, 0, "Saved rows are not editors");
 });
 
 test("provider panels stack without clipping at narrow widths", () => {
@@ -261,12 +261,12 @@ test("Ignore applied while the editor is open rejects the stale draft and shows 
   assert.match(ui.container.querySelector("article")?.textContent || "", /Reported missing/);
   await ui.toggle(0);
   ui.ignore();
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.equal(ui.last()?.revision, 2, "The draft was opened at the pre-Ignore revision");
   assert.match(ui.container.textContent || "", /changed since you opened it/, "The stale draft is rejected with a clear message");
   assert.doesNotMatch(ui.container.querySelector("article")?.textContent || "", /Reported missing/, "Saved rows reload without the flag deleted by Ignore");
   assert.deepEqual(ui.checkboxes().map(box => box.checked), [false, false], "The editor reopens the refreshed saved state, discarding the stale draft");
   await ui.toggle(0);
-  await ui.click("Save coverage mapping");
+  await ui.click("Save Manual Match");
   assert.deepEqual(ui.last(), { action: "save", id: "match", revision: 3, reportMissing: [{ provider: "TMDB", id: 100 }] }, "The next save is based on the refreshed revision");
 });

@@ -57,12 +57,12 @@ export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onReso
     </section>;
   }
   return <section className="manual-match-form" aria-label="Manual Match editor">
- {editing && !inPopup && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
- {creatable && <button disabled={locked} onClick={onCreate}>Create mapping</button>}
+ {editing && !inPopup && <p>Editing Manual Match {editing.id} · Revision {editing.revision}</p>}
+ {creatable && <button disabled={locked} onClick={onCreate}>Create Manual Match</button>}
  {inPopup
    ? <p className="manual-match-help">Add each episode&apos;s TMDB or TVDB link (or an ID like <code>tvdb:200</code>) in any order. Each side needs at least one episode.</p>
    : <>
-     <p>You can create a mapping before owning either set. Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context; show IDs alone cannot identify episodes.</p>
+     <p>You can create a Manual Match before owning either set. Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context; show IDs alone cannot identify episodes.</p>
      <p>Link complete TMDB and TVDB episode sets representing the same content. Each side needs at least one episode. Review every record before saving.</p>
    </>}
  <div className="manual-match-episodes">{urls.map((url, index) => <div className="manual-match-episode" key={index}><label>Episode {index + 1}<input disabled={locked} value={url} onChange={event => onUrlsChange(current => current.map((value, i) => i === index ? event.target.value : value))}/></label>{urls.length > 2 && <button disabled={locked} onClick={() => onUrlsChange(current => current.filter((_, i) => i !== index))}>Remove episode {index + 1}</button>}</div>)}</div>
@@ -72,7 +72,7 @@ export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onReso
    <p className="manual-match-draft-state">{!draftMembers ? "Nothing changes until you review and save." : dirty ? `${inPopup ? "● " : ""}Unsaved changes` : "No unsaved changes"}</p>
    <button disabled={locked || !(dirty || inPopup)} onClick={onCancel}>Cancel</button>
    <button className={draftMembers ? undefined : "primary"} disabled={locked || urls.some(url => !url.trim())} onClick={onResolve}>Resolve and review</button>
-   {draftMembers && <button className="primary" disabled={locked || savePaused || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>}
+   {draftMembers && <button className="primary" disabled={locked || savePaused || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save Manual Match</button>}
  </footer>
  </section>;
 }

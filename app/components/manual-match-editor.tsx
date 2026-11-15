@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ManualMatchForm } from "@/app/components/manual-match-form";
 import { matchesHealthFilter, type HealthFilter } from "@/app/components/manual-match-card";
-import { ManualMatchList } from "@/app/components/manual-match-list";
+import { ManualMatchList, plural } from "@/app/components/manual-match-list";
 import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 type Props = {
@@ -107,7 +107,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setPreview(null);
     setDraftFlags(flaggedKeys(mapping.members));
     setError("");
-    setMessage("Editing mapping. Add or remove episodes, then resolve and review before saving.");
+    setMessage("Editing this Manual Match. Add or remove episodes, then resolve and review before saving.");
   }
   function createMapping() {
     setFormOpen(true);
@@ -251,7 +251,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           if (!members.some(candidate => candidate.provider === member.provider && candidate.id === member.id)) members.push(member);
         }
         setUrls(members.map(member => member.url));
-        setMessage("This episode already belongs to a mapping. Kept your resolved episodes and included its saved members. Check the complete sets, then resolve and review before saving.");
+        setMessage("This episode already belongs to a Manual Match. Kept your resolved episodes and included its saved members. Check the complete sets, then resolve and review before saving.");
         return;
       }
       if (result.preview)
@@ -269,7 +269,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         await load();
       }
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Could not save mapping.");
+      setError(error instanceof Error ? error.message : "Could not save the Manual Match.");
     } finally {
       setBusy(false);
     }
@@ -293,7 +293,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Scan Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
       await load();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Could not delete mapping.");
+      setError(error instanceof Error ? error.message : "Could not delete the Manual Match.");
     } finally {
       setBusy(false);
     }
@@ -310,10 +310,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       changeSelection([]);
       acceptedRevision.current = Math.max(acceptedRevision.current, body.revision);
       onChanged(body.revision);
-      setMessage(`Deleted ${body.deleted.length} mappings.${body.missing.length ? ` ${body.missing.length} selected mappings were already removed.` : ""} Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.`);
+      setMessage(`Deleted ${plural(body.deleted.length, "Manual Match", "Manual Matches")}.${body.missing.length ? ` ${plural(body.missing.length, "selected Manual Match was", "selected Manual Matches were")} already removed.` : ""} Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.`);
       await load();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Could not delete selected mappings.");
+      setError(error instanceof Error ? error.message : "Could not delete the selected Manual Matches.");
     } finally { setBusy(false); }
   }
   // On the Manual Matches page the whole editor opens in a popup; Matching Episodes is already one.

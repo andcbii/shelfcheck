@@ -19,6 +19,19 @@ type Props = {
   onDelete: () => void;
 };
 
+// A compact card: a header row (select, health, room for a note, Edit, Delete), the health
+// message on its own line when there is one, then the TMDB and TVDB columns.
 export function ManualMatchCard({ match, locked, selection, onEdit, onDelete }: Props) {
-  return <article className="provider-match-row">{selection && <label><input type="checkbox" aria-label={`Select mapping ${match.id}`} disabled={locked} checked={selection.selected} onChange={event => selection.onChange(event.target.checked)}/>Select mapping</label>}<p><strong>{MATCH_HEALTH_LABELS[match.health || "healthy"]}</strong>{match.healthMessage && <> · {match.healthMessage}</>}</p><ManualMatchPanels members={match.members} idPrefix={match.id}/><button disabled={locked} onClick={onEdit}>Edit mapping</button><details><summary>Coverage evidence</summary><p>Mapping {match.id} · Revision {match.revision}</p>{match.evidence?.length ? match.evidence.map(item => <p key={`${match.id}:${item.showKey}:${item.ratingKey}`}>Plex item {item.ratingKey} · {item.showKey} · Provider identities: {item.identities.map(i=>`${i.provider} ${i.id}`).join(", ")}</p>) : <p>No directly owned source items in the latest inventory.</p>}</details><button disabled={locked} onClick={onDelete}>Delete mapping</button></article>;
+  const health = match.health || "healthy";
+  return <article className="manual-match-card">
+    <header>
+      {selection && <input type="checkbox" aria-label={`Select mapping ${match.id}`} disabled={locked} checked={selection.selected} onChange={event => selection.onChange(event.target.checked)}/>}
+      <span className={`manual-match-health ${health}`}>{MATCH_HEALTH_LABELS[health]}</span>
+      <span className="manual-match-card-spacer"/>
+      <button disabled={locked} onClick={onEdit}>Edit</button>
+      <button className="danger" disabled={locked} onClick={onDelete}>Delete</button>
+    </header>
+    {match.healthMessage && <p className="manual-match-health-message">{match.healthMessage}</p>}
+    <ManualMatchPanels members={match.members} idPrefix={match.id}/>
+  </article>;
 }

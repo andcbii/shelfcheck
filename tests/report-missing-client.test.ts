@@ -51,7 +51,7 @@ async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; re
 test("each one-to-one episode has a keyboard-usable Report Missing checkbox in its provider panel", async t => {
   const ui = await mount(t);
   const editor = ui.editor();
-  assert.deepEqual([...editor.querySelectorAll(".manual-match-panels > section header")].map(header => header.textContent), ["TMDB1 episode", "TVDB1 episode"]);
+  assert.deepEqual([...editor.querySelectorAll(".manual-match-panels > section header")].map(header => header.textContent), ["TMDBAnimaniacsShow 101 episode", "TVDBAnimaniacsShow 201 episode"]);
   const boxes = ui.checkboxes();
   assert.equal(boxes.length, 2);
   for (const [index, member] of [tmdb, tvdb].entries()) {
@@ -59,7 +59,7 @@ test("each one-to-one episode has a keyboard-usable Report Missing checkbox in i
     assert.equal(box.closest("label")?.textContent, "Report Missing", "Exact visible label");
     assert.equal(box.tabIndex, 0, "Native checkboxes stay in the keyboard order");
     const context = box.getAttribute("aria-describedby")!.split(" ").map(id => ui.container.querySelector(`[id="${id}"]`)?.textContent).join(" ");
-    assert.match(context, new RegExp(`${member.provider}.*${member.title.replace(/[()]/g, "\\$&")}.*Episode ID ${member.id}`), "Each checkbox is associated with its episode");
+    assert.match(context, new RegExp(`${member.provider}.*${member.title.replace(/[()]/g, "\\$&")}.*#${member.id}`), "Each checkbox is associated with its episode");
     assert.equal(box.closest("section")?.querySelector("a")?.getAttribute("href"), member.url, "Provider links are preserved");
   }
   assert.match(editor.textContent || "", /S03E18.*S08E22/, "Each provider keeps its own numbering");
@@ -204,7 +204,7 @@ for (const [name, members, combined, part, otherPart] of [
   test(`${name}: one-to-many drafts preview the reported part and the incomplete combined episode`, async t => {
     const ui = await mount(t, { members: [...members] });
     assert.equal(ui.checkboxes().length, 3, "Every episode in either provider panel has Report Missing");
-    const boxFor = (id: number) => ui.checkboxes().findIndex(box => box.getAttribute("aria-describedby")!.split(" ").some(ref => new RegExp(`Episode ID ${id}(?!\\d)`).test(ui.container.querySelector(`[id="${ref}"]`)?.textContent || "")));
+    const boxFor = (id: number) => ui.checkboxes().findIndex(box => box.getAttribute("aria-describedby")!.split(" ").some(ref => new RegExp(`#${id}(?!\\d)`).test(ui.container.querySelector(`[id="${ref}"]`)?.textContent || "")));
     const flagged = members[2], whole = members[0];
     const partIndex = boxFor(flagged.id), wholeIndex = boxFor(whole.id);
     assert.ok(partIndex >= 0 && wholeIndex >= 0);

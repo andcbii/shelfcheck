@@ -193,6 +193,8 @@ footer{border-top:1px solid var(--line);padding:24px 5vw;display:flex;justify-co
 .manual-match-editor .manual-match-episode > button { min-height: 48px; margin: 0; }
 .manual-match-editor .manual-match-add-episode { border-style: dashed; }
 .manual-match-form-popup .manual-match-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.manual-match-form-popup .manual-match-review-divider { display: flex; align-items: center; gap: 12px; margin: 20px 0 12px; font: 600 11px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: #4f544e; }
+.manual-match-form-popup .manual-match-review-divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .manual-match-editor .manual-match-form-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .manual-match-editor .manual-match-form-footer .manual-match-draft-state { flex: 1; margin: 0; }
 .manual-match-editor .manual-match-form-footer button { margin: 0; }

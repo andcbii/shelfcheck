@@ -21,11 +21,11 @@ type Props = {
   selectionProblem?: string | null;
   flagsChanged: boolean;
   dirty: boolean;
-  // Shows the short help text of the Manual Matches page instead of the full guidance.
-  conciseHelp?: boolean;
-  // Cancel closes the editor popup, so it stays available without unsaved changes;
-  // otherwise it resets the draft.
-  cancelCloses?: boolean;
+  // The form fills the Manual Matches page's editor popup: the popup title names the edited
+  // Manual Match instead of its ID and revision, the help text is short, a Review divider leads
+  // into the reviewed episodes, and Cancel closes the popup, so it stays available without
+  // unsaved changes. Otherwise Cancel resets the draft.
+  inPopup?: boolean;
   onCancel: () => void;
   onSave: () => void;
 };
@@ -33,15 +33,16 @@ type Props = {
 // The Manual Match editor form: one column of episode inputs, the reviewed episodes with
 // Report Missing, and a footer with Cancel, Resolve and review until the episodes are freshly
 // reviewed, and Save once there are reviewed or saved episodes.
-export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onResolve, onCreate, draftMembers, draft, hasPreview, selectionProblem, flagsChanged, dirty, conciseHelp = false, cancelCloses = false, onCancel, onSave }: Props) {
+export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onResolve, onCreate, draftMembers, draft, hasPreview, selectionProblem, flagsChanged, dirty, inPopup = false, onCancel, onSave }: Props) {
   const { members: draftState, locked } = draft;
   const uid = useId();
   const draftFlagged = draftState.filter(member => member.reportMissing);
   const draftIncomplete = draftState.filter(member => !member.reportMissing && missingPartsOf(draftState, member).length);
   function draftEditor(members: CoverageMember[]) {
     return <section aria-label={hasPreview ? "Resolved episode preview" : "Manual Match episodes"}>
+      {inPopup && <p className="manual-match-review-divider">Review</p>}
       <ManualMatchPanels members={members} idPrefix="draft" draft={draft}/>
-      <p className="report-missing-explanation"><strong>Report Missing</strong> {conciseHelp
+      <p className="report-missing-explanation"><strong>Report Missing</strong> {inPopup
         ? "keeps an episode missing in your Plex results when your copy lacks its content. It stays in Shelfcheck and is never sent to Plex, TMDB or TVDB."
         : "keeps an episode missing in your Plex results when your local copy lacks its content, even if matching would mark it collected. Reporting a split episode missing also keeps its combined episode missing. When both sides list several episodes, report at least one episode missing on each side, or none. It is a local Shelfcheck override: Shelfcheck sends no report to Plex, TMDB, or TVDB."}</p>
       {selectionProblem
@@ -54,9 +55,9 @@ export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onReso
     </section>;
   }
   return <section className="manual-match-form" aria-label="Manual Match editor">
- {editing && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
+ {editing && !inPopup && <p>Editing mapping {editing.id} · Revision {editing.revision}</p>}
  {creatable && <button disabled={locked} onClick={onCreate}>Create mapping</button>}
- {conciseHelp
+ {inPopup
    ? <p className="manual-match-help">Add each episode&apos;s TMDB or TVDB link (or an ID like <code>tvdb:200</code>) in any order. Each side needs at least one episode.</p>
    : <>
      <p>You can create a mapping before owning either set. Enter episode URLs, tvdb:200, or tmdb:100 show:10 season:1 episode:2. TMDB IDs require show, season and episode context; show IDs alone cannot identify episodes.</p>
@@ -66,8 +67,8 @@ export function ManualMatchForm({ editing, creatable, urls, onUrlsChange, onReso
  <button className="manual-match-add-episode" disabled={locked} onClick={() => onUrlsChange(current => [...current, ""])}>+ Add episode</button>
  {draftMembers && draftEditor(draftMembers)}
  <footer className="manual-match-form-footer">
-   <p className="manual-match-draft-state">{!draftMembers ? "Nothing changes until you review and save." : dirty ? "Unsaved changes" : "No unsaved changes"}</p>
-   <button disabled={locked || !(dirty || cancelCloses)} onClick={onCancel}>Cancel</button>
+   <p className="manual-match-draft-state">{!draftMembers ? "Nothing changes until you review and save." : dirty ? `${inPopup ? "● " : ""}Unsaved changes` : "No unsaved changes"}</p>
+   <button disabled={locked || !(dirty || inPopup)} onClick={onCancel}>Cancel</button>
    {!hasPreview && <button className={draftMembers ? undefined : "primary"} disabled={locked || urls.some(url => !url.trim())} onClick={onResolve}>Resolve and review</button>}
    {draftMembers && <button className="primary" disabled={locked || (!hasPreview && !flagsChanged) || Boolean(selectionProblem)} aria-describedby={selectionProblem ? `${uid}-report-missing-validation` : undefined} onClick={onSave}>Save coverage mapping</button>}
  </footer>

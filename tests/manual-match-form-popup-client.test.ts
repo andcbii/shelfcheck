@@ -73,7 +73,7 @@ test("Edit opens the saved Manual Match in a popup titled by show and episode, w
   assert.equal(dialog.querySelectorAll('.manual-match-panels input[type="checkbox"]').length, 2);
 });
 
-test("resolving inside the popup reviews the episodes side by side, and Save keeps today's behaviour", async t => {
+test("resolving inside the popup reviews the episodes side by side, and the popup stays open after saving", async t => {
   const page = await mountPage(t);
   await page.click("+ Add Manual Match");
   const [first, second] = page.episodeInputs();
@@ -87,6 +87,8 @@ test("resolving inside the popup reviews the episodes side by side, and Save kee
   const panels = [...dialog.querySelectorAll(".manual-match-panels > section")];
   assert.deepEqual(panels.map(panel => panel.querySelector(".provider-badge")?.textContent), ["TMDB", "TVDB"]);
   assert.ok(panels.every(panel => panel.querySelectorAll('input[type="checkbox"]').length === 1), "Each resolved episode has a Report missing checkbox");
+  assert.equal(dialog.querySelector(".manual-match-review-divider")?.textContent, "Review", "A Review divider leads into the resolved episodes");
+  assert.equal(dialog.querySelector(".manual-match-draft-state")?.textContent, "● Unsaved changes");
   assert.match(dialog.textContent || "", /Report Missing keeps an episode missing in your Plex results when your copy lacks its content\. It stays in Shelfcheck and is never sent to Plex, TMDB or TVDB\./);
   await page.click("Save coverage mapping", dialog);
   assert.equal(page.posts.at(-1)?.action, "save");

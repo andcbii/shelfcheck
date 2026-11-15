@@ -285,11 +285,9 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     } finally { setBusy(false); }
   }
   // On the Manual Matches page the whole editor opens in a popup; Matching Episodes is already one.
-  // The popup title names the edited Manual Match, so the form shows no ID or revision there,
-  // and the popup uses the page's short help text.
-  const form = <ManualMatchForm editing={report ? null : editing} creatable={!episodeScope && !report} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
+  const form = <ManualMatchForm editing={editing} creatable={!episodeScope && !report} urls={urls} onUrlsChange={update => { setUrls(update); setPreview(null); }} onResolve={() => void action({ action: "resolve", urls, id: editing?.id })} onCreate={createMapping}
    draftMembers={draftMembers} draft={{ members: draftState, flags: draftFlags, locked, onToggle: toggleFlag }} hasPreview={Boolean(preview)} selectionProblem={selectionProblem} flagsChanged={flagsChanged} dirty={dirty}
-   conciseHelp={report} cancelCloses={report} onCancel={report ? requestFormClose : cancelDraft} onSave={saveDraft}/>;
+   inPopup={report} onCancel={report ? requestFormClose : cancelDraft} onSave={saveDraft}/>;
   const feedback = <>{error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}</>;
   return <section className={`manual-match-editor ${report ? "manual-match-report" : ""}`}>
  {scanning || scanActive ? <p role="status">A Plex scan is running. Wait for it to finish before changing Manual Matches.</p> : null}

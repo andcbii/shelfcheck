@@ -50,6 +50,22 @@ test("deleting one Manual Match asks first, and Cancel deletes nothing", async t
   assert.ok(card("Murder Pals"));
 });
 
+for (const [way, dismiss] of [
+  ["Close", (dialog: HTMLElement) => act(async () => dialog.querySelector<HTMLButtonElement>('button[aria-label="Close Delete Manual Match"]')!.click())],
+  ["Esc", () => act(async () => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); })],
+  ["a click outside", (dialog: HTMLElement) => act(async () => (dialog.parentElement as HTMLElement).click())],
+] as const) {
+  test(`dismissing the single delete confirmation with ${way} deletes nothing`, async t => {
+    const { deletes, click, dialog, card } = await mountPage(t);
+    await click(card("Murder Pals"), /^Delete/);
+    assert.equal(dialog()?.getAttribute("aria-label"), "Delete Manual Match");
+    await dismiss(dialog()!);
+    assert.equal(dialog(), null);
+    assert.deepEqual(deletes, []);
+    assert.ok(card("Murder Pals"));
+  });
+}
+
 test("confirming the single delete removes only that Manual Match", async t => {
   const { container, deletes, click, dialog, card } = await mountPage(t);
   await click(card("Hooray"), /^Delete/);

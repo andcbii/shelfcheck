@@ -236,7 +236,7 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release.
 Report problems by
 [opening a GitHub issue](https://github.com/andcbii/shelfcheck/issues).
 Report security vulnerabilities as described in the
-[security policy](SECURITY_POLICY.md).
+[security policy](SECURITY.md).
 
 ## License
 

@@ -28,7 +28,7 @@ export async function POST(request: Request) {
       return Response.json({ ...resolved, ...(existingMapping ? { existingMapping } : {}) }, { headers });
     }
     if (body.id !== undefined && (typeof body.id !== "string" || !body.id))
-      throw new CoverageError("Supply the mapping identity to edit.");
+      throw new CoverageError("Supply the Manual Match ID to edit.");
     if (body.preview === undefined && body.id !== undefined && body.reportMissing !== undefined) {
       // Changing only Report Missing keeps the saved members, so it needs no provider review.
       const impact = captureCoverageImpact([body.id]);
@@ -60,7 +60,7 @@ export async function DELETE(request: Request) {
       deleteCoverageMapping(id);
       result = { deleted: [id], missing: [] };
     } else {
-      const body = await request.json().catch(() => { throw new CoverageError("Supply selected mapping identities as JSON."); });
+      const body = await request.json().catch(() => { throw new CoverageError("Supply the selected Manual Match IDs as JSON."); });
       impact=captureCoverageImpact(Array.isArray(body?.ids) ? body.ids : []);
       result = deleteCoverageMappings(body?.ids);
     }

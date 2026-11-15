@@ -46,6 +46,6 @@ export async function recheckCoverageHealth(client: PlexProviderClient, config: 
       return state;
     }));
     const health = states.includes("needs-review") ? "needs-review" : states.includes("pending") ? "pending" : "healthy";
-    updateCoverageHealth(mapping,health,health === "needs-review" ? "A provider episode record was not found. Resolve and review replacements to repair this mapping." : health === "pending" ? "Provider identity could not be verified. Coverage is pending; retry the scan or review the episode context." : undefined);
+    updateCoverageHealth(mapping,health,health === "needs-review" ? "A provider episode record was not found. Resolve and review replacements to repair this Manual Match." : health === "pending" ? "Provider identity could not be verified. Coverage is pending; retry the scan or review the episode context." : undefined);
   }
 }

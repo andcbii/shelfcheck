@@ -15,7 +15,7 @@ export async function resolveCoverageUrls(urls: unknown) {
     return await resolveCoverageInputs(urls);
   } catch (error) {
     if (error instanceof CoverageError) throw error;
-    throw new CoverageError(`${error instanceof Error ? error.message : "Provider resolution failed."} Check the episode URL or ID and provider credentials, then retry. No mapping was saved.`, 503, "provider-unavailable");
+    throw new CoverageError(`${error instanceof Error ? error.message : "Provider resolution failed."} Check the episode URL or ID and provider credentials, then retry. No Manual Match was saved.`, 503, "provider-unavailable");
   }
 }
 async function resolveCoverageInputs(urls: unknown) {

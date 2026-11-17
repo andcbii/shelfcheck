@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fixture, missingTmdb, day, plexScan } from "./catalogue-override-harness";
+import { catalogues, fixture, missingTmdb, day, plexScan } from "./catalogue-override-harness";
 
 test("saving an override immediately rechecks the show from its saved catalogue, without HTTP", async t => {
   const f = await fixture(t);
@@ -195,4 +195,61 @@ test("saving an override again keeps the series' earlier unavailable provenance"
   assert.equal(current.state,"saved-unavailable","B is still unavailable; its saved catalogue is in use");
   assert.equal(current.preferredFailedAt,day(25));
   assert.equal(current.preferredDownloadedAt,day(2));
+});
+
+test("changing the TVDB choice of a show without Plex TMDB IDs re-resolves its derived TMDB series offline", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = []; f.plex.tvdb = [1,3];
+  f.find[1] = 10; f.find[3] = 11;
+  let show = await f.run();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1]);
+  await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  f.at(day(2)); show = await f.run();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[11,3]);
+
+  f.requests.length = 0;
+  const cleared = await f.select({identity:f.identity,provider:"tvdb",seriesId:null});
+  assert.equal(cleared.status,200,JSON.stringify(cleared.body));
+  assert.deepEqual(f.requests,[],"no scan and no provider request");
+  show = await f.show();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1],"the TMDB series TVDB 1 resolves to, as a live scan would compare");
+  assert.deepEqual(missingTmdb(show),[1002]);
+  assert.equal(f.selection().tmdb.current?.usingId,10);
+  assert.equal(f.selection().tmdb.current?.derivedFrom,1);
+  assert.ok(!(await f.issues()).some(issue=>issue.id === `comparison-inputs:${f.identity}`));
+
+  const saved = await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  assert.equal(saved.status,200,JSON.stringify(saved.body));
+  assert.deepEqual(f.requests,[]);
+  show = await f.show();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[11,3]);
+  assert.deepEqual(missingTmdb(show),[1102,1103]);
+  assert.equal(f.selection().tmdb.current?.usingId,11);
+  assert.equal(f.selection().tmdb.current?.derivedFrom,3);
+});
+
+test("a TVDB choice without saved TMDB association evidence keeps last-good results pending instead of a mixed pair", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = []; f.plex.tvdb = [1,3];
+  f.find[1] = 10; f.find[3] = 11;
+  await f.run();
+  await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  f.at(day(2)); await f.run();
+  // The saved TMDB answer for TVDB 1 is gone, so its TMDB series cannot be resolved offline.
+  const saved = catalogues.readPlexInputs().comparisons[f.identity]!;
+  const association = Object.keys(saved.relationships).find(key => key.includes("/find/1?"));
+  assert.ok(association,"the scan saved TVDB 1's TMDB association for an offline switch");
+  delete saved.relationships[association];
+  catalogues.savePlexComparison(f.identity,saved);
+
+  f.requests.length = 0;
+  const cleared = await f.select({identity:f.identity,provider:"tvdb",seriesId:null});
+  assert.equal(cleared.status,200,JSON.stringify(cleared.body));
+  assert.deepEqual(f.requests,[]);
+  const show = await f.show();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[11,3],"last-good results are kept");
+  assert.match((await f.issues()).find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.cause || "",/association for TVDB series 1 is not saved/);
+  assert.equal(f.selection().tmdb.current?.usingId,11);
+  assert.equal(f.selection().tmdb.current?.derivedFrom,3);
+  assert.equal(f.selection().tvdb.current?.usingId,3);
 });

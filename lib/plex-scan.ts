@@ -1574,7 +1574,8 @@ class PendingSavedComparison extends Error {}
  * The saved inputs an offline recheck compares for one show. Each provider with several Plex IDs
  * compares its preferred series' saved catalogue while within 60 days of `now`, else (once a scan has
  * tried that preference) the lowest remaining candidate with such a catalogue. A TVDB series derived
- * from TMDB follows the TMDB catalogue compared. `uses` are the catalogue uses to publish, `null`
+ * from TMDB follows the TMDB catalogue compared, and a TMDB series resolved from TVDB follows the TVDB series
+ * compared, from TMDB's saved association for it. `uses` are the catalogue uses to publish, `null`
  * clearing one. Throws `PendingSavedComparison` when the saved catalogues cannot support it.
  */
 function assembleSavedComparison(identity: string, saved: SavedPlexComparison, inputs: PlexGeneratedInputs, selection: ShowCatalogueSelection | undefined, now: string) {
@@ -1601,6 +1602,14 @@ function assembleSavedComparison(identity: string, saved: SavedPlexComparison, i
     // Never keep a TVDB ID derived from a TMDB catalogue no longer compared.
     input.tvdbId=savedCatalogue("tmdb",input.tmdbId)?.show.external_ids?.tvdb_id || undefined;
     uses.tvdb=input.tvdbId ? {usingId:input.tvdbId,state:"derived",derivedFrom:input.tmdbId,...(savedCatalogue("tvdb",input.tvdbId) ? {usingDownloadedAt:savedCatalogue("tvdb",input.tvdbId)!.downloadedAt} : {})} : null;
+  }
+  if (selection && !selection.tmdb.candidates.length && input.tvdbId !== saved.tvdbId) {
+    // Never keep a TMDB ID resolved from a TVDB series no longer compared: resolve it as a scan
+    // would, from TMDB's saved answer for the TVDB series now compared.
+    const association=input.tvdbId ? saved.relationships[relationshipKey("TMDB",`${TMDB}/find/${input.tvdbId}?external_source=tvdb_id`)] : undefined;
+    if (input.tvdbId && !association) throw new PendingSavedComparison(`TMDB's association for TVDB series ${input.tvdbId} is not saved, so its TMDB series could not be resolved from saved inputs. Last-good results were kept until the next Plex scan.`);
+    input.tmdbId=(association?.value as {tv_results?: {id?: number}[]} | undefined)?.tv_results?.[0]?.id || undefined;
+    uses.tmdb=input.tmdbId ? {usingId:input.tmdbId,state:"derived",derivedFrom:input.tvdbId,...(savedCatalogue("tmdb",input.tmdbId) ? {usingDownloadedAt:savedCatalogue("tmdb",input.tmdbId)!.downloadedAt} : {})} : null;
   }
   for (const provider of PROVIDERS) {
     const name=PROVIDER_NAME[provider], id=provider === "tmdb" ? input.tmdbId : input.tvdbId;

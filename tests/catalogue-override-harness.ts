@@ -13,6 +13,7 @@ const config = await import("../lib/server-config");
 export const selections = await import("../lib/catalogue-selection-store");
 export const reportData = await import("../app/reports/report-data");
 export const plexScan = await import("../lib/plex-scan");
+export const catalogues = await import("../lib/plex-catalogues");
 hook.deregister();
 
 export const DAY = 86400_000;
@@ -41,6 +42,8 @@ export async function fixture(t: TestContext) {
   let second: {tmdb:number;tvdb:number} | undefined;
   const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
   const tvdb: Record<number,{episodes:number;fail?:boolean}> = {1:{episodes:1},2:{episodes:1},3:{episodes:2}};
+  /** TMDB's answer to /find/{tvdbId}: the TMDB series it associates with a TVDB series, when set. */
+  const find: Record<number,number> = {};
   const requests: string[] = [];
   let hold: {started: () => void; released: Promise<void>} | undefined;
   const guids = (ids: {tmdb:number[];tvdb:number[]}) => [...ids.tmdb.map(id=>({id:`tmdb://${id}`})),...ids.tvdb.map(id=>({id:`tvdb://${id}`}))];
@@ -74,6 +77,8 @@ export async function fixture(t: TestContext) {
       if(!tvdbSeries[2]) return Response.json({data:{id,name:`TVDB ${id}`,slug:`tvdb-${id}`}});
       return Response.json({data:{episodes:Array.from({length:series.episodes},(_,n)=>({id:id*1000+n+1,seasonNumber:1,number:n+1,name:`Episode ${n+1}`,aired:"2020-01-01"}))}});
     }
+    const found = u.pathname.match(/^\/3\/find\/(\d+)$/)?.[1];
+    if(found && find[Number(found)]) { const id = find[Number(found)]; return Response.json({tv_results:[{id,name:`TMDB ${id}`,first_air_date:`19${id}-01-01`}],tv_episode_results:[]}); }
     if(u.pathname.includes("/find/")) return Response.json({tv_results:[],tv_episode_results:[]});
     throw new Error("Unexpected HTTP: "+u);
   });
@@ -85,7 +90,7 @@ export async function fixture(t: TestContext) {
     throw new Error("Scan timed out");
   };
   return {
-    plex, tmdb, tvdb, identity, requests, state,
+    plex, tmdb, tvdb, find, identity, requests, state,
     setSecond(value: typeof second) { second = value; },
     at(value: string) { t.mock.timers.setTime(Date.parse(value)); },
     restart() { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase; },

@@ -22,7 +22,8 @@ import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 import { PLEX_SCAN_WORKERS, type PlexProviderName } from "@/lib/plex-provider-policy";
 import { ActiveScanTracker, runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
-import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
+import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
+import { observeCatalogueCandidates, recordCatalogueCandidateNames } from "@/lib/catalogue-selection-store";
 import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, mergeScanProgress, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
@@ -589,8 +590,8 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
   let warning: string | undefined;
   const primary=group.records[0], ratingKey=group.identity;
   const plexGuids=[...new Set(details.flatMap(d=>d.guid?.startsWith("plex://show/") ? [d.guid] : []))];
-  const plexTmdbIds=[...new Set(details.flatMap(d=>{const id=idsFromGuids(d.Guid).tmdbId;return id ? [id] : [];}))];
-  const plexTvdbIds=[...new Set(details.flatMap(d=>{const id=idsFromGuids(d.Guid).tvdbId;return id ? [id] : [];}))];
+  // Every reported series ID stays identity evidence; only the selected one supplies the catalogue.
+  const {tmdb:plexTmdbIds,tvdb:plexTvdbIds}=showProviderIds(details.flatMap(d=>d.Guid || []));
   const {localEpisodes,localProviderEpisodes,localTmdbEpisodeIds}=localComparisonInventory(localMetadata);
   let tmdbSeriesMatches: TmdbShow[]=[], tvdbSeriesMatches: TvdbShow[]=[], equivalentTmdbIds=new Set<number>();
   const autoMatchEvidence=new Map<number,{method:PlexAutoMatchMethod;tmdbEpisodeId:number;tmdbEpisode?:TmdbEpisodeFindResult}>();
@@ -983,8 +984,12 @@ async function runPlexScan(targetRatingKey?: string) {
       let details: PlexMetadata[];
       let localResponses: PlexContainer[];
       let metadataLoaded = false;
+      let metadataComplete = false;
       try {
-        details = await Promise.all(group.records.map(async (record) => (await plexJson(`/library/metadata/${record.ratingKey}?includeGuids=1`, config.plexUrl, config.plexToken)).MediaContainer?.Metadata?.[0] || record));
+        const metadata = await Promise.all(group.records.map(async (record) => (await plexJson(`/library/metadata/${record.ratingKey}?includeGuids=1`, config.plexUrl, config.plexToken)).MediaContainer?.Metadata?.[0]));
+        details = metadata.map((detail, index) => detail || group.records[index]);
+        // A record without usable metadata falls back to its library listing, which cannot establish removed series IDs.
+        metadataComplete = metadata.every(detail => Array.isArray(detail?.Guid));
         metadataLoaded = true;
         resolveCoverageIssue(`inventory-details:${ratingKey}`);
         if (!inputs.inventory?.complete) throw new Error("The library inventory is incomplete; coverage cannot be verified against unavailable items.");
@@ -997,7 +1002,8 @@ async function runPlexScan(targetRatingKey?: string) {
         retainComparison(message);
         return;
       }
-      let { tmdbId, tvdbId } = idsFromGuids(details.flatMap((detail) => detail.Guid || []));
+      const selected = observeCatalogueCandidates(ratingKey, showProviderIds(details.flatMap((detail) => detail.Guid || [])), metadataComplete);
+      let tmdbId = selected.tmdb.preferredId, tvdbId = selected.tvdb.preferredId;
       let tmdbSource: LookupSourceStep[] = tmdbId ? [{provider:"Plex",kind:"TMDB show",id:tmdbId}] : tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
       let tvdbSource: LookupSourceStep[] = tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
       const selectTmdbIdentity = (show:TmdbShow, cached:boolean) => {
@@ -1153,6 +1159,8 @@ async function runPlexScan(targetRatingKey?: string) {
       await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError}, () => relationshipScope.run(relationships, async () => {
         const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat,tmdbCrosswalkScan:{startedAt,forced:!reuseTmdbRelationships,requested:requestedTmdbCrosswalks},checkedTmdbCrosswalks});
         ({tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds}=compared);
+        recordCatalogueCandidateNames(ratingKey,"tmdb",tmdbSeriesMatches);
+        recordCatalogueCandidateNames(ratingKey,"tvdb",tvdbSeriesMatches);
         // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
         reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords);
         for (const record of malformedRecords) logger.warn("plex.show.catalogue-record-unusable", { ratingKey, ...record });

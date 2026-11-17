@@ -1233,17 +1233,26 @@ async function runPlexScan(targetRatingKey?: string) {
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");
         logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       }
-      for (const provider of PROVIDERS) {
-        // A provider no longer comparing a fallback has no fallback refresh to report.
-        if (catalogueUse[provider]?.state !== "fallback") resolveCoverageIssue(`catalogue-fallback-refresh:${PROVIDER_NAME[provider]}:${ratingKey}`);
-        const use = catalogueUse[provider];
-        if (use) recordCatalogueUse(ratingKey, provider, use);
-        else clearCatalogueUse(ratingKey, provider);
-      }
+      // A provider no longer comparing a fallback has no fallback refresh to report.
+      for (const provider of PROVIDERS) if (catalogueUse[provider]?.state !== "fallback") resolveCoverageIssue(`catalogue-fallback-refresh:${PROVIDER_NAME[provider]}:${ratingKey}`);
+      /**
+       * Publish the catalogues in use once a comparison completes. Kept last-good results keep the
+       * uses they compared, so the new preference reads as pending; only a provider with no usable
+       * catalogue records that, since it names no catalogue in use.
+       */
+      const publishCatalogueUse = (completed: boolean) => {
+        for (const provider of PROVIDERS) {
+          const use = catalogueUse[provider];
+          if (!completed) { if (use?.state === "unavailable") recordCatalogueUse(ratingKey, provider, use); }
+          else if (use) recordCatalogueUse(ratingKey, provider, use);
+          else clearCatalogueUse(ratingKey, provider);
+        }
+      };
       if ((tmdbId && !tmdbShow) || (tvdbId && !tvdbResolved) || (!tmdbId && !tvdbId)) {
         const cause = `Episode comparison could not be checked because complete provider catalogue inputs are unavailable. ${savedComparison?.complete ? "Last-good comparison results were retained." : "No previous comparison results are available."}`;
         setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action:"Run a Plex scan to refresh the missing provider catalogue inputs; check any reported lookup failure first."});
         if (savedComparison) { inputs.comparisons[ratingKey] = {...savedComparison,refresh}; savePlexComparison(ratingKey,inputs.comparisons[ratingKey]); }
+        publishCatalogueUse(false);
         retainComparison(warning || cause);
         return;
       }
@@ -1273,11 +1282,13 @@ async function runPlexScan(targetRatingKey?: string) {
         inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? retainedComparison(savedComparison) : {group,details,localMetadata,tmdbId,tvdbId,relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
       }));
+      publishCatalogueUse(true);
       resolveCoverageIssue(`comparison-failure:${ratingKey}`);
       } catch (error) {
         const cause = coverageIssueCause(error);
         setCoverageIssue({id:`comparison-failure:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry this comparison; run a Plex scan if saved inputs are incomplete."});
         if (savedComparison) {inputs.comparisons[ratingKey] = retainedComparison(savedComparison);savePlexComparison(ratingKey,inputs.comparisons[ratingKey]);}
+        publishCatalogueUse(false);
         retainComparison(cause);
         return;
       }

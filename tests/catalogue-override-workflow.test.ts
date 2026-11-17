@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { catalogueNotices } from "../lib/catalogue-notice";
 import test from "node:test";
 import { catalogues, fixture, missingTmdb, day, plexScan } from "./catalogue-override-harness";
 
@@ -252,4 +253,22 @@ test("a TVDB choice without saved TMDB association evidence keeps last-good resu
   assert.equal(f.selection().tmdb.current?.usingId,11);
   assert.equal(f.selection().tmdb.current?.derivedFrom,3);
   assert.equal(f.selection().tvdb.current?.usingId,3);
+});
+
+test("when a dependent provider input fails, the persisted catalogues in use are those the kept results compared", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11]; f.plex.tvdb = [];
+  f.tmdb[11].tvdb = 3;
+  let show = await f.run();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1]);
+  await f.select({identity:f.identity,provider:"tmdb",seriesId:11});
+  f.tvdb[3].fail = true;
+  f.at(day(2)); show = await f.run();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1],"last-good results are kept");
+  assert.deepEqual(missingTmdb(show),[1002]);
+  const selection = f.selection();
+  assert.equal(selection.tmdb.current?.usingId,show.tmdbId,"TMDB in use is the catalogue the results compared");
+  assert.equal(selection.tvdb.current?.usingId,show.tvdbId,"TVDB in use is the catalogue the results compared");
+  assert.equal(selection.tmdb.preferredId,11,"the new preference is kept");
+  assert.match(catalogueNotices(selection)[0]?.text || "",/Preferred TMDB 11 · Using .*10\)? until compared/,"the new preference shows as pending");
 });

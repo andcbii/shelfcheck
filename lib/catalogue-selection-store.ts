@@ -74,12 +74,13 @@ const savedOverride = (db: Db, identity: string, provider: CatalogueProvider) =>
 
 /**
  * Reconcile this scan's Plex observation of a show group with its saved candidates and
- * overrides, and record the catalogue each provider will compare. Only a complete observation
- * (every record returned usable metadata) replaces the candidates or clears an override.
+ * overrides, and choose the catalogue each provider prefers. The catalogue in use is recorded only
+ * once a comparison completes (`recordCatalogueUse`), so a scan that keeps last-good results never
+ * describes a catalogue those results did not compare. Only a complete observation (every record
+ * returned usable metadata) replaces the candidates or clears an override.
  */
 export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection> {
   const db = catalogueSelectionDatabase();
-  const selectedAt = new Date().toISOString();
   return transaction(db, () => Object.fromEntries(PROVIDERS.map(provider => {
     const previous = candidateIds(db, identity, provider);
     const selection = selectComparisonCatalogue({
@@ -94,10 +95,6 @@ export function observeCatalogueCandidates(identity: string, observed: ShowProvi
       for (const id of selection.candidates) db.prepare("INSERT OR IGNORE INTO shelfcheck_catalogue_candidates(identity,provider,series_id) VALUES(?,?,?)").run(identity, provider, id);
     }
     if (selection.overrideCleared) db.prepare("DELETE FROM shelfcheck_catalogue_overrides WHERE identity=? AND provider=?").run(identity, provider);
-    if (selection.preferredId === undefined) db.prepare("DELETE FROM shelfcheck_catalogue_selections WHERE identity=? AND provider=?").run(identity, provider);
-    else db.prepare(`INSERT INTO shelfcheck_catalogue_selections(identity,provider,preferred_id,using_id,state,selected_at) VALUES(?,?,?,?,'preferred',?)
-      ON CONFLICT(identity,provider) DO UPDATE SET preferred_id=excluded.preferred_id,using_id=excluded.using_id,state=excluded.state,selected_at=excluded.selected_at`)
-      .run(identity, provider, selection.preferredId, selection.preferredId, selectedAt);
     return [provider, selection];
   })) as Record<CatalogueProvider, CatalogueSelection>);
 }

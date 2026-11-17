@@ -60,7 +60,7 @@ test("the next scan uses the saved override until Plex removes a candidate", t =
   const saved = store.readCatalogueSelections()[show];
   assert.equal(saved.tmdb.override,undefined);
   assert.equal(saved.tvdb.override,7);
-  assert.deepEqual(saved.tmdb.current,{preferredId:2,usingId:2,state:"preferred",selectedAt:saved.tmdb.current?.selectedAt});
+  assert.equal(saved.tmdb.current,undefined,"observing candidates never claims a catalogue in use; only a completed comparison does");
 });
 
 test("candidate names are kept for retained IDs and do not affect the override", t => {

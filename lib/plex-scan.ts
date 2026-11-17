@@ -1102,7 +1102,7 @@ async function runPlexScan(targetRatingKey?: string) {
         const kind = provider === "tmdb" ? "show" : "series";
         const issueId = `catalogue-refresh:${name}:${ratingKey}`, fallbackIssueId = `catalogue-fallback-refresh:${name}:${ratingKey}`;
         if (choice.preferredError) {
-          setCoverageIssue({id:issueId,...authentication(choice.preferredError),operation:"catalogue-refresh",provider:name,scope:"show",show:showIds(preferredId),...providerLookupContext(choice.preferredError,{source,requested:{provider:name,kind,id:preferredId},impact:unavailablePreferredImpact(provider,use)})});
+          setCoverageIssue({id:issueId,failedAt:startedAt,...authentication(choice.preferredError),operation:"catalogue-refresh",provider:name,scope:"show",show:showIds(preferredId),...providerLookupContext(choice.preferredError,{source,requested:{provider:name,kind,id:preferredId},impact:unavailablePreferredImpact(provider,use)})});
           if (!choice.loaded) {
             unavailableCatalogueCauses.push(issueId);
             addWarning(choice.preferredError instanceof Error ? choice.preferredError.message : `${name} lookup failed.`);
@@ -1255,7 +1255,9 @@ async function runPlexScan(targetRatingKey?: string) {
       const reuseTmdbRelationships = !targetRatingKey && !stale?.tmdb && !tmdbAliases.some(id => tmdbCatalogueChanges.has(id) && !(id === tmdbShow?.id && tmdbCatalogueReused)) && tvdbId === savedComparison?.tvdbId;
       const reuseTvdbRelationships = !targetRatingKey && !stale?.tvdb && (tvdbVerifiedChanges === null || !tvdbAliases.some(id => tvdbVerifiedChanges.has(id)));
       const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
-      const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([,value]) => value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships));
+      // Another TVDB candidate's saved TMDB association is kept for an offline recheck that switches to it; this scan never reads it.
+      const otherTvdbAssociations = new Set(tvdbCandidates.filter(id => id !== tvdbId).map(id => relationshipKey("TMDB", `${TMDB}/find/${id}?external_source=tvdb_id`)));
+      const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([key,value]) => otherTvdbAssociations.has(key) || (value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships)));
       const checkedTmdbCrosswalks = new Set<string>();
       const retainedComparison = (saved: SavedPlexComparison) => ({...withLiveCrosswalkOutcomes(saved,relationships,checkedTmdbCrosswalks),refresh});
       try {

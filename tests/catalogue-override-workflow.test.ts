@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { fixture, missingTmdb, day } from "./catalogue-override-harness";
+import { fixture, missingTmdb, day, plexScan } from "./catalogue-override-harness";
 
 test("saving an override immediately rechecks the show from its saved catalogue, without HTTP", async t => {
   const f = await fixture(t);
@@ -142,4 +142,57 @@ test("an active Plex scan rejects a selection change before validating it", asyn
     assert.equal(rejected.body.code,"scan-active");
   }
   await finish();
+});
+
+test("a TVDB override to a previously downloaded catalogue rechecks immediately", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = [1,3];
+  await f.run();
+  await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  f.at(day(2)); assert.equal((await f.run()).tvdbId,3);
+  await f.select({identity:f.identity,provider:"tvdb",seriesId:null});
+  f.at(day(3)); assert.equal((await f.run()).tvdbId,1);
+  f.requests.length = 0;
+  const saved = await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  assert.equal(saved.status,200);
+  assert.deepEqual(f.requests,[],"no scan and no provider download");
+  const show = await f.show();
+  assert.equal(show.tvdbId,3,"the saved TVDB catalogue is compared at once");
+  assert.deepEqual(show.missing.flatMap(episode => episode.tvdbEpisodeId ? [episode.tvdbEpisodeId] : []),[3002]);
+  assert.equal(f.selection().tvdb.current?.usingId,3);
+  assert.ok(!(await f.issues()).some(issue=>issue.id === `comparison-inputs:${f.identity}`));
+});
+
+test("a Manual Match recheck keeps a pending override's comparison issue while the overridden catalogue is not compared", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  await f.select({identity:f.identity,provider:"tmdb",seriesId:11});
+  const pending = async () => (await f.issues()).find(issue=>issue.id === `comparison-inputs:${f.identity}`);
+  assert.match((await pending())?.cause || "",/TMDB series 11/);
+  f.requests.length = 0;
+  await plexScan.requestCoverageRecheck({members:[{provider:"TMDB",id:1001,showId:10,show:"TMDB 10",title:"Episode 1",season:1,episode:1,url:""}]});
+  assert.deepEqual(f.requests,[]);
+  assert.equal((await f.show()).tmdbId,10,"last-good results are kept");
+  assert.match((await pending())?.cause || "",/TMDB series 11/,"the override is still not compared");
+  assert.equal(f.selection().tmdb.current?.usingId,10);
+});
+
+test("saving an override again keeps the series' earlier unavailable provenance", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  await f.select({identity:f.identity,provider:"tmdb",seriesId:11});
+  f.at(day(2)); await f.run();
+  f.tmdb[11].fail = true;
+  f.at(day(25)); await f.run();
+  assert.equal(f.selection().tmdb.current?.state,"saved-unavailable","B's 20-day refresh failed");
+  await f.select({identity:f.identity,provider:"tmdb",seriesId:null});
+  assert.equal(f.selection().tmdb.current?.usingId,10);
+  await f.select({identity:f.identity,provider:"tmdb",seriesId:11});
+  const current = f.selection().tmdb.current!;
+  assert.equal(current.usingId,11);
+  assert.equal(current.state,"saved-unavailable","B is still unavailable; its saved catalogue is in use");
+  assert.equal(current.preferredFailedAt,day(25));
+  assert.equal(current.preferredDownloadedAt,day(2));
 });

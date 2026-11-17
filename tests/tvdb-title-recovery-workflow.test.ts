@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { harness, type Episode } from "./report-missing-harness";
+const catalogues = await import("../lib/plex-catalogues");
 
 // TVDB's default episode catalogue stays the first source. Only an unusable
 // default title is recovered, from the English translation of that exact TVDB
@@ -162,4 +163,31 @@ test("a cached Manual Match recheck stays offline and keeps an unresolved Englis
   assert.deepEqual(missingKeys(rechecked), ["TMDB:9002", "TVDB:104"], "the Manual Match collects the split episode");
   assert.deepEqual(episodeIssues(rechecked).map(item => item.id).sort(), ids, "the unresolved recovery is not consumed by the recheck");
   assert.equal(episodeIssues(rechecked).find(item => item.operation === "title-recovery")?.cause, "English title recovery could not be checked: 403 — TVDB request failed.");
+});
+
+test("a reused TVDB catalogue chosen from several Plex TVDB IDs asks again for an English title the TMDB-derived combined/split match needs", async t => {
+  // Plex reports two TVDB series and no TMDB ID, so TMDB is resolved from the TVDB series compared.
+  const untitledPart2 = { ...part2, name: null };
+  const { rerun, state, requests } = await harness(t, [combined, part1, untitledPart2], [combined]);
+  const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tvdb://20" }, { id: "tvdb://21" }] };
+  state.bodies.set("/library/sections/1/all", { MediaContainer: { Metadata: [show] } });
+  state.bodies.set("/library/metadata/target", { MediaContainer: { Metadata: [show] } });
+  state.bodies.set("/3/find/20", { tv_results: [{ id: 10 }], tv_episode_results: [] });
+  const first = await rerun();
+  assert.deepEqual(missingKeys(first), ["TVDB:102"], "without any title the split part stays missing");
+  assert.deepEqual(translationRequests(requests), ["/v4/episodes/102/translations/eng"]);
+  const downloadedAt = catalogues.readPlexInputs().tvdb["20"].downloadedAt;
+
+  // TVDB adds the English title before the next ordinary scan, which reuses both catalogues.
+  state.english.set(102, "Arrival (2)");
+  const before = requests.length;
+  const second = await rerun();
+  const scanned = requests.slice(before);
+  assert.deepEqual(translationRequests(scanned), ["/v4/episodes/102/translations/eng"], "the title the combined/split match needs is asked for again");
+  assert.ok(!scanned.some(path => path.endsWith("/episodes/default")), "no whole-catalogue download");
+  assert.deepEqual(missingKeys(second), [], "the recovered title completes the combined/split match");
+  const saved = catalogues.readPlexInputs().tvdb["20"];
+  assert.equal(saved.episodes.find(episode => episode.providerEpisodeId === 102)?.title, "Arrival (2)", "the repaired catalogue is saved");
+  assert.equal(saved.titleRecovery, undefined);
+  assert.equal(saved.downloadedAt, downloadedAt, "the download time is not renewed");
 });

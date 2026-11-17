@@ -138,3 +138,64 @@ test("the product-owner timeline keeps the B preference through saved data and f
   assert.equal(show.tvdbId,1,"TVDB is unchanged throughout");
   assert.equal(f.selection().tvdb.current?.usingId,1);
 });
+
+test("an unavailable preferred catalogue stays in use through exactly 60 days, then falls back until B recovers", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  const downloaded = Date.parse(day(2));
+  f.at(day(2)); await f.run();
+  assert.equal(f.tmdbDownloads(11),1);
+
+  f.at(new Date(downloaded + 10 * DAY).toISOString());
+  let show = await f.run();
+  assert.equal(f.tmdbDownloads(11),0,"B is reused within its freshness window");
+  assert.equal(f.selection().tmdb.current?.preferredDownloadedAt,day(2),"reuse never renews the download time");
+
+  f.tmdb[11].fail = true;
+  for (const [offset,label] of [[-1,"just before"],[0,"exactly at"]] as const) {
+    f.at(new Date(downloaded + 60 * DAY + offset).toISOString());
+    show = await f.run();
+    assert.ok(f.requests.includes("/3/tv/11"),`B is looked up ${label} 60 days`);
+    assert.equal(show.tmdbId,11,`saved B is still compared ${label} 60 days`);
+    assert.equal(f.selection().tmdb.current?.state,"saved-unavailable");
+  }
+  assert.equal(f.selection().tmdb.current?.preferredUsableUntil,new Date(downloaded + 60 * DAY).toISOString());
+
+  f.at(new Date(downloaded + 60 * DAY + 1).toISOString());
+  show = await f.run();
+  assert.equal(show.tmdbId,10,"saved B is unusable once older than 60 days");
+  assert.equal(f.selection().tmdb.current?.state,"fallback");
+  assert.equal(f.selection().tmdb.override,11);
+
+  f.tmdb[11].fail = false;
+  f.at(new Date(downloaded + 61 * DAY).toISOString());
+  show = await f.run();
+  assert.equal(show.tmdbId,11,"B loading again restores it without reselecting it");
+  assert.deepEqual(missingTmdb(show),[1102,1103]);
+  const current = f.selection().tmdb.current!;
+  assert.equal(current.state,"preferred"); assert.equal(current.usingId,11);
+  assert.equal(current.preferredDownloadedAt,new Date(downloaded + 61 * DAY).toISOString(),"only a successful download renews the clock");
+  assert.equal(current.preferredFailedAt,undefined);
+  assert.ok(!(await f.issues()).some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`));
+});
+
+test("when no candidate can supply a usable catalogue, last-good results stay with a Coverage Issue", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.at(day(2)); const good = await f.run();
+  assert.deepEqual(missingTmdb(good),[1102,1103]);
+  f.tmdb[11].fail = true; f.tmdb[10].fail = true;
+  f.at(day(70));
+  const show = await f.run();
+  assert.ok(show.warning,"no current successful comparison is claimed");
+  assert.deepEqual(missingTmdb(show),[1102,1103],"last-good results are kept, never an empty missing list");
+  assert.equal(f.selection().tmdb.current?.state,"unavailable");
+  assert.equal(f.selection().tmdb.current?.usingId,undefined);
+  const root = (await f.issues() as {id:string;impacts?:string[];lookup?:{impact:string}}[]).find(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`);
+  assert.match(root?.lookup?.impact || "",/No TMDB series reported by Plex could supply a usable catalogue/);
+  assert.ok(root?.impacts?.some(impact=>impact.includes("Episode comparison could not be checked")),"the comparison issue is folded into its cause");
+});

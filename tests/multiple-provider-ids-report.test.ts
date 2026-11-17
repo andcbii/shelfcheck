@@ -22,12 +22,12 @@ test("lists every scanned show with several IDs on either provider, collected or
   });
   assert.deepEqual(entries.map(entry => [entry.identity, entry.title]), [["ratingKey:2", "Animaniacs"], ["plex://show/b", "Scooby"]], "a show no longer scanned is not listed");
   const tmdb = entries[1].panels.tmdb;
-  assert.equal(tmdb.multiple, true);
+  assert.equal(tmdb.hasMultipleIds, true);
   assert.deepEqual(tmdb.candidates.map(candidate => [candidate.id, candidate.name, candidate.year, candidate.href, candidate.automatic]), [
     [2150, "The Scooby-Doo/Dynomutt Hour", 1976, "https://www.themoviedb.org/tv/2150", true],
     [337142, "The Scooby-Doo Show", undefined, "https://www.themoviedb.org/tv/337142", false],
   ]);
-  assert.equal(entries[1].panels.tvdb.multiple, false);
+  assert.equal(entries[1].panels.tvdb.hasMultipleIds, false);
   assert.equal(entries[1].panels.tvdb.candidates[0].href, "https://thetvdb.com/series/the-scooby-doo-show");
   assert.equal(entries[0].panels.tvdb.candidates[1].href, "https://thetvdb.com/dereferrer/series/8");
 });

@@ -1011,8 +1011,8 @@ async function runPlexScan(targetRatingKey?: string) {
         retainComparison(message);
         return;
       }
-      const selected = observeCatalogueCandidates(ratingKey, showProviderIds(details.flatMap((detail) => detail.Guid || [])), metadataComplete);
-      let tmdbId = selected.tmdb.preferredId, tvdbId = selected.tvdb.preferredId;
+      const plexSelection = observeCatalogueCandidates(ratingKey, showProviderIds(details.flatMap((detail) => detail.Guid || [])), metadataComplete);
+      let tmdbId = plexSelection.tmdb.preferredId, tvdbId = plexSelection.tvdb.preferredId;
       let tmdbSource: LookupSourceStep[] = tmdbId ? [{provider:"Plex",kind:"TMDB show",id:tmdbId}] : tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
       let tvdbSource: LookupSourceStep[] = tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
       const selectTmdbIdentity = (show:TmdbShow, cached:boolean) => {
@@ -1050,7 +1050,7 @@ async function runPlexScan(targetRatingKey?: string) {
       const unavailableCatalogueCauses: string[] = [];
       const savedTmdb = inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
       // A provider with several Plex candidates chooses among them; single-ID shows keep the ADR-0003 behavior.
-      const tmdbCandidates = selected.tmdb.candidates, tvdbCandidates = selected.tvdb.candidates;
+      const tmdbCandidates = plexSelection.tmdb.candidates, tvdbCandidates = plexSelection.tvdb.candidates;
       const catalogueUse: Partial<Record<"tmdb" | "tvdb", CatalogueUse>> = {};
       const loadTmdb = async (id: number | undefined, mandatory: boolean, refreshAfter?: number) => {
         const saved = id ? inputs.tmdb[String(id)] : savedTmdb;
@@ -1140,7 +1140,7 @@ async function runPlexScan(targetRatingKey?: string) {
             savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           }
         }
-        if (tmdbId) catalogueUse.tmdb = singleIdUse(tmdbId, selected.tmdb.preferredId !== undefined, tvdbId, loaded?.downloadedAt);
+        if (tmdbId) catalogueUse.tmdb = singleIdUse(tmdbId, plexSelection.tmdb.preferredId !== undefined, tvdbId, loaded?.downloadedAt);
         resolveCoverageIssue(`catalogue-refresh:TMDB:${ratingKey}`);
         phaseTimings.tmdbMs = Date.now() - phaseStarted;
       } catch (error) {
@@ -1152,7 +1152,7 @@ async function runPlexScan(targetRatingKey?: string) {
           providerEpisodes.push(...savedTmdb.episodes);
           malformedRecords.push(...savedTmdb.malformed || []);
         } else { tmdbShow = null; unavailableCatalogueCauses.push(`catalogue-refresh:TMDB:${ratingKey}`); }
-        if (selected.tmdb.preferredId) catalogueUse.tmdb = failedSingleIdUse(selected.tmdb.preferredId, tmdbShow ? savedTmdb?.downloadedAt : undefined, startedAt);
+        if (plexSelection.tmdb.preferredId) catalogueUse.tmdb = failedSingleIdUse(plexSelection.tmdb.preferredId, tmdbShow ? savedTmdb?.downloadedAt : undefined, startedAt);
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
       }
@@ -1216,7 +1216,7 @@ async function runPlexScan(targetRatingKey?: string) {
             savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           }
           useTvdb(loaded);
-          catalogueUse.tvdb = singleIdUse(tvdbId, selected.tvdb.preferredId !== undefined, tmdbId, loaded.downloadedAt);
+          catalogueUse.tvdb = singleIdUse(tvdbId, plexSelection.tvdb.preferredId !== undefined, tmdbId, loaded.downloadedAt);
           phaseTimings.tvdbMs = Date.now() - phaseStarted;
         }
         resolveCoverageIssue(`catalogue-refresh:TVDB:${ratingKey}`);
@@ -1227,7 +1227,7 @@ async function runPlexScan(targetRatingKey?: string) {
         const savedTvdb = inputs.tvdb[String(tvdbId)];
         if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); malformedRecords.push(...savedTvdb.malformed || []); titleRecovery = {state: savedTvdb.titleRecovery || {}, carried: true}; }
         else unavailableCatalogueCauses.push(`catalogue-refresh:TVDB:${ratingKey}`);
-        if (selected.tvdb.preferredId) catalogueUse.tvdb = failedSingleIdUse(selected.tvdb.preferredId, tvdbResolved ? savedTvdb?.downloadedAt : undefined, startedAt);
+        if (plexSelection.tvdb.preferredId) catalogueUse.tvdb = failedSingleIdUse(plexSelection.tvdb.preferredId, tvdbResolved ? savedTvdb?.downloadedAt : undefined, startedAt);
         else if (tvdbId && tmdbId) catalogueUse.tvdb = {usingId:tvdbId, state:"derived", derivedFrom:tmdbId, ...(tvdbResolved ? {usingDownloadedAt:savedTvdb?.downloadedAt} : {})};
         savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");

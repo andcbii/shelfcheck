@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { CatalogueProvider } from "@/lib/catalogue-selection";
+import { PROVIDER_NAME, PROVIDERS } from "@/lib/catalogue-selection";
 import type { ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import type { MultipleProviderIdEntry, ProviderPanel } from "@/lib/multiple-provider-ids-report";
 import { ReportPagination } from "@/app/reports/report-pagination";
 
-const NAME: Record<CatalogueProvider, string> = { tmdb: "TMDB", tvdb: "TVDB" };
 type Feedback = { tone: "saved" | "error"; text: string };
 type Props = { entries: MultipleProviderIdEntry[]; initialScanning: boolean; onChanged: () => void };
 
@@ -30,11 +29,11 @@ function CandidatePanel({ entry, panel, locked, onSaved }: { entry: MultipleProv
     try {
       const response = await fetch("/api/plex/catalogue-selection", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ identity: entry.identity, provider: panel.provider, seriesId }) });
       const body = await response.json() as { error?: string; selection?: ShowCatalogueSelection | null };
-      const persisted = body.selection?.[panel.provider];
+      const saved = body.selection?.[panel.provider];
       // Always show what the server persisted, including after a rejection.
-      setChoice(persisted ? persisted.override ?? persisted.automaticId : persistedChoice(panel));
+      setChoice(saved ? saved.override ?? saved.automaticId : persistedChoice(panel));
       if (!response.ok) throw new Error(body.error || "The catalogue selection could not be saved.");
-      const compared = persisted?.current?.preferredId === persisted?.preferredId;
+      const compared = saved?.current?.preferredId === saved?.preferredId;
       const what = seriesId === null ? "Automatic selection restored" : "Override saved";
       setFeedback({ tone: "saved", text: compared ? `${what}; the show was rechecked from saved data.` : `${what}; the next Plex scan downloads and compares it.` });
     } catch (error) {
@@ -45,18 +44,18 @@ function CandidatePanel({ entry, panel, locked, onSaved }: { entry: MultipleProv
     }
   }
 
-  const name = NAME[panel.provider];
+  const name = PROVIDER_NAME[panel.provider];
   const count = panel.candidates.length;
   return <section className="show-provider-matches catalogue-panel">
     <header><span className={`provider-badge ${panel.provider}`}>{name}</span><strong>{count} {count === 1 ? "ID" : "IDs"}</strong></header>
-    {count ? <fieldset disabled={locked || busy || !panel.multiple}><legend>{name} series reported by Plex</legend>{panel.candidates.map(candidate => {
-      const marks = [candidate.automatic ? (panel.multiple ? "Automatic" : "Automatic selection") : "", candidate.override ? "Saved preference" : "", candidate.using ? "In use" : "", candidate.unavailable ? "Unavailable" : ""].filter(Boolean);
+    {count ? <fieldset disabled={locked || busy || !panel.hasMultipleIds}><legend>{name} series reported by Plex</legend>{panel.candidates.map(candidate => {
+      const marks = [candidate.automatic ? (panel.hasMultipleIds ? "Automatic" : "Automatic selection") : "", candidate.override ? "Saved preference" : "", candidate.using ? "In use" : "", candidate.unavailable ? "Unavailable" : ""].filter(Boolean);
       const content = <><div><strong>{candidate.name || `${name} series ${candidate.id}`}</strong>{candidate.year ? <small>{candidate.year}</small> : null}</div><code>{candidate.id}</code><span className="catalogue-marks">{marks.map(mark => <em key={mark} className={mark === "Unavailable" ? "unavailable" : undefined}>{mark}</em>)}</span><a href={candidate.href} target="_blank" rel="noreferrer" aria-label={`Open ${name} ${candidate.id}`}>↗</a></>;
-      return panel.multiple
+      return panel.hasMultipleIds
         ? <label className="catalogue-candidate" key={candidate.id}><input type="radio" name={`${entry.anchor}-${panel.provider}`} value={candidate.id} checked={choice === candidate.id} disabled={locked || busy} onChange={() => setChoice(candidate.id)} />{content}</label>
         : <div className="catalogue-candidate" key={candidate.id}>{content}</div>;
     })}</fieldset> : <p className="catalogue-none">Plex reports no {name} series for this show.</p>}
-    {panel.multiple ? <div className="catalogue-actions">
+    {panel.hasMultipleIds ? <div className="catalogue-actions">
       <button type="button" onClick={() => void save(choice ?? null)} disabled={locked || busy || choice === undefined || choice === override}>Save override</button>
       <button type="button" onClick={() => void save(null)} disabled={locked || busy || override === undefined}>Use automatic</button>
     </div> : null}
@@ -64,14 +63,14 @@ function CandidatePanel({ entry, panel, locked, onSaved }: { entry: MultipleProv
   </section>;
 }
 
-function Entry({ entry, locked, onChanged }: { entry: MultipleProviderIdEntry; locked: boolean; onChanged: () => void }) {
-  const providers = (["tmdb", "tvdb"] as const).filter(provider => entry.panels[provider].candidates.length || entry.panels[provider].selection.current);
+function ShowEntry({ entry, locked, onChanged }: { entry: MultipleProviderIdEntry; locked: boolean; onChanged: () => void }) {
+  const providers = PROVIDERS.filter(provider => entry.panels[provider].candidates.length || entry.panels[provider].selection.current);
   return <article className="provider-match-row multiple-id-row" id={entry.anchor}>
     <header><div><span>Plex show</span><h2>{entry.title}{entry.year ? <small>{entry.year}</small> : null}</h2></div><div className="plex-guid-list"><code>{entry.identity}</code></div></header>
     <div className="provider-match-columns">{(["tmdb", "tvdb"] as const).map(provider => <CandidatePanel key={provider} entry={entry} panel={entry.panels[provider]} locked={locked} onSaved={onChanged} />)}</div>
     <div className="catalogue-summary">{providers.map(provider => {
       const summary = entry.panels[provider].summary;
-      return <div key={provider}><span className={`provider-badge ${provider}`}>{NAME[provider]}</span><dl><div><dt>Currently using</dt><dd>{summary.using}</dd></div><div><dt>Preference</dt><dd>{summary.preference}</dd></div></dl>{summary.explanation ? <p>{summary.explanation}</p> : null}</div>;
+      return <div key={provider}><span className={`provider-badge ${provider}`}>{PROVIDER_NAME[provider]}</span><dl><div><dt>Currently using</dt><dd>{summary.using}</dd></div><div><dt>Preference</dt><dd>{summary.preference}</dd></div></dl>{summary.explanation ? <p>{summary.explanation}</p> : null}</div>;
     })}</div>
     {entry.issues.length ? <ul className="catalogue-issues">{entry.issues.map(issue => <li key={issue.id}><strong>Scan Issue</strong> {issue.lookup?.impact || issue.cause} <a href="/reports/coverage-issues">View Scan Issues</a></li>)}</ul> : null}
   </article>;
@@ -124,7 +123,7 @@ export function MultipleProviderIdReport({ entries, initialScanning, onChanged }
   function choosePageSize(value: number) { setPageSize(value); setPage(1); }
   return <>
     {scanning ? <p className="catalogue-scan-note" role="status">A Plex scan is running. Wait for it to finish before changing comparison catalogues.</p> : null}
-    {visible.length ? <div className="provider-match-list">{visible.map(entry => <Entry key={entry.identity} entry={entry} locked={scanning} onChanged={onChanged} />)}</div>
+    {visible.length ? <div className="provider-match-list">{visible.map(entry => <ShowEntry key={entry.identity} entry={entry} locked={scanning} onChanged={onChanged} />)}</div>
       : <div className="empty auto-match-empty"><div>✓</div><h3>No shows with multiple provider IDs</h3><p>Plex reports at most one TMDB and one TVDB series for every scanned show.</p></div>}
     <ReportPagination total={entries.length} page={page} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={choosePageSize} />
   </>;

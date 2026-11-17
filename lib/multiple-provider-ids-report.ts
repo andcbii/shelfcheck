@@ -8,7 +8,7 @@ type ProviderMatch = { id: number; name?: string; year?: number; slug?: string }
 type ReportShow = { ratingKey: string; title: string; year?: number; providerMatches?: { tmdb?: ProviderMatch[]; tvdb?: ProviderMatch[] } };
 
 export type CandidateView = { id: number; name?: string; year?: number; href: string; automatic: boolean; override: boolean; using: boolean; unavailable: boolean };
-export type ProviderPanel = { provider: CatalogueProvider; multiple: boolean; candidates: CandidateView[]; selection: ProviderCatalogueSelection; summary: SelectionSummary };
+export type ProviderPanel = { provider: CatalogueProvider; hasMultipleIds: boolean; candidates: CandidateView[]; selection: ProviderCatalogueSelection; summary: SelectionSummary };
 export type MultipleProviderIdEntry = { identity: string; anchor: string; title: string; year?: number; panels: Record<CatalogueProvider, ProviderPanel>; issues: CoverageIssue[] };
 export type SelectionSummary = { using: string; preference: string; explanation?: string };
 
@@ -45,7 +45,7 @@ function panel(provider: CatalogueProvider, selection: ProviderCatalogueSelectio
   const current = selection.current;
   const unavailableId = current?.preferredFailedAt ? current.preferredId : undefined;
   return {
-    provider, selection, multiple: hasMultipleCandidates(selection), summary: selectionSummary(provider, selection),
+    provider, selection, hasMultipleIds: hasMultipleCandidates(selection), summary: selectionSummary(provider, selection),
     candidates: selection.candidates.map(({ id, name }) => {
       const match = matches.find(candidate => candidate.id === id);
       return { id, name: name || match?.name, year: match?.year, href: providerHref(provider, id, match?.slug), automatic: id === selection.automaticId, override: id === selection.override, using: id === current?.usingId, unavailable: id === unavailableId };

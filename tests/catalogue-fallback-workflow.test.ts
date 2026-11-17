@@ -199,3 +199,52 @@ test("when no candidate can supply a usable catalogue, last-good results stay wi
   assert.match(root?.lookup?.impact || "",/No TMDB series reported by Plex could supply a usable catalogue/);
   assert.ok(root?.impacts?.some(impact=>impact.includes("Episode comparison could not be checked")),"the comparison issue is folded into its cause");
 });
+
+test("the catalogue in use for a provider with several IDs is downloaded again once older than 20 days", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11]; f.setSecond({tmdb:12,tvdb:2});
+  const downloaded = Date.parse(day(1));
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11); await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",null);
+  let show = await f.run();
+  assert.equal(show.tmdbId,10,"A is in use; B is a saved but unused candidate");
+  for (const days of [7,14]) { f.at(new Date(downloaded + days * DAY).toISOString()); await f.run(); }
+  const downloads = () => [f.tmdbDownloads(10),f.tmdbDownloads(11),f.tmdbDownloads(12),f.tvdbDownloads(1),f.tvdbDownloads(2)];
+  for (const [offset,label] of [[-1,"just before"],[0,"exactly at"]] as const) {
+    f.at(new Date(downloaded + 20 * DAY + offset).toISOString());
+    show = await f.run();
+    assert.deepEqual(downloads(),[0,0,0,0,0],`nothing is downloaded ${label} 20 days`);
+  }
+  f.at(new Date(downloaded + 20 * DAY + 1).toISOString());
+  show = await f.run();
+  assert.deepEqual(downloads(),[1,0,0,0,0],"only the multiple-ID provider's catalogue in use is refreshed after 20 days");
+  assert.equal(f.selection().tmdb.current?.usingDownloadedAt,new Date(downloaded + 20 * DAY + 1).toISOString());
+});
+
+test("a failed 20-day refresh keeps saved B in use, retries next scan and renews no clock", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  const downloaded = Date.parse(day(2));
+  f.at(day(2)); await f.run();
+  f.tmdb[11].fail = true;
+  f.at(new Date(downloaded + 20 * DAY + 1).toISOString());
+  let show = await f.run();
+  assert.ok(f.requests.includes("/3/tv/11"),"the refresh was attempted");
+  assert.equal(show.tmdbId,11,"saved B stays in use");
+  assert.deepEqual(missingTmdb(show),[1102,1103]);
+  assert.equal(f.selection().tmdb.current?.state,"saved-unavailable");
+  assert.equal(f.selection().tmdb.current?.preferredDownloadedAt,day(2),"a failed refresh restarts neither clock");
+  f.at(new Date(downloaded + 21 * DAY).toISOString());
+  show = await f.run();
+  assert.ok(f.requests.includes("/3/tv/11"),"the refresh is retried on the next scan");
+  assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(2));
+  f.tmdb[11].fail = false;
+  f.at(new Date(downloaded + 22 * DAY).toISOString());
+  show = await f.run();
+  assert.equal(f.tmdbDownloads(11),1);
+  assert.equal(f.selection().tmdb.current?.state,"preferred");
+  assert.equal(f.selection().tmdb.current?.preferredDownloadedAt,new Date(downloaded + 22 * DAY).toISOString());
+});

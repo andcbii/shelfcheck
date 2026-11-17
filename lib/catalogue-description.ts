@@ -25,7 +25,8 @@ export function catalogueStatus(selection: ProviderCatalogueSelection): Catalogu
   const current = selection.current;
   if (!current) return { kind: "not-compared", preferredId: selection.preferredId };
   const usingId = current.usingId;
-  if (current.state === "unavailable" || usingId === undefined) return { kind: "unavailable", preferredId: current.preferredId ?? selection.preferredId };
+  // The saved selection is the preference; `current` only records what the last scan used or failed to load.
+  if (current.state === "unavailable" || usingId === undefined) return { kind: "unavailable", preferredId: selection.preferredId ?? current.preferredId };
   if (selection.preferredId !== undefined && current.state !== "derived" && current.preferredId !== selection.preferredId)
     return { kind: "pending", preferredId: selection.preferredId, usingId };
   return { kind: current.state, preferredId: current.preferredId, usingId };

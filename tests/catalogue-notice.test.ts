@@ -57,3 +57,11 @@ test("only providers with several distinct IDs get a notice, each provider separ
     { provider: "tvdb", text: "Multiple TVDB IDs · Override: 10" },
   ]);
 });
+
+test("a preference changed after a scan with no usable catalogue names the saved preference, not the failed one", () => {
+  const notices = catalogueNotices({
+    tmdb: { candidates: [{ id: 10 }, { id: 11 }], automaticId: 10, override: 11, preferredId: 11, current: { preferredId: 10, state: "unavailable", selectedAt: at, preferredFailedAt: at } },
+    tvdb: single,
+  });
+  assert.deepEqual(notices.map((notice) => notice.text), ["Multiple TMDB IDs · Preferred TMDB 11 · No catalogue available"]);
+});

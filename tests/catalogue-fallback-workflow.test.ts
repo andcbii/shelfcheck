@@ -248,3 +248,40 @@ test("a failed 20-day refresh keeps saved B in use, retries next scan and renews
   assert.equal(f.selection().tmdb.current?.state,"preferred");
   assert.equal(f.selection().tmdb.current?.preferredDownloadedAt,new Date(downloaded + 22 * DAY).toISOString());
 });
+
+test("without a Plex TVDB ID, the derived TVDB series follows the TMDB catalogue actually used", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11]; f.plex.tvdb = [];
+  f.tmdb[10].tvdb = null; f.tmdb[11].tvdb = 3;
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  const derived = () => { const current = f.selection().tvdb.current; return current && {usingId:current.usingId,state:current.state,derivedFrom:current.derivedFrom}; };
+
+  f.at(day(2)); let show = await f.run();
+  assert.equal(show.tvdbId,3,"B's external IDs supply the TVDB series");
+  assert.deepEqual(derived(),{usingId:3,state:"derived",derivedFrom:11});
+  assert.deepEqual(f.selection().tvdb.candidates,[],"a derived ID is never a candidate");
+
+  f.tmdb[11].fail = true; f.changes([11]);
+  f.at(day(3)); show = await f.run();
+  assert.equal(f.selection().tmdb.current?.state,"saved-unavailable");
+  assert.equal(show.tvdbId,3,"saved B still supplies the TVDB series");
+
+  f.changes([]);
+  f.at(day(63)); show = await f.run();
+  assert.equal(f.selection().tmdb.current?.state,"fallback");
+  assert.equal(show.tmdbId,10);
+  assert.equal(show.tvdbId,undefined,"fallback A has no TVDB link, so B's derived ID is not kept");
+  assert.equal(derived(),undefined);
+
+  f.tmdb[11].fail = false;
+  f.at(day(64)); show = await f.run();
+  assert.equal(show.tmdbId,11);
+  assert.equal(show.tvdbId,3,"recovered B supplies the TVDB series again");
+  assert.deepEqual(derived(),{usingId:3,state:"derived",derivedFrom:11});
+
+  f.plex.tvdb = [1];
+  f.at(day(65)); show = await f.run();
+  assert.equal(show.tvdbId,1,"a Plex-reported TVDB ID always wins");
+  assert.equal(f.selection().tvdb.current?.state,"preferred");
+});

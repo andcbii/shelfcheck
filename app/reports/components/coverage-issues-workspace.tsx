@@ -5,7 +5,7 @@ import type { CoverageIssue } from "@/lib/coverage-issues";
 import { ReportSidebar } from "@/app/reports/report-sidebar";
 import { CoverageIssueReport } from "./coverage-issue-report";
 
-type Props = {initialIssues: CoverageIssue[]; autoCount: number; unmatchedCount: number; providerCount: number; manualCount: number};
+type Props = {initialIssues: CoverageIssue[]; autoCount: number; unmatchedCount: number; providerCount: number; manualCount: number; multipleIdCount?: number};
 export function CoverageIssuesWorkspace({initialIssues,...counts}: Props) {
   const [issues,setIssues]=useState(initialIssues);
   const [error,setError]=useState("");

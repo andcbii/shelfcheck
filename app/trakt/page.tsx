@@ -329,6 +329,7 @@ export default function Home() {
   function loginToTrakt() {
     setError("");
     setErrorContext("auth");
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- API route that redirects to Trakt OAuth; needs a full browser navigation, not client routing.
     if (applicationConfigured) window.location.assign("/api/auth/trakt/login");
     else setConnectionOpen(true);
   }
@@ -366,6 +367,7 @@ export default function Home() {
       setClientSecret("");
       setApplicationConfigured(true);
       setConnectionOpen(false);
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- API route that redirects to Trakt OAuth; needs a full browser navigation, not client routing.
       window.location.assign("/api/auth/trakt/login");
     } catch (saveError) {
       setErrorContext("auth");

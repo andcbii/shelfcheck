@@ -332,7 +332,17 @@ export function catalogueSelectionDatabase() {
   db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_candidates(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), series_id INTEGER NOT NULL, name TEXT, PRIMARY KEY(identity, provider, series_id));
     CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_overrides(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), series_id INTEGER NOT NULL, saved_at TEXT NOT NULL, PRIMARY KEY(identity, provider));
     CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_selections(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), preferred_id INTEGER, using_id INTEGER, state TEXT NOT NULL, selected_at TEXT NOT NULL, PRIMARY KEY(identity, provider));`);
+  addCatalogueUseColumns(db);
   return db;
+}
+// What the report shows about the catalogue in use: download times, the 60-day deadline, and derived provenance.
+const catalogueUseDatabases = new WeakSet<DatabaseSync>();
+function addCatalogueUseColumns(db: DatabaseSync) {
+  if (catalogueUseDatabases.has(db)) return;
+  const columns = new Set((db.prepare("PRAGMA table_info(shelfcheck_catalogue_selections)").all() as { name: string }[]).map(column => column.name));
+  for (const [name, type] of [["preferred_downloaded_at","TEXT"],["preferred_usable_until","TEXT"],["preferred_failed_at","TEXT"],["using_downloaded_at","TEXT"],["derived_from","INTEGER"]])
+    if (!columns.has(name)) db.exec(`ALTER TABLE shelfcheck_catalogue_selections ADD COLUMN ${name} ${type}`);
+  catalogueUseDatabases.add(db);
 }
 
 // Generated provider catalogues and inputs do not pass through report ignore pruning.

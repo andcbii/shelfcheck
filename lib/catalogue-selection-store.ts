@@ -1,5 +1,6 @@
 import "server-only";
-import { selectComparisonCatalogue, type CatalogueProvider, type CatalogueSelection } from "@/lib/catalogue-selection";
+import { selectComparisonCatalogue, type CatalogueProvider, type CatalogueSelection, type CatalogueUseState } from "@/lib/catalogue-selection";
+export type { CatalogueUseState } from "@/lib/catalogue-selection";
 import type { ShowProviderIds } from "@/lib/plex-inventory";
 import { catalogueSelectionDatabase } from "@/lib/sqlite";
 
@@ -11,11 +12,29 @@ export class CatalogueSelectionError extends Error {
   }
 }
 
-/** How the scan is using its chosen catalogue. Only the preferred catalogue is used so far. */
-export type CatalogueUseState = "preferred";
-
-/** The catalogue a scan or recheck chose for one provider, recorded separately from the preference. */
-export type CurrentCatalogue = { preferredId?: number; usingId?: number; state: CatalogueUseState; selectedAt: string };
+/**
+ * The catalogue a scan chose to compare for one provider, recorded separately from the preference
+ * so reports can show it without recalculating. Times are ISO strings.
+ */
+export type CurrentCatalogue = {
+  preferredId?: number;
+  /** The series whose catalogue is compared; absent when no catalogue is usable. */
+  usingId?: number;
+  state: CatalogueUseState;
+  selectedAt: string;
+  /** Last successful download of the preferred series' catalogue. */
+  preferredDownloadedAt?: string;
+  /** For a provider with several candidates: the last moment the saved preferred catalogue may still be compared (60 days after its download). */
+  preferredUsableUntil?: string;
+  /** When the preferred series last failed to load, while it is unavailable. */
+  preferredFailedAt?: string;
+  /** Last successful download of the catalogue in use. */
+  usingDownloadedAt?: string;
+  /** For a `derived` series: the other provider's series whose catalogue supplied it. */
+  derivedFrom?: number;
+};
+/** What a scan records about the catalogue it is using. */
+export type CatalogueUse = Omit<CurrentCatalogue, "selectedAt">;
 
 export type ProviderCatalogueSelection = {
   /** The last completely observed Plex candidates, with names when known. */
@@ -32,7 +51,8 @@ export type ShowCatalogueSelection = Record<CatalogueProvider, ProviderCatalogue
 type Db = ReturnType<typeof catalogueSelectionDatabase>;
 type CandidateRow = { identity: string; provider: CatalogueProvider; series_id: number; name: string | null };
 type OverrideRow = { identity: string; provider: CatalogueProvider; series_id: number };
-type SelectionRow = { identity: string; provider: CatalogueProvider; preferred_id: number | null; using_id: number | null; state: CatalogueUseState; selected_at: string };
+type SelectionRow = { identity: string; provider: CatalogueProvider; preferred_id: number | null; using_id: number | null; state: CatalogueUseState; selected_at: string;
+  preferred_downloaded_at: string | null; preferred_usable_until: string | null; preferred_failed_at: string | null; using_downloaded_at: string | null; derived_from: number | null };
 
 function transaction<T>(db: Db, run: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -81,6 +101,23 @@ export function observeCatalogueCandidates(identity: string, observed: ShowProvi
   })) as Record<CatalogueProvider, CatalogueSelection>);
 }
 
+/**
+ * Record the catalogue a scan is comparing for one provider. The preference itself (override and
+ * candidates) is untouched, so a temporary fallback cannot erase it.
+ */
+export function recordCatalogueUse(identity: string, provider: CatalogueProvider, use: CatalogueUse) {
+  const db = catalogueSelectionDatabase();
+  transaction(db, () => db.prepare(`INSERT INTO shelfcheck_catalogue_selections(identity,provider,preferred_id,using_id,state,selected_at,preferred_downloaded_at,preferred_usable_until,preferred_failed_at,using_downloaded_at,derived_from) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(identity,provider) DO UPDATE SET preferred_id=excluded.preferred_id,using_id=excluded.using_id,state=excluded.state,selected_at=excluded.selected_at,preferred_downloaded_at=excluded.preferred_downloaded_at,
+      preferred_usable_until=excluded.preferred_usable_until,preferred_failed_at=excluded.preferred_failed_at,using_downloaded_at=excluded.using_downloaded_at,derived_from=excluded.derived_from`)
+    .run(identity, provider, use.preferredId ?? null, use.usingId ?? null, use.state, new Date().toISOString(), use.preferredDownloadedAt ?? null, use.preferredUsableUntil ?? null, use.preferredFailedAt ?? null, use.usingDownloadedAt ?? null, use.derivedFrom ?? null));
+}
+
+/** Forget the catalogue in use for a provider that has none this scan, such as a derived series no longer linked. */
+export function clearCatalogueUse(identity: string, provider: CatalogueProvider) {
+  catalogueSelectionDatabase().prepare("DELETE FROM shelfcheck_catalogue_selections WHERE identity=? AND provider=?").run(identity, provider);
+}
+
 /** Save names for known candidates; names never affect the candidate set or an override. */
 export function recordCatalogueCandidateNames(identity: string, provider: CatalogueProvider, names: { id: number; name?: string }[]) {
   const db = catalogueSelectionDatabase();
@@ -119,8 +156,10 @@ export function readCatalogueSelections(): Record<string, ShowCatalogueSelection
     entry(row.identity, row.provider).candidates.push({ id: row.series_id, ...(row.name ? { name: row.name } : {}) });
   for (const row of db.prepare("SELECT identity,provider,series_id FROM shelfcheck_catalogue_overrides").all() as OverrideRow[])
     entry(row.identity, row.provider).override = row.series_id;
-  for (const row of db.prepare("SELECT identity,provider,preferred_id,using_id,state,selected_at FROM shelfcheck_catalogue_selections").all() as SelectionRow[])
-    entry(row.identity, row.provider).current = { ...(row.preferred_id !== null ? { preferredId: row.preferred_id } : {}), ...(row.using_id !== null ? { usingId: row.using_id } : {}), state: row.state, selectedAt: row.selected_at };
+  for (const row of db.prepare("SELECT * FROM shelfcheck_catalogue_selections").all() as SelectionRow[]) {
+    const optional = { preferredId: row.preferred_id, usingId: row.using_id, preferredDownloadedAt: row.preferred_downloaded_at, preferredUsableUntil: row.preferred_usable_until, preferredFailedAt: row.preferred_failed_at, usingDownloadedAt: row.using_downloaded_at, derivedFrom: row.derived_from };
+    entry(row.identity, row.provider).current = { ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== null)), state: row.state, selectedAt: row.selected_at };
+  }
   for (const show of Object.values(shows)) for (const provider of PROVIDERS) {
     const selection = show[provider];
     selection.automaticId = selection.candidates[0]?.id;

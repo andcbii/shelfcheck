@@ -50,3 +50,13 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
     ...(preferredId !== undefined ? { preferredId } : {}),
   };
 }
+
+/**
+ * How a scan is using a provider's comparison catalogue:
+ * - `preferred`: the preferred series (override or automatic choice) loaded or was reused under the freshness policies.
+ * - `saved-unavailable`: the preferred series could not be loaded; its saved catalogue, within the 60-day limit, is compared.
+ * - `fallback`: the preferred series could not be loaded and has no usable saved catalogue; another Plex candidate is compared.
+ * - `unavailable`: no candidate could supply a usable catalogue; last-good results are kept.
+ * - `derived`: Plex reported no ID for this provider; the series came from the other provider's catalogue in use.
+ */
+export type CatalogueUseState = "preferred" | "saved-unavailable" | "fallback" | "unavailable" | "derived";

@@ -22,7 +22,7 @@ export const missingTmdb = (show: Show) => show.missing.flatMap(episode => episo
 /**
  * One Plex show (two when `second` is set) against fake TMDB and TVDB catalogues. TMDB series
  * `id` has `episodes` episodes with IDs id*100+n; the Plex library owns only S1E1. A held scan
- * waits inside its first TMDB season download until released, so it stays active.
+ * waits inside its Plex library listing until released, so it stays active.
  */
 export async function fixture(t: TestContext) {
   const dir = mkdtempSync(path.join(tmpdir(),"catalogue-override-"));
@@ -47,7 +47,10 @@ export async function fixture(t: TestContext) {
     const shows = [{ratingKey:"1",title:"Scooby",year:1976,Guid:guids(plex),updatedAt:1},...(second ? [{ratingKey:"2",title:"Other",Guid:guids({tmdb:[second.tmdb],tvdb:[second.tvdb]}),updatedAt:1}] : [])];
     if(u.hostname === "plex") {
       if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
-      if(u.pathname === "/library/sections/1/all") return Response.json({MediaContainer:{Metadata:shows}});
+      if(u.pathname === "/library/sections/1/all") {
+        if(hold) { const current = hold; hold = undefined; current.started(); await current.released; }
+        return Response.json({MediaContainer:{Metadata:shows}});
+      }
       if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[{ratingKey:"ep",parentIndex:1,index:1,Guid:[]}]}});
       const key = u.pathname.match(/^\/library\/metadata\/(\d+)$/)?.[1];
       return Response.json({MediaContainer:{Metadata:shows.filter(show=>show.ratingKey === key)}});
@@ -60,7 +63,6 @@ export async function fixture(t: TestContext) {
       const id = Number(tmdbShow[1]), series = tmdb[id];
       if(series.fail) return Response.json({status_message:"not found"},{status:404});
       if(!tmdbShow[2]) return Response.json({id,name:`TMDB ${id}`,first_air_date:`19${id}-01-01`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
-      if(hold) { const current = hold; hold = undefined; current.started(); await current.released; }
       return Response.json({episodes:Array.from({length:series.episodes},(_,n)=>({id:id*100+n+1,season_number:1,episode_number:n+1,name:`Episode ${n+1}`,air_date:"2020-01-01"}))});
     }
     const tvdbSeries = u.pathname.match(/^\/v4\/series\/(\d+)(\/episodes\/default)?$/);

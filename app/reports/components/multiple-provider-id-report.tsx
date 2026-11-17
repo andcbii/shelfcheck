@@ -18,7 +18,10 @@ function CandidatePanel({ entry, panel, locked, onSaved }: { entry: MultipleProv
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const override = panel.selection.override;
-  useEffect(() => { setChoice(persistedChoice(panel)); }, [panel]);
+  // A refreshed report resets the radios to the newly persisted choice.
+  const persisted = persistedChoice(panel);
+  const [synced, setSynced] = useState(persisted);
+  if (synced !== persisted) { setSynced(persisted); setChoice(persisted); }
 
   async function save(seriesId: number | null) {
     if (locked || busy) return;

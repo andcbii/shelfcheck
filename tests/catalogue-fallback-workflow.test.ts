@@ -12,6 +12,7 @@ const config = await import("../lib/server-config");
 const selections = await import("../lib/catalogue-selection-store");
 const plexScan = await import("../lib/plex-scan");
 const catalogues = await import("../lib/plex-catalogues");
+const reportData = await import("../app/reports/report-data");
 hook.deregister();
 
 const DAY = 86400_000;
@@ -127,6 +128,11 @@ test("the product-owner timeline keeps the B preference through saved data and f
   current = f.selection().tmdb.current!;
   assert.equal(current.state,"fallback"); assert.equal(current.usingId,10); assert.equal(current.preferredId,11);
   assert.equal(current.preferredDownloadedAt,day(101),"failures never renew B's download time");
+  const entry = reportData.getReportData().multipleIdShows.find(candidate => candidate.identity === f.identity)!;
+  assert.deepEqual({using:entry.panels.tmdb.summary.using,preference:entry.panels.tmdb.summary.preference},{using:"Fallback: TMDB 10 (10)",preference:"Override: TMDB 11 (11)"},"the report shows preference B and currently using A");
+  assert.match(entry.panels.tmdb.summary.explanation || "",/^Preferred: 11 · Currently using: 10 · 11 unavailable; saved catalogue expired 2026-06-11/);
+  assert.deepEqual(entry.panels.tmdb.candidates.map(candidate => [candidate.id,candidate.override,candidate.using,candidate.unavailable]),[[10,false,true,false],[11,true,false,true]]);
+  assert.equal(entry.panels.tvdb.summary.using,"TVDB 1 (1)","TVDB is unchanged in the report");
   f.restart();
   assert.equal(f.selection().tmdb.override,11,"the preference survives fallback and restart");
   assert.equal(f.selection().tmdb.current?.usingId,10);
@@ -477,4 +483,27 @@ test("an offline recheck that falls back re-derives TVDB from the TMDB catalogue
   assert.equal(show.tmdbId,10);
   assert.equal(show.tvdbId,undefined,"A has no TVDB link, so B's derived ID is not kept");
   assert.equal(f.selection().tvdb.current,undefined);
+});
+
+test("the TVDB catalogue in use for a provider with several IDs is downloaded again once older than 20 days", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = [1,3]; f.setSecond({tmdb:12,tvdb:2});
+  const downloaded = Date.parse(day(1));
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tvdb",3); await f.run();
+  selections.saveCatalogueOverride(f.identity,"tvdb",null);
+  const show = await f.run();
+  assert.equal(show.tvdbId,1,"A is in use; B is a saved but unused candidate");
+  for (const days of [7,14]) { f.at(new Date(downloaded + days * DAY).toISOString()); await f.run(); }
+  const downloads = () => [f.tvdbDownloads(1),f.tvdbDownloads(3),f.tvdbDownloads(2),f.tmdbDownloads(10),f.tmdbDownloads(12)];
+  for (const [offset,label] of [[-1,"just before"],[0,"exactly at"]] as const) {
+    f.at(new Date(downloaded + 20 * DAY + offset).toISOString());
+    await f.run();
+    assert.deepEqual(downloads(),[0,0,0,0,0],`nothing is downloaded ${label} 20 days`);
+  }
+  f.at(new Date(downloaded + 20 * DAY + 1).toISOString());
+  await f.run();
+  assert.deepEqual(downloads(),[1,0,0,0,0],"only the multiple-ID provider's TVDB catalogue in use is refreshed after 20 days");
+  assert.equal(f.selection().tvdb.current?.usingDownloadedAt,new Date(downloaded + 20 * DAY + 1).toISOString());
+  assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(1),"TMDB of the same show keeps its own rules");
 });

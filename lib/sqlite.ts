@@ -322,6 +322,19 @@ function retireOwnershipCorrections(db: DatabaseSync) {
   }
 }
 
+// Catalogue selection for shows with several Plex provider IDs. Overrides are user
+// decisions and candidate sets are observed Plex state, so neither is a generated
+// input: clearing the cache or saving Plex settings leaves them in place.
+// Candidates are the last completely observed set; selections record the catalogue
+// a scan chose to use, kept apart so a temporary fallback cannot erase a preference.
+export function catalogueSelectionDatabase() {
+  const db = database();
+  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_candidates(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), series_id INTEGER NOT NULL, name TEXT, PRIMARY KEY(identity, provider, series_id));
+    CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_overrides(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), series_id INTEGER NOT NULL, saved_at TEXT NOT NULL, PRIMARY KEY(identity, provider));
+    CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_selections(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), preferred_id INTEGER, using_id INTEGER, state TEXT NOT NULL, selected_at TEXT NOT NULL, PRIMARY KEY(identity, provider));`);
+  return db;
+}
+
 // Generated provider catalogues and inputs do not pass through report ignore pruning.
 function plexInputsDatabase() {
   const db = database();

@@ -1,10 +1,19 @@
+import { readCatalogueSelections } from "@/lib/catalogue-selection-store";
 import { coverageState } from "@/lib/manual-coverage";
 import { clearPlexScanCache, getPlexReport, getPlexScanStatus, startPlexScan } from "@/lib/plex-scan";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() { return Response.json({ scan: getPlexScanStatus(), report: getPlexReport(), coverage: coverageState() }, { headers: { "Cache-Control": "private, no-store" } }); }
+/** The saved report, each show carrying its persisted comparison catalogue selection for the results notice. */
+function reportWithCatalogueSelections() {
+  const report = getPlexReport();
+  if (!report) return report;
+  const selections = readCatalogueSelections();
+  return { ...report, shows: report.shows.map((show) => selections[show.ratingKey] ? { ...show, catalogueSelection: selections[show.ratingKey] } : show) };
+}
+
+export async function GET() { return Response.json({ scan: getPlexScanStatus(), report: reportWithCatalogueSelections(), coverage: coverageState() }, { headers: { "Cache-Control": "private, no-store" } }); }
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({})) as { ratingKey?: string };

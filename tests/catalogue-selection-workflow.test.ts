@@ -70,6 +70,7 @@ test("scans compare the lowest Plex series ID or the saved override, reconciling
   assert.deepEqual(named.tmdb.candidates,[{id:9,name:"Dynomutt Hour"},{id:10,name:"Scooby-Doo Show"}]);
   assert.deepEqual(named.tvdb.candidates,[{id:20,name:"TVDB 20"},{id:21,name:"TVDB 21"}]);
   assert.equal(named.tmdb.current?.usingId,9);
+  assert.deepEqual(result.catalogueSelection,named,"results carry the persisted selection for their notice");
 
   guids = [...guids].reverse();
   result = await run();

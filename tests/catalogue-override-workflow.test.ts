@@ -272,3 +272,20 @@ test("when a dependent provider input fails, the persisted catalogues in use are
   assert.equal(selection.tmdb.preferredId,11,"the new preference is kept");
   assert.match(catalogueNotices(selection)[0]?.text || "",/Preferred TMDB 11 · Using .*10\)? until compared/,"the new preference shows as pending");
 });
+
+test("a scan falling back to another TVDB series resolves the TMDB series of the one compared when Plex reports no TMDB ID", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = []; f.plex.tvdb = [1,3];
+  f.find[1] = 10; f.find[3] = 11;
+  await f.run();
+  await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  f.tvdb[3].fail = true;
+  f.at(day(2)); const show = await f.run();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1],"TMDB follows the fallback TVDB series, never the unavailable preference");
+  assert.deepEqual(missingTmdb(show),[1002]);
+  const selection = f.selection();
+  assert.equal(selection.tvdb.current?.state,"fallback");
+  assert.equal(selection.tvdb.current?.usingId,1);
+  assert.equal(selection.tmdb.current?.usingId,10);
+  assert.equal(selection.tmdb.current?.derivedFrom,1);
+});

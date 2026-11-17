@@ -13,6 +13,19 @@ export function idsFromGuids(guids: { id?: string }[] = []) {
   return { tmdbId, tvdbId, imdbId };
 }
 
+export type ShowProviderIds = { tmdb: number[]; tvdb: number[] };
+
+/** Every distinct show-level TMDB and TVDB series ID, numerically sorted. Episode GUIDs keep `idsFromGuids`. */
+export function showProviderIds(guids: { id?: string }[] = []): ShowProviderIds {
+  const ids = { tmdb: new Set<number>(), tvdb: new Set<number>() };
+  for (const guid of guids) {
+    const match = guid.id?.match(/^(tmdb|tvdb):\/\/(\d+)/i);
+    if (match) ids[match[1].toLowerCase() as "tmdb" | "tvdb"].add(Number(match[2]));
+  }
+  const sorted = (values: Set<number>) => [...values].filter(id => id > 0).sort((left, right) => left - right);
+  return { tmdb: sorted(ids.tmdb), tvdb: sorted(ids.tvdb) };
+}
+
 export function groupPlexShows(shows: PlexMetadata[]): PlexShowGroup[] {
   const parents = shows.map((_, index) => index);
   const root = (index: number): number => parents[index] === index ? index : (parents[index] = root(parents[index]));
@@ -21,7 +34,8 @@ export function groupPlexShows(shows: PlexMetadata[]): PlexShowGroup[] {
 
   for (const [index, show] of shows.entries()) {
     const plexGuid = show.guid?.startsWith("plex://show/") ? show.guid : undefined;
-    const { tmdbId, tvdbId } = idsFromGuids(show.Guid);
+    // Each record's lowest IDs make the alias independent of GUID order.
+    const { tmdb: [tmdbId], tvdb: [tvdbId] } = showProviderIds(show.Guid);
     // Requiring the complete pair avoids merging distinct TMDB series that TVDB
     // represents as one record (for example, the two Animaniacs series).
     const providerPair = tmdbId && tvdbId ? `tmdb:${tmdbId}|tvdb:${tvdbId}` : undefined;

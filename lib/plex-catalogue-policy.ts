@@ -1,4 +1,20 @@
-const CATALOGUE_AGE_LIMIT = 60 * 86400_000;
+export const CATALOGUE_AGE_LIMIT = 60 * 86400_000;
+/** The in-use catalogue of a provider with several Plex IDs is downloaded again once older than this. */
+export const MULTIPLE_ID_REFRESH_AGE = 20 * 86400_000;
+
+/**
+ * Whether a saved catalogue may still serve as current comparison input when its series could
+ * not be loaded: 60 days or less since its last successful download (usable at exactly 60 days).
+ */
+export function withinCatalogueAgeLimit(downloadedAt: string | undefined, now: string): boolean {
+  const downloaded = Date.parse(downloadedAt || "");
+  return Number.isFinite(downloaded) && Date.parse(now) - downloaded <= CATALOGUE_AGE_LIMIT;
+}
+
+/** The last moment a saved catalogue downloaded at `downloadedAt` may still be compared (exactly 60 days later). */
+export function catalogueUsableUntil(downloadedAt: string): string {
+  return new Date(Date.parse(downloadedAt) + CATALOGUE_AGE_LIMIT).toISOString();
+}
 
 /** A complete catalogue download is the only event that renews provider age. */
 export function reuseProviderCatalogue(input: {
@@ -6,10 +22,12 @@ export function reuseProviderCatalogue(input: {
   usable: boolean; mandatory: boolean; targeted: boolean;
   /** A verified change, or TMDB verification recovery that the change feed cannot cover. */
   changed: boolean;
+  /** A shorter age (ms) after which the catalogue is downloaded again; reusable at exactly this age. */
+  refreshAfter?: number;
 }): boolean {
   if (!input.usable || input.mandatory || input.targeted) return false;
-  const downloaded = Date.parse(input.downloadedAt || "");
-  if (!Number.isFinite(downloaded) || Date.parse(input.now) - downloaded > CATALOGUE_AGE_LIMIT) return false;
+  if (!withinCatalogueAgeLimit(input.downloadedAt, input.now)) return false;
+  if (input.refreshAfter !== undefined && Date.parse(input.now) - Date.parse(input.downloadedAt || "") > input.refreshAfter) return false;
   if (!input.changed) return true;
   return input.provider === "tmdb" && input.downloadedAt?.slice(0, 10) === input.now.slice(0, 10);
 }

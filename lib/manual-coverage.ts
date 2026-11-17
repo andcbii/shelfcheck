@@ -1,4 +1,5 @@
 import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
+import { isPlexScanActive } from "@/lib/plex-scan-active";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { coverageDatabase } from "@/lib/sqlite";
@@ -43,7 +44,7 @@ export function listCoverageMappings(): CoverageMapping[] {
 }
 
 export function assertCoverageMutationAllowed() {
-  if ((globalThis as typeof globalThis & {__shelfcheckPlexScan?:Promise<void>}).__shelfcheckPlexScan) throw new CoverageError("Wait for the current Plex scan to finish before changing Manual Matches.",409,"scan-active");
+  if (isPlexScanActive()) throw new CoverageError("Wait for the current Plex scan to finish before changing Manual Matches.",409,"scan-active");
 }
 
 /** Explicit flags supplied with a save, or undefined to retain flags on retained members. */

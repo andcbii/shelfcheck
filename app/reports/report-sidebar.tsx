@@ -3,9 +3,9 @@
 import Link from "next/link";
 import { useState } from "react";
 
-type Props = { active: "all" | "auto-matches" | "unmatched-shows" | "provider-matches" | "manual-matches" | "coverage-issues"; autoCount: number; unmatchedCount: number; providerCount: number; manualCount?: number; issueCount?: number };
+type Props = { active: "all" | "auto-matches" | "unmatched-shows" | "provider-matches" | "manual-matches" | "coverage-issues" | "multiple-provider-ids"; autoCount: number; unmatchedCount: number; providerCount: number; manualCount?: number; issueCount?: number; multipleIdCount?: number };
 
-export function ReportSidebar({ active, autoCount, unmatchedCount, providerCount, manualCount = 0, issueCount = 0 }: Props) {
+export function ReportSidebar({ active, autoCount, unmatchedCount, providerCount, manualCount = 0, issueCount = 0, multipleIdCount = 0 }: Props) {
   const [collapsed, setCollapsed] = useState(false);
   return <aside className={`report-sidebar ${collapsed ? "collapsed" : ""}`}>
     <div className="report-sidebar-heading"><span>Report List</span><button type="button" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? "Expand report menu" : "Collapse report menu"} title={collapsed ? "Expand" : "Collapse"}>{collapsed ? "→" : "←"}</button></div>
@@ -16,6 +16,7 @@ export function ReportSidebar({ active, autoCount, unmatchedCount, providerCount
       <Link className={active === "unmatched-shows" ? "active" : ""} href="/reports/unmatched-shows"><b>03</b><span>Unmatched Shows</span><small>{unmatchedCount}</small></Link>
       <Link className={active === "provider-matches" ? "active" : ""} href="/reports/provider-matches"><b>04</b><span>Provider Matches</span><small>{providerCount}</small></Link>
       <Link className={active === "coverage-issues" ? "active" : ""} href="/reports/coverage-issues"><b>05</b><span>Scan Issues</span><small>{issueCount}</small></Link>
+      <Link className={active === "multiple-provider-ids" ? "active" : ""} href="/reports/multiple-provider-ids"><b>06</b><span>Multiple Provider IDs</span><small>{multipleIdCount}</small></Link>
     </nav>
   </aside>;
 }

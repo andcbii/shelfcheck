@@ -10,6 +10,15 @@ A provider's description of a show and its episodes, including their identities,
 **Library inventory**:
 The shows and episode items present in the Plex libraries included in a scan, together with the identities Plex assigns to them.
 
+**Comparison catalogue**:
+The provider catalogue selected as the reference for checking one library show's missing episodes. TMDB and TVDB have independent comparison catalogues.
+
+**Catalogue override**:
+A user's preferred comparison catalogue, chosen from the series identities Plex reports for that provider. The preference can remain saved while an unavailable catalogue requires another catalogue to be used.
+
+**Fallback catalogue**:
+A comparison catalogue used while the preferred catalogue is unavailable and has no usable saved copy. Using a fallback does not replace the user's saved catalogue override.
+
 **Completed full scan**:
 A scan that obtains the complete library inventory and finishes processing the library, even when individual checks leave unresolved issues. Interrupted scans and scans with incomplete library inventory do not qualify.
 

@@ -8,6 +8,8 @@ import type { CoverageIssue } from "@/lib/coverage-issues";
 import Link from "next/link";
 import { INCOMPLETE_LABEL, missingPartsExplanation, type CoverageGroup } from "@/lib/manual-coverage-model";
 import { ManualCoverageManager } from "@/app/components/manual-coverage-manager";
+import { CatalogueNotice } from "@/app/components/catalogue-notice";
+import type { ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
@@ -26,7 +28,7 @@ import { activeIgnores, createIgnoreTiming, isIgnoreActive, type IgnoreDuration,
 import { parsePlexPreferences } from "@/lib/preferences";
 
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
-type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string };
+type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string; catalogueSelection?: ShowCatalogueSelection };
 type Report = { shows: Show[]; lastScan: string; coverageGroups?: CoverageGroup[]; scanCache?: Record<string, unknown> };
 type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" };
 type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: boolean; tvdbApiKeySaved: boolean; tvdbPinSaved: boolean; configured: boolean };
@@ -438,6 +440,7 @@ export default function PlexPage() {
             {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey) && <div className="ignored-season-status">Ignored {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey)!.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}</div>}
             {openShowMenu === show.ratingKey && <ShowActionsMenu onIgnoreShow={() => { setShowToIgnore(show); setOpenShowMenu(null); }} onForceCheck={() => void forceCheckShow(show)} onClearCache={() => void clearShowCache(show)} onIgnoreSeasons={() => openSeasonIgnore(show)} />}
             {!showCollapsed && <><div className="compact-show-meta"><p>{show.plexEpisodes} collected · {show.missing.length} missing {show.missing.length === 1 ? "episode" : "episodes"}</p><div className="season-all-controls"><button onClick={() => setAllSeasons(show, false)}>Show all</button><button onClick={() => setAllSeasons(show, true)}>Collapse all</button></div></div>
+            <CatalogueNotice identity={show.ratingKey} selection={show.catalogueSelection} />
             {show.warning && <p className="plex-warning">{show.warning}</p>}
             <div className="plex-seasons">{seasons.map((season) => {
               const episodes = ungroupedMissing(show).filter((episode) => episode.season === season).sort((a, b) => a.episode - b.episode);

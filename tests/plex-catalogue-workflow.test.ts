@@ -191,7 +191,8 @@ test("saved identity relationships revalidate ownership and retain aliases and i
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
   sqlite.writePlexSettings({diagnosticsEnabled:false,ignoredShows:[{ratingKey:"ratingKey:ignored",title:"Ignored source"}]});
-  const a = {ratingKey:"a",guid:"plex://show/target",title:"Target",Guid:[{id:"tmdb://10"},{id:"tvdb://20"}]};
+  // The lowest IDs (TMDB 11, TVDB 21) supply the compared catalogues; the others are identity evidence.
+  const a = {ratingKey:"a",guid:"plex://show/target",title:"Target",Guid:[{id:"tmdb://14"},{id:"tvdb://24"}]};
   const b = {ratingKey:"b",guid:"plex://show/target",title:"Target",Guid:[{id:"tmdb://11"},{id:"tvdb://21"}]};
   const other = {ratingKey:"other",title:"Other",Guid:[{id:"tmdb://30"}]};
   const ignored = {ratingKey:"ignored",title:"Ignored source",Guid:[{id:"tvdb://50"}]};
@@ -232,8 +233,8 @@ test("saved identity relationships revalidate ownership and retain aliases and i
   assert.equal(initial.shows.length,2);
   assert.deepEqual(target.plexRatingKeys,["a","b"]);
   assert.equal(target.autoMatches[0].tmdb.id,999);
-  assert.deepEqual(target.providerMatches.tmdb.map((s:{id:number})=>s.id).sort((a:number,b:number)=>a-b),[10,11,12,13]);
-  assert.deepEqual(target.providerMatches.tvdb.map((s:{id:number})=>s.id).sort((a:number,b:number)=>a-b),[20,21]);
+  assert.deepEqual(target.providerMatches.tmdb.map((s:{id:number})=>s.id).sort((a:number,b:number)=>a-b),[11,12,13,14]);
+  assert.deepEqual(target.providerMatches.tvdb.map((s:{id:number})=>s.id).sort((a:number,b:number)=>a-b),[21,24]);
   assert.ok(requests.includes("/library/metadata/ignored/allLeaves"),"ignored source inventory is collected before any Manual Matches exist");
   global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
   owned=998; requests.length=0;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { catalogueStatus } from "@/lib/catalogue-description";
 import { PROVIDER_NAME, PROVIDERS } from "@/lib/catalogue-selection";
 import type { ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import type { MultipleProviderIdEntry, ProviderPanel } from "@/lib/multiple-provider-ids-report";
@@ -33,7 +34,8 @@ function CandidatePanel({ entry, panel, locked, onSaved }: { entry: MultipleProv
       // Always show what the server persisted, including after a rejection.
       setChoice(saved ? saved.override ?? saved.automaticId : persistedChoice(panel));
       if (!response.ok) throw new Error(body.error || "The catalogue selection could not be saved.");
-      const compared = saved?.current?.preferredId === saved?.preferredId;
+      // Compared only when the saved preference has a catalogue in use, as every other description reads it.
+      const compared = !!saved && !["not-compared", "unavailable", "pending"].includes(catalogueStatus(saved).kind);
       const what = seriesId === null ? "Automatic selection restored" : "Override saved";
       setFeedback({ tone: "saved", text: compared ? `${what}; the show was rechecked from saved data.` : `${what}; the next Plex scan downloads and compares it.` });
     } catch (error) {

@@ -82,6 +82,15 @@ test("a pending selection says the next scan compares it", async t => {
   assert.match(container.textContent || "", /Override saved; the next Plex scan downloads and compares it/);
 });
 
+test("a selection with no usable catalogue after the save says the next scan compares it, not that it was rechecked", async t => {
+  const unavailable = selection(337142); unavailable.tmdb.current = { preferredId: 337142, state: "unavailable", selectedAt: "2026-01-01T00:00:00Z", preferredFailedAt: "2026-01-01T00:00:00Z" };
+  const { container, root } = mountDom(t, { fetch: fetcher([], () => Response.json({ selection: unavailable })) });
+  await act(async () => root.render(createElement(MultipleProviderIdReport, { entries: entries(), initialScanning: false, onChanged() {} })));
+  await act(async () => (container.querySelector('input[value="337142"]') as HTMLInputElement).click());
+  await act(async () => button(container, "Save override").click());
+  assert.match(container.textContent || "", /Override saved; the next Plex scan downloads and compares it/);
+});
+
 test("changes are disabled during a scan, and a rejected save shows the persisted selection", async t => {
   const calls: Call[] = [];
   const { container, root } = mountDom(t, { fetch: fetcher(calls, () => Response.json({ error: "Wait for the current Plex scan to finish before changing the comparison catalogue.", code: "scan-active", selection: selection() }, { status: 409 })) });

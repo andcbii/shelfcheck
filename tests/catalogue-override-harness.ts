@@ -11,6 +11,7 @@ export const selectionRoute = await import("../app/api/plex/catalogue-selection/
 const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 export const selections = await import("../lib/catalogue-selection-store");
+export const reportData = await import("../app/reports/report-data");
 hook.deregister();
 
 export const DAY = 86400_000;

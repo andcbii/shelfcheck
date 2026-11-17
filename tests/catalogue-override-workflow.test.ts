@@ -95,3 +95,37 @@ test("a selection change is rejected while a Plex scan is active, and the persis
   assert.equal(f.selection().tmdb.override,undefined);
   assert.equal((await f.show()).tmdbId,10);
 });
+
+test("report membership follows successful Plex inventory on either provider", async t => {
+  const { reportData } = await import("./catalogue-override-harness");
+  const f = await fixture(t);
+  f.setSecond({tmdb:12,tvdb:2});
+  await f.run();
+  const listed = () => reportData.getReportData().multipleIdShows.map(entry => entry.identity);
+  assert.deepEqual(listed(),[]);
+  f.plex.tmdb = [10,11];
+  f.at(day(2)); await f.run();
+  assert.deepEqual(listed(),[f.identity]);
+  assert.equal(reportData.getReportData().counts.multipleIdCount,1);
+  f.plex.tmdb = [10]; f.plex.tvdb = [1,3];
+  f.at(day(3)); await f.run();
+  assert.deepEqual(listed(),[f.identity],"ambiguity on the other provider keeps the show listed");
+  f.plex.tvdb = [1];
+  f.at(day(4)); await f.run();
+  assert.deepEqual(listed(),[],"the show leaves once neither provider has several IDs");
+});
+
+test("a TVDB override whose saved inputs cannot replay keeps last-good results until the next scan", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = [1,3];
+  await f.run();
+  f.requests.length = 0;
+  const saved = await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  assert.equal(saved.status,200);
+  assert.deepEqual(f.requests,[]);
+  assert.equal((await f.show()).tvdbId,1);
+  assert.ok((await f.issues()).some(issue=>issue.id === `comparison-inputs:${f.identity}`));
+  f.at(day(2));
+  assert.equal((await f.run()).tvdbId,3);
+  assert.ok(!(await f.issues()).some(issue=>issue.id === `comparison-inputs:${f.identity}`));
+});

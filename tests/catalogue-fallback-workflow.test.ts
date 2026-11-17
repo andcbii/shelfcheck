@@ -285,3 +285,53 @@ test("without a Plex TVDB ID, the derived TVDB series follows the TMDB catalogue
   assert.equal(show.tvdbId,1,"a Plex-reported TVDB ID always wins");
   assert.equal(f.selection().tvdb.current?.state,"preferred");
 });
+
+test("a cached recheck replays the catalogue in use without provider downloads", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.at(day(2)); await f.run();
+  f.tmdb[11].fail = true;
+  f.at(day(63)); const show = await f.run();
+  assert.equal(show.tmdbId,10);
+  f.requests.length = 0;
+  await plexScan.requestCoverageRecheck({members:[{provider:"TMDB",id:1001,showId:10,show:"TMDB 10",title:"Episode 1",season:1,episode:1,url:""}]});
+  assert.deepEqual(f.requests,[],"no provider or Plex requests");
+  const rechecked = (await (await scan.GET()).json()).report.shows[0] as Show;
+  assert.equal(rechecked.tmdbId,10,"fallback A is replayed, not preferred B");
+  assert.deepEqual(missingTmdb(rechecked),[1002]);
+  assert.equal(f.selection().tmdb.current?.state,"fallback");
+});
+
+test("a single-ID show keeps comparing its old saved catalogue, unverified, after 60 days", async t => {
+  const f = await fixture(t);
+  await f.run();
+  f.tmdb[10].fail = true;
+  f.at(day(100));
+  const show = await f.run();
+  assert.equal(show.tmdbId,10);
+  assert.deepEqual(missingTmdb(show),[1002]);
+  assert.ok(show.warning,"the result is marked unverified");
+  const current = f.selection().tmdb.current!;
+  assert.equal(current.state,"saved-unavailable");
+  assert.equal(current.preferredUsableUntil,undefined,"no 60-day deadline applies to a single ID");
+});
+
+test("TVDB applies the same saved-catalogue limit and fallback independently of TMDB", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = [1,3];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tvdb",3);
+  f.at(day(2)); let show = await f.run();
+  assert.equal(show.tvdbId,3);
+  f.tvdb[3].fail = true;
+  f.at(day(30)); show = await f.run();
+  assert.equal(show.tvdbId,3);
+  assert.equal(f.selection().tvdb.current?.state,"saved-unavailable");
+  f.at(day(63)); show = await f.run();
+  assert.equal(show.tvdbId,1,"TVDB falls back once saved B is older than 60 days");
+  assert.equal(f.selection().tvdb.current?.state,"fallback");
+  assert.equal(f.selection().tvdb.override,3);
+  assert.equal(f.selection().tmdb.current?.state,"preferred","TMDB is unaffected");
+});

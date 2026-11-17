@@ -401,3 +401,80 @@ test("an outstanding refresh obligation also downloads the fallback in use until
   assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`));
   assert.equal(fallbackIssue(issues),undefined,"A's refresh failure no longer affects the comparison");
 });
+
+/**
+ * Prepare `provider` with candidates A (lower) and B: B is preferred by override and failing, its saved
+ * catalogue downloaded on day 2; A's saved catalogue was downloaded on day 40. Day 41's scan compares saved B.
+ */
+async function savedBWithYoungA(f: Awaited<ReturnType<typeof fixture>>, provider: "tmdb" | "tvdb", a: number, b: number) {
+  f.plex[provider] = [a,b];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,provider,b);
+  f.at(day(2)); await f.run();
+  selections.saveCatalogueOverride(f.identity,provider,null);
+  f.at(day(40)); await f.run();
+  selections.saveCatalogueOverride(f.identity,provider,b);
+  (provider === "tmdb" ? f.tmdb : f.tvdb)[b].fail = true;
+  f.at(day(41)); const show = await f.run();
+  assert.equal(f.selection()[provider].current?.state,"saved-unavailable");
+  return show;
+}
+type Member = {provider:"TMDB"|"TVDB";id:number;showId:number;show:string;title:string;season:number;episode:number;url:string};
+const member = (provider: "TMDB" | "TVDB", showId: number, id: number): Member => ({provider,id,showId,show:`${provider} ${showId}`,title:"Episode 1",season:1,episode:1,url:""});
+async function offlineRecheck(f: Awaited<ReturnType<typeof fixture>>, at: string, members: readonly Member[]) {
+  f.at(at); f.requests.length = 0;
+  await plexScan.requestCoverageRecheck({members:[...members]});
+  assert.deepEqual(f.requests,[],"an offline recheck makes no HTTP or Plex request");
+  return (await (await scan.GET()).json()).report.shows.find((show: Show) => show.ratingKey === f.identity) as Show;
+}
+
+for (const [provider,a,b,members] of [["tmdb",10,11,[member("TMDB",11,1101),member("TMDB",10,1001)]],["tvdb",1,3,[member("TVDB",3,3001),member("TVDB",1,1001)]]] as const) {
+  test(`an offline recheck applies the 60-day limit to the ${provider.toUpperCase()} catalogue in use, then falls back to saved A`, async t => {
+    const f = await fixture(t);
+    f.setSecond({tmdb:12,tvdb:2});
+    await savedBWithYoungA(f,provider,a,b);
+    const other = (await (await scan.GET()).json()).report.shows.find((show: Show) => show.ratingKey === "ratingKey:2");
+    const id = (show: Show) => provider === "tmdb" ? show.tmdbId : show.tvdbId;
+    const label = provider.toUpperCase();
+    const downloaded = Date.parse(day(2));
+    for (const [offset,when] of [[-1,"just before"],[0,"exactly at"]] as const) {
+      const show = await offlineRecheck(f,new Date(downloaded + 60 * DAY + offset).toISOString(),members);
+      assert.equal(id(show),b,`saved B is compared ${when} 60 days`);
+      assert.equal(f.selection()[provider].current?.state,"saved-unavailable");
+    }
+    f.restart();
+    let show = await offlineRecheck(f,new Date(downloaded + 60 * DAY + 1).toISOString(),members);
+    assert.equal(id(show),a,"saved A is compared once saved B is older than 60 days");
+    if (provider === "tmdb") assert.deepEqual(missingTmdb(show),[1002]);
+    let current = f.selection()[provider].current!;
+    assert.deepEqual({state:current.state,usingId:current.usingId,preferredId:current.preferredId,preferredDownloadedAt:current.preferredDownloadedAt,preferredFailedAt:current.preferredFailedAt,usingDownloadedAt:current.usingDownloadedAt},
+      {state:"fallback",usingId:a,preferredId:b,preferredDownloadedAt:day(2),preferredFailedAt:day(41),usingDownloadedAt:day(40)});
+    assert.equal(f.selection()[provider].override,b,"the preference is kept");
+    let issues = await f.issues();
+    assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:${label}:${f.identity}`),"B's failure is preserved");
+    assert.ok(!issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`));
+    const saved = catalogues.readPlexInputs();
+    assert.equal(saved.comparisons[f.identity].refresh?.[provider],true,"the refresh obligation is retained");
+    assert.deepEqual([saved[provider][String(b)].downloadedAt,saved[provider][String(a)].downloadedAt],[day(2),day(40)],"no download time is renewed");
+
+    show = await offlineRecheck(f,new Date(Date.parse(day(40)) + 60 * DAY + 1).toISOString(),members);
+    assert.equal(id(show),a,"last-good results are kept once A is expired too");
+    issues = await f.issues();
+    const pending = issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`) as {cause?:string} | undefined;
+    assert.match(pending?.cause || "",new RegExp(`No reported ${label} series has a saved catalogue from the last 60 days`));
+    current = f.selection()[provider].current!;
+    assert.equal(current.usingDownloadedAt,day(40),"the last comparison's selection is unchanged");
+    assert.deepEqual((await (await scan.GET()).json()).report.shows.find((entry: Show) => entry.ratingKey === "ratingKey:2"),other,"an unrelated show is untouched");
+  });
+}
+
+test("an offline recheck that falls back re-derives TVDB from the TMDB catalogue actually compared", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = []; f.tmdb[10].tvdb = null; f.tmdb[11].tvdb = 3;
+  await savedBWithYoungA(f,"tmdb",10,11);
+  assert.equal(f.selection().tvdb.current?.usingId,3,"saved B supplies the derived TVDB series");
+  const show = await offlineRecheck(f,new Date(Date.parse(day(2)) + 60 * DAY + 1).toISOString(),[member("TMDB",11,1101),member("TMDB",10,1001)]);
+  assert.equal(show.tmdbId,10);
+  assert.equal(show.tvdbId,undefined,"A has no TVDB link, so B's derived ID is not kept");
+  assert.equal(f.selection().tvdb.current,undefined);
+});

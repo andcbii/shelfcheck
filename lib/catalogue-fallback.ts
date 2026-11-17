@@ -76,3 +76,31 @@ export function singleIdUse(usingId: number, reported: boolean, derivedFrom: num
 export function failedSingleIdUse(preferredId: number, savedDownloadedAt: string | undefined, failedAt: string): CatalogueUse {
   return { preferredId, ...(savedDownloadedAt ? { usingId: preferredId, preferredDownloadedAt: savedDownloadedAt, usingDownloadedAt: savedDownloadedAt } : {}), state: savedDownloadedAt ? "saved-unavailable" : "unavailable", preferredFailedAt: failedAt };
 }
+
+/**
+ * The offline counterpart of `chooseAvailableCatalogue` for a cached recheck, which loads nothing.
+ * The preferred series is compared when its saved catalogue is within 60 days of `now`. Once a scan
+ * has tried this preference (`tried`), the lowest remaining candidate with such a catalogue is the
+ * fallback; a preference no scan has tried yet is never replaced by a fallback.
+ */
+export function chooseSavedCatalogue(input: { preferredId: number; candidates: number[]; now: string; tried: boolean; downloadedAt: (id: number) => string | undefined }): number | undefined {
+  const usable = (id: number) => withinCatalogueAgeLimit(input.downloadedAt(id), input.now);
+  if (usable(input.preferredId)) return input.preferredId;
+  return input.tried ? distinctSortedIds(input.candidates).find(id => id !== input.preferredId && usable(id)) : undefined;
+}
+
+/**
+ * The catalogue use an offline recheck publishes for a provider with several Plex IDs. It keeps the
+ * failure provenance already recorded and renews no time: download times are the saved catalogues'.
+ */
+export function savedCatalogueUse(input: { preferredId: number; usingId: number; preferredDownloadedAt?: string; usingDownloadedAt: string; preferredFailedAt?: string; usingFailedAt?: string }): CatalogueUse {
+  const preferred = input.usingId === input.preferredId;
+  return {
+    preferredId: input.preferredId, usingId: input.usingId,
+    state: preferred ? (input.preferredFailedAt ? "saved-unavailable" : "preferred") : "fallback",
+    ...(input.preferredDownloadedAt ? { preferredDownloadedAt: input.preferredDownloadedAt, preferredUsableUntil: catalogueUsableUntil(input.preferredDownloadedAt) } : {}),
+    ...(input.preferredFailedAt ? { preferredFailedAt: input.preferredFailedAt } : {}),
+    usingDownloadedAt: input.usingDownloadedAt,
+    ...(!preferred && input.usingFailedAt ? { usingFailedAt: input.usingFailedAt } : {}),
+  };
+}

@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.6.0 - 2026-11-17
+
+### Added
+
+- Keep every TMDB and TVDB series ID Plex attaches to a show as a candidate and
+  compare against the lowest ID by default, independent of Plex GUID order.
+- Add a Multiple Provider IDs report to choose which series ID each provider
+  uses, saved per show and kept when the cache is cleared; saving rechecks the
+  show immediately from saved data.
+- Show a note on results that use a show with several IDs, with a Review IDs
+  link to its report entry.
+
+### Changed
+
+- When the chosen series cannot be loaded, keep using its saved catalogue for
+  up to 60 days, then fall back to the lowest usable ID until it loads again.
+  Shows with several IDs refresh their catalogue once it is older than 20 days.
+- Upgrade Next.js to 16.4.6 (fixes GHSA-mfr8-8qww-v76h and
+  GHSA-vc7v-qv4w-wrv8), React to 19.3.1, Tailwind CSS to 4.3.5 and TypeScript
+  to 6.0.3, with other build and lint tooling updates.
+- Pin GitHub Actions by commit SHA and the Node 24 base image by digest, with
+  weekly Dependabot update pull requests.
+
 ## 2.5.5 - 2026-11-15
 
 ### Changed

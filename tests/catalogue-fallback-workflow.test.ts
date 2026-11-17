@@ -11,6 +11,7 @@ const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 const selections = await import("../lib/catalogue-selection-store");
 const plexScan = await import("../lib/plex-scan");
+const catalogues = await import("../lib/plex-catalogues");
 hook.deregister();
 
 const DAY = 86400_000;
@@ -196,7 +197,7 @@ test("when no candidate can supply a usable catalogue, last-good results stay wi
   assert.equal(f.selection().tmdb.current?.state,"unavailable");
   assert.equal(f.selection().tmdb.current?.usingId,undefined);
   const root = (await f.issues() as {id:string;impacts?:string[];lookup?:{impact:string}}[]).find(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`);
-  assert.match(root?.lookup?.impact || "",/No TMDB series reported by Plex could supply a usable catalogue/);
+  assert.match(root?.lookup?.impact || "",/No reported TMDB series could supply a usable catalogue/);
   assert.ok(root?.impacts?.some(impact=>impact.includes("Episode comparison could not be checked")),"the comparison issue is folded into its cause");
 });
 
@@ -334,4 +335,69 @@ test("TVDB applies the same saved-catalogue limit and fallback independently of 
   assert.equal(f.selection().tvdb.current?.state,"fallback");
   assert.equal(f.selection().tvdb.override,3);
   assert.equal(f.selection().tmdb.current?.state,"preferred","TMDB is unaffected");
+});
+
+test("an outstanding refresh obligation also downloads the fallback in use until the preferred series downloads again", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.at(day(2)); await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",null);
+  f.at(day(50)); await f.run();
+  assert.equal(f.tmdbDownloads(10),1,"A is downloaded on day 50 and young afterwards");
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.tmdb[11].fail = true;
+  const obligation = () => catalogues.readPlexInputs().comparisons[f.identity]?.refresh;
+
+  f.at(day(63)); let show = await f.run();
+  assert.equal(show.tmdbId,10); assert.equal(f.selection().tmdb.current?.state,"fallback");
+  assert.equal(f.tmdbDownloads(10),0,"without an obligation, young A is reused");
+  assert.equal(obligation()?.tmdb,true,"B's failure leaves a refresh obligation");
+
+  for (const n of [64,65]) {
+    f.at(day(n)); show = await f.run();
+    assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
+    assert.equal(f.tmdbDownloads(10),1,`the obligation downloads A on day ${n} although it is younger than 20 days`);
+    assert.equal(show.tmdbId,10);
+    assert.equal(obligation()?.tmdb,true,"a successful fallback download does not satisfy B's obligation");
+    assert.equal(obligation()?.tvdb,undefined,"TVDB has no obligation of its own");
+    assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(n));
+  }
+  assert.equal(f.selection().tmdb.current?.preferredDownloadedAt,day(2),"B's download time is unchanged");
+
+  f.tmdb[10].fail = true;
+  f.at(day(66)); show = await f.run();
+  assert.equal(show.tmdbId,10,"saved A, within 60 days, is still compared");
+  assert.deepEqual(missingTmdb(show),[1002]);
+  assert.equal(show.warning,undefined,"no duplicate generic warning for a complete saved comparison");
+  let current = f.selection().tmdb.current!;
+  assert.equal(current.state,"fallback"); assert.equal(current.usingDownloadedAt,day(65),"A's failed refresh renews nothing");
+  assert.equal(current.usingFailedAt,day(66),"A's failed refresh is recorded with the catalogue in use");
+  assert.equal(obligation()?.tmdb,true);
+  type Issue = {id:string;operation:string;show?:{tmdbId?:number};lookup?:{impact:string}};
+  const fallbackIssue = (issues: Issue[]) => issues.find(issue=>issue.id === `catalogue-fallback-refresh:TMDB:${f.identity}`);
+  let issues = await f.issues() as Issue[];
+  assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"B's failure stays a Coverage Issue");
+  assert.equal(fallbackIssue(issues)?.operation,"catalogue-refresh");
+  assert.equal(fallbackIssue(issues)?.show?.tmdbId,10);
+  assert.match(fallbackIssue(issues)?.lookup?.impact || "",/saved catalogue, downloaded 2026-03-07/);
+
+  f.restart();
+  await plexScan.requestCoverageRecheck({members:[{provider:"TMDB",id:1001,showId:10,show:"TMDB 10",title:"Episode 1",season:1,episode:1,url:""}]});
+  issues = await f.issues() as Issue[];
+  assert.ok(fallbackIssue(issues),"an offline recheck preserves A's failure");
+  assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"and B's");
+  assert.equal(f.selection().tmdb.current?.usingFailedAt,day(66));
+
+  f.tmdb[11].fail = false;
+  f.at(day(67)); show = await f.run();
+  assert.equal(show.tmdbId,11,"B recovers");
+  assert.equal(f.tmdbDownloads(10),0,"A is no longer loaded");
+  assert.equal(obligation()?.tmdb,undefined,"a successful B download clears only TMDB's obligation");
+  current = f.selection().tmdb.current!;
+  assert.equal(current.state,"preferred"); assert.equal(current.usingFailedAt,undefined);
+  issues = await f.issues() as Issue[];
+  assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`));
+  assert.equal(fallbackIssue(issues),undefined,"A's refresh failure no longer affects the comparison");
 });

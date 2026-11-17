@@ -11,6 +11,11 @@ export function withinCatalogueAgeLimit(downloadedAt: string | undefined, now: s
   return Number.isFinite(downloaded) && Date.parse(now) - downloaded <= CATALOGUE_AGE_LIMIT;
 }
 
+/** The last moment a saved catalogue downloaded at `downloadedAt` may still be compared (exactly 60 days later). */
+export function catalogueUsableUntil(downloadedAt: string): string {
+  return new Date(Date.parse(downloadedAt) + CATALOGUE_AGE_LIMIT).toISOString();
+}
+
 /** A complete catalogue download is the only event that renews provider age. */
 export function reuseProviderCatalogue(input: {
   provider: "tmdb" | "tvdb"; now: string; downloadedAt?: string;

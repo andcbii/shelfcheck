@@ -1,27 +1,21 @@
-import type { CatalogueProvider } from "@/lib/catalogue-selection";
+import { catalogueStatus, hasMultipleCandidates, seriesLabel } from "@/lib/catalogue-description";
+import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { ProviderCatalogueSelection, ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 
 export type CatalogueNotice = { provider: CatalogueProvider; text: string };
 
-const PROVIDERS: CatalogueProvider[] = ["tmdb", "tvdb"];
-const PROVIDER_NAME: Record<CatalogueProvider, string> = { tmdb: "TMDB", tvdb: "TVDB" };
-
-function series(selection: ProviderCatalogueSelection, id: number) {
-  const name = selection.candidates.find((candidate) => candidate.id === id)?.name;
-  return name ? `${name} (${id})` : String(id);
-}
-
 function details(provider: CatalogueProvider, selection: ProviderCatalogueSelection): string[] {
-  const current = selection.current;
-  const preferredId = current?.preferredId ?? selection.preferredId;
-  const preferred = preferredId === undefined ? [] : [`Preferred ${PROVIDER_NAME[provider]} ${preferredId}`];
-  if (!current) return [...preferred, "Not compared yet"];
-  const usingId = current.usingId;
-  if (usingId === undefined) return [...preferred, "No catalogue available"];
-  if (current.state === "fallback") return [...preferred, `Using fallback ${series(selection, usingId)}`];
-  const saved = current.state === "saved-unavailable";
-  if (selection.override === usingId) return [`Override: ${series(selection, usingId)}`, ...(saved ? ["Using saved catalogue", "Series unavailable"] : [])];
-  return saved ? [`Using saved catalogue ${series(selection, usingId)}`, "Series unavailable"] : [`Using ${series(selection, usingId)}`];
+  const status = catalogueStatus(selection);
+  const preferred = status.preferredId === undefined ? [] : [`Preferred ${PROVIDER_NAME[provider]} ${status.preferredId}`];
+  switch (status.kind) {
+    case "not-compared": return [...preferred, "Not compared yet"];
+    case "unavailable": return [...preferred, "No catalogue available"];
+    case "fallback": return [...preferred, `Using fallback ${seriesLabel(selection, status.usingId)}`];
+    case "pending": return [...preferred, `Using ${seriesLabel(selection, status.usingId)} until compared`];
+  }
+  const saved = status.kind === "saved-unavailable";
+  if (selection.override === status.usingId) return [`Override: ${seriesLabel(selection, status.usingId)}`, ...(saved ? ["Using saved catalogue", "Series unavailable"] : [])];
+  return saved ? [`Using saved catalogue ${seriesLabel(selection, status.usingId)}`, "Series unavailable"] : [`Using ${seriesLabel(selection, status.usingId)}`];
 }
 
 /**
@@ -30,7 +24,7 @@ function details(provider: CatalogueProvider, selection: ProviderCatalogueSelect
  */
 export function catalogueNotices(selection: ShowCatalogueSelection | undefined): CatalogueNotice[] {
   if (!selection) return [];
-  return PROVIDERS.filter((provider) => new Set(selection[provider].candidates.map((candidate) => candidate.id)).size > 1).map((provider) => ({
+  return PROVIDERS.filter((provider) => hasMultipleCandidates(selection[provider])).map((provider) => ({
     provider,
     text: [`Multiple ${PROVIDER_NAME[provider]} IDs`, ...details(provider, selection[provider])].join(" · "),
   }));

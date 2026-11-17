@@ -1,10 +1,9 @@
 import "server-only";
-import { selectComparisonCatalogue, type CatalogueProvider, type CatalogueSelection, type CatalogueUseState } from "@/lib/catalogue-selection";
+import { PROVIDER_NAME, PROVIDERS, selectComparisonCatalogue, type CatalogueProvider, type CatalogueSelection, type CatalogueUseState } from "@/lib/catalogue-selection";
 export type { CatalogueUseState } from "@/lib/catalogue-selection";
 import type { ShowProviderIds } from "@/lib/plex-inventory";
+import { isPlexScanActive } from "@/lib/plex-scan-active";
 import { catalogueSelectionDatabase } from "@/lib/sqlite";
-
-const PROVIDERS: CatalogueProvider[] = ["tmdb", "tvdb"];
 
 export class CatalogueSelectionError extends Error {
   constructor(message: string, public status = 400, public code = "validation") {
@@ -30,6 +29,8 @@ export type CurrentCatalogue = {
   preferredFailedAt?: string;
   /** Last successful download of the catalogue in use. */
   usingDownloadedAt?: string;
+  /** When a fallback in use last failed to load, so its saved catalogue is compared. */
+  usingFailedAt?: string;
   /** For a `derived` series: the other provider's series whose catalogue supplied it. */
   derivedFrom?: number;
 };
@@ -52,7 +53,7 @@ type Db = ReturnType<typeof catalogueSelectionDatabase>;
 type CandidateRow = { identity: string; provider: CatalogueProvider; series_id: number; name: string | null };
 type OverrideRow = { identity: string; provider: CatalogueProvider; series_id: number };
 type SelectionRow = { identity: string; provider: CatalogueProvider; preferred_id: number | null; using_id: number | null; state: CatalogueUseState; selected_at: string;
-  preferred_downloaded_at: string | null; preferred_usable_until: string | null; preferred_failed_at: string | null; using_downloaded_at: string | null; derived_from: number | null };
+  preferred_downloaded_at: string | null; preferred_usable_until: string | null; preferred_failed_at: string | null; using_downloaded_at: string | null; using_failed_at: string | null; derived_from: number | null };
 
 function transaction<T>(db: Db, run: () => T): T {
   db.exec("BEGIN IMMEDIATE");
@@ -107,10 +108,10 @@ export function observeCatalogueCandidates(identity: string, observed: ShowProvi
  */
 export function recordCatalogueUse(identity: string, provider: CatalogueProvider, use: CatalogueUse) {
   const db = catalogueSelectionDatabase();
-  transaction(db, () => db.prepare(`INSERT INTO shelfcheck_catalogue_selections(identity,provider,preferred_id,using_id,state,selected_at,preferred_downloaded_at,preferred_usable_until,preferred_failed_at,using_downloaded_at,derived_from) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+  transaction(db, () => db.prepare(`INSERT INTO shelfcheck_catalogue_selections(identity,provider,preferred_id,using_id,state,selected_at,preferred_downloaded_at,preferred_usable_until,preferred_failed_at,using_downloaded_at,using_failed_at,derived_from) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(identity,provider) DO UPDATE SET preferred_id=excluded.preferred_id,using_id=excluded.using_id,state=excluded.state,selected_at=excluded.selected_at,preferred_downloaded_at=excluded.preferred_downloaded_at,
-      preferred_usable_until=excluded.preferred_usable_until,preferred_failed_at=excluded.preferred_failed_at,using_downloaded_at=excluded.using_downloaded_at,derived_from=excluded.derived_from`)
-    .run(identity, provider, use.preferredId ?? null, use.usingId ?? null, use.state, new Date().toISOString(), use.preferredDownloadedAt ?? null, use.preferredUsableUntil ?? null, use.preferredFailedAt ?? null, use.usingDownloadedAt ?? null, use.derivedFrom ?? null));
+      preferred_usable_until=excluded.preferred_usable_until,preferred_failed_at=excluded.preferred_failed_at,using_downloaded_at=excluded.using_downloaded_at,using_failed_at=excluded.using_failed_at,derived_from=excluded.derived_from`)
+    .run(identity, provider, use.preferredId ?? null, use.usingId ?? null, use.state, new Date().toISOString(), use.preferredDownloadedAt ?? null, use.preferredUsableUntil ?? null, use.preferredFailedAt ?? null, use.usingDownloadedAt ?? null, use.usingFailedAt ?? null, use.derivedFrom ?? null));
 }
 
 /** Forget the catalogue in use for a provider that has none this scan, such as a derived series no longer linked. */
@@ -127,21 +128,24 @@ export function recordCatalogueCandidateNames(identity: string, provider: Catalo
 }
 
 /**
- * Save (or with `seriesId` null clear) a show's catalogue override for one provider. The ID
- * must be one of the provider's currently reported Plex candidates. Rejected while a Plex scan runs.
+ * Save (or with `seriesId` null clear) a show's catalogue override for one provider, validating the
+ * request: an active Plex scan rejects it first, then the ID must be one of the provider's currently
+ * reported Plex candidates, of which there must be several.
  */
-export function saveCatalogueOverride(identity: string, provider: CatalogueProvider, seriesId: number | null) {
-  if (!PROVIDERS.includes(provider)) throw new CatalogueSelectionError("Choose a TMDB or TVDB catalogue.");
+export function saveCatalogueOverride(identity: unknown, provider: unknown, seriesId: unknown) {
   const db = catalogueSelectionDatabase();
   transaction(db, () => {
-    if ((globalThis as typeof globalThis & { __shelfcheckPlexScan?: Promise<void> }).__shelfcheckPlexScan)
-      throw new CatalogueSelectionError("Wait for the current Plex scan to finish before changing the comparison catalogue.", 409, "scan-active");
+    if (isPlexScanActive()) throw new CatalogueSelectionError("Wait for the current Plex scan to finish before changing the comparison catalogue.", 409, "scan-active");
+    if (typeof identity !== "string" || !identity) throw new CatalogueSelectionError("Supply the Plex show identity.");
+    if (provider !== "tmdb" && provider !== "tvdb") throw new CatalogueSelectionError("Choose a TMDB or TVDB catalogue.");
     if (seriesId === null) {
       db.prepare("DELETE FROM shelfcheck_catalogue_overrides WHERE identity=? AND provider=?").run(identity, provider);
       return;
     }
-    if (!candidateIds(db, identity, provider).includes(seriesId))
-      throw new CatalogueSelectionError(`Choose one of the ${provider.toUpperCase()} series IDs Plex currently reports for this show.`);
+    if (!(typeof seriesId === "number" && Number.isSafeInteger(seriesId) && seriesId > 0)) throw new CatalogueSelectionError("Choose a series ID, or clear the override.");
+    const candidates = candidateIds(db, identity, provider);
+    if (candidates.length < 2) throw new CatalogueSelectionError(`Plex reports only one ${PROVIDER_NAME[provider]} series for this show, so there is nothing to override.`);
+    if (!candidates.includes(seriesId)) throw new CatalogueSelectionError(`Choose one of the ${PROVIDER_NAME[provider]} series IDs Plex currently reports for this show.`);
     db.prepare(`INSERT INTO shelfcheck_catalogue_overrides(identity,provider,series_id,saved_at) VALUES(?,?,?,?)
       ON CONFLICT(identity,provider) DO UPDATE SET series_id=excluded.series_id,saved_at=excluded.saved_at`).run(identity, provider, seriesId, new Date().toISOString());
   });
@@ -149,15 +153,24 @@ export function saveCatalogueOverride(identity: string, provider: CatalogueProvi
 
 /** Saved candidates, overrides and current selections by show group identity. */
 export function readCatalogueSelections(): Record<string, ShowCatalogueSelection> {
+  return readSelections();
+}
+/** One show's saved candidates, override and current selections, if any are saved. */
+export function readShowCatalogueSelection(identity: string): ShowCatalogueSelection | undefined {
+  return readSelections(identity)[identity];
+}
+function readSelections(identity?: string): Record<string, ShowCatalogueSelection> {
   const db = catalogueSelectionDatabase();
   const shows: Record<string, ShowCatalogueSelection> = {};
-  const entry = (identity: string, provider: CatalogueProvider) => (shows[identity] ||= { tmdb: { candidates: [] }, tvdb: { candidates: [] } })[provider];
-  for (const row of db.prepare("SELECT identity,provider,series_id,name FROM shelfcheck_catalogue_candidates ORDER BY identity,provider,series_id").all() as CandidateRow[])
+  const where = identity === undefined ? "" : " WHERE identity=?";
+  const rows = <T,>(sql: string) => (identity === undefined ? db.prepare(sql).all() : db.prepare(sql).all(identity)) as T[];
+  const entry = (key: string, provider: CatalogueProvider) => (shows[key] ||= { tmdb: { candidates: [] }, tvdb: { candidates: [] } })[provider];
+  for (const row of rows<CandidateRow>(`SELECT identity,provider,series_id,name FROM shelfcheck_catalogue_candidates${where} ORDER BY identity,provider,series_id`))
     entry(row.identity, row.provider).candidates.push({ id: row.series_id, ...(row.name ? { name: row.name } : {}) });
-  for (const row of db.prepare("SELECT identity,provider,series_id FROM shelfcheck_catalogue_overrides").all() as OverrideRow[])
+  for (const row of rows<OverrideRow>(`SELECT identity,provider,series_id FROM shelfcheck_catalogue_overrides${where}`))
     entry(row.identity, row.provider).override = row.series_id;
-  for (const row of db.prepare("SELECT * FROM shelfcheck_catalogue_selections").all() as SelectionRow[]) {
-    const optional = { preferredId: row.preferred_id, usingId: row.using_id, preferredDownloadedAt: row.preferred_downloaded_at, preferredUsableUntil: row.preferred_usable_until, preferredFailedAt: row.preferred_failed_at, usingDownloadedAt: row.using_downloaded_at, derivedFrom: row.derived_from };
+  for (const row of rows<SelectionRow>(`SELECT * FROM shelfcheck_catalogue_selections${where}`)) {
+    const optional = { preferredId: row.preferred_id, usingId: row.using_id, preferredDownloadedAt: row.preferred_downloaded_at, preferredUsableUntil: row.preferred_usable_until, preferredFailedAt: row.preferred_failed_at, usingDownloadedAt: row.using_downloaded_at, usingFailedAt: row.using_failed_at, derivedFrom: row.derived_from };
     entry(row.identity, row.provider).current = { ...Object.fromEntries(Object.entries(optional).filter(([, value]) => value !== null)), state: row.state, selectedAt: row.selected_at };
   }
   for (const show of Object.values(shows)) for (const provider of PROVIDERS) {

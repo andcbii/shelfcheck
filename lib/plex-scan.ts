@@ -1,6 +1,7 @@
 import { CATALOGUE_AGE_LIMIT, MULTIPLE_ID_REFRESH_AGE, reuseProviderCatalogue, withinCatalogueAgeLimit, tmdbFeedCovers, tmdbVerificationPlan, tvdbVerificationFrom } from "@/lib/plex-catalogue-policy";
 import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isPlexScanActive, type PlexScanGlobal } from "@/lib/plex-scan-active";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, invalidateSharedTmdbCrosswalk, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
@@ -24,8 +25,9 @@ import { PLEX_SCAN_WORKERS, type PlexProviderName } from "@/lib/plex-provider-po
 import { ActiveScanTracker, runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readCatalogueSelections, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse } from "@/lib/catalogue-selection-store";
-import type { CatalogueProvider } from "@/lib/catalogue-selection";
-import { chooseAvailableCatalogue, type CatalogueChoice } from "@/lib/catalogue-fallback";
+import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { chooseAvailableCatalogue, failedSingleIdUse, multipleIdUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
+import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, mergeScanProgress, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
@@ -55,7 +57,7 @@ type TmdbEpisodeFindResult = TmdbFindEpisode;
 type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
 type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };
 type TraktCredentials = { clientId: string; accessToken: string };
-type ScanGlobal = typeof globalThis & { __shelfcheckPlexScan?: Promise<void>; __shelfcheckPlexLogger?: ScanLogger };
+type ScanGlobal = PlexScanGlobal & { __shelfcheckPlexLogger?: ScanLogger };
 
 const TMDB = "https://api.themoviedb.org/3";
 const TVDB = "https://api4.thetvdb.com/v4";
@@ -196,30 +198,9 @@ async function traktJson<T>(path: string, credentials: TraktCredentials): Promis
   } }, "Trakt");
 }
 
-/** The catalogue in use for a provider with one Plex ID, or a series derived from the other provider's catalogue. */
-function singleIdUse(usingId: number, plexId: number | undefined, derivedFrom: number | undefined, downloadedAt: string | undefined): CatalogueUse {
-  return plexId
-    ? {preferredId:usingId, usingId, state:"preferred", ...(downloadedAt ? {preferredDownloadedAt:downloadedAt, usingDownloadedAt:downloadedAt} : {})}
-    : {usingId, state:"derived", ...(derivedFrom ? {derivedFrom} : {}), ...(downloadedAt ? {usingDownloadedAt:downloadedAt} : {})};
-}
-/** A single-ID provider whose series failed to load: its saved catalogue, at any age, stays in use (ADR-0003). */
-function failedSingleIdUse(preferredId: number, savedDownloadedAt: string | undefined, failedAt: string): CatalogueUse {
-  return {preferredId, ...(savedDownloadedAt ? {usingId:preferredId, preferredDownloadedAt:savedDownloadedAt, usingDownloadedAt:savedDownloadedAt} : {}), state:savedDownloadedAt ? "saved-unavailable" : "unavailable", preferredFailedAt:failedAt};
-}
-/** The catalogue a provider with several Plex IDs is using, with the preferred series' 60-day deadline. */
-function multipleIdUse<T>(choice: CatalogueChoice<T>, preferredId: number, preferredDownloadedAt: string | undefined, now: string): CatalogueUse {
-  return {
-    preferredId, ...(choice.usingId ? {usingId:choice.usingId} : {}), state:choice.state,
-    ...(preferredDownloadedAt ? {preferredDownloadedAt, preferredUsableUntil:new Date(Date.parse(preferredDownloadedAt) + CATALOGUE_AGE_LIMIT).toISOString()} : {}),
-    ...(choice.preferredError ? {preferredFailedAt:now} : {}),
-    ...(choice.loaded ? {usingDownloadedAt:choice.loaded.downloadedAt} : {}),
-  };
-}
-function unavailablePreferredImpact(provider: "TMDB" | "TVDB", use: CatalogueUse, comparisonComplete: boolean | undefined) {
-  const day = (value?: string) => value?.slice(0, 10) || "unknown";
-  if (use.state === "saved-unavailable") return `${provider} series ${use.preferredId} could not be loaded. Its saved catalogue, downloaded ${day(use.preferredDownloadedAt)}, is compared until ${day(use.preferredUsableUntil)}; the series is retried every scan.`;
-  if (use.state === "fallback") return `${provider} series ${use.preferredId} could not be loaded and has no saved catalogue from the last 60 days. ${provider} series ${use.usingId} is compared instead until ${use.preferredId} loads again; the preference is kept.`;
-  return `No ${provider} series reported by Plex could supply a usable catalogue. ${comparisonComplete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`;
+/** The Coverage Issue impact of an unavailable preferred series, from the shared description of the catalogue in use. */
+function unavailablePreferredImpact(provider: CatalogueProvider, use: CatalogueUse) {
+  return `${catalogueUseExplanation(provider, use)} ${PROVIDER_NAME[provider]} series ${use.preferredId} is retried every scan; the preference is kept.`;
 }
 
 async function getTmdbShow(tmdbId: number | undefined, tvdbId: number | undefined, token: string, resolved?: (id:number)=>void): Promise<TmdbShow | null> {
@@ -1099,39 +1080,54 @@ async function runPlexScan(targetRatingKey?: string) {
         providerEpisodes.push(...loaded.episodes);
         malformedRecords.push(...loaded.malformed);
       };
+      /**
+       * Choose and load the catalogue of a provider with several Plex candidates. An outstanding refresh
+       * obligation downloads whichever candidate supplies the comparison, and stays until the preferred
+       * series downloads successfully. Unavailable preferred and fallback series are Coverage Issues.
+       */
+      const chooseMultipleIdCatalogue = async <T extends {reused:boolean;downloadedAt:string}>(provider: CatalogueProvider, preferredId: number, candidates: number[], load: (id: number, mandatory: boolean, refreshAfter: number) => Promise<T>, saved: (id: number) => T | undefined, source: LookupSourceStep[]) => {
+        const name = PROVIDER_NAME[provider];
+        const loaded = (value: T): LoadedCatalogue<T> => ({value, downloadedAt: value.downloadedAt});
+        const choice = await chooseAvailableCatalogue({
+          preferredId, candidates, now: startedAt,
+          load: async id => loaded(await load(id, !!refresh[provider], MULTIPLE_ID_REFRESH_AGE)),
+          saved: id => { const value = saved(id); return value && loaded(value); },
+        });
+        if (choice.state === "preferred" && !choice.loaded?.value.reused) delete refresh[provider];
+        if (choice.preferredError) refresh[provider] = true;
+        const use = multipleIdUse(choice, preferredId, inputs[provider][String(preferredId)]?.downloadedAt, startedAt);
+        catalogueUse[provider] = use;
+        const showIds = (id: number) => ({ratingKey,title:primary.title,tmdbId:provider === "tmdb" ? id : tmdbId,tvdbId:provider === "tvdb" ? id : tvdbId});
+        const authentication = (error: unknown) => provider === "tvdb" && tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {};
+        const kind = provider === "tmdb" ? "show" : "series";
+        const issueId = `catalogue-refresh:${name}:${ratingKey}`, fallbackIssueId = `catalogue-fallback-refresh:${name}:${ratingKey}`;
+        if (choice.preferredError) {
+          setCoverageIssue({id:issueId,...authentication(choice.preferredError),operation:"catalogue-refresh",provider:name,scope:"show",show:showIds(preferredId),...providerLookupContext(choice.preferredError,{source,requested:{provider:name,kind,id:preferredId},impact:unavailablePreferredImpact(provider,use)})});
+          if (!choice.loaded) {
+            unavailableCatalogueCauses.push(issueId);
+            addWarning(choice.preferredError instanceof Error ? choice.preferredError.message : `${name} lookup failed.`);
+          }
+        } else resolveCoverageIssue(issueId);
+        // A fallback compared from saved data after its own failed refresh is unverified too.
+        if (choice.fallbackError && choice.usingId) setCoverageIssue({id:fallbackIssueId,...authentication(choice.fallbackError),operation:"catalogue-refresh",provider:name,scope:"show",show:showIds(choice.usingId),...providerLookupContext(choice.fallbackError,{source,requested:{provider:name,kind,id:choice.usingId},impact:catalogueUseExplanation(provider,use)!})});
+        else resolveCoverageIssue(fallbackIssueId);
+        savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
+        return choice;
+      };
       if (tmdbCandidates.length > 1 && tmdbId) {
         const preferredId = tmdbId;
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
         phaseStarted = Date.now();
-        const choice = await chooseAvailableCatalogue({
-          preferredId, candidates: tmdbCandidates, now: startedAt,
-          load: async (id, preferred) => {
-            // The refresh obligation belongs to the preferred series; the catalogue in use is refreshed after 20 days.
-            const loaded = await loadTmdb(id, preferred && !!refresh.tmdb, MULTIPLE_ID_REFRESH_AGE);
-            if (!loaded) throw new Error(`TMDB returned no show ${id}.`);
-            return {value: loaded, downloadedAt: loaded.downloadedAt};
-          },
-          saved: id => {
-            const saved = inputs.tmdb[String(id)];
-            return usableProviderCatalogue(saved) ? {value: {show: saved.show, episodes: saved.episodes, malformed: saved.malformed || [], reused: true, downloadedAt: saved.downloadedAt}, downloadedAt: saved.downloadedAt} : undefined;
-          },
-        });
+        const choice = await chooseMultipleIdCatalogue("tmdb", preferredId, tmdbCandidates, async (id, mandatory, refreshAfter) => {
+          const loaded = await loadTmdb(id, mandatory, refreshAfter);
+          if (!loaded) throw new Error(`TMDB returned no show ${id}.`);
+          return loaded;
+        }, id => {
+          const saved = inputs.tmdb[String(id)];
+          return usableProviderCatalogue(saved) ? {show: saved.show, episodes: saved.episodes, malformed: saved.malformed || [], reused: true, downloadedAt: saved.downloadedAt} : undefined;
+        }, tmdbSource);
         if (choice.loaded) useTmdb(choice.loaded.value);
-        else tmdbShow = null;
-        // Only a successful download of the preferred series satisfies its refresh obligation.
-        if (choice.state === "preferred" && !choice.loaded?.value.reused) delete refresh.tmdb;
-        if (choice.preferredError) refresh.tmdb = true;
-        catalogueUse.tmdb = multipleIdUse(choice, preferredId, inputs.tmdb[String(preferredId)]?.downloadedAt, startedAt);
-        const issueId = `catalogue-refresh:TMDB:${ratingKey}`;
-        if (choice.preferredError) {
-          setCoverageIssue({id:issueId,operation:"catalogue-refresh",provider:"TMDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId:preferredId,tvdbId},...providerLookupContext(choice.preferredError,{source:tmdbSource,requested:{provider:"TMDB",kind:"show",id:preferredId},impact:unavailablePreferredImpact("TMDB",catalogueUse.tmdb,savedComparison?.complete)})});
-          if (!choice.loaded) {
-            tmdbId = preferredId;
-            unavailableCatalogueCauses.push(issueId);
-            addWarning(choice.preferredError instanceof Error ? choice.preferredError.message : "TMDB lookup failed.");
-          }
-        } else resolveCoverageIssue(issueId);
-        savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
+        else { tmdbShow = null; tmdbId = preferredId; }
         phaseTimings.tmdbMs = Date.now() - phaseStarted;
       } else try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
@@ -1144,7 +1140,7 @@ async function runPlexScan(targetRatingKey?: string) {
             savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           }
         }
-        if (tmdbId) catalogueUse.tmdb = singleIdUse(tmdbId, selected.tmdb.preferredId, tvdbId, loaded?.downloadedAt);
+        if (tmdbId) catalogueUse.tmdb = singleIdUse(tmdbId, selected.tmdb.preferredId !== undefined, tvdbId, loaded?.downloadedAt);
         resolveCoverageIssue(`catalogue-refresh:TMDB:${ratingKey}`);
         phaseTimings.tmdbMs = Date.now() - phaseStarted;
       } catch (error) {
@@ -1202,33 +1198,13 @@ async function runPlexScan(targetRatingKey?: string) {
         malformedRecords.push(...loaded.malformed);
       };
       if (tvdbCandidates.length > 1 && tvdbId) {
-        const preferredId = tvdbId;
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tvdb-series-and-episodes");
         phaseStarted = Date.now();
-        const choice = await chooseAvailableCatalogue({
-          preferredId, candidates: tvdbCandidates, now: startedAt,
-          load: async (id, preferred) => {
-            const loaded = await loadTvdb(id, preferred && !!refresh.tvdb, MULTIPLE_ID_REFRESH_AGE);
-            return {value: loaded, downloadedAt: loaded.downloadedAt};
-          },
-          saved: id => {
-            const saved = inputs.tvdb[String(id)];
-            return usableProviderCatalogue(saved) ? {value: {episodes: saved.episodes, malformed: saved.malformed || [], slug: saved.show.slug, titleRecovery: {state: saved.titleRecovery || {}, carried: true}, reused: true, downloadedAt: saved.downloadedAt}, downloadedAt: saved.downloadedAt} : undefined;
-          },
-        });
+        const choice = await chooseMultipleIdCatalogue("tvdb", tvdbId, tvdbCandidates, loadTvdb, id => {
+          const saved = inputs.tvdb[String(id)];
+          return usableProviderCatalogue(saved) ? {episodes: saved.episodes, malformed: saved.malformed || [], slug: saved.show.slug, titleRecovery: {state: saved.titleRecovery || {}, carried: true}, reused: true, downloadedAt: saved.downloadedAt} : undefined;
+        }, tvdbSource);
         if (choice.loaded) { useTvdb(choice.loaded.value); tvdbId = choice.usingId; }
-        if (choice.state === "preferred" && !choice.loaded?.value.reused) delete refresh.tvdb;
-        if (choice.preferredError) refresh.tvdb = true;
-        catalogueUse.tvdb = multipleIdUse(choice, preferredId, inputs.tvdb[String(preferredId)]?.downloadedAt, startedAt);
-        const issueId = `catalogue-refresh:TVDB:${ratingKey}`;
-        if (choice.preferredError) {
-          setCoverageIssue({id:issueId,...(tvdbAuthenticationError && choice.preferredError === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId:preferredId},...providerLookupContext(choice.preferredError,{source:tvdbSource,requested:{provider:"TVDB",kind:"series",id:preferredId},impact:unavailablePreferredImpact("TVDB",catalogueUse.tvdb,savedComparison?.complete)})});
-          if (!choice.loaded) {
-            unavailableCatalogueCauses.push(issueId);
-            addWarning(choice.preferredError instanceof Error ? choice.preferredError.message : "Provider lookup failed.");
-          }
-        } else resolveCoverageIssue(issueId);
-        savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
         phaseTimings.tvdbMs = Date.now() - phaseStarted;
       } else try {
         if (tvdbId) {
@@ -1240,7 +1216,7 @@ async function runPlexScan(targetRatingKey?: string) {
             savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           }
           useTvdb(loaded);
-          catalogueUse.tvdb = singleIdUse(tvdbId, selected.tvdb.preferredId, tmdbId, loaded.downloadedAt);
+          catalogueUse.tvdb = singleIdUse(tvdbId, selected.tvdb.preferredId !== undefined, tmdbId, loaded.downloadedAt);
           phaseTimings.tvdbMs = Date.now() - phaseStarted;
         }
         resolveCoverageIssue(`catalogue-refresh:TVDB:${ratingKey}`);
@@ -1257,7 +1233,9 @@ async function runPlexScan(targetRatingKey?: string) {
         addWarning(error instanceof Error ? error.message : "Provider lookup failed.");
         logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       }
-      for (const provider of ["tmdb","tvdb"] as const) {
+      for (const provider of PROVIDERS) {
+        // A provider no longer comparing a fallback has no fallback refresh to report.
+        if (catalogueUse[provider]?.state !== "fallback") resolveCoverageIssue(`catalogue-fallback-refresh:${PROVIDER_NAME[provider]}:${ratingKey}`);
         const use = catalogueUse[provider];
         if (use) recordCatalogueUse(ratingKey, provider, use);
         else clearCatalogueUse(ratingKey, provider);
@@ -1355,7 +1333,7 @@ async function runPlexScan(targetRatingKey?: string) {
 
 export function getPlexScanStatus(): PlexScanStatus {
   const status = readPlexScanStatus() as PlexScanStatus | null;
-  if (status?.status === "running" && !(globalThis as ScanGlobal).__shelfcheckPlexScan) {
+  if (status?.status === "running" && !isPlexScanActive()) {
     const lastActivity = Date.parse(status.heartbeatAt || status.startedAt || "");
     if (Number.isFinite(lastActivity) && Date.now() - lastActivity > 90_000) {
       const interrupted: PlexScanStatus = { ...status, status: "error", finishedAt: new Date().toISOString(), error: `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.` };
@@ -1373,7 +1351,7 @@ export function getPlexReport(): PlexReport | null {
 }
 
 export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
-  if ((globalThis as ScanGlobal).__shelfcheckPlexScan) throw new Error("Wait for the current Plex scan to finish before clearing the cache.");
+  if (isPlexScanActive()) throw new Error("Wait for the current Plex scan to finish before clearing the cache.");
   const report = readPlexReport() as PlexReport | null;
   // Clearing one show marks the usable shared crosswalk evidence it saved not current, so its next lookup is
   // requested again; offline rechecks still replay it and rejections stay, so no older copy is revived.
@@ -1404,7 +1382,7 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
 
 export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
   const global = globalThis as ScanGlobal;
-  if (global.__shelfcheckPlexScan) return getPlexScanStatus();
+  if (isPlexScanActive()) return getPlexScanStatus();
   if (targetRatingKey) {
     const settings = parsePlexPreferences(readPlexSettings());
     if (!plexReportCacheIsUsable(getPlexReport(), CACHE_VERSION, settings.autoCompoundEpisodes !== false)) {

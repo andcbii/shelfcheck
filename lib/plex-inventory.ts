@@ -1,3 +1,4 @@
+import { distinctSortedIds } from "@/lib/catalogue-selection";
 export type PlexMetadata = { ratingKey?: string; key?: string; guid?: string; title?: string; year?: number; thumb?: string; updatedAt?: number; duration?: number; type?: string; parentIndex?: number; index?: number; Guid?: { id?: string }[] };
 export type PlexShowGroup = { identity: string; plexGuid?: string; records: PlexMetadata[] };
 
@@ -22,8 +23,8 @@ export function showProviderIds(guids: { id?: string }[] = []): ShowProviderIds 
     const match = guid.id?.match(/^(tmdb|tvdb):\/\/(\d+)/i);
     if (match) ids[match[1].toLowerCase() as "tmdb" | "tvdb"].add(Number(match[2]));
   }
-  const sorted = (values: Set<number>) => [...values].filter(id => id > 0).sort((left, right) => left - right);
-  return { tmdb: sorted(ids.tmdb), tvdb: sorted(ids.tvdb) };
+  const positive = (values: Set<number>) => distinctSortedIds([...values].filter(id => id > 0));
+  return { tmdb: positive(ids.tmdb), tvdb: positive(ids.tvdb) };
 }
 
 export function groupPlexShows(shows: PlexMetadata[]): PlexShowGroup[] {

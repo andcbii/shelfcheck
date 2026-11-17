@@ -1,4 +1,11 @@
 export type CatalogueProvider = "tmdb" | "tvdb";
+export const PROVIDERS: readonly CatalogueProvider[] = ["tmdb", "tvdb"];
+export const PROVIDER_NAME: Record<CatalogueProvider, "TMDB" | "TVDB"> = { tmdb: "TMDB", tvdb: "TVDB" };
+
+/** Distinct series IDs in ascending numeric order. */
+export function distinctSortedIds(ids: Iterable<number>): number[] {
+  return [...new Set(ids)].sort((left, right) => left - right);
+}
 
 export type CatalogueSelectionInput = {
   /** The last committed (completely observed) candidate set, if any. */
@@ -25,16 +32,14 @@ export type CatalogueSelection = {
   preferredId?: number;
 };
 
-const sorted = (ids: number[]) => [...new Set(ids)].sort((left, right) => left - right);
-
 /**
  * Choose one comparison catalogue for a provider: the saved override when it is still a
  * candidate, else the lowest numeric candidate. Only a complete Plex observation can replace
  * the candidate set; removing any candidate from it clears the override.
  */
 export function selectComparisonCatalogue(input: CatalogueSelectionInput): CatalogueSelection {
-  const observed = sorted(input.observed);
-  const previous = input.previous ? sorted(input.previous) : undefined;
+  const observed = distinctSortedIds(input.observed);
+  const previous = input.previous ? distinctSortedIds(input.previous) : undefined;
   const commit = input.complete;
   const candidates = commit ? observed : previous || observed;
   const removed = commit && !!previous?.some(id => !observed.includes(id));

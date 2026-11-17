@@ -129,3 +129,17 @@ test("a TVDB override whose saved inputs cannot replay keeps last-good results u
   assert.equal((await f.run()).tvdbId,3);
   assert.ok(!(await f.issues()).some(issue=>issue.id === `comparison-inputs:${f.identity}`));
 });
+
+test("an active Plex scan rejects a selection change before validating it", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  f.at(day(2));
+  const finish = await f.startHeldScan();
+  for (const body of [{identity:f.identity,provider:"tmdb",seriesId:12},{identity:f.identity,provider:"imdb",seriesId:1},{provider:"tmdb",seriesId:11}]) {
+    const rejected = await f.select(body);
+    assert.equal(rejected.status,409,JSON.stringify(body));
+    assert.equal(rejected.body.code,"scan-active");
+  }
+  await finish();
+});

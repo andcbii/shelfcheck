@@ -19,6 +19,17 @@ A user's preferred comparison catalogue, chosen from the series identities Plex 
 **Fallback catalogue**:
 A comparison catalogue used while the preferred catalogue is unavailable and has no usable saved copy. Using a fallback does not replace the user's saved catalogue override.
 
+**Scan run**:
+One Trakt or Plex scan, from its start until it completes, fails, or is interrupted. A scan run checks either the whole collection or library, or a single show. Only one scan run, Trakt or Plex, is active at a time.
+_Avoid_: Job, sync
+
+**Interrupted scan**:
+A scan run that stopped without completing or failing, such as through a server restart, recognised once it has gone a set time without reporting progress.
+
+**Resume point**:
+The progress a full scan run saves part-way through, so the next scan run of the same kind can continue from it instead of starting over. It stops being usable once it is too old or was saved under different scan settings. Single-show scan runs never save one.
+_Avoid_: Checkpoint (in conversation; the code uses it)
+
 **Completed full scan**:
 A scan that obtains the complete library inventory and finishes processing the library, even when individual checks leave unresolved issues. Interrupted scans and scans with incomplete library inventory do not qualify.
 

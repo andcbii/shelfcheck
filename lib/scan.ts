@@ -2,7 +2,7 @@ import "server-only";
 
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { createScanLogger } from "@/lib/scan-log";
-import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, type ScanReason } from "@/lib/scan-cache";
+import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, trackScanIgnores, writeSingleUserScanStatus } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
@@ -21,6 +21,8 @@ type ShowScanState = {
 };
 type ScanCache = Record<string, ShowScanState>;
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
+/** A full-run Resume point: the report so far, plus when it was saved and its format version. */
+type ResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
 export type ScanStatus = ScanRunStatus;
 
 const TRAKT = "https://api.trakt.tv";
@@ -41,23 +43,23 @@ type ScanGlobal = typeof globalThis & {
  * their unprefixed names (`scan.start`, `checkpoint.saved`) in shelfcheck.log.
  * It raises no Coverage Issues.
  */
-const traktScanMode: ScanRunMode<ScanStatus, ScanReport> = {
+const traktScanMode: ScanRunMode<ScanStatus, ResumePoint> = {
   kind: "trakt",
   eventPrefix: "",
   failureMessage: "The scan failed.",
   status: { read: () => readSingleUserScanStatus() as ScanStatus | null, write: writeSingleUserScanStatus },
   interruptedError: () => "The scan was interrupted by a server restart. Start it again to resume.",
   resumePoint: {
-    read: () => (readSingleUserState().state?.checkpoint as ScanReport | undefined) || null,
+    read: () => (readSingleUserState().state?.checkpoint as ResumePoint | undefined) || null,
     write: (checkpoint) => { patchSingleUserState({ checkpoint }); },
     clear: () => { patchSingleUserState({ checkpoint: null }); },
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
-    discardDetails: () => ({ reason: "expired-or-incompatible" }),
+    discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, airingGraceDays: checkpoint.airingGraceDays, reason: "expired-or-incompatible" }),
   },
 };
 
 /** The live Trakt Scan run that dispatched the current request; a late callback from a settled run gets undefined. */
-const liveTraktRun = () => scanRuns.bound<ScanReport>("trakt");
+const liveTraktRun = () => scanRuns.bound<ResumePoint>("trakt");
 
 /**
  * A Trakt rate-limit pause starting or ending. The pause globals pace later
@@ -222,15 +224,17 @@ async function traktAll<T>(path: string): Promise<T[]> {
  * heartbeat, logger and Resume point policy; this keeps the Trakt work, report
  * assembly and ignore tracking.
  *
- * Every Trakt run, single-show included, loads, saves and clears the Resume
- * point as a full run, as before the lifecycle; SHELFCHECK-54 sets the Trakt
- * Resume point rules.
+ * A full run resumes from a usable Resume point and saves new ones. A
+ * single-show check neither loads nor creates one: it starts from the saved
+ * report, and on success removes the checked show from a stored full-run
+ * Resume point, so the next full run rechecks it.
  */
 function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
   const state = readSingleUserState().state || {};
   let finishIgnoreTracking: (() => void) | undefined;
   return scanRuns.run(owner, traktScanMode, {
-    fullRun: true,
+    fullRun: !targetTraktId,
+    pruneResumePoint: (point) => resumePointWithoutShow(point, targetTraktId!),
     createLogger: () => createScanLogger(state.diagnosticsEnabled !== false),
     startDetails: { version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) },
     hooks: {
@@ -246,12 +250,13 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     },
   }, async (run) => {
     const { startedAt, logger, activeWork } = run;
-    const { usable: checkpoint } = run.resumePoint.load(() => true);
-    const prior = checkpoint || (state.report as ScanReport | undefined);
+    const airingGraceDays = gracePeriod(state.airingGraceDays);
+    // An unusable Resume point is discarded and cleared; the saved report and its scan cache are the fallback.
+    const { usable: checkpoint } = run.resumePoint.load((point) => traktResumePointIsUsable(point, airingGraceDays, Date.now()));
+    const prior: ScanReport | undefined = checkpoint || (state.report as ScanReport | undefined);
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
-    const airingGraceDays = gracePeriod(state.airingGraceDays);
     const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
     const downloadedAll = await traktAll<CollectionShow>("/sync/collection/shows?extended=full,images");
     const ignoredIds = ignoredTraktIds(state.ignoredShows, Date.parse(startedAt));
@@ -317,8 +322,8 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     run.progress(processed, candidates.length);
     run.resumePoint.startIntervals();
     // The Resume point holds the completed shows' results and cache entries.
-    run.resumePoint.provideSnapshot(() => ({
-      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, airingGraceDays },
+    run.resumePoint.provideSnapshot((savedAt) => ({
+      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, airingGraceDays, savedAt, resumePointVersion: TRAKT_RESUME_POINT_VERSION },
       details: {},
     }));
     await runTrackedWorkerPool(queue, 6, activeWork, ({ item }) => ({ key: String(item.show.ids.trakt), show: item.show.title }), async ({ item, reason }) => {
@@ -402,6 +407,13 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
   });
 }
 
+/** A Resume point without one show's result, cache entry and collection entry; everything else, savedAt included, is kept. */
+function resumePointWithoutShow(point: ResumePoint, traktId: number): ResumePoint {
+  const scanCache = { ...(point.scanCache || {}) };
+  delete scanCache[String(traktId)];
+  return { ...point, scanCache, shows: (point.shows || []).filter((item) => item.show.ids.trakt !== traktId), missing: (point.missing || []).filter((episode) => episode.show.ids.trakt !== traktId) };
+}
+
 /** The Trakt scan status, with an Interrupted scan reconciled once by the scan run lifecycle. */
 export function getScanStatus(): ScanStatus {
   return scanRuns.readStatus(traktScanMode) || { status: "idle", processed: 0, total: 0 };
@@ -422,7 +434,7 @@ export function clearScanCache(traktId?: number): { cleared: number } {
   if (scanRuns.isActive("trakt")) throw new Error("Wait for the current scan to finish before clearing the cache.");
   const state = readSingleUserState().state || {};
   const report = state.report as ScanReport | undefined;
-  const checkpoint = state.checkpoint as ScanReport | undefined;
+  const checkpoint = state.checkpoint as ResumePoint | undefined;
   if (traktId !== undefined) {
     const key = String(traktId);
     const hadReportCache = Boolean(report?.scanCache?.[key]);
@@ -432,11 +444,7 @@ export function clearScanCache(traktId?: number): { cleared: number } {
       delete scanCache[key];
       patchSingleUserState({ report: { ...report, scanCache } });
     }
-    if (checkpoint) {
-      const scanCache = { ...(checkpoint.scanCache || {}) };
-      delete scanCache[key];
-      patchSingleUserState({ checkpoint: { ...checkpoint, scanCache, shows: checkpoint.shows.filter((item) => item.show.ids.trakt !== traktId), missing: checkpoint.missing.filter((episode) => episode.show.ids.trakt !== traktId) } });
-    }
+    if (checkpoint) patchSingleUserState({ checkpoint: resumePointWithoutShow(checkpoint, traktId) });
     return { cleared: hadReportCache || hadCheckpointCache ? 1 : 0 };
   }
   const cleared = new Set([

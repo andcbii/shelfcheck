@@ -19,8 +19,7 @@ hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
 // with a controlled Trakt API, before it moves onto the scan run lifecycle.
-// Resume point (checkpoint) contents are deliberately not asserted: SHELFCHECK-53
-// and 54 change when they are saved and reused.
+// The SHELFCHECK-54 tests at the end cover when Resume points are saved and reused.
 
 const NOW = "2026-11-11T12:00:00.000Z";
 const poster = { poster: ["walter.trakt.tv/poster.jpg"] };
@@ -322,4 +321,128 @@ test("Trakt scan runs raise no Coverage Issues, completed or failed", async (t) 
   f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
   assert.equal((await f.run()).status, "error");
   assert.deepEqual(issues.listCoverageIssues(), []);
+});
+
+// SHELFCHECK-54: Trakt Resume point rules.
+
+type ResumePoint = Report & { savedAt?: string; resumePointVersion?: number; airingGraceDays?: number };
+const storedResumePoint = async () => ((await (await state.GET()).json()) as { state: { checkpoint?: ResumePoint | null } }).state.checkpoint || null;
+const HOUR = 3_600_000;
+/** A Resume point saved before 2.6.2: none of savedAt, format version or grace period. */
+const legacy = { savedAt: undefined, resumePointVersion: undefined, airingGraceDays: undefined };
+
+/**
+ * After a completed Quick scan, stores a full-run Resume point built from its
+ * report whose only result is Bravo S1E2, so a run that resumes from it reports
+ * just that episode. `fields`, given the time it is stored, replaces its
+ * current Resume point metadata. The next run loads it at that same time.
+ */
+async function seedResumePoint(f: Awaited<ReturnType<typeof fixture>>, fields: (now: number) => Partial<ResumePoint> = () => ({})) {
+  assert.equal((await f.run()).status, "completed");
+  const report = await f.report();
+  const now = Date.now();
+  const point: Record<string, unknown> = { ...report, missing: report!.missing.filter((episode) => episode.show.title === "Bravo" && episode.episode === 2), savedAt: new Date(now - HOUR).toISOString(), resumePointVersion: 1, airingGraceDays: 0, ...fields(now) };
+  for (const [key, value] of Object.entries(point)) if (value === undefined) delete point[key];
+  sqlite.patchSingleUserState({ checkpoint: point });
+  return report!;
+}
+
+test("a full Trakt scan run resumes from a Resume point under 6 hours old with the current format and grace period", async (t) => {
+  const f = await fixture(t);
+  await seedResumePoint(f, (now) => ({ savedAt: new Date(now - 6 * HOUR + 1).toISOString() }));
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2"], "the run resumed from the Resume point");
+  assert.equal(await storedResumePoint(), null, "a completed run clears its Resume point");
+});
+
+for (const [name, fields] of [
+  ["a legacy Resume point without savedAt, format version or grace period", () => legacy],
+  ["a Resume point exactly 6 hours old", (now: number) => ({ savedAt: new Date(now - 6 * HOUR).toISOString() })],
+  ["a future-dated Resume point", (now: number) => ({ savedAt: new Date(now + 60_000).toISOString() })],
+  ["a Resume point whose savedAt does not parse", () => ({ savedAt: "not a date" })],
+  ["a Resume point of another format version", () => ({ resumePointVersion: 2 })],
+  ["a Resume point of another airing grace period", () => ({ airingGraceDays: 3 })],
+] as const) {
+  test(`${name} is discarded and cleared, and the run falls back to the saved report and scan cache`, async (t) => {
+    const f = await fixture(t);
+    const lastGood = await seedResumePoint(f, fields);
+    assert.equal((await f.run()).status, "completed");
+    assert.deepEqual(perShow(f.requests), [], "every show is reused from the saved report's scan cache");
+    const report = await f.report();
+    assert.deepEqual(missing(report), missing(lastGood), "the saved report was used, not the Resume point");
+    assert.deepEqual(report?.shows.map((item) => item.show.title), ["Alpha", "Bravo", "Charlie"]);
+    assert.equal(await storedResumePoint(), null);
+  });
+}
+
+test("a discarded Resume point is cleared even when the run then fails, and the saved report is kept", async (t) => {
+  const f = await fixture(t);
+  const lastGood = await seedResumePoint(f, () => legacy);
+  f.trakt.failures.set("/sync/collection/shows", [new Response("{}", { status: 403 })]);
+  assert.equal((await f.run()).status, "error");
+  assert.deepEqual(await f.report(), lastGood, "the completed report is never erased");
+  assert.equal(await storedResumePoint(), null);
+});
+
+test("a single-show check does not resume from a full-run Resume point, and keeps it without the checked show", async (t) => {
+  const f = await fixture(t);
+  await seedResumePoint(f);
+  const stored = await storedResumePoint();
+  assert.equal((await f.run({ traktId: 3 })).status, "completed");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"], "the single-show check started from the saved report");
+  const kept = await storedResumePoint();
+  assert.equal(kept?.savedAt, stored?.savedAt, "the full-run Resume point is not replaced by a one-show snapshot");
+  assert.deepEqual(Object.keys(kept?.scanCache || {}).sort(), ["1", "2"], "only the checked show is pruned from it");
+  assert.deepEqual(kept?.shows.map((item) => item.show.title), ["Alpha", "Bravo"]);
+  assert.deepEqual(missing(kept!), ["Bravo S1E2"]);
+
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection"], "the next full run resumes and rechecks only the pruned show");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Charlie S1E2"]);
+});
+
+test("a failed single-show check creates no Resume point", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.run()).status, "completed");
+  f.trakt.failures.set("/shows/3/seasons", [new Response("{}", { status: 403 })]);
+  f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
+  assert.equal((await f.run({ traktId: 3 })).status, "error");
+  assert.equal(await storedResumePoint(), null);
+});
+
+test("a failed full scan run saves a Resume point of its completed shows, and the next full run resumes from it", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
+  assert.equal((await f.run()).status, "error");
+  const saved = await storedResumePoint();
+  assert.equal(saved?.resumePointVersion, 1);
+  assert.equal(saved?.airingGraceDays, 0);
+  assert.ok(Date.parse(saved?.savedAt || "") >= Date.parse(NOW), "it records when it was saved");
+  assert.deepEqual(Object.keys(saved?.scanCache || {}).sort(), ["1", "2"], "only completed shows are saved");
+  assert.deepEqual(missing(saved!), ["Bravo S1E2", "Bravo S1E3"]);
+
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection"], "the completed shows are resumed, not rechecked");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+  assert.equal(await storedResumePoint(), null);
+});
+
+test("a Trakt rate-limit pause saves a Resume point of the shows completed so far", async (t) => {
+  const f = await fixture(t);
+  let release!: (response: Response) => void;
+  let charlieRequested!: () => void;
+  const charlieInFlight = new Promise<void>((resolve) => { charlieRequested = resolve; });
+  f.trakt.failures.set("/shows/2/progress/collection", [charlieInFlight.then(() => new Response("{}", { status: 429, headers: { "Retry-After": "60" } }))]);
+  f.trakt.failures.set("/shows/3/progress/collection", [() => { charlieRequested(); return new Promise<Response>((resolve) => { release = resolve; }); }]);
+  await f.start();
+  for (let step = 0; step < 100 && !(await status()).rateLimitPaused; step += 1) { t.mock.timers.tick(50); await flush(); }
+  assert.equal((await status()).rateLimitPaused, true);
+  const saved = await storedResumePoint();
+  assert.equal(saved?.resumePointVersion, 1);
+  assert.ok(saved?.savedAt);
+  assert.deepEqual(Object.keys(saved?.scanCache || {}), ["1"], "the paused and in-flight shows are not in it");
+  assert.deepEqual(missing(saved!), []);
+  release(Response.json(progress[3]));
+  assert.equal((await f.settle()).status, "completed");
+  assert.equal(await storedResumePoint(), null);
 });

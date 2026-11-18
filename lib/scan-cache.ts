@@ -53,3 +53,21 @@ export function canCacheAirDateResult(requiresAirDates: boolean, requestSucceede
 export function shouldSaveCheckpoint(processed: number, lastProcessed: number, now: number, lastSavedAt: number): boolean {
   return processed - lastProcessed >= 10 || now - lastSavedAt >= 5_000;
 }
+
+/** The Trakt Resume point format. A Resume point of any other version, or none (saved before 2.6.2), is discarded. */
+export const TRAKT_RESUME_POINT_VERSION = 1;
+
+/** A Resume point is usable for less than this long after it was saved. */
+export const RESUME_POINT_MAX_AGE_MS = 6 * 3_600_000;
+
+/**
+ * Whether a full Trakt Scan run may resume from a stored Resume point: its
+ * format version and normalized airing grace period match this run's, and its
+ * `savedAt` parses, is not in the future and is under 6 hours old. Exactly 6
+ * hours old is unusable.
+ */
+export function traktResumePointIsUsable(point: { resumePointVersion?: unknown; airingGraceDays?: unknown; savedAt?: unknown } | null | undefined, airingGraceDays: number, now: number): boolean {
+  if (point?.resumePointVersion !== TRAKT_RESUME_POINT_VERSION || point.airingGraceDays !== airingGraceDays || typeof point.savedAt !== "string") return false;
+  const savedAt = Date.parse(point.savedAt);
+  return Number.isFinite(savedAt) && savedAt <= now && now - savedAt < RESUME_POINT_MAX_AGE_MS;
+}

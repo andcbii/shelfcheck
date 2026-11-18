@@ -75,6 +75,9 @@ export type ScanRunStatus = {
 
 type LogDetails = Record<string, unknown>;
 
+/** Why a Resume point was saved outside the interval cadence. */
+type ForcedSaveReason = "failure" | "rate-limit";
+
 /** Where a mode keeps its Resume point, and how its log events describe one. */
 export type ScanRunResumePointStore<P> = {
   read(): P | null;
@@ -115,6 +118,12 @@ export type ScanRunHooks = {
   failed?(error: unknown): void;
   /** Extra details for the `<prefix>.scan.error` event. */
   failureDetails?(): LogDetails;
+  /**
+   * Once the run's outcome is recorded, including a forced failure save, and
+   * before ownership is released. Runs exactly once, even when recording
+   * failed; a throw here is reported, never replaces the run's outcome.
+   */
+  ended?(): void;
 };
 
 export type ScanRunOptions<P> = {
@@ -264,6 +273,32 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     let cadence: { processed: number; at: number } | undefined;
     const activeWork = new ActiveScanTracker();
     const live = () => !settled && !terminal;
+    // Only a live full run with a snapshot producer installed saves a Resume point.
+    const savable = () => live() && Boolean(mode.resumePoint && runOptions.fullRun && snapshot);
+    /**
+     * Writes a Resume point unless the mode vetoes it. A veto is not a save:
+     * nothing is written and the cadence is not reset. Only a written point
+     * restarts the interval cadence.
+     */
+    const save = (reason?: ForcedSaveReason) => {
+      if (!savable() || hooks.veto?.()) return false;
+      const savedAt = iso();
+      const { point, details } = snapshot!(savedAt);
+      mode.resumePoint!.write(point);
+      runLogger.info(`${prefix}.checkpoint.saved`, { savedAt, processed, total, ...(reason ? { reason } : {}), ...details });
+      cadence = { processed, at: clock.now() };
+      return true;
+    };
+    /**
+     * A forced save, at a failure or when a rate-limit pause starts: saved at
+     * once, whatever the interval cadence. Its own failure is logged and never
+     * fails or interrupts the run.
+     */
+    const forceSave = (reason: ForcedSaveReason) => {
+      try { save(reason); } catch (error) {
+        try { runLogger.warn(`${prefix}.checkpoint.save-failed`, { reason, error: error instanceof Error ? error.message : String(error) }); } catch (logError) { report(`The ${label} scan could not log a failed Resume point save.`, logError); }
+      }
+    };
     // In-run updates merge against the raw stored record, never the reconciling reader.
     const update = (progress: Partial<ScanRunStatus>) => {
       const current = mode.status.read() || { status: "running", processed, total, startedAt };
@@ -290,7 +325,10 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       reportRateLimit(provider, paused) {
         if (!live()) return;
         const current = mode.status.read();
-        if (current?.status === "running" && (paused || current.rateLimitProvider === provider)) update({ rateLimitPaused: paused, rateLimitProvider: paused ? provider : undefined });
+        if (current?.status !== "running" || !(paused || current.rateLimitProvider === provider)) return;
+        update({ rateLimitPaused: paused, rateLimitProvider: paused ? provider : undefined });
+        // A pause starting, not one continuing or ending, saves the work completed so far.
+        if (paused && !current.rateLimitPaused) forceSave("rate-limit");
       },
       resumePoint: {
         load(validate) {
@@ -309,18 +347,10 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         startIntervals() { if (live()) cadence = { processed, at: clock.now() }; },
         provideSnapshot(produce) { if (live()) snapshot = produce; },
         checkpoint() {
-          const store = mode.resumePoint;
-          if (!live() || !store || !runOptions.fullRun || !snapshot) return false;
+          if (!savable()) return false;
           cadence ??= { processed: 0, at: clock.now() };
           if (!shouldSaveCheckpoint(processed, cadence.processed, clock.now(), cadence.at)) return false;
-          // A veto is not a save: nothing is written and the cadence is not reset.
-          if (hooks.veto?.()) return false;
-          const savedAt = iso();
-          const { point, details } = snapshot(savedAt);
-          store.write(point);
-          runLogger.info(`${prefix}.checkpoint.saved`, { savedAt, processed, total, ...details });
-          cadence = { processed, at: clock.now() };
-          return true;
+          return save();
         },
       },
       complete(final) {
@@ -370,6 +400,8 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       let unrecorded = false;
       try {
         if (failure && !terminal) {
+          // While still live: the completed, compatible work so far becomes the Resume point.
+          forceSave("failure");
           terminal = true;
           const { error } = failure;
           try { hooks.failed?.(error); } catch (hookError) { report(`The ${label} scan failure hook failed.`, hookError); }
@@ -387,6 +419,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
           } catch (logError) { report(`The ${label} scan could not log its failure.`, logError); }
         }
       } finally {
+        try { hooks.ended?.(); } catch (endError) { report(`The ${label} scan end hook failed.`, endError); }
         settled = true;
         if (heartbeat !== undefined) timers.clearInterval(heartbeat);
         logger = silentLogger;

@@ -387,3 +387,124 @@ test("only the run that owns the lock can run a body", async () => {
   const h = harness();
   await assert.rejects(h.runs.run({ kind: "plex", runId: "stale", startedAt: h.iso() }, h.mode, { fullRun: true, createLogger: () => ({ info() {}, warn() {}, error() {} }) }, async () => {}), /does not own/);
 });
+
+test("a full run that fails saves a forced Resume point at once, outside the interval cadence", async () => {
+  const h = harness();
+  await h.startRun(async (run) => {
+    run.resumePoint.startIntervals();
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["a", "b"] }, details: { shows: 2 } }));
+    run.progress(2, 30);
+    h.advance(1_000);
+    assert.equal(run.resumePoint.checkpoint(), false, "no interval save is due");
+    throw new Error("Plex is unreachable.");
+  }).settled;
+  assert.deepEqual(h.point, { savedAt: h.iso(1_000), shows: ["a", "b"] });
+  assert.deepEqual(h.log.find((line) => line.event === "plex.checkpoint.saved")?.details, { savedAt: h.iso(1_000), processed: 2, total: 30, reason: "failure", shows: 2 });
+  assert.equal(h.status()?.error, "Plex is unreachable.");
+});
+
+test("a rate-limit pause saves a forced Resume point when the pause starts, not while it continues or as it ends", async () => {
+  const h = harness();
+  const saves = () => h.log.filter((line) => line.event === "plex.checkpoint.saved").map((line) => line.details);
+  await h.startRun(async (run) => {
+    run.resumePoint.startIntervals();
+    let shows = ["a"];
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows }, details: {} }));
+    run.progress(1, 30);
+    h.advance(1_000);
+    run.reportRateLimit("TVDB", true);
+    assert.deepEqual(h.point, { savedAt: h.iso(1_000), shows: ["a"] });
+    shows = ["a", "b"];
+    run.reportRateLimit("TVDB", true);
+    run.reportRateLimit("TMDB", true);
+    assert.equal(saves().length, 1, "a continuing pause is not a new pause");
+    run.reportRateLimit("TMDB", false);
+    assert.equal(saves().length, 1, "the pause ending saves nothing");
+    run.progress(2, 30);
+    h.advance(1_000);
+    run.reportRateLimit("TVDB", true);
+    assert.deepEqual(h.point, { savedAt: h.iso(2_000), shows: ["a", "b"] }, "a new pause saves again");
+    run.complete({ commit: () => {}, processed: 30, total: 30, finishedAt: h.iso(), details: {} });
+  }).settled;
+  assert.deepEqual(saves(), [
+    { savedAt: h.iso(1_000), processed: 1, total: 30, reason: "rate-limit" },
+    { savedAt: h.iso(2_000), processed: 2, total: 30, reason: "rate-limit" },
+  ]);
+});
+
+test("a failure or pause before the snapshot producer is ready saves nothing and does not error", async () => {
+  const h = harness();
+  await h.startRun(async (run) => {
+    run.progress(3, 30);
+    run.reportRateLimit("TVDB", true);
+    throw new Error("Plex is unreachable.");
+  }).settled;
+  assert.equal(h.point, null);
+  assert.ok(!h.events().some((event) => event.startsWith("plex.checkpoint.")));
+  assert.equal(h.status()?.error, "Plex is unreachable.");
+});
+
+test("single-show runs never force a save", async () => {
+  const h = harness();
+  h.point = { savedAt: h.iso(-1_000), shows: ["a", "b"] };
+  await h.startRun(async (run) => {
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["b"] }, details: {} }));
+    run.progress(1, 1);
+    run.reportRateLimit("TVDB", true);
+    throw new Error("TVDB is unreachable.");
+  }, { fullRun: false }).settled;
+  assert.deepEqual(h.point, { savedAt: h.iso(-1_000), shows: ["a", "b"] });
+  assert.ok(!h.events().some((event) => event.startsWith("plex.checkpoint.")));
+});
+
+test("a vetoed forced save is not a save and does not reset the interval cadence", async () => {
+  const h = harness();
+  let vetoed = true;
+  await h.startRun(async (run) => {
+    run.resumePoint.startIntervals();
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["a"] }, details: {} }));
+    run.progress(1, 30);
+    h.advance(5_000);
+    run.reportRateLimit("TVDB", true);
+    assert.equal(h.point, null, "the coverage-revision veto writes nothing");
+    vetoed = false;
+    assert.equal(run.resumePoint.checkpoint(), true, "the interval save is still due after the vetoed forced save");
+    vetoed = true;
+    throw new Error("Plex is unreachable.");
+  }, { hooks: { veto: () => vetoed } }).settled;
+  assert.deepEqual(h.log.filter((line) => line.event === "plex.checkpoint.saved").map((line) => line.details?.reason), [undefined], "only the interval save was written");
+  assert.deepEqual(h.point, { savedAt: h.iso(5_000), shows: ["a"] });
+});
+
+test("a forced save that fails is logged and neither fails the pause nor replaces the run's error", async () => {
+  const h = harness();
+  let paused = false;
+  await h.startRun(async (run) => {
+    run.resumePoint.provideSnapshot(() => { throw new Error("snapshot broke"); });
+    run.reportRateLimit("TVDB", true);
+    paused = Boolean(h.status()?.rateLimitPaused);
+    throw new Error("Plex is unreachable.");
+  }).settled;
+  assert.ok(paused, "the pause is still recorded");
+  assert.deepEqual(h.log.filter((line) => line.event === "plex.checkpoint.save-failed").map((line) => line.details), [
+    { reason: "rate-limit", error: "snapshot broke" },
+    { reason: "failure", error: "snapshot broke" },
+  ]);
+  assert.equal(h.status()?.error, "Plex is unreachable.");
+  assert.equal(h.runs.activeScanRun(), null);
+});
+
+test("the end hook runs once, after the forced failure save, even when the failure cannot be recorded", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const h = harness();
+  const order: string[] = [];
+  const started = h.startRun(async (run) => {
+    run.resumePoint.provideSnapshot((savedAt) => { order.push("save"); return { point: { savedAt, shows: ["a"] }, details: {} }; });
+    h.failures.statusWrite = true;
+    throw new Error("original");
+  }, { hooks: { ended: () => { order.push("ended"); throw new Error("end hook broke"); } } });
+  await assert.rejects(started.settled, /original/);
+  assert.deepEqual(order, ["save", "ended"]);
+  assert.equal(h.runs.activeScanRun(), null);
+  assert.equal(h.timerCount(), 0);
+});

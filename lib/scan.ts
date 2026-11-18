@@ -23,7 +23,6 @@ type ScanCache = Record<string, ShowScanState>;
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
 /** A full-run Resume point: the report so far, plus when it was saved and its format version. */
 export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
-export type ScanStatus = ScanRunStatus;
 
 const TRAKT = "https://api.trakt.tv";
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -43,11 +42,11 @@ type ScanGlobal = typeof globalThis & {
  * their unprefixed names (`scan.start`, `checkpoint.saved`) in shelfcheck.log.
  * It raises no Coverage Issues.
  */
-const traktScanMode: ScanRunMode<ScanStatus, TraktResumePoint> = {
+const traktScanMode: ScanRunMode<ScanRunStatus, TraktResumePoint> = {
   kind: "trakt",
   eventPrefix: "",
   failureMessage: "The scan failed.",
-  status: { read: () => readSingleUserScanStatus() as ScanStatus | null, write: writeSingleUserScanStatus },
+  status: { read: () => readSingleUserScanStatus() as ScanRunStatus | null, write: writeSingleUserScanStatus },
   interruptedError: () => "The scan was interrupted by a server restart. Start it again to resume.",
   resumePoint: {
     read: () => (readSingleUserState().state?.checkpoint as TraktResumePoint | undefined) || null,
@@ -417,7 +416,7 @@ function resumePointWithoutShow(point: TraktResumePoint, traktId: number): Trakt
 }
 
 /** The Trakt scan status, with an Interrupted scan reconciled once by the scan run lifecycle. */
-export function getScanStatus(): ScanStatus {
+export function getScanStatus(): ScanRunStatus {
   return scanRuns.readStatus(traktScanMode) || { status: "idle", processed: 0, total: 0 };
 }
 
@@ -426,7 +425,7 @@ export function getScanStatus(): ScanStatus {
  * lock first; throws ScanRunConflictError, with no side effects, while any
  * Scan run is active.
  */
-export function startScan(force = false, targetTraktId?: number): ScanStatus {
+export function startScan(force = false, targetTraktId?: number): ScanRunStatus {
   const { owner } = scanRuns.start("trakt", (runOwner) => runScan(runOwner, force, targetTraktId));
   return { status: "running", processed: 0, total: 0, startedAt: owner.startedAt };
 }

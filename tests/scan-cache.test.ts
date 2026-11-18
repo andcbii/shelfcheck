@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint } from "../lib/scan-cache";
+import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, traktResumePointIsUsable } from "../lib/scan-cache";
+import type { TraktResumePoint } from "../lib/scan";
 
 const collection = {
   show: { aired_episodes: 3 },
@@ -63,4 +64,14 @@ test("checkpoint policy saves every ten shows or five seconds", () => {
   assert.equal(shouldSaveCheckpoint(9, 0, 4_999, 0), false);
   assert.equal(shouldSaveCheckpoint(10, 0, 1_000, 0), true);
   assert.equal(shouldSaveCheckpoint(2, 0, 5_000, 0), true);
+});
+
+test("a malformed stored Trakt Resume point is rejected, not trusted", () => {
+  const now = Date.parse("2026-11-11T12:00:00.000Z");
+  const good = { shows: [], missing: [], lastScan: "", savedAt: "2026-11-11T11:00:00.000Z", resumePointVersion: 1, airingGraceDays: 0 };
+  assert.equal(traktResumePointIsUsable(good, 0, now), true);
+  // Stored values come from SQLite JSON, so their shape is not guaranteed.
+  for (const stored of ["a string", 42, [], { ...good, savedAt: Date.parse(good.savedAt) }, { ...good, resumePointVersion: "1" }, { ...good, airingGraceDays: null }]) {
+    assert.equal(traktResumePointIsUsable(stored as unknown as TraktResumePoint, 0, now), false, JSON.stringify(stored));
+  }
 });

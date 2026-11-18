@@ -1,5 +1,6 @@
 import "server-only";
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, type ScanReason } from "@/lib/scan-cache";
@@ -9,6 +10,7 @@ import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { runWorkerPool } from "@/lib/scan-concurrency";
 import { isTerminalTraktError, TraktHttpError } from "@/lib/trakt-http";
+import { scanRuns, type ScanRunOwner } from "@/lib/scan-run";
 
 type ProgressSeason = { number: number; episodes: { number: number; completed: boolean }[] };
 type TraktSeason = { number: number; episodes?: { season?: number; number: number; first_aired?: string | null }[] };
@@ -27,15 +29,30 @@ const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resol
 
 type TraktRateLimit = { name?: string; period?: number; limit?: number; remaining?: number; until?: string };
 type ScanGlobal = typeof globalThis & {
-  __shelfcheckScan?: Promise<void>;
   __shelfcheckNextRequestAt?: number;
   __shelfcheckRequestGate?: Promise<void>;
-  __shelfcheckLogger?: ScanLogger;
   __shelfcheckRateLimit?: TraktRateLimit;
   __shelfcheckRateLimitPaused?: boolean;
   __shelfcheckRateLimitResumeAt?: number;
-  __shelfcheckSaveCheckpoint?: (reason: "rate-limit" | "error") => void;
 };
+
+/**
+ * The Trakt bridge's per-run callbacks: the request logger and the forced
+ * Resume point save, installed by one Trakt Scan run. Until SHELFCHECK-47 moves
+ * Trakt onto the lifecycle, they are bound to that run's identity here.
+ */
+type TraktRunBridge = { owner: ScanRunOwner; logger: ScanLogger; saveCheckpoint?: (reason: "rate-limit" | "error") => void };
+const traktRun = new AsyncLocalStorage<TraktRunBridge>();
+
+/**
+ * The Trakt Scan run that dispatched the current work, only while it still owns
+ * the scan run lock. A late callback after it settled, or one from a run that
+ * lost the lock, gets undefined and has no effect.
+ */
+function liveTraktRun(): TraktRunBridge | undefined {
+  const run = traktRun.getStore();
+  return run && scanRuns.activeScanRun()?.runId === run.owner.runId ? run : undefined;
+}
 
 function rateLimitStatusFields(global: ScanGlobal) {
   return global.__shelfcheckRateLimitPaused
@@ -44,9 +61,11 @@ function rateLimitStatusFields(global: ScanGlobal) {
 }
 
 function setRateLimitPaused(global: ScanGlobal, paused: boolean, resumeAt?: number) {
+  const run = liveTraktRun();
+  if (!run) return;
   global.__shelfcheckRateLimitPaused = paused;
   global.__shelfcheckRateLimitResumeAt = paused ? Math.max(global.__shelfcheckRateLimitResumeAt || 0, resumeAt || Date.now()) : undefined;
-  if (paused) global.__shelfcheckSaveCheckpoint?.("rate-limit");
+  if (paused) run.saveCheckpoint?.("rate-limit");
   const scan = readSingleUserScanStatus() as ScanStatus | null;
   if (scan?.status === "running") writeSingleUserScanStatus({ ...scan, ...rateLimitStatusFields(global) } satisfies ScanStatus);
 }
@@ -69,9 +88,9 @@ function updateRateLimit(response: Response, global: ScanGlobal) {
   try {
     const rateLimit = JSON.parse(header) as TraktRateLimit;
     global.__shelfcheckRateLimit = rateLimit;
-    global.__shelfcheckLogger?.info("rate-limit", rateLimit);
+    liveTraktRun()?.logger.info("rate-limit", rateLimit);
   } catch {
-    global.__shelfcheckLogger?.warn("rate-limit.invalid", { header });
+    liveTraktRun()?.logger.warn("rate-limit.invalid", { header });
   }
 }
 
@@ -132,7 +151,7 @@ async function traktRequest(path: string): Promise<Response> {
       global.__shelfcheckNextRequestAt = Date.now() + requestSpacing(global);
     } finally { release(); }
     const requestStarted = Date.now();
-    global.__shelfcheckLogger?.info("request.start", { path, attempt: attempt + 1 });
+    liveTraktRun()?.logger.info("request.start", { path, attempt: attempt + 1 });
     try {
       if (!credentials) throw new Error("Log in to Trakt before scanning.");
       const response = await fetch(`${TRAKT}${path}`, {
@@ -147,7 +166,7 @@ async function traktRequest(path: string): Promise<Response> {
         },
       });
       updateRateLimit(response, global);
-      global.__shelfcheckLogger?.info("request.response", { path, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
+      liveTraktRun()?.logger.info("request.response", { path, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
       if (response.status === 401 && attempt === 0) {
         credentials = await validTraktCredentials(true);
         if (!credentials) throw new Error("Log in to Trakt before scanning.");
@@ -161,7 +180,7 @@ async function traktRequest(path: string): Promise<Response> {
         const delayMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** attempt;
         global.__shelfcheckNextRequestAt = Math.max(global.__shelfcheckNextRequestAt || 0, Date.now() + delayMs);
         if (response.status === 429) setRateLimitPaused(global, true, Date.now() + delayMs);
-        global.__shelfcheckLogger?.warn("request.retry", { path, attempt: attempt + 1, status: response.status, delayMs });
+        liveTraktRun()?.logger.warn("request.retry", { path, attempt: attempt + 1, status: response.status, delayMs });
         await wait(delayMs);
         continue;
       }
@@ -169,7 +188,7 @@ async function traktRequest(path: string): Promise<Response> {
       if (global.__shelfcheckRateLimitPaused && Date.now() >= (global.__shelfcheckRateLimitResumeAt || 0)) setRateLimitPaused(global, false);
       return response;
     } catch (error) {
-      global.__shelfcheckLogger?.warn("request.error", { path, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: error instanceof Error ? error.message : String(error) });
+      liveTraktRun()?.logger.warn("request.error", { path, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: error instanceof Error ? error.message : String(error) });
       if (isTerminalTraktError(error)) throw error;
       if (attempt === 4) throw new Error(error instanceof Error ? error.message : "The Trakt request failed.");
       await wait(1000 * 2 ** attempt);
@@ -200,12 +219,17 @@ function updateScan(scan: ScanStatus) {
   writeSingleUserScanStatus(scan);
 }
 
-async function runScan(force = false, targetTraktId?: number) {
-  const startedAt = new Date().toISOString();
+async function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
   const state = readSingleUserState().state || {};
   const logger = createScanLogger(state.diagnosticsEnabled !== false);
+  const bridge: TraktRunBridge = { owner, logger };
+  return traktRun.run(bridge, () => scanTraktLibrary(bridge, state, force, targetTraktId));
+}
+
+async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, unknown>, force: boolean, targetTraktId?: number) {
+  const startedAt = new Date().toISOString();
+  const { logger } = bridge;
   const scanGlobal = globalThis as ScanGlobal;
-  scanGlobal.__shelfcheckLogger = logger;
   scanGlobal.__shelfcheckRateLimitPaused = false;
   scanGlobal.__shelfcheckRateLimitResumeAt = undefined;
   logger.info("scan.start", { startedAt, version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) });
@@ -294,7 +318,7 @@ async function runScan(force = false, targetTraktId?: number) {
       if (forceSave) lastForcedCheckpointProcessed = processed;
       logger.info("checkpoint.saved", { reason, processed, total: candidates.length });
     };
-    scanGlobal.__shelfcheckSaveCheckpoint = (reason) => saveCheckpoint(reason, true);
+    bridge.saveCheckpoint = (reason) => saveCheckpoint(reason, true);
     await runWorkerPool(queue, 6, async ({ item, reason }) => {
         const id = String(item.show.ids.trakt);
         const showStarted = Date.now();
@@ -366,20 +390,19 @@ async function runScan(force = false, targetTraktId?: number) {
     updateScan({ status: "completed", processed: candidates.length, total: candidates.length, startedAt, finishedAt });
     logger.info("scan.complete", { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: missing.length, targetTraktId });
   } catch (error) {
-    scanGlobal.__shelfcheckSaveCheckpoint?.("error");
+    bridge.saveCheckpoint?.("error");
     const current = getScanStatus();
     updateScan({ ...current, status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The scan failed." });
     logger.error("scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
   } finally {
     finishIgnoreTracking();
-    scanGlobal.__shelfcheckLogger = undefined;
-    scanGlobal.__shelfcheckSaveCheckpoint = undefined;
+    bridge.saveCheckpoint = undefined;
   }
 }
 
 export function getScanStatus(): ScanStatus {
   const scan = (readSingleUserScanStatus() as ScanStatus | null) || { status: "idle", processed: 0, total: 0 };
-  if (scan.status === "running" && !(globalThis as ScanGlobal).__shelfcheckScan) {
+  if (scan.status === "running" && !scanRuns.isActive("trakt")) {
     const interrupted: ScanStatus = { ...scan, status: "error", error: "The scan was interrupted by a server restart. Start it again to resume." };
     writeSingleUserScanStatus(interrupted);
     return interrupted;
@@ -387,18 +410,20 @@ export function getScanStatus(): ScanStatus {
   return scan;
 }
 
+/**
+ * Starts a Trakt Scan run. The Trakt bridge: the existing run claims the shared
+ * scan run lock and releases it once settled; its status, heartbeat and Resume
+ * point stay here until they move onto the lifecycle module. Throws
+ * ScanRunConflictError, with no side effects, while any Scan run is active.
+ */
 export function startScan(force = false, targetTraktId?: number): ScanStatus {
-  const global = globalThis as ScanGlobal;
-  if (!global.__shelfcheckScan) {
-    global.__shelfcheckScan = runScan(force, targetTraktId).finally(() => { global.__shelfcheckScan = undefined; });
-  }
-  return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
+  const { owner } = scanRuns.start("trakt", (runOwner) => runScan(runOwner, force, targetTraktId));
+  return { status: "running", processed: 0, total: 0, startedAt: owner.startedAt };
 }
 
 export function clearScanCache(traktId?: number): { cleared: number } {
   if (traktId !== undefined && (!Number.isInteger(traktId) || traktId <= 0)) throw new Error("A positive Trakt show ID is required.");
-  const global = globalThis as ScanGlobal;
-  if (global.__shelfcheckScan) throw new Error("Wait for the current scan to finish before clearing the cache.");
+  if (scanRuns.isActive("trakt")) throw new Error("Wait for the current scan to finish before clearing the cache.");
   const state = readSingleUserState().state || {};
   const report = state.report as ScanReport | undefined;
   const checkpoint = state.checkpoint as ScanReport | undefined;

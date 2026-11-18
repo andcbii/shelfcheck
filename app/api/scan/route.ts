@@ -1,5 +1,7 @@
 import { clearScanCache, getScanStatus, startScan } from "@/lib/scan";
 import { positiveInteger } from "@/lib/positive-integer";
+import { scanRunConflictResponse } from "@/lib/scan-run-conflict";
+import { ScanRunConflictError } from "@/lib/scan-run";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +13,12 @@ export async function GET() {
 export async function POST(request: Request) {
   const body = await request.json().catch(() => ({})) as { force?: boolean; traktId?: number };
   const traktId = positiveInteger(body.traktId);
-  return Response.json({ scan: startScan(body.force === true, traktId) }, { status: 202, headers: { "Cache-Control": "private, no-store" } });
+  try {
+    return Response.json({ scan: startScan(body.force === true, traktId) }, { status: 202, headers: { "Cache-Control": "private, no-store" } });
+  } catch (error) {
+    if (error instanceof ScanRunConflictError) return scanRunConflictResponse(error);
+    throw error;
+  }
 }
 
 export async function DELETE(request: Request) {

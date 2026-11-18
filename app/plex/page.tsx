@@ -23,6 +23,7 @@ import { shouldShowPlexMissingEpisode } from "@/lib/plex-airdate";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
+import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { activeIgnores, createIgnoreTiming, isIgnoreActive, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
@@ -84,6 +85,7 @@ export default function PlexPage() {
   const [report, setReport] = useState<Report | null>(null);
   const reportInvalidations = useRef(new Set<string>());
   const scanRequestPending = useRef(false);
+  const scanInProgress = useRef(false);
   const settingsSaves = useRef(0);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -101,7 +103,7 @@ export default function PlexPage() {
   const [configStatus, setConfigStatus] = useState<ConfigStatus>(EMPTY_CONFIG);
   const { poll, abort } = useScanPoller<{ scan?: Status; report?: Report | null; coverage?: { revision: number; pending: number; issues: CoverageIssue[] }; error?: string }>({
     url: "/api/plex/scan",
-    onPollingChange: setScanning,
+    onPollingChange: (polling) => { scanInProgress.current = polling; setScanning(polling); },
     onResponse: (body) => {
       if (!body.scan) throw new Error(body.error || "Plex scan status could not be loaded.");
       if ((body.coverage?.revision || 0) < minimumCoverageRevision.current) return false;
@@ -112,6 +114,12 @@ export default function PlexPage() {
       if (body.scan.status === "error") throw new Error(body.scan.error || "The Plex scan failed.");
       return false;
     },
+  });
+  const activity = useScanRunActivity("plex", {
+    isFollowing: () => scanInProgress.current || scanRequestPending.current,
+    poll: () => poll().catch((pollError) => {
+      if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded.");
+    }),
   });
 
   useEffect(() => {
@@ -196,7 +204,7 @@ export default function PlexPage() {
   }
 
   async function scan(show?: Show) {
-    if (scanRequestPending.current) return;
+    if (scanRequestPending.current || activity.isLocked()) return;
     if (!configured) { setConnectionOpen(true); return; }
     scanRequestPending.current = true;
     // Only a new scan can return results removed by a previous whole-show ignore.
@@ -209,14 +217,17 @@ export default function PlexPage() {
         method: "POST",
         ...(show ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ratingKey: show.ratingKey }) } : {}),
       });
-      const body = await response.json().catch(() => ({})) as { error?: string };
+      const body = await response.json().catch(() => ({})) as { error?: string; activeScanRun?: unknown };
+      if (response.status === 409) activity.report(body.activeScanRun);
       if (!response.ok) throw new Error(body.error || (show ? `Shelfcheck could not check ${show.title}.` : "Shelfcheck could not start the Plex scan."));
       await poll();
+      activity.refresh();
     } catch (scanError) { if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "Shelfcheck could not start the Plex scan."); }
     finally { scanRequestPending.current = false; }
   }
 
   async function forceCheckShow(show: Show) {
+    if (activity.isLocked()) return;
     setOpenShowMenu(null); setCacheMessage("");
     await scan(show);
   }
@@ -411,7 +422,7 @@ export default function PlexPage() {
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
-      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p></div>
+      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
     </section>
     <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{activeShows.filter((show) => show.missing.length).length}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
       {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: `show|${show.ratingKey}`, title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: `seasons|${show.ratingKey}`, title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={(key) => { const value = String(key); if (value.startsWith("show|")) restoreShow(value.slice(5)); else if (value.startsWith("seasons|")) restoreSeasons(value.slice(8)); }} />}
@@ -438,7 +449,7 @@ export default function PlexPage() {
           <div className="show-info" data-show-menu-id={show.ratingKey}>
             <div className="show-title-line"><button className="show-name-button" onClick={() => setOpenShowMenu((current) => current === show.ratingKey ? null : show.ratingKey)}>{show.title}</button>{show.year && <small>{show.year}</small>}{show.tmdbId && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.tmdbId}`} target="_blank" rel="noreferrer" title="View show on TMDB"><img src="/tmdb-blue-square.svg" alt="TMDB" /></a>}{show.tvdbSlug && <a className="brand-link" href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}`} target="_blank" rel="noreferrer" title="View show on TVDB"><img src={TVDB_LOGO} alt="TVDB" /></a>}<button className="show-collapse-toggle" onClick={() => toggleShow(show.ratingKey)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button></div>
             {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey) && <div className="ignored-season-status">Ignored {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey)!.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}</div>}
-            {openShowMenu === show.ratingKey && <ShowActionsMenu onIgnoreShow={() => { setShowToIgnore(show); setOpenShowMenu(null); }} onForceCheck={() => void forceCheckShow(show)} onClearCache={() => void clearShowCache(show)} onIgnoreSeasons={() => openSeasonIgnore(show)} />}
+            {openShowMenu === show.ratingKey && <ShowActionsMenu onIgnoreShow={() => { setShowToIgnore(show); setOpenShowMenu(null); }} onForceCheck={() => void forceCheckShow(show)} forceCheckDisabled={activity.locked} onClearCache={() => void clearShowCache(show)} onIgnoreSeasons={() => openSeasonIgnore(show)} />}
             {!showCollapsed && <><div className="compact-show-meta"><p>{show.plexEpisodes} collected · {show.missing.length} missing {show.missing.length === 1 ? "episode" : "episodes"}</p><div className="season-all-controls"><button onClick={() => setAllSeasons(show, false)}>Show all</button><button onClick={() => setAllSeasons(show, true)}>Collapse all</button></div></div>
             <CatalogueNotice identity={show.ratingKey} selection={show.catalogueSelection} />
             {show.warning && <p className="plex-warning">{show.warning}</p>}

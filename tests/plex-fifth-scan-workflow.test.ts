@@ -88,6 +88,13 @@ async function fixture(t: test.TestContext) {
 type Issue = {id:string;provider?:string;operation:string};
 const hasIssue = (result:{coverage:{issues:Issue[]}}, id:string) => result.coverage.issues.some(issue=>issue.id === id);
 
+/** Simulates the process ending: the next process starts with an empty owner record, and the abandoned run settles later. */
+function abandonRunningScan(): Promise<void> {
+  const global = globalThis as typeof globalThis & {__shelfcheckScanRun?: {owner?: unknown}};
+  const abandoned = global.__shelfcheckScanRun!;
+  global.__shelfcheckScanRun = {};
+  return (async () => { while (abandoned.owner) await new Promise(r=>setTimeout(r,10)); })();
+}
 test("every fifth completed full scan refreshes only today's included changed TMDB catalogues across restart", async t => {
   const f = await fixture(t);
   for(let i=1;i<=4;i++) { assert.equal((await f.run()).scan.status,"completed"); if(i>1) assert.deepEqual(f.downloads(),[]); }
@@ -392,15 +399,14 @@ test("a real scan interrupted mid-library does not count toward the fifth-scan c
   f.requests.length = 0;
   await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
   for(let i=0; i<500 && !f.downloads().length; i++) await new Promise(r=>setTimeout(r,10));
-  const global = globalThis as typeof globalThis & {__shelfcheckPlexScan?: Promise<void>};
-  const interrupted = global.__shelfcheckPlexScan!;
   const release = f.state.heldTmdb.get(10)!;
   f.state.heldTmdb.delete(10); // Later scans download normally.
+  let interrupted: Promise<void> | undefined;
   try {
     assert.deepEqual(f.downloads(),["/3/tv/10/season/1"],"the scan was interrupted mid-library");
     assert.equal((await (await scan.GET()).json()).scan.status,"running");
     // Simulate the process ending: the stuck scan is abandoned and the database reopened.
-    delete global.__shelfcheckPlexScan;
+    interrupted = abandonRunningScan();
     f.restart();
     t.mock.timers.tick(120_000); // No heartbeat since the process ended.
     const status = await (await scan.GET()).json();

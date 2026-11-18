@@ -58,6 +58,8 @@ async function mountPage(t: test.TestContext, fetcher: typeof fetch, strictMode 
 
 function configuredFetch(scanFetch: typeof fetch): typeof fetch {
   return async (input, init) => {
+    // No Scan run owns the lock, so the scan controls unlock.
+    if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
     if (input === "/api/plex/config") return json({ configured: true, plexUrl: "http://plex.example.test" });
     if (input === "/api/plex/state") return json({ settings: { ignoredShows: [], ignoredSeasons: [] } });
     if (input === "/api/plex/scan") return scanFetch(input, init);

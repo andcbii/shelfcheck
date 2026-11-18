@@ -1,7 +1,10 @@
-/** The in-flight Plex scan, shared across module instances through `globalThis`. */
-export type PlexScanGlobal = typeof globalThis & { __shelfcheckPlexScan?: Promise<void> };
+import { scanRuns } from "@/lib/scan-run";
 
-/** Whether a Plex scan is running in this process; mutations of scan inputs are rejected meanwhile. */
+/**
+ * Whether a Plex Scan run owns the scan run lock in this process; Manual Match
+ * and comparison catalogue changes are rejected meanwhile. A Trakt Scan run
+ * does not count.
+ */
 export function isPlexScanActive(): boolean {
-  return Boolean((globalThis as PlexScanGlobal).__shelfcheckPlexScan);
+  return scanRuns.isActive("plex");
 }

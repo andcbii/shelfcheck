@@ -60,6 +60,8 @@ test("05 — Scan Issues explains malformed catalogue records with only the prov
 test("/plex keeps an episode with a failed check in the normal missing results", async t => {
   const report = { lastScan: "2026-11-06T12:00:00.000Z", shows: [{ ...show, tvdbSlug: "target", plexEpisodes: 2, missing: [{ season: 1, episode: 2, airDate: "2020-01-01", tvdbEpisodeId: 102, sources: ["TVDB"] }] }] };
   const fetcher: typeof fetch = async input => {
+    // No Scan run owns the lock, so the scan controls unlock.
+    if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
     if (input === "/api/plex/config") return Response.json({ configured: true, plexUrl: "http://plex.example.test" });
     if (input === "/api/plex/state") return Response.json({ settings: { ignoredShows: [], ignoredSeasons: [] } });
     if (input === "/api/plex/scan") return Response.json({ scan: { status: "completed", processed: 1, total: 1 }, report, coverage: { revision: 0, pending: 0, issues: [issue] } });

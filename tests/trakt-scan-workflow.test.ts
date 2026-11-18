@@ -15,6 +15,7 @@ const sqlite = await import("../lib/sqlite");
 const plex = await import("../lib/plex-scan");
 const issues = await import("../lib/coverage-issues");
 const lifecycle = await import("../lib/scan-run");
+const logs = await import("../app/api/logs/route");
 hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
@@ -286,30 +287,74 @@ test("a Trakt rate-limit pause and its resume time survive progress updates and 
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
 });
 
-test("a late Trakt callback from a settled scan run reaches neither a following Trakt nor Plex scan run", async (t) => {
+const plexScan = await import("../app/api/plex/scan/route");
+const plexLogs = await import("../app/api/plex/logs/route");
+
+/**
+ * Replays, in the async context of the request that got it, what the Trakt
+ * adapter does with a 429 response: it logs request.retry on the run that
+ * dispatched the request and reports the rate-limit pause to it. The Trakt scan
+ * reaches the run only through the lifecycle's binding, as replayed here.
+ */
+const rateLimitedResponse = (scope: AsyncResource) => scope.runInAsyncScope(() => {
+  const run = lifecycle.scanRuns.bound("trakt");
+  run?.logger.warn("request.retry", { path: "/shows/late/progress/collection", attempt: 1, status: 429, delayMs: 60_000 });
+  run?.reportRateLimit("Trakt", true, new Date(Date.now() + 60_000).toISOString());
+});
+
+/** What a following Scan run shows through the public routes, plus its stored Resume point. */
+const observe = async () => ({
+  lock: ((await (await scanRuns.GET()).json()) as { activeScanRun: unknown }).activeScanRun,
+  trakt: { status: await status(), log: await (await logs.GET()).text(), resumePoint: await storedResumePoint() },
+  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: sqlite.readPlexCheckpoint() },
+});
+
+test("a late 429 for a request of a settled Trakt scan run changes nothing in a following Trakt or Plex scan run", async (t) => {
+  // A Trakt run cannot settle while one of its own requests is in flight: every
+  // request is awaited and the worker pool waits for every worker. So the late
+  // response is replayed in the async context the settled run's request kept.
   const f = await fixture(t);
-  const collection = () => Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1" } });
-  // Each scope keeps the async context of a Trakt request, as a late provider callback would.
+  await f.settings({ diagnosticsEnabled: true });
   let late!: AsyncResource;
-  let current!: AsyncResource;
-  f.trakt.failures.set("/sync/collection/shows", [() => { late = new AsyncResource("late-trakt-callback"); return collection(); }]);
+  f.trakt.failures.set("/sync/collection/shows", [() => { late = new AsyncResource("settled-trakt-request"); return Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1" } }); }]);
   assert.equal((await f.run()).status, "completed");
-  const reaches = (scope: AsyncResource, kind: "trakt" | "plex") => scope.runInAsyncScope(() => Boolean(lifecycle.scanRuns.bound(kind)));
 
-  let releaseCollection!: (response: Response) => void;
-  f.trakt.failures.set("/sync/collection/shows", [() => { current = new AsyncResource("current-trakt-callback"); return new Promise<Response>((resolve) => { releaseCollection = resolve; }); }]);
-  await f.start();
+  // A following Deep Scan rechecks Bravo (Trakt updated it) and Charlie (it aired another episode).
+  // It is held on Charlie's progress request, after its Resume point snapshot is installed.
+  f.trakt.library[1].show.updated_at = "2026-11-10T00:00:00.000Z";
+  f.trakt.library[2].show.aired_episodes = 3;
+  let current!: AsyncResource;
+  let release!: (response: Response) => void;
+  f.trakt.failures.set("/shows/3/progress/collection", [() => { current = new AsyncResource("live-trakt-request"); return new Promise<Response>((resolve) => { release = resolve; }); }]);
+  await f.start({ force: true });
   for (let step = 0; step < 100 && !current; step += 1) { t.mock.timers.tick(50); await flush(); }
-  assert.equal(reaches(current, "trakt"), true, "the following Trakt run's own callback reaches it");
-  assert.equal(reaches(late, "trakt"), false, "the settled run's callback does not reach the following Trakt run");
-  assert.equal(reaches(late, "plex"), false);
-  releaseCollection(collection());
-  assert.equal((await f.settle()).status, "completed");
-  assert.equal(reaches(current, "trakt"), false, "once settled, its callbacks reach nothing");
+  await flush();
+  const before = await observe();
+  assert.equal((before.lock as { kind: string }).kind, "trakt");
+  assert.equal(before.trakt.status.status, "running");
+  rateLimitedResponse(late);
+  await flush();
+  assert.deepEqual(await observe(), before, "the following Trakt run's status, log, Resume point and lock are unchanged");
+  assert.ok(!before.trakt.status.rateLimitPaused);
+  assert.doesNotMatch(before.trakt.log, /shows\/late/);
 
+  // The same replay from the following run's own request does reach it, so the check above is not vacuous.
+  rateLimitedResponse(current);
+  await flush();
+  const own = await observe();
+  assert.equal(own.trakt.status.rateLimitPaused, true);
+  assert.match(own.trakt.log, /request\.retry .*shows\/late/);
+  assert.notDeepEqual(own.trakt.resumePoint, before.trakt.resumePoint, "the pause saved a Resume point");
+  release(Response.json(progress[3]));
+  assert.equal((await f.settle()).status, "completed");
+
+  // A following Plex run, checked while it still owns the lock.
   plex.startPlexScan();
-  assert.equal(reaches(late, "plex"), false, "a settled Trakt run's callback does not reach a following Plex run");
-  assert.equal(reaches(late, "trakt"), false);
+  const plexBefore = await observe();
+  assert.equal((plexBefore.lock as { kind: string }).kind, "plex");
+  rateLimitedResponse(late);
+  rateLimitedResponse(current);
+  assert.deepEqual(await observe(), plexBefore, "the following Plex run's status, log, Resume point and lock are unchanged");
   await f.settle();
   assert.equal((await status()).status, "completed", "the Plex run left the Trakt status alone");
 });
@@ -449,7 +494,6 @@ test("a Trakt rate-limit pause saves a Resume point of the shows completed so fa
 
 // Trakt log lines stay as they were before the scan run lifecycle.
 
-const logs = await import("../app/api/logs/route");
 /** The current shelfcheck.log, one entry per line. */
 const logLines = async () => (await (await logs.GET()).text()).split("\n").filter(Boolean);
 const savedReasons = (lines: string[]) => lines.filter((line) => / checkpoint\.saved \|/.test(line)).map((line) => line.match(/ reason="([^"]*)"/)?.[1]);

@@ -12,15 +12,15 @@ const config = await import("../lib/server-config");
 const { scanRuns } = await import("../lib/scan-run");
 hook.deregister();
 
-// The Trakt bridge's rate-limit pause, request logger and Resume point save
-// belong to the Trakt Scan run that installed them, and act only while that
-// run still owns the scan run lock.
+// A Trakt rate-limit pause reaches the Trakt Scan run that dispatched the
+// request: its status, its log and a forced Resume point save. Late callbacks
+// from a settled run are covered in trakt-scan-workflow.test.ts.
 
 type ScanRunRecord = { owner?: { kind: string; runId: string; startedAt: string } };
 const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync; __shelfcheckScanRun?: ScanRunRecord };
 
-async function traktScanRateLimited(t: TestContext, ownsLock: boolean) {
-  const dir = mkdtempSync(path.join(tmpdir(), "trakt-scan-run-bridge-"));
+async function traktScanRateLimited(t: TestContext) {
+  const dir = mkdtempSync(path.join(tmpdir(), "trakt-scan-rate-limit-"));
   const previous = { data: process.env.SHELFCHECK_DATA_DIR, config: process.env.SHELFCHECK_CONFIG_DIR };
   process.env.SHELFCHECK_DATA_DIR = dir;
   process.env.SHELFCHECK_CONFIG_DIR = dir;
@@ -50,35 +50,21 @@ async function traktScanRateLimited(t: TestContext, ownsLock: boolean) {
 
   trakt.startScan(true);
   await requested;
-  const record = cache.__shelfcheckScanRun!;
-  const owner = record.owner;
-  assert.equal(owner?.kind, "trakt");
-  // Unless it still owns the lock, the run that issued this request has lost it when Trakt answers.
-  if (!ownsLock) record.owner = { kind: "trakt", runId: "another-run", startedAt: new Date().toISOString() };
+  assert.equal(cache.__shelfcheckScanRun?.owner?.kind, "trakt");
   releaseProgress(new Response("{}", { status: 429, headers: { "Retry-After": "1" } }));
   await new Promise((resolve) => setTimeout(resolve, 50));
   const status = sqlite.readSingleUserScanStatus() as { status: string; rateLimitPaused?: boolean };
   const checkpoint = sqlite.readSingleUserState().state?.checkpoint;
   const logFile = path.join(dir, "logs", "shelfcheck.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
-  record.owner = owner;
   while (scanRuns.activeScanRun()) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(trakt.getScanStatus().status, "completed");
   return { status, checkpoint, log };
 }
 
 test("a Trakt rate-limit pause from the run that owns the lock is recorded with its Resume point", async (t) => {
-  const { status, checkpoint, log } = await traktScanRateLimited(t, true);
+  const { status, checkpoint, log } = await traktScanRateLimited(t);
   assert.equal(status.rateLimitPaused, true);
   assert.ok(checkpoint, "the pause saved a Resume point");
   assert.ok(log.includes("request.retry"));
-});
-
-test("a Trakt rate-limit callback from a run that no longer owns the scan run lock writes nothing", async (t) => {
-  const { status, checkpoint, log } = await traktScanRateLimited(t, false);
-  assert.equal(status.status, "running");
-  assert.notEqual(status.rateLimitPaused, true, "no rate-limit pause is written for a run that does not own the lock");
-  assert.equal(checkpoint, undefined, "no Resume point is saved");
-  assert.ok(!log.includes("request.retry"), "the bridge logger is silent");
-  assert.ok(!log.includes("checkpoint.saved"));
 });

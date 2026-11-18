@@ -1,16 +1,15 @@
 import "server-only";
 
-import { AsyncLocalStorage } from "node:async_hooks";
 import { validTraktCredentials } from "@/lib/trakt-auth";
-import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
-import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, type ScanReason } from "@/lib/scan-cache";
+import { createScanLogger } from "@/lib/scan-log";
+import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, type ScanReason } from "@/lib/scan-cache";
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, trackScanIgnores, writeSingleUserScanStatus } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
-import { runWorkerPool } from "@/lib/scan-concurrency";
+import { runTrackedWorkerPool } from "@/lib/scan-concurrency";
 import { isTerminalTraktError, TraktHttpError } from "@/lib/trakt-http";
-import { scanRuns, type ScanRunOwner } from "@/lib/scan-run";
+import { scanRuns, type ScanRunMode, type ScanRunOwner, type ScanRunStatus } from "@/lib/scan-run";
 
 type ProgressSeason = { number: number; episodes: { number: number; completed: boolean }[] };
 type TraktSeason = { number: number; episodes?: { season?: number; number: number; first_aired?: string | null }[] };
@@ -22,7 +21,7 @@ type ShowScanState = {
 };
 type ScanCache = Record<string, ShowScanState>;
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
-export type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitResumeAt?: string };
+export type ScanStatus = ScanRunStatus;
 
 const TRAKT = "https://api.trakt.tv";
 const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -37,37 +36,40 @@ type ScanGlobal = typeof globalThis & {
 };
 
 /**
- * The Trakt bridge's per-run callbacks: the request logger and the forced
- * Resume point save, installed by one Trakt Scan run. Until SHELFCHECK-47 moves
- * Trakt onto the lifecycle, they are bound to that run's identity here.
+ * The Trakt scan mode's adapter to the scan run lifecycle: its status and
+ * Resume point stores and Interrupted scan wording. Its lifecycle events keep
+ * their unprefixed names (`scan.start`, `checkpoint.saved`) in shelfcheck.log.
+ * It raises no Coverage Issues.
  */
-type TraktRunBridge = { owner: ScanRunOwner; logger: ScanLogger; saveCheckpoint?: (reason: "rate-limit" | "error") => void };
-const traktRun = new AsyncLocalStorage<TraktRunBridge>();
+const traktScanMode: ScanRunMode<ScanStatus, ScanReport> = {
+  kind: "trakt",
+  eventPrefix: "",
+  failureMessage: "The scan failed.",
+  status: { read: () => readSingleUserScanStatus() as ScanStatus | null, write: writeSingleUserScanStatus },
+  interruptedError: () => "The scan was interrupted by a server restart. Start it again to resume.",
+  resumePoint: {
+    read: () => (readSingleUserState().state?.checkpoint as ScanReport | undefined) || null,
+    write: (checkpoint) => { patchSingleUserState({ checkpoint }); },
+    clear: () => { patchSingleUserState({ checkpoint: null }); },
+    resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
+    discardDetails: () => ({ reason: "expired-or-incompatible" }),
+  },
+};
+
+/** The live Trakt Scan run that dispatched the current request; a late callback from a settled run gets undefined. */
+const liveTraktRun = () => scanRuns.bound<ScanReport>("trakt");
 
 /**
- * The Trakt Scan run that dispatched the current work, only while it still owns
- * the scan run lock. A late callback after it settled, or one from a run that
- * lost the lock, gets undefined and has no effect.
+ * A Trakt rate-limit pause starting or ending. The pause globals pace later
+ * requests; the run that dispatched the request records the pause, its resume
+ * time and the forced Resume point save. Outside a live Trakt run it does nothing.
  */
-function liveTraktRun(): TraktRunBridge | undefined {
-  const run = traktRun.getStore();
-  return run && scanRuns.activeScanRun()?.runId === run.owner.runId ? run : undefined;
-}
-
-function rateLimitStatusFields(global: ScanGlobal) {
-  return global.__shelfcheckRateLimitPaused
-    ? { rateLimitPaused: true, rateLimitResumeAt: new Date(global.__shelfcheckRateLimitResumeAt || Date.now()).toISOString() }
-    : { rateLimitPaused: false, rateLimitResumeAt: undefined };
-}
-
 function setRateLimitPaused(global: ScanGlobal, paused: boolean, resumeAt?: number) {
   const run = liveTraktRun();
   if (!run) return;
   global.__shelfcheckRateLimitPaused = paused;
   global.__shelfcheckRateLimitResumeAt = paused ? Math.max(global.__shelfcheckRateLimitResumeAt || 0, resumeAt || Date.now()) : undefined;
-  if (paused) run.saveCheckpoint?.("rate-limit");
-  const scan = readSingleUserScanStatus() as ScanStatus | null;
-  if (scan?.status === "running") writeSingleUserScanStatus({ ...scan, ...rateLimitStatusFields(global) } satisfies ScanStatus);
+  run.reportRateLimit("Trakt", paused, paused ? new Date(global.__shelfcheckRateLimitResumeAt!).toISOString() : undefined);
 }
 
 function requestSpacing(global: ScanGlobal): number {
@@ -215,28 +217,37 @@ async function traktAll<T>(path: string): Promise<T[]> {
   return items;
 }
 
-function updateScan(scan: ScanStatus) {
-  writeSingleUserScanStatus(scan);
-}
-
-async function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
+/**
+ * One Trakt Scan run through the scan run lifecycle. The lifecycle owns status,
+ * heartbeat, logger and Resume point policy; this keeps the Trakt work, report
+ * assembly and ignore tracking.
+ *
+ * Every Trakt run, single-show included, loads, saves and clears the Resume
+ * point as a full run, as before the lifecycle; SHELFCHECK-54 sets the Trakt
+ * Resume point rules.
+ */
+function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
   const state = readSingleUserState().state || {};
-  const logger = createScanLogger(state.diagnosticsEnabled !== false);
-  const bridge: TraktRunBridge = { owner, logger };
-  return traktRun.run(bridge, () => scanTraktLibrary(bridge, state, force, targetTraktId));
-}
-
-async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, unknown>, force: boolean, targetTraktId?: number) {
-  const startedAt = new Date().toISOString();
-  const { logger } = bridge;
-  const scanGlobal = globalThis as ScanGlobal;
-  scanGlobal.__shelfcheckRateLimitPaused = false;
-  scanGlobal.__shelfcheckRateLimitResumeAt = undefined;
-  logger.info("scan.start", { startedAt, version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) });
-  updateScan({ status: "running", processed: 0, total: 0, startedAt });
-  const finishIgnoreTracking = trackScanIgnores("trakt", Date.parse(startedAt));
-  try {
-    const prior = (state.checkpoint || state.report) as ScanReport | undefined;
+  let finishIgnoreTracking: (() => void) | undefined;
+  return scanRuns.run(owner, traktScanMode, {
+    fullRun: true,
+    createLogger: () => createScanLogger(state.diagnosticsEnabled !== false),
+    startDetails: { version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) },
+    hooks: {
+      begin: () => {
+        // A new run starts unpaused; the request gate and spacing globals keep pacing requests.
+        const scanGlobal = globalThis as ScanGlobal;
+        scanGlobal.__shelfcheckRateLimitPaused = false;
+        scanGlobal.__shelfcheckRateLimitResumeAt = undefined;
+        // Ignore tracking spans every report and Resume point write, including a forced failure save.
+        finishIgnoreTracking = trackScanIgnores("trakt", Date.parse(owner.startedAt));
+      },
+      ended: () => finishIgnoreTracking?.(),
+    },
+  }, async (run) => {
+    const { startedAt, logger, activeWork } = run;
+    const { usable: checkpoint } = run.resumePoint.load(() => true);
+    const prior = checkpoint || (state.report as ScanReport | undefined);
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
@@ -303,23 +314,14 @@ async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, un
       traktUpdated: queue.filter((entry) => entry.reason === "trakt-updated").length,
       settingsChanged: queue.filter((entry) => entry.reason === "settings-changed").length,
     });
-    updateScan({ status: "running", processed, total: candidates.length, startedAt });
-    let lastCheckpointProcessed = processed;
-    let lastCheckpointAt = Date.now();
-    let lastForcedCheckpointProcessed = -1;
-    const saveCheckpoint = (reason: "interval" | "rate-limit" | "error", forceSave = false) => {
-      const now = Date.now();
-      if (forceSave && lastForcedCheckpointProcessed === processed) return;
-      if (!forceSave && !shouldSaveCheckpoint(processed, lastCheckpointProcessed, now, lastCheckpointAt)) return;
-      const checkpoint: ScanReport = { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, airingGraceDays };
-      patchSingleUserState({ checkpoint });
-      lastCheckpointProcessed = processed;
-      lastCheckpointAt = now;
-      if (forceSave) lastForcedCheckpointProcessed = processed;
-      logger.info("checkpoint.saved", { reason, processed, total: candidates.length });
-    };
-    bridge.saveCheckpoint = (reason) => saveCheckpoint(reason, true);
-    await runWorkerPool(queue, 6, async ({ item, reason }) => {
+    run.progress(processed, candidates.length);
+    run.resumePoint.startIntervals();
+    // The Resume point holds the completed shows' results and cache entries.
+    run.resumePoint.provideSnapshot(() => ({
+      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, airingGraceDays },
+      details: {},
+    }));
+    await runTrackedWorkerPool(queue, 6, activeWork, ({ item }) => ({ key: String(item.show.ids.trakt), show: item.show.title }), async ({ item, reason }) => {
         const id = String(item.show.ids.trakt);
         const showStarted = Date.now();
         logger.info("show.start", { traktId: item.show.ids.trakt, title: item.show.title, reason });
@@ -328,6 +330,7 @@ async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, un
         if (canTrustFreshCompleteCount) {
           logger.info("show.collection-complete", { traktId: item.show.ids.trakt, title: item.show.title, reason });
         } else {
+          activeWork.update(id, item.show.title, "collection-progress");
           const progress = await traktJson<{ aired?: number; completed?: number; seasons?: ProgressSeason[] }>(`/shows/${id}/progress/collection?hidden=false&specials=false&count_specials=false&extended=full`);
           const seasons = progress.seasons || [];
           const aired = progress.aired ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.length : 0), 0);
@@ -339,6 +342,7 @@ async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, un
         }
         const requiresAirDates = Boolean(incomplete.length && (force || Boolean(targetTraktId) || airingGraceDays > 0));
         let airDateRequestSucceeded = true;
+        if (requiresAirDates) activeWork.update(id, item.show.title, "air-dates");
         const episodeDates = requiresAirDates
           ? await traktJson<TraktSeason[]>(`/shows/${id}/seasons?extended=episodes,full`).catch((error) => {
             airDateRequestSucceeded = false;
@@ -364,6 +368,7 @@ async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, un
         const cacheable = canCacheAirDateResult(requiresAirDates, airDateRequestSucceeded, unknownAirDates);
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });
         if (missing.length && !item.show.images?.poster?.length) {
+          activeWork.update(id, item.show.title, "poster");
           const details = await traktJson<TraktShow>(`/shows/${id}?extended=full,images`).catch(() => null);
           if (details?.images?.poster?.[0]) item.show = compactTraktShow({ ...item.show, images: { poster: [details.images.poster[0]] } });
           for (const result of missing) result.show = item.show;
@@ -380,41 +385,32 @@ async function scanTraktLibrary(bridge: TraktRunBridge, state: Record<string, un
         }
         logger.info("show.complete", { traktId: item.show.ids.trakt, title: item.show.title, reason, missing: missing.length, cached: cacheable, elapsedMs: Date.now() - showStarted });
         processed += 1;
-        updateScan({ status: "running", processed, total: candidates.length, startedAt, ...rateLimitStatusFields(globalThis as ScanGlobal) });
-        saveCheckpoint("interval");
+        run.progress(processed, candidates.length);
+        run.resumePoint.checkpoint();
     });
     const missing = Object.values(results).flat().sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
     const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache, airingGraceDays };
     const finishedAt = new Date().toISOString();
-    patchSingleUserState({ report, checkpoint: null });
-    updateScan({ status: "completed", processed: candidates.length, total: candidates.length, startedAt, finishedAt });
-    logger.info("scan.complete", { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: missing.length, targetTraktId });
-  } catch (error) {
-    bridge.saveCheckpoint?.("error");
-    const current = getScanStatus();
-    updateScan({ ...current, status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The scan failed." });
-    logger.error("scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined });
-  } finally {
-    finishIgnoreTracking();
-    bridge.saveCheckpoint = undefined;
-  }
+    run.complete({
+      // The report and the cleared Resume point are written together.
+      commit: () => patchSingleUserState({ report, checkpoint: null }),
+      processed: candidates.length,
+      total: candidates.length,
+      finishedAt,
+      details: { finishedAt, elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt), total: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: missing.length, targetTraktId },
+    });
+  });
 }
 
+/** The Trakt scan status, with an Interrupted scan reconciled once by the scan run lifecycle. */
 export function getScanStatus(): ScanStatus {
-  const scan = (readSingleUserScanStatus() as ScanStatus | null) || { status: "idle", processed: 0, total: 0 };
-  if (scan.status === "running" && !scanRuns.isActive("trakt")) {
-    const interrupted: ScanStatus = { ...scan, status: "error", error: "The scan was interrupted by a server restart. Start it again to resume." };
-    writeSingleUserScanStatus(interrupted);
-    return interrupted;
-  }
-  return scan;
+  return scanRuns.readStatus(traktScanMode) || { status: "idle", processed: 0, total: 0 };
 }
 
 /**
- * Starts a Trakt Scan run. The Trakt bridge: the existing run claims the shared
- * scan run lock and releases it once settled; its status, heartbeat and Resume
- * point stay here until they move onto the lifecycle module. Throws
- * ScanRunConflictError, with no side effects, while any Scan run is active.
+ * Starts a Trakt Scan run, full or single-show. It claims the shared scan run
+ * lock first; throws ScanRunConflictError, with no side effects, while any
+ * Scan run is active.
  */
 export function startScan(force = false, targetTraktId?: number): ScanStatus {
   const { owner } = scanRuns.start("trakt", (runOwner) => runScan(runOwner, force, targetTraktId));

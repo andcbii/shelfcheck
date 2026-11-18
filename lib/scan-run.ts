@@ -90,7 +90,7 @@ export type ScanRunResumePointStore<P> = {
 /** The parts of a scan mode the lifecycle needs with or without a live run. */
 export type ScanRunMode<S extends ScanRunStatus, P> = {
   kind: ScanRunKind;
-  /** Lifecycle log events are `<eventPrefix>.scan.*` and `<eventPrefix>.checkpoint.*`. */
+  /** Lifecycle log events are `<eventPrefix>.scan.*` and `<eventPrefix>.checkpoint.*`; with an empty prefix, `scan.*` and `checkpoint.*`. */
   eventPrefix: string;
   /** The status error when a failure is not an Error with its own message. */
   failureMessage: string;
@@ -267,6 +267,8 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     const label = SCAN_RUN_LABELS[mode.kind];
     const hooks = runOptions.hooks || {};
     const prefix = mode.eventPrefix;
+    // An empty prefix keeps a mode's unprefixed event names, such as the Trakt scan's `scan.start`.
+    const event = (name: string) => (prefix ? `${prefix}.${name}` : name);
     const startedAt = owner.startedAt;
     let settled = false;
     let terminal = false;
@@ -294,7 +296,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       const savedAt = iso();
       const { point, details } = snapshot!(savedAt);
       mode.resumePoint!.write(point);
-      runLogger.info(`${prefix}.checkpoint.saved`, { savedAt, processed, total, ...(reason ? { reason } : {}), ...details });
+      runLogger.info(event("checkpoint.saved"), { savedAt, processed, total, ...(reason ? { reason } : {}), ...details });
       cadence = { processed, at: clock.now() };
       return true;
     };
@@ -305,7 +307,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
      */
     const forceSave = (reason: ForcedSaveReason) => {
       try { save(reason); } catch (error) {
-        try { runLogger.warn(`${prefix}.checkpoint.save-failed`, { reason, error: error instanceof Error ? error.message : String(error) }); } catch (logError) { report(`The ${label} scan could not log a failed Resume point save.`, logError); }
+        try { runLogger.warn(event("checkpoint.save-failed"), { reason, error: error instanceof Error ? error.message : String(error) }); } catch (logError) { report(`The ${label} scan could not log a failed Resume point save.`, logError); }
       }
     };
     // In-run updates merge against the raw stored record, never the reconciling reader.
@@ -360,9 +362,9 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
           storedPoint = store.read();
           if (!runOptions.fullRun) return { stored: storedPoint, usable: null };
           const usable = storedPoint && validate(storedPoint) ? storedPoint : null;
-          if (usable) runLogger.info(`${prefix}.checkpoint.resume`, store.resumeDetails(usable));
+          if (usable) runLogger.info(event("checkpoint.resume"), store.resumeDetails(usable));
           else if (storedPoint) {
-            runLogger.warn(`${prefix}.checkpoint.discarded`, store.discardDetails(storedPoint));
+            runLogger.warn(event("checkpoint.discarded"), store.discardDetails(storedPoint));
             store.clear();
           }
           return { stored: storedPoint, usable };
@@ -381,7 +383,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         if (hooks.veto?.()) {
           // Ends the run at once rather than leaving it running until it reads as an Interrupted scan.
           recordError(mode.vetoedError || mode.failureMessage, "veto");
-          runLogger.warn(`${prefix}.scan.vetoed`, { processed, total });
+          runLogger.warn(event("scan.vetoed"), { processed, total });
           return "vetoed";
         }
         final.commit();
@@ -399,7 +401,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         // A clean finish: replace, so no pause or active work survives the run.
         mode.status.write({ status: "completed", processed: final.processed, total: final.total, startedAt, finishedAt: final.finishedAt } as S);
         terminal = true;
-        runLogger.info(`${prefix}.scan.complete`, final.details);
+        runLogger.info(event("scan.complete"), final.details);
         return "completed";
       },
     };
@@ -416,7 +418,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       try {
         const activeShows = activeWork.snapshot();
         const heartbeatAt = iso();
-        try { runLogger.info(`${prefix}.scan.heartbeat`, { processed, total, activeShows, heartbeatAt }); } catch (logError) { reportSafely(`The ${label} scan could not log its heartbeat.`, logError); }
+        try { runLogger.info(event("scan.heartbeat"), { processed, total, activeShows, heartbeatAt }); } catch (logError) { reportSafely(`The ${label} scan could not log its heartbeat.`, logError); }
         update({ status: "running", processed, total, activeShows, currentShow: activeShows.length === 1 ? activeShows[0].show : undefined, currentPhase: activeShows.length > 1 ? `processing-${activeShows.length}-shows` : activeShows[0]?.phase || phase || "processing", heartbeatAt });
       } catch (error) {
         reportSafely(`The ${label} scan could not record its heartbeat.`, error);
@@ -429,8 +431,8 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         logger = runOptions.createLogger();
         hooks.begin?.();
         const previous = mode.status.read();
-        if (previous?.status === "running") logger.warn(`${prefix}.scan.interrupted-detected`, { previousStartedAt: previous.startedAt, processed: previous.processed, total: previous.total, currentShow: previous.currentShow, currentPhase: previous.currentPhase, lastHeartbeatAt: previous.heartbeatAt });
-        logger.info(`${prefix}.scan.start`, { startedAt, ...runOptions.startDetails });
+        if (previous?.status === "running") logger.warn(event("scan.interrupted-detected"), { previousStartedAt: previous.startedAt, processed: previous.processed, total: previous.total, currentShow: previous.currentShow, currentPhase: previous.currentPhase, lastHeartbeatAt: previous.heartbeatAt });
+        logger.info(event("scan.start"), { startedAt, ...runOptions.startDetails });
         // A clean start: replace, never merge, so nothing from an earlier run survives.
         mode.status.write({ status: "running", processed: 0, total: 0, startedAt, ...(phase ? { currentPhase: phase } : {}), heartbeatAt: startedAt } as S);
         heartbeat = timers.setInterval(beat, HEARTBEAT_INTERVAL_MS);
@@ -450,7 +452,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
           try {
             let details: LogDetails = {};
             try { details = hooks.failureDetails?.() || {}; } catch (detailsError) { report(`The ${label} scan failure details failed.`, detailsError); }
-            logger.error(`${prefix}.scan.error`, { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, ...details });
+            logger.error(event("scan.error"), { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, ...details });
           } catch (logError) { report(`The ${label} scan could not log its failure.`, logError); }
         }
       } finally {

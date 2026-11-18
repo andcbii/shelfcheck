@@ -4,12 +4,17 @@ import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { AsyncResource } from "node:async_hooks";
 import test, { type TestContext } from "node:test";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const scan = await import("../app/api/scan/route");
 const scanRuns = await import("../app/api/scan-runs/route");
 const state = await import("../app/api/state/route");
 const config = await import("../lib/server-config");
+const sqlite = await import("../lib/sqlite");
+const plex = await import("../lib/plex-scan");
+const issues = await import("../lib/coverage-issues");
+const lifecycle = await import("../lib/scan-run");
 hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
@@ -43,7 +48,7 @@ const airDates: Record<number, string[]> = {
 };
 
 type Report = { shows: { show: { title: string; ids: { trakt: number } } }[]; missing: { show: { title: string }; season: number; episode: number }[]; lastScan: string; scanCache?: Record<string, unknown> };
-type ScanStatus = { status: string; processed: number; total: number; error?: string };
+type ScanStatus = { status: string; processed: number; total: number; error?: string; finishedAt?: string; rateLimitPaused?: boolean; rateLimitResumeAt?: string; heartbeatAt?: string; activeShows?: unknown[] };
 
 async function fixture(t: TestContext) {
   const dir = mkdtempSync(path.join(tmpdir(), "trakt-scan-workflow-"));
@@ -70,7 +75,7 @@ async function fixture(t: TestContext) {
     library: library(),
     progress: structuredClone(progress),
     /** Responses, by request path, served before the normal answer. */
-    failures: new Map<string, Response[]>(),
+    failures: new Map<string, (Response | Promise<Response> | (() => Response | Promise<Response>))[]>(),
   };
   const requests: string[] = [];
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
@@ -78,7 +83,7 @@ async function fixture(t: TestContext) {
     assert.equal(url.hostname, "api.trakt.tv", `no request leaves the controlled Trakt API: ${url}`);
     requests.push(url.pathname);
     const failure = trakt.failures.get(url.pathname)?.shift();
-    if (failure) return failure;
+    if (failure) return typeof failure === "function" ? failure() : failure;
     if (url.pathname === "/sync/collection/shows") return Response.json(trakt.library, { headers: { "X-Pagination-Page-Count": "1" } });
     const show = url.pathname.match(/^\/shows\/(\d+)\/(progress\/collection|seasons)$/);
     if (show?.[2] === "progress/collection") return Response.json(trakt.progress[Number(show[1])]);
@@ -86,11 +91,14 @@ async function fixture(t: TestContext) {
     throw new Error(`Unexpected Trakt request: ${url}`);
   });
 
-  /** Starts a scan through the route and advances the mocked clock until its Scan run settles. */
-  const run = async (body: { force?: boolean; traktId?: number } = {}) => {
+  /** Starts a scan through the route, without waiting for it. */
+  const start = async (body: { force?: boolean; traktId?: number } = {}) => {
     requests.length = 0;
     const started = await scan.POST(new Request("http://localhost/api/scan", { method: "POST", body: JSON.stringify(body) }));
     assert.equal(started.status, 202);
+  };
+  /** Advances the mocked clock until the active Scan run settles, then returns the Trakt scan status. */
+  const settle = async () => {
     for (let step = 0; step < 2_000; step += 1) {
       const { activeScanRun } = await (await scanRuns.GET()).json() as { activeScanRun: unknown };
       if (!activeScanRun) return (await (await scan.GET()).json() as { scan: ScanStatus }).scan;
@@ -99,9 +107,14 @@ async function fixture(t: TestContext) {
     }
     throw new Error("The Trakt scan did not settle.");
   };
+  /** Starts a scan through the route and advances the mocked clock until its Scan run settles. */
+  const run = async (body: { force?: boolean; traktId?: number } = {}) => {
+    await start(body);
+    return settle();
+  };
   const report = async () => ((await (await state.GET()).json()) as { state: { report?: Report } }).state.report;
   const settings = (patch: Record<string, unknown>) => state.PATCH(new Request("http://localhost/api/state", { method: "PATCH", body: JSON.stringify(patch) }));
-  return { trakt, requests, run, report, settings };
+  return { trakt, requests, start, settle, run, report, settings };
 }
 
 const missing = (report: Report | undefined) => report?.missing.map((episode) => `${episode.show.title} S${episode.season}E${episode.episode}`);
@@ -211,4 +224,102 @@ test("a Deep Scan rechecks a show Trakt updated, which a Quick scan reuses from 
   await f.run({ force: true });
   assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection", "/shows/3/seasons"]);
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+});
+
+// SHELFCHECK-53: the Trakt scan runs through the scan run lifecycle.
+
+const status = async () => (await (await scan.GET()).json() as { scan: ScanStatus }).scan;
+
+test("a Trakt scan run with no heartbeat for more than 90 seconds and no live owner is an Interrupted scan, written once", async (t) => {
+  await fixture(t);
+  sqlite.writeSingleUserScanStatus({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
+  assert.equal((await status()).status, "running", "exactly 90 seconds without a heartbeat is still running");
+  t.mock.timers.tick(1);
+  const first = await status();
+  assert.equal(first.status, "error");
+  assert.equal(first.error, "The scan was interrupted by a server restart. Start it again to resume.");
+  assert.equal(first.processed, 1);
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(await status(), first, "a later poll rewrites nothing");
+  assert.deepEqual(issues.listCoverageIssues(), [], "an Interrupted Trakt scan raises no Coverage Issue");
+});
+
+const flush = async () => { for (let step = 0; step < 20; step += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+test("a Trakt rate-limit pause and its resume time survive progress updates and heartbeats until the pause ends", async (t) => {
+  const f = await fixture(t);
+  let release!: (response: Response) => void;
+  let charlieRequested!: () => void;
+  // Bravo is rate limited once Charlie's progress request is in flight; Charlie's answer is held until the pause has started.
+  const charlieInFlight = new Promise<void>((resolve) => { charlieRequested = resolve; });
+  f.trakt.failures.set("/shows/2/progress/collection", [charlieInFlight.then(() => new Response("{}", { status: 429, headers: { "Retry-After": "60" } }))]);
+  f.trakt.failures.set("/shows/3/progress/collection", [() => { charlieRequested(); return new Promise<Response>((resolve) => { release = resolve; }); }]);
+  await f.start();
+  let paused = await status();
+  for (let step = 0; step < 100 && !paused.rateLimitPaused; step += 1) {
+    t.mock.timers.tick(50);
+    await flush();
+    paused = await status();
+  }
+  assert.equal(paused.status, "running");
+  assert.equal(paused.rateLimitPaused, true);
+  assert.ok(Date.parse(paused.rateLimitResumeAt || "") >= Date.now() + 55_000, "the resume time is when Trakt said the pause ends");
+
+  release(Response.json(progress[3]));
+  await flush();
+  const progressed = await status();
+  assert.equal(progressed.processed, paused.processed + 1, "Charlie completed during the pause");
+  assert.equal(progressed.rateLimitPaused, true, "a progress update keeps the pause");
+  assert.equal(progressed.rateLimitResumeAt, paused.rateLimitResumeAt);
+
+  t.mock.timers.tick(15_000);
+  await flush();
+  const beat = await status();
+  assert.notEqual(beat.heartbeatAt, progressed.heartbeatAt, "the heartbeat ran");
+  assert.equal(beat.rateLimitPaused, true, "a heartbeat keeps the pause");
+  assert.equal(beat.rateLimitResumeAt, paused.rateLimitResumeAt);
+  assert.deepEqual(beat.activeShows, [{ key: "2", show: "Bravo", phase: "collection-progress" }], "the heartbeat shows the show waiting out the pause");
+
+  const finished = await f.settle();
+  assert.equal(finished.status, "completed");
+  assert.ok(!finished.rateLimitPaused, "the pause ended with the run");
+  assert.equal(finished.rateLimitResumeAt, undefined);
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+});
+
+test("a late Trakt callback from a settled scan run reaches neither a following Trakt nor Plex scan run", async (t) => {
+  const f = await fixture(t);
+  const collection = () => Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1" } });
+  // Each scope keeps the async context of a Trakt request, as a late provider callback would.
+  let late!: AsyncResource;
+  let current!: AsyncResource;
+  f.trakt.failures.set("/sync/collection/shows", [() => { late = new AsyncResource("late-trakt-callback"); return collection(); }]);
+  assert.equal((await f.run()).status, "completed");
+  const reaches = (scope: AsyncResource, kind: "trakt" | "plex") => scope.runInAsyncScope(() => Boolean(lifecycle.scanRuns.bound(kind)));
+
+  let releaseCollection!: (response: Response) => void;
+  f.trakt.failures.set("/sync/collection/shows", [() => { current = new AsyncResource("current-trakt-callback"); return new Promise<Response>((resolve) => { releaseCollection = resolve; }); }]);
+  await f.start();
+  for (let step = 0; step < 100 && !current; step += 1) { t.mock.timers.tick(50); await flush(); }
+  assert.equal(reaches(current, "trakt"), true, "the following Trakt run's own callback reaches it");
+  assert.equal(reaches(late, "trakt"), false, "the settled run's callback does not reach the following Trakt run");
+  assert.equal(reaches(late, "plex"), false);
+  releaseCollection(collection());
+  assert.equal((await f.settle()).status, "completed");
+  assert.equal(reaches(current, "trakt"), false, "once settled, its callbacks reach nothing");
+
+  plex.startPlexScan();
+  assert.equal(reaches(late, "plex"), false, "a settled Trakt run's callback does not reach a following Plex run");
+  assert.equal(reaches(late, "trakt"), false);
+  await f.settle();
+  assert.equal((await status()).status, "completed", "the Plex run left the Trakt status alone");
+});
+
+test("Trakt scan runs raise no Coverage Issues, completed or failed", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.run()).status, "completed");
+  f.trakt.library[2].show.aired_episodes = 3;
+  f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
+  assert.equal((await f.run()).status, "error");
+  assert.deepEqual(issues.listCoverageIssues(), []);
 });

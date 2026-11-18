@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.6.2 - 2026-11-18
+
+### Changed
+
+- Allow one scan run at a time across Trakt and Plex, full or single-show. While
+  a scan run is active, the other page's scan controls are locked with a
+  message naming the running scan, and a refused start returns that message
+  with HTTP 409 instead of starting a second scan.
+- A Plex scan run that fails, or that a Plex rate-limit pause interrupts, now
+  saves a Resume point of its completed shows straight away.
+- A Plex scan run whose Manual Matches change while it runs now ends with a
+  clear error asking for a new Plex scan, instead of staying running until it
+  reads as an Interrupted scan.
+- Trakt scan runs report a heartbeat every 15 seconds and are recognised as an
+  Interrupted scan only after more than 90 seconds without one, the same rule
+  as Plex. A Trakt rate-limit pause and its resume time now stay on the status
+  through progress updates until the pause ends.
+- Trakt Resume points record when they were saved, a format version and the
+  airing grace period. A full scan run resumes only from one with the current
+  version and grace period that is under 6 hours old; any other is discarded
+  and the run falls back to the saved report and scan cache. Resume points
+  saved before 2.6.2 are discarded once, on the first Trakt scan run after
+  upgrading.
+- Trakt single-show checks start from the saved report, never load or create a
+  Resume point, and leave a saved full-run Resume point in place without the
+  checked show.
+
 ## 2.6.1 - 2026-11-17
 
 ### Changed

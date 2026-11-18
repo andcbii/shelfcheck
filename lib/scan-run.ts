@@ -76,6 +76,9 @@ type LogDetails = Record<string, unknown>;
 /** Why a Resume point was saved outside the interval cadence. */
 type ForcedSaveReason = "failure" | "rate-limit";
 
+/** Why a Resume point was saved: on the interval cadence, or forced. */
+export type ScanRunSaveReason = "interval" | ForcedSaveReason;
+
 /** Where a mode keeps its Resume point, and how its log events describe one. */
 export type ScanRunResumePointStore<P> = {
   read(): P | null;
@@ -85,12 +88,22 @@ export type ScanRunResumePointStore<P> = {
   resumeDetails(point: P): LogDetails;
   /** Details for the `<prefix>.checkpoint.discarded` event. */
   discardDetails(point: P): LogDetails;
+  /**
+   * The `reason` the `<prefix>.checkpoint.saved` event logs, or undefined for
+   * none. By default a forced save logs its reason and an interval save none.
+   */
+  savedReason?(reason: ScanRunSaveReason): string | undefined;
 };
 
 /** The parts of a scan mode the lifecycle needs with or without a live run. */
 export type ScanRunMode<S extends ScanRunStatus, P> = {
   kind: ScanRunKind;
-  /** Lifecycle log events are `<eventPrefix>.scan.*` and `<eventPrefix>.checkpoint.*`; with an empty prefix, `scan.*` and `checkpoint.*`. */
+  /**
+   * Lifecycle log events are `<eventPrefix>.scan.*` and `<eventPrefix>.checkpoint.*`;
+   * with an empty prefix, `scan.*` and `checkpoint.*`. The Trakt mode uses the
+   * empty prefix for log compatibility: its shelfcheck.log lines kept these
+   * unprefixed names before the lifecycle, and stay unchanged.
+   */
   eventPrefix: string;
   /** The status error when a failure is not an Error with its own message. */
   failureMessage: string;
@@ -296,7 +309,8 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       const savedAt = iso();
       const { point, details } = snapshot!(savedAt);
       mode.resumePoint!.write(point);
-      runLogger.info(event("checkpoint.saved"), { savedAt, processed, total, ...(reason ? { reason } : {}), ...details });
+      const logged = mode.resumePoint!.savedReason ? mode.resumePoint!.savedReason(reason || "interval") : reason;
+      runLogger.info(event("checkpoint.saved"), { savedAt, processed, total, ...(logged ? { reason: logged } : {}), ...details });
       cadence = { processed, at: clock.now() };
       return true;
     };

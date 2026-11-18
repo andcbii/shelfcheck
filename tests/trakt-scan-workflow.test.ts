@@ -446,3 +446,24 @@ test("a Trakt rate-limit pause saves a Resume point of the shows completed so fa
   assert.equal((await f.settle()).status, "completed");
   assert.equal(await storedResumePoint(), null);
 });
+
+// Trakt log lines stay as they were before the scan run lifecycle.
+
+const logs = await import("../app/api/logs/route");
+/** The current shelfcheck.log, one entry per line. */
+const logLines = async () => (await (await logs.GET()).text()).split("\n").filter(Boolean);
+const savedReasons = (lines: string[]) => lines.filter((line) => / checkpoint\.saved \|/.test(line)).map((line) => line.match(/ reason="([^"]*)"/)?.[1]);
+
+test("Trakt checkpoint.saved log lines keep their reasons: interval, rate-limit and error", async (t) => {
+  const f = await fixture(t);
+  await f.settings({ diagnosticsEnabled: true });
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 429, headers: { "Retry-After": "30" } })]);
+  f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 503 })]);
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(savedReasons(await logLines()), ["rate-limit", "interval"]);
+
+  f.trakt.library[2].show.aired_episodes = 3;
+  f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
+  assert.equal((await f.run({ force: true })).status, "error");
+  assert.deepEqual(savedReasons(await logLines()), ["error"], "a failure save logs reason error, as before");
+});

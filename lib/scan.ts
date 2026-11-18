@@ -55,6 +55,8 @@ const traktScanMode: ScanRunMode<ScanStatus, ResumePoint> = {
     clear: () => { patchSingleUserState({ checkpoint: null }); },
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
     discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, airingGraceDays: checkpoint.airingGraceDays, reason: "expired-or-incompatible" }),
+    // checkpoint.saved keeps its pre-lifecycle reasons: every save names one, and a failure save is "error".
+    savedReason: (reason) => (reason === "failure" ? "error" : reason),
   },
 };
 

@@ -352,12 +352,22 @@ test("a running status is an Interrupted scan only after more than 90 seconds wi
   assert.equal(h.runs.readStatus(h.mode)?.status, "running", "exactly 90 seconds is not interrupted");
   h.advance(1);
   const interrupted = h.runs.readStatus(h.mode);
-  assert.deepEqual(interrupted, { status: "error", processed: 2, total: 5, startedAt: h.iso(-200_000), heartbeatAt: h.iso(-90_000), currentPhase: "tvdb", currentShow: "Show A", finishedAt: h.iso(1), error: "Interrupted during tvdb." });
+  assert.deepEqual(interrupted, { status: "error", processed: 2, total: 5, startedAt: h.iso(-200_000), heartbeatAt: h.iso(-90_000), currentPhase: "tvdb", rateLimitPaused: false, finishedAt: h.iso(1), error: "Interrupted during tvdb." });
   assert.deepEqual(h.status(), interrupted);
   assert.equal(h.interruptions.length, 1);
   h.advance(60_000);
   assert.deepEqual(h.runs.readStatus(h.mode), interrupted, "later reads rewrite nothing");
   assert.equal(h.interruptions.length, 1, "the interruption hook runs once");
+});
+
+test("an Interrupted scan is explained from its last running status but stores no pause or active work", () => {
+  const h = harness();
+  h.setStatus({ status: "running", processed: 2, total: 5, startedAt: h.iso(-200_000), heartbeatAt: h.iso(-91_000), currentPhase: "tvdb", currentShow: "Show A", activeShows: [{ key: "a", show: "Show A", phase: "tvdb" }], rateLimitPaused: true, rateLimitProvider: "TVDB", rateLimitResumeAt: h.iso(60_000) });
+  const interrupted = h.runs.readStatus(h.mode);
+  const expected = { status: "error", processed: 2, total: 5, startedAt: h.iso(-200_000), heartbeatAt: h.iso(-91_000), currentPhase: "tvdb", rateLimitPaused: false, finishedAt: h.iso(), error: "Interrupted during tvdb." };
+  assert.deepEqual(interrupted, expected);
+  assert.deepEqual(h.status(), expected, "the stored terminal record has no pause, provider, resume time or active shows");
+  assert.equal(h.interruptions[0].rateLimitPaused, false, "the interruption hook sees the cleared record");
 });
 
 test("without a heartbeat, the start time ages the running status", () => {

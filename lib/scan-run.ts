@@ -476,7 +476,10 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     if (status?.status !== "running" || isActive(mode.kind)) return status;
     const lastActivity = Date.parse(status.heartbeatAt || status.startedAt || "");
     if (Number.isFinite(lastActivity) && clock.now() - lastActivity <= INTERRUPTED_AFTER_MS) return status;
-    const interrupted: S = { ...status, status: "error", finishedAt: iso(), error: mode.interruptedError(status) };
+    // Explained from the last running status, then reset like any terminal error: no pause, provider, resume time or active work survives.
+    const error = mode.interruptedError(status);
+    const interrupted: S = { ...status, status: "error", finishedAt: iso(), error, rateLimitPaused: false };
+    for (const field of ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow"] as const) delete interrupted[field];
     mode.status.write(interrupted);
     try { mode.onInterrupted?.(interrupted); } catch (error) { report(`The ${SCAN_RUN_LABELS[mode.kind]} interrupted scan hook failed.`, error); }
     return interrupted;

@@ -17,6 +17,7 @@ import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, type Col
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
+import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { activeIgnores, createIgnoreTiming, isIgnoreActive, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
@@ -107,6 +108,19 @@ export default function Home() {
       return false;
     },
   });
+  // The Trakt Scan run this page last followed, so another tab's run starts the progress poller once.
+  const followedScanRun = useRef<string | null>(null);
+  const activity = useScanRunActivity("trakt", { onOwnKindRunning: followOwnScanRun });
+
+  function followOwnScanRun(run: { startedAt: string }) {
+    const alreadyFollowing = scanInProgress.current || scanRequestPending.current;
+    if (!alreadyFollowing && followedScanRun.current === run.startedAt) return;
+    followedScanRun.current = run.startedAt;
+    if (alreadyFollowing) return;
+    void pollServerScan().catch((pollError) => {
+      if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
+    }).finally(activity.refresh);
+  }
 
   useEffect(() => {
     void fetch("/api/config", { cache: "no-store" }).then(async (response) => {
@@ -405,7 +419,7 @@ export default function Home() {
   }
 
   async function scanLibrary(force = false, traktId?: number) {
-    if (scanRequestPending.current || scanInProgress.current) return;
+    if (scanRequestPending.current || scanInProgress.current || activity.lockingScanRun()) return;
     if (!connected) { loginToTrakt(); return; }
     scanRequestPending.current = true;
     // Pending report loads keep the old set and cannot overwrite the new scan.
@@ -420,16 +434,19 @@ export default function Home() {
         body: JSON.stringify({ force, traktId }),
       });
       if (!response.ok) {
-        const body = await response.json().catch(() => ({})) as { error?: string };
+        const body = await response.json().catch(() => ({})) as { error?: string; activeScanRun?: unknown };
+        if (response.status === 409) activity.report(body.activeScanRun);
         throw new Error(body.error || "Shelfcheck could not start the server-side scan.");
       }
       await pollServerScan();
+      activity.refresh();
     } catch (scanError) {
       if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");
     } finally { scanRequestPending.current = false; }
   }
 
   async function forceCheckShow(show: TraktShow) {
+    if (activity.lockingScanRun()) return;
     setOpenShowMenu(null); setCacheMessage("");
     await scanLibrary(false, show.ids.trakt);
   }
@@ -458,9 +475,10 @@ export default function Home() {
         </div>
         <div className="scan-panel">
           <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{activelyRateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning}>{activelyRateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
+          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${formatLastScan(lastScan)}` : "Only your collection metadata is read."}</p>
-          {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning}>Run Deep Scan</button>}
+          {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning || activity.locked}>Run Deep Scan</button>}
+          {activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}
         </div>
       </section>
 
@@ -510,7 +528,7 @@ export default function Home() {
               <button className="show-collapse-toggle" onClick={() => toggleTraktShow(show.ids.trakt)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button>
             </div>
             {activeIgnoredSeasons.find((item) => item.traktId === show.ids.trakt) && <div className="ignored-season-status">Ignored {activeIgnoredSeasons.find((item) => item.traktId === show.ids.trakt)!.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}</div>}
-            {openShowMenu === show.ids.trakt && <ShowActionsMenu onIgnoreShow={() => { setShowToIgnore(show); setOpenShowMenu(null); }} onForceCheck={() => void forceCheckShow(show)} onClearCache={() => void clearShowCache(show)} onIgnoreSeasons={() => openSeasonIgnore(show)} />}
+            {openShowMenu === show.ids.trakt && <ShowActionsMenu onIgnoreShow={() => { setShowToIgnore(show); setOpenShowMenu(null); }} onForceCheck={() => void forceCheckShow(show)} forceCheckDisabled={activity.locked} onClearCache={() => void clearShowCache(show)} onIgnoreSeasons={() => openSeasonIgnore(show)} />}
             {!showCollapsed && <>
             <div className="compact-show-meta"><p>{show.collection?.completed ?? 0} collected · {episodes.length} missing {episodes.length === 1 ? "episode" : "episodes"}</p><div className="season-all-controls"><button onClick={() => setAllTraktSeasons(show.ids.trakt, episodes, false)}>Show all</button><button onClick={() => setAllTraktSeasons(show.ids.trakt, episodes, true)}>Collapse all</button></div></div>
             <div className="plex-seasons">{seasons.map((season) => {
@@ -578,7 +596,7 @@ export default function Home() {
           <p className="modal-copy">Shelfcheck will compare the collection fingerprint, aired count, and Trakt update timestamp for all {shows.length} shows, then manually rescan only the shows that changed. It can exclude incomplete episodes whose confirmed Trakt air date has not arrived, so its total can differ from Quick Scan. Clear the scan cache in Settings to rebuild every show.</p>
           <div className="modal-actions">
             <button type="button" className="secondary" onClick={() => setFullRescanConfirmOpen(false)}>Cancel</button>
-            <button type="button" className="primary" onClick={() => scanLibrary(true)}>Run Deep Scan <b>→</b></button>
+            <button type="button" className="primary" onClick={() => scanLibrary(true)} disabled={activity.locked}>Run Deep Scan <b>→</b></button>
           </div>
         </section>
       </div>}

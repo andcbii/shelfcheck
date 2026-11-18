@@ -9,6 +9,7 @@ const message = "A Plex scan is running. You can start a Trakt scan when it fini
 test("the Trakt page shows the server's message when a start is refused", async (t) => {
   const starts: unknown[] = [];
   const fetcher: typeof fetch = async (input, init) => {
+    if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
     if (input === "/api/config") return Response.json({ connected: true, applicationConfigured: true });
     if (input === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0 } });
     if (input === "/api/scan" && init?.method === "POST") {

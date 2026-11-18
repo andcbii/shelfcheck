@@ -211,7 +211,7 @@ export default function PlexPage() {
   }
 
   async function scan(show?: Show) {
-    if (scanRequestPending.current || activity.lockingScanRun()) return;
+    if (scanRequestPending.current || activity.isLocked()) return;
     if (!configured) { setConnectionOpen(true); return; }
     scanRequestPending.current = true;
     // Only a new scan can return results removed by a previous whole-show ignore.
@@ -234,7 +234,7 @@ export default function PlexPage() {
   }
 
   async function forceCheckShow(show: Show) {
-    if (activity.lockingScanRun()) return;
+    if (activity.isLocked()) return;
     setOpenShowMenu(null); setCacheMessage("");
     await scan(show);
   }

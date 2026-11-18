@@ -16,14 +16,17 @@ type ScanRunActivityOptions = {
  * kept apart from the page's own scanning and progress state, so it never
  * makes the page look like it is scanning.
  *
- * A failed or malformed observation keeps the last known owner; it is never
- * taken to mean the lock was released. A response that started before a newer
+ * Until the first observation arrives the owner is unknown, and an unknown
+ * owner locks the scan controls and handler guards without a lock message. A
+ * failed or malformed observation keeps the last known owner (or leaves it
+ * unknown); it is never taken to mean the lock was released. A response that started before a newer
  * observation (a refresh or a reported 409) is ignored. The server still
  * refuses a conflicting start; this only keeps the page's controls honest.
  */
 export function useScanRunActivity(page: ScanRunActivityKind, options: ScanRunActivityOptions) {
-  const [activeScanRun, setActiveScanRun] = useState<ActiveScanRun | null>(null);
-  const activeRef = useRef<ActiveScanRun | null>(null);
+  // undefined: no observation has arrived yet, so the owner is unknown.
+  const [activeScanRun, setActiveScanRun] = useState<ActiveScanRun | null | undefined>(undefined);
+  const activeRef = useRef<ActiveScanRun | null | undefined>(undefined);
   const onOwnKindRunningRef = useRef(options.onOwnKindRunning);
   const versionRef = useRef(0);
   const wakeRef = useRef<() => void>(() => {});
@@ -33,7 +36,7 @@ export function useScanRunActivity(page: ScanRunActivityKind, options: ScanRunAc
   const apply = useCallback((run: ActiveScanRun | null) => {
     versionRef.current += 1;
     activeRef.current = run;
-    setActiveScanRun((current) => current?.kind === run?.kind && current?.startedAt === run?.startedAt ? current : run);
+    setActiveScanRun((current) => current === run || (current && run && current.kind === run.kind && current.startedAt === run.startedAt) ? current : run);
     if (run?.kind === page) onOwnKindRunningRef.current(run);
   }, [page]);
 
@@ -85,9 +88,14 @@ export function useScanRunActivity(page: ScanRunActivityKind, options: ScanRunAc
     if (run !== undefined) apply(run);
     wakeRef.current();
   }, [apply]);
-  /** The other kind's Scan run that locks this page's scan controls, read at call time for handler guards. */
-  const lockingScanRun = useCallback(() => activeRef.current && activeRef.current.kind !== page ? activeRef.current : null, [page]);
+  /** Whether this page's scan controls are locked, read at call time for handler guards. */
+  const isLocked = useCallback(() => locks(activeRef.current, page), [page]);
 
   const locking = activeScanRun && activeScanRun.kind !== page ? activeScanRun : null;
-  return { locked: Boolean(locking), lockMessage: locking ? scanRunLockMessage(locking.kind, page) : "", lockingScanRun, refresh, report };
+  return { locked: locks(activeScanRun, page), lockMessage: locking ? scanRunLockMessage(locking.kind, page) : "", isLocked, refresh, report };
+}
+
+/** An unknown owner (undefined) or the other kind's Scan run locks the page's scan controls. */
+function locks(run: ActiveScanRun | null | undefined, page: ScanRunActivityKind) {
+  return run === undefined || (run !== null && run.kind !== page);
 }

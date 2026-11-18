@@ -25,6 +25,8 @@ async function mountPage(t: test.TestContext) {
   const globals = {
     window: browser, self: browser, document: browser.document, navigator: browser.navigator, HTMLElement: browser.HTMLElement, Element: browser.Element, IS_REACT_ACT_ENVIRONMENT: true,
     fetch: (async (input: unknown) => {
+      // No Scan run owns the lock, so the scan controls unlock.
+      if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
       if (input === "/api/plex/config") return Response.json({ configured: true, plexUrl: "http://plex.example.test" });
       if (input === "/api/plex/state") return Response.json({ settings: { ignoredShows: [], ignoredSeasons: [] } });
       if (input === "/api/plex/scan") return Response.json({ scan: { status: "completed", processed: 2, total: 2 }, report });

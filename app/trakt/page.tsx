@@ -419,7 +419,7 @@ export default function Home() {
   }
 
   async function scanLibrary(force = false, traktId?: number) {
-    if (scanRequestPending.current || scanInProgress.current || activity.lockingScanRun()) return;
+    if (scanRequestPending.current || scanInProgress.current || activity.isLocked()) return;
     if (!connected) { loginToTrakt(); return; }
     scanRequestPending.current = true;
     // Pending report loads keep the old set and cannot overwrite the new scan.
@@ -446,7 +446,7 @@ export default function Home() {
   }
 
   async function forceCheckShow(show: TraktShow) {
-    if (activity.lockingScanRun()) return;
+    if (activity.isLocked()) return;
     setOpenShowMenu(null); setCacheMessage("");
     await scanLibrary(false, show.ids.trakt);
   }

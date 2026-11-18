@@ -254,3 +254,35 @@ test("a Plex page follows a Plex scan run started in another tab once, then refr
   await page.advance(3000);
   assert.equal(page.server.statusRequests, 3, "the same run is not followed again, and no progress loop keeps running");
 });
+
+test("a page's scan controls stay locked, with no lock message, until the first activity observation arrives", async (t) => {
+  const first = deferred();
+  const page = await mountPage(t, "trakt", { activity: () => first.promise });
+  assert.equal(page.button("Quick scan")?.disabled, true, "scan controls are locked from the first render");
+  assert.equal(page.button("Run Deep Scan")?.disabled, true);
+  assert.equal(page.lockMessage(), "", "an unknown owner shows no lock message");
+  await act(async () => { page.button("Quick scan")?.removeAttribute("disabled"); page.button("Quick scan")?.click(); });
+  await settle();
+  assert.deepEqual(page.server.starts, [], "the handler guard refuses a start while the owner is unknown");
+
+  first.resolve(Response.json({ activeScanRun: null }));
+  await settle();
+  assert.equal(page.button("Quick scan")?.disabled, false);
+  assert.equal(page.lockMessage(), "");
+});
+
+test("a failed first observation keeps the page locked, and polling retries until an owner is known", async (t) => {
+  const page = await mountPage(t, "plex", { activity: () => Response.json({ error: "unavailable" }, { status: 500 }) });
+  assert.equal(page.button("New Plex search")?.disabled, true);
+  assert.equal(page.lockMessage(), "");
+  await page.click("Plex preferences");
+  assert.equal(page.button("Clear scan cache")?.disabled, false, "clearing the cache is not affected by an unknown owner");
+
+  page.server.activity = () => Promise.reject(new TypeError("network down"));
+  await page.advance(1000);
+  assert.equal(page.button("New Plex search")?.disabled, true);
+
+  page.server.activity = null;
+  await page.advance(1000);
+  assert.equal(page.button("New Plex search")?.disabled, false, "the first successful observation unlocks the page");
+});

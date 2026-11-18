@@ -207,7 +207,7 @@ retained.
 
 ## Local development
 
-Requires Node.js 24 or newer and pnpm 11.
+Requires Node.js 26 or newer and pnpm 11.
 
 ```bash
 pnpm install

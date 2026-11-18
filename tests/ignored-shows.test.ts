@@ -50,7 +50,7 @@ test("six-month ignores use the selecting device's calendar across daylight savi
     assert.deepEqual([expiry.getFullYear(), expiry.getMonth(), expiry.getDate(), expiry.getHours(), expiry.getMinutes()], [2026, 8, 7, 12, 30]);
     assert.equal(expiry.getTime() - selected.getTime(), 184 * 86400000 - 3600000);
   `], { encoding: "utf8", env: { ...process.env, TZ: "America/Chicago" } });
-  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.equal(result.status, 0, (result.stderr || result.error?.message) ?? "child process did not exit successfully");
 });
 
 test("legacy ignores and Forever remain active while deadlines expire at the exact instant", () => {

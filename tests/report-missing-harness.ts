@@ -118,7 +118,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify(ratingKey ? { ratingKey } : {}) }));
     for (let i = 0; i < 300; i++) {
       const result = await status();
-      if (result.scan.status !== "running") { assert.equal(result.scan.status, "completed", result.scan.error); return result; }
+      if (result.scan.status !== "running") { assert.equal(result.scan.status, "completed", result.scan.error ?? "scan did not complete"); return result; }
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     throw new Error("scan timeout");

@@ -242,6 +242,38 @@ test("a Plex start refused by a race shows the server's message and locks the pa
   assert.equal(page.button("New Plex search")?.disabled, true);
 });
 
+// Two tabs race to start the same kind: the loser's start is refused while it is
+// still pending, and once refused it must follow the winning Scan run's progress.
+test("a Trakt start refused by a same-kind race follows the winning scan's progress with its start button disabled", async (t) => {
+  const page = await mountPage(t, "trakt", {
+    statuses: [{ status: "running", processed: 1, total: 4 }, { status: "running", processed: 2, total: 4 }, { status: "completed", processed: 4, total: 4 }],
+    start: () => { page.server.activity = TRAKT_RUN; return Response.json({ error: "A Trakt scan is already running.", activeScanRun: { ...TRAKT_RUN, status: { status: "running", processed: 1, total: 4 } } }, { status: 409 }); },
+  });
+  const before = page.server.statusRequests;
+  await page.click("Quick scan");
+  assert.equal(page.server.starts.length, 1);
+  await page.advance(1000);
+  assert.ok(page.server.statusRequests > before, "the refused page follows the winning scan's progress");
+  const checking = page.button("Checking");
+  assert.match(checking?.textContent || "", /Checking \d of 4/, "the winning scan's progress is shown");
+  assert.equal(checking?.disabled, true, "the start button is disabled while the winning scan runs");
+});
+
+test("a Plex start refused by a same-kind race follows the winning scan's progress with its start button disabled", async (t) => {
+  const page = await mountPage(t, "plex", {
+    statuses: [{ status: "completed", processed: 1, total: 1 }, { status: "running", processed: 1, total: 4 }, { status: "running", processed: 2, total: 4 }, { status: "completed", processed: 4, total: 4 }],
+    start: () => { page.server.activity = PLEX_RUN; return Response.json({ error: "A Plex scan is already running.", activeScanRun: { ...PLEX_RUN, status: { status: "running", processed: 1, total: 4 } } }, { status: 409 }); },
+  });
+  const before = page.server.statusRequests;
+  await page.click("New Plex search");
+  assert.equal(page.server.starts.length, 1);
+  await page.advance(1000);
+  assert.ok(page.server.statusRequests > before, "the refused page follows the winning scan's progress");
+  const checking = page.button("Checking");
+  assert.match(checking?.textContent || "", /Checking \d of 4/, "the winning scan's progress is shown");
+  assert.equal(checking?.disabled, true, "the start button is disabled while the winning scan runs");
+});
+
 test("a Plex page follows a Plex scan run started in another tab once, then refreshes activity on completion", async (t) => {
   const page = await mountPage(t, "plex", { statuses: [{ status: "completed", processed: 1, total: 1 }, { status: "running", processed: 1, total: 2 }, { status: "completed", processed: 2, total: 2 }] });
   assert.equal(page.server.statusRequests, 1, "the page loads its last status");

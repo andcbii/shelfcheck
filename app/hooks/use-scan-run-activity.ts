@@ -34,7 +34,7 @@ export function useScanRunActivity(page: ScanRunKind, options: ScanRunActivityOp
   const [activeScanRun, setActiveScanRun] = useState<ActiveScanRun | null | undefined>(undefined);
   const activeRef = useRef<ActiveScanRun | null | undefined>(undefined);
   const followRef = useRef({ isFollowing: options.isFollowing, poll: options.poll });
-  // The own-kind Scan run this page last followed, so another tab's run starts the progress poll once.
+  // The own-kind Scan run this page's observation last started a progress poll for, so another tab's run is followed once.
   const followedRef = useRef<string | null>(null);
   const versionRef = useRef(0);
   const wakeRef = useRef<() => void>(() => {});
@@ -42,10 +42,11 @@ export function useScanRunActivity(page: ScanRunKind, options: ScanRunActivityOp
   useEffect(() => { followRef.current = { isFollowing: options.isFollowing, poll: options.poll }; }, [options.isFollowing, options.poll]);
 
   const followOwnScanRun = useCallback((run: ActiveScanRun) => {
-    const alreadyFollowing = followRef.current.isFollowing();
-    if (!alreadyFollowing && followedRef.current === run.startedAt) return;
+    // Recorded only when a progress poll really starts: a start request still
+    // pending (and perhaps about to be refused by a same-kind race) is not
+    // following anything, so a later observation must still follow this run.
+    if (followRef.current.isFollowing() || followedRef.current === run.startedAt) return;
     followedRef.current = run.startedAt;
-    if (alreadyFollowing) return;
     void followRef.current.poll().finally(() => wakeRef.current());
   }, []);
 

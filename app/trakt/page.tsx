@@ -108,19 +108,12 @@ export default function Home() {
       return false;
     },
   });
-  // The Trakt Scan run this page last followed, so another tab's run starts the progress poller once.
-  const followedScanRun = useRef<string | null>(null);
-  const activity = useScanRunActivity("trakt", { onOwnKindRunning: followOwnScanRun });
-
-  function followOwnScanRun(run: { startedAt: string }) {
-    const alreadyFollowing = scanInProgress.current || scanRequestPending.current;
-    if (!alreadyFollowing && followedScanRun.current === run.startedAt) return;
-    followedScanRun.current = run.startedAt;
-    if (alreadyFollowing) return;
-    void pollServerScan().catch((pollError) => {
+  const activity = useScanRunActivity("trakt", {
+    isFollowing: () => scanInProgress.current || scanRequestPending.current,
+    poll: () => pollServerScan().catch((pollError) => {
       if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
-    }).finally(activity.refresh);
-  }
+    }),
+  });
 
   useEffect(() => {
     void fetch("/api/config", { cache: "no-store" }).then(async (response) => {

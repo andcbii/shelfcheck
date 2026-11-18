@@ -86,8 +86,6 @@ export default function PlexPage() {
   const reportInvalidations = useRef(new Set<string>());
   const scanRequestPending = useRef(false);
   const scanInProgress = useRef(false);
-  // The Plex Scan run this page last followed, so another tab's run starts the progress poller once.
-  const followedScanRun = useRef<string | null>(null);
   const settingsSaves = useRef(0);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
@@ -117,17 +115,12 @@ export default function PlexPage() {
       return false;
     },
   });
-  const activity = useScanRunActivity("plex", { onOwnKindRunning: followOwnScanRun });
-
-  function followOwnScanRun(run: { startedAt: string }) {
-    const alreadyFollowing = scanInProgress.current || scanRequestPending.current;
-    if (!alreadyFollowing && followedScanRun.current === run.startedAt) return;
-    followedScanRun.current = run.startedAt;
-    if (alreadyFollowing) return;
-    void poll().catch((pollError) => {
+  const activity = useScanRunActivity("plex", {
+    isFollowing: () => scanInProgress.current || scanRequestPending.current,
+    poll: () => poll().catch((pollError) => {
       if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Plex scan status could not be loaded.");
-    }).finally(activity.refresh);
-  }
+    }),
+  });
 
   useEffect(() => {
     const initialInvalidations = reportInvalidations.current;

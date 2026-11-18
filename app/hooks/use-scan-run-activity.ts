@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { parseActiveScanRun, scanRunLockMessage, type ActiveScanRun, type ScanRunActivityKind } from "@/lib/scan-run-activity";
 
 type ScanRunActivityOptions = {
-  /** Called on each observation that finds a Scan run of this page's own kind, for example one started in another tab. */
-  onOwnKindRunning: (run: ActiveScanRun) => void;
+  /** Whether the page is already following its own kind's Scan run: a start it requested, or its progress poller. */
+  isFollowing: () => boolean;
+  /** The page's progress poll: follows its own kind's Scan run until it finishes, handling its own errors. */
+  poll: () => Promise<unknown>;
   intervalMs?: number;
 };
 
@@ -15,6 +17,10 @@ type ScanRunActivityOptions = {
  * the page is idle or scanning, with one request in flight at a time. It is
  * kept apart from the page's own scanning and progress state, so it never
  * makes the page look like it is scanning.
+ *
+ * An observation that finds a Scan run of the page's own kind, for example one
+ * started in another tab, follows it with the page's progress poll once, unless
+ * the page is already following one, then observes again when the poll ends.
  *
  * Until the first observation arrives the owner is unknown, and an unknown
  * owner locks the scan controls and handler guards without a lock message. A
@@ -27,18 +33,28 @@ export function useScanRunActivity(page: ScanRunActivityKind, options: ScanRunAc
   // undefined: no observation has arrived yet, so the owner is unknown.
   const [activeScanRun, setActiveScanRun] = useState<ActiveScanRun | null | undefined>(undefined);
   const activeRef = useRef<ActiveScanRun | null | undefined>(undefined);
-  const onOwnKindRunningRef = useRef(options.onOwnKindRunning);
+  const followRef = useRef({ isFollowing: options.isFollowing, poll: options.poll });
+  // The own-kind Scan run this page last followed, so another tab's run starts the progress poll once.
+  const followedRef = useRef<string | null>(null);
   const versionRef = useRef(0);
   const wakeRef = useRef<() => void>(() => {});
   const intervalMs = options.intervalMs ?? 1000;
-  useEffect(() => { onOwnKindRunningRef.current = options.onOwnKindRunning; }, [options.onOwnKindRunning]);
+  useEffect(() => { followRef.current = { isFollowing: options.isFollowing, poll: options.poll }; }, [options.isFollowing, options.poll]);
+
+  const followOwnScanRun = useCallback((run: ActiveScanRun) => {
+    const alreadyFollowing = followRef.current.isFollowing();
+    if (!alreadyFollowing && followedRef.current === run.startedAt) return;
+    followedRef.current = run.startedAt;
+    if (alreadyFollowing) return;
+    void followRef.current.poll().finally(() => wakeRef.current());
+  }, []);
 
   const apply = useCallback((run: ActiveScanRun | null) => {
     versionRef.current += 1;
     activeRef.current = run;
     setActiveScanRun((current) => current === run || (current && run && current.kind === run.kind && current.startedAt === run.startedAt) ? current : run);
-    if (run?.kind === page) onOwnKindRunningRef.current(run);
-  }, [page]);
+    if (run?.kind === page) followOwnScanRun(run);
+  }, [page, followOwnScanRun]);
 
   useEffect(() => {
     let stopped = false;

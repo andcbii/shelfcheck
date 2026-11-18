@@ -2,7 +2,7 @@ import { MULTIPLE_ID_REFRESH_AGE, reuseProviderCatalogue, tmdbFeedCovers, tmdbVe
 import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
-import { scanRuns } from "@/lib/scan-run";
+import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, invalidateSharedTmdbCrosswalk, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
@@ -23,15 +23,14 @@ import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueReco
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 import { PLEX_SCAN_WORKERS, type PlexProviderName } from "@/lib/plex-provider-policy";
-import { ActiveScanTracker, runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
+import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
 import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
-import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, mergeScanProgress, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
-import { shouldSaveCheckpoint } from "@/lib/scan-cache";
+import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
@@ -58,7 +57,6 @@ type TmdbEpisodeFindResult = TmdbFindEpisode;
 type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
 type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };
 type TraktCredentials = { clientId: string; accessToken: string };
-type ScanGlobal = typeof globalThis & { __shelfcheckPlexLogger?: ScanLogger };
 
 const TMDB = "https://api.themoviedb.org/3";
 const TVDB = "https://api4.thetvdb.com/v4";
@@ -66,17 +64,31 @@ const TRAKT = "https://api.trakt.tv";
 const CACHE_VERSION = PLEX_CACHE_VERSION;
 type ProviderName = PlexProviderName;
 
-function replaceStatus(status: PlexScanStatus) { writePlexScanStatus(status); }
-function updateStatus(progress: Partial<PlexScanStatus>) {
-  writePlexScanStatus(mergeScanProgress(getPlexScanStatus(), progress));
-}
-
-const providerClient = new PlexProviderClient(
-  () => (globalThis as ScanGlobal).__shelfcheckPlexLogger,
-  (provider, paused) => {
-    const current = getPlexScanStatus();
-    if (current.status === "running" && (paused || current.rateLimitProvider === provider)) updateStatus({ rateLimitPaused: paused, rateLimitProvider: paused ? provider : undefined });
+/**
+ * The Plex scan mode's adapter to the scan run lifecycle: its status and
+ * Resume point stores, log event prefix and Interrupted scan wording. The
+ * scan-failure Coverage Issue is raised once when an Interrupted scan is recorded.
+ */
+const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
+  kind: "plex",
+  eventPrefix: "plex",
+  failureMessage: "The Plex scan failed.",
+  status: { read: () => readPlexScanStatus() as PlexScanStatus | null, write: writePlexScanStatus },
+  interruptedError: (status) => `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
+  onInterrupted: (status) => setCoverageIssue({id:"scan-failure",operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
+  resumePoint: {
+    read: () => readPlexCheckpoint() as PlexCheckpoint | null,
+    write: writePlexCheckpoint,
+    clear: clearPlexCheckpoint,
+    resumeDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length }),
+    discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, cacheVersion: checkpoint.cacheVersion, reason: "expired-or-incompatible" }),
   },
+};
+
+// Provider callbacks reach only the live Plex Scan run that dispatched the request; a late one is a no-op.
+const providerClient = new PlexProviderClient(
+  () => scanRuns.bound("plex")?.logger,
+  (provider, paused) => scanRuns.bound("plex")?.reportRateLimit(provider, paused),
 );
 
 /** The saved relationship key of one provider request: its provider and URL. */
@@ -807,30 +819,35 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
   return {result,tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds,episodeFailures};
 }
 
-async function runPlexScan(targetRatingKey?: string) {
-  const startedAt = new Date().toISOString();
+/**
+ * One Plex Scan run through the scan run lifecycle. The lifecycle owns status,
+ * heartbeat, logger and Resume point policy; the hooks keep what is Plex's own:
+ * coverage recheck begin and complete, the coverage-revision veto and the
+ * scan-failure Coverage Issue.
+ */
+function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   let coverageRevision = coverageState().revision;
   let mappings = listCoverageMappings();
-  if (mappings.length) beginCoverageRecheck(coverageRevision);
   const settings = parsePlexPreferences(readPlexSettings());
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
-  const logger = createScanLogger(settings.diagnosticsEnabled !== false, "shelfcheck-plex");
-  const global = globalThis as ScanGlobal;
-  global.__shelfcheckPlexLogger = logger;
-  providerClient.resetMetrics();
-  const activeWork = new ActiveScanTracker();
-  const staleStatus = readPlexScanStatus() as PlexScanStatus | null;
-  if (staleStatus?.status === "running") logger.warn("plex.scan.interrupted-detected", { previousStartedAt: staleStatus.startedAt, processed: staleStatus.processed, total: staleStatus.total, currentShow: staleStatus.currentShow, currentPhase: staleStatus.currentPhase, lastHeartbeatAt: staleStatus.heartbeatAt });
-  logger.info("plex.scan.start", { startedAt, version: SHELFCHECK_VERSION, mode: targetRatingKey ? "single-show" : "full", targetRatingKey, autoCompoundEpisodes });
-  replaceStatus({ status: "running", processed: 0, total: 0, startedAt, currentPhase: "initializing", heartbeatAt: startedAt });
-  const heartbeatTimer = setInterval(() => {
-    const activeShows = activeWork.snapshot();
-    const heartbeatAt = new Date().toISOString();
-    logger.info("plex.scan.heartbeat", { processed, total: currentTotal, activeShows, heartbeatAt });
-    updateStatus({ status: "running", processed, total: currentTotal, activeShows, currentShow: activeShows.length === 1 ? activeShows[0].show : undefined, currentPhase: activeShows.length > 1 ? `processing-${activeShows.length}-shows` : activeShows[0]?.phase || "processing", heartbeatAt });
-  }, 15_000);
+  return scanRuns.run(owner, plexScanMode, {
+    fullRun: !targetRatingKey,
+    createLogger: () => createScanLogger(settings.diagnosticsEnabled !== false, "shelfcheck-plex"),
+    startDetails: { version: SHELFCHECK_VERSION, mode: targetRatingKey ? "single-show" : "full", targetRatingKey, autoCompoundEpisodes },
+    phase: "initializing",
+    pruneResumePoint: (checkpoint) => checkpointWithoutRatingKey(checkpoint, targetRatingKey!),
+    hooks: {
+      begin: () => { if (mappings.length) beginCoverageRecheck(coverageRevision); providerClient.resetMetrics(); },
+      // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
+      veto: () => coverageState().revision !== coverageRevision,
+      committed: () => completeCoverageRecheck(coverageRevision),
+      succeeded: () => resolveCoverageIssue("scan-failure"),
+      failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
+      failureDetails: () => ({ providerMetrics: providerClient.metrics() }),
+    },
+  }, async (run) => {
+  const { startedAt, logger, activeWork } = run;
   let processed = 0;
-  let currentTotal = 0;
   const setHeartbeat = (key: string, show: string, phase: string) => activeWork.update(key, show, phase);
   const finishIgnoreTracking = trackScanIgnores("plex", Date.parse(startedAt));
   try {
@@ -871,10 +888,8 @@ async function runPlexScan(targetRatingKey?: string) {
     // Scans 5, 10, ... require today's TMDB change list; an earlier unfinished one stays due today.
     const safeguardDue = !targetRatingKey && (upcomingFullScan.count % 5 === 0 || Boolean(inputs.pendingSafeguards[utcDate]));
     const prior = getPlexReport();
-    const rawCheckpoint = readPlexCheckpoint() as PlexCheckpoint | null;
-    const checkpoint = !targetRatingKey && (rawCheckpoint?.coverageRevision || 0) === coverageRevision && checkpointIsUsable(rawCheckpoint, autoCompoundEpisodes) ? rawCheckpoint : null;
-    if (checkpoint) logger.info("plex.checkpoint.resume", { savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length });
-    else if (rawCheckpoint && !targetRatingKey) { logger.warn("plex.checkpoint.discarded", { savedAt: rawCheckpoint.savedAt, cacheVersion: rawCheckpoint.cacheVersion, reason: "expired-or-incompatible" }); clearPlexCheckpoint(); }
+    // Loaded after coverage preparation and the revision snapshot, so the revision check is current.
+    const { usable: checkpoint } = run.resumePoint.load((saved) => (saved.coverageRevision || 0) === coverageRevision && checkpointIsUsable(saved, autoCompoundEpisodes));
     const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
     let tmdbChanges: Set<number> | null = null;
     let tvdbChanges: Set<number> | null = null;
@@ -931,7 +946,7 @@ async function runPlexScan(targetRatingKey?: string) {
     const queue: PlexShowGroup[] = [];
     const localResponsesByRatingKey = new Map<string, PlexContainer>();
     const inventoryFailureCauses: string[] = [];
-    currentTotal = candidates.length;
+    run.progress(processed, candidates.length);
     await runWorkerPool(allShows, PLEX_SCAN_WORKERS, async (group) => {
       const responses = await Promise.allSettled(group.records.map(async (record) => ({
         ratingKey: record.ratingKey,
@@ -969,11 +984,17 @@ async function runPlexScan(targetRatingKey?: string) {
     // Catalogue reuse does not certify ownership. Rebuild every comparison against this inventory.
     queue.push(...candidates);
     logger.info("plex.scan.plan", { total: candidates.length, reused: processed, refreshing: queue.length, tmdbChanged: tmdbChanges?.size, tvdbChanged: tvdbChanges?.size, cacheUsable, targetRatingKey });
-    updateStatus({ status: "running", processed, total: candidates.length });
+    run.progress(processed, candidates.length);
     const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(allShows, inputs.inventory.items, ignoredKeys);
     logger.info("plex.library.episode-identities", { tmdb: libraryTmdbEpisodeIds.size, tvdb: libraryTvdbEpisodeIds.size, imdb: libraryImdbEpisodeIds.size });
-    let lastCheckpointProcessed = processed;
-    let lastCheckpointAt = Date.now();
+    // Initialization is over: between active shows the heartbeat now shows "processing".
+    run.setPhase(undefined);
+    run.resumePoint.startIntervals();
+    // The Resume point holds only completed shows whose cache entry is usable.
+    run.resumePoint.provideSnapshot((savedAt) => ({
+      point: { shows: checkpointShowsWithCache(results, scanCache), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision },
+      details: { shows: results.length, cacheEntries: Object.keys(scanCache).length },
+    }));
     await runTrackedWorkerPool(queue, PLEX_SCAN_WORKERS, activeWork, (group) => ({ key: group.identity, show: group.records[0]?.title || "Unknown show" }), async (group) => {
       const primary = group.records[0];
       const ratingKey = group.identity;
@@ -982,7 +1003,7 @@ async function runPlexScan(targetRatingKey?: string) {
         results.push(previous ? {...previous,warning:message} : {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[],warning:message});
         if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];
         processed += 1;
-        updateStatus({status:"running",processed,total:candidates.length});
+        run.progress(processed, candidates.length);
       };
       const priorCacheEntry = checkpoint?.scanCache[ratingKey] || prior?.scanCache?.[ratingKey];
       let cachedTvdbEpisodeImdbIds = { ...(inputs.comparisons[ratingKey]?.tvdbEpisodeImdbIds || priorCacheEntry?.tvdbEpisodeImdbIds || {}) };
@@ -1351,64 +1372,43 @@ async function runPlexScan(targetRatingKey?: string) {
       if (cacheable) scanCache[ratingKey] = { ...(fingerprint ? { plexFingerprint: fingerprint } : {}), ...(episodeFingerprint ? { plexEpisodeFingerprint: episodeFingerprint } : {}), ...(tmdbId ? { tmdbId } : {}), ...(tvdbId ? { tvdbId } : {}), ...(Object.keys(cachedTvdbEpisodeImdbIds).length ? { tvdbEpisodeImdbIds: cachedTvdbEpisodeImdbIds } : {}), localTmdbEpisodeIds: [...localTmdbEpisodeIds], localTvdbEpisodeIds: [...localTvdbEpisodeIds], localImdbEpisodeIds: [...localImdbEpisodeIds], lastCheckedAt: new Date().toISOString() };
       logger.info("plex.show.complete", { ratingKey, title: primary.title || "Unknown show", plexRecords: group.records.length, tmdbId, tvdbId, plexEpisodes: localEpisodes.size, missing: results.find(show => show.ratingKey === ratingKey)?.missing.length, phaseWallMs: phaseTimings, elapsedMs: Date.now() - showStarted });
       processed += 1;
-      updateStatus({ status: "running", processed, total: candidates.length });
-      if (!targetRatingKey && shouldSaveCheckpoint(processed, lastCheckpointProcessed, Date.now(), lastCheckpointAt)) {
-        const savedAt = new Date().toISOString();
-        if (coverageState().revision === coverageRevision) writePlexCheckpoint({ shows: checkpointShowsWithCache(results, scanCache), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision });
-        logger.info("plex.checkpoint.saved", { savedAt, processed, total: candidates.length, shows: results.length, cacheEntries: Object.keys(scanCache).length });
-        lastCheckpointProcessed = processed;
-        lastCheckpointAt = Date.now();
-      }
+      run.progress(processed, candidates.length);
+      run.resumePoint.checkpoint();
     });
     const finishedAt = new Date().toISOString();
     const coverageGroups=coverageGroupsForResults(results,manualInventory);
     const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
-    if (coverageState().revision !== coverageRevision) return;
-    writePlexReport(report);
-    const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
-    if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
-    if (!targetRatingKey) {
-      // Verified changes and recovery work were retained before processing, so isolated failures cannot hold a position back.
-      saveProviderVerification({
-        ...inputs.verification,
-        ...(tmdbChanges !== null ? {tmdb: startedAt} : {}),
-        ...(tvdbChanges !== null ? {tvdb: startedAt} : {}),
-      });
-      // Isolated download, comparison, and verification issues do not prevent a Completed full scan from counting.
-      if (inputs.inventory?.complete) saveCompletedFullScan(startedAt, upcomingFullScan);
-    }
-    completeCoverageRecheck(coverageRevision);
-    if (!targetRatingKey) clearPlexCheckpoint();
-    else if (rawCheckpoint) {
-      const nextCheckpoint = checkpointWithoutRatingKey(rawCheckpoint, targetRatingKey);
-      if (nextCheckpoint) writePlexCheckpoint(nextCheckpoint); else clearPlexCheckpoint();
-    }
-    resolveCoverageIssue("scan-failure");
-    replaceStatus({ status: "completed", processed, total: candidates.length, startedAt, finishedAt });
-    logger.info("plex.scan.complete", { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: providerClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) });
-  } catch (error) {
-    setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})});
-    updateStatus({ status: "error", finishedAt: new Date().toISOString(), error: error instanceof Error ? error.message : "The Plex scan failed.", rateLimitPaused: false, rateLimitProvider: undefined });
-    logger.error("plex.scan.error", { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined, providerMetrics: providerClient.metrics() });
+    // A coverage-revision veto commits nothing and records no completion.
+    run.complete({
+      commit: () => {
+        writePlexReport(report);
+        const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
+        if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
+        if (!targetRatingKey) {
+          // Verified changes and recovery work were retained before processing, so isolated failures cannot hold a position back.
+          saveProviderVerification({
+            ...inputs.verification,
+            ...(tmdbChanges !== null ? {tmdb: startedAt} : {}),
+            ...(tvdbChanges !== null ? {tvdb: startedAt} : {}),
+          });
+          // Isolated download, comparison, and verification issues do not prevent a Completed full scan from counting.
+          if (inputs.inventory?.complete) saveCompletedFullScan(startedAt, upcomingFullScan);
+        }
+      },
+      processed,
+      total: candidates.length,
+      finishedAt,
+      details: { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: providerClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) },
+    });
   } finally {
     finishIgnoreTracking();
-    clearInterval(heartbeatTimer);
-    global.__shelfcheckPlexLogger = undefined;
   }
+  });
 }
 
+/** The Plex scan status, with an Interrupted scan reconciled once by the scan run lifecycle. */
 export function getPlexScanStatus(): PlexScanStatus {
-  const status = readPlexScanStatus() as PlexScanStatus | null;
-  if (status?.status === "running" && !isPlexScanActive()) {
-    const lastActivity = Date.parse(status.heartbeatAt || status.startedAt || "");
-    if (Number.isFinite(lastActivity) && Date.now() - lastActivity > 90_000) {
-      const interrupted: PlexScanStatus = { ...status, status: "error", finishedAt: new Date().toISOString(), error: `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.` };
-      setCoverageIssue({id:"scan-failure",operation:"scan",scope:"library",cause:interrupted.error!,action:"Start a new Plex scan to resume verification."});
-      writePlexScanStatus(interrupted);
-      return interrupted;
-    }
-  }
-  return status || { status: "idle", processed: 0, total: 0 };
+  return scanRuns.readStatus(plexScanMode) || { status: "idle", processed: 0, total: 0 };
 }
 
 export function getPlexReport(): PlexReport | null {
@@ -1453,14 +1453,14 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
  * and releases the lock it claimed.
  */
 export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
-  const { owner } = scanRuns.start("plex", () => {
+  const { owner } = scanRuns.start("plex", (runOwner) => {
     if (targetRatingKey) {
       const settings = parsePlexPreferences(readPlexSettings());
       if (!plexReportCacheIsUsable(getPlexReport(), CACHE_VERSION, settings.autoCompoundEpisodes !== false)) {
         throw new Error("Run a full Plex search before force-checking one show because the scan settings or cache format changed.");
       }
     }
-    return runPlexScan(targetRatingKey);
+    return runPlexScan(runOwner, targetRatingKey);
   });
   return { status: "running", processed: 0, total: 0, startedAt: owner.startedAt };
 }

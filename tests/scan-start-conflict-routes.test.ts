@@ -19,7 +19,7 @@ const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: Databas
 
 /** A disposable data and config directory with Trakt and Plex configured, and providers that wait until released. */
 async function harness(t: TestContext) {
-  const dir = mkdtempSync(path.join(tmpdir(), "scan-run-routes-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "scan-start-conflict-routes-"));
   const previousData = process.env.SHELFCHECK_DATA_DIR;
   const previousConfig = process.env.SHELFCHECK_CONFIG_DIR;
   process.env.SHELFCHECK_DATA_DIR = dir;

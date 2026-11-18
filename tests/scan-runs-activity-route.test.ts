@@ -35,7 +35,7 @@ test("the scan-runs route reports the owner's kind and start time only, for as l
 });
 
 test("the scan-runs route never reconciles a stale running status into an Interrupted scan", async (t) => {
-  const dir = mkdtempSync(path.join(tmpdir(), "scan-runs-route-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "scan-runs-activity-route-"));
   const previous = process.env.SHELFCHECK_DATA_DIR;
   process.env.SHELFCHECK_DATA_DIR = dir;
   t.after(() => {

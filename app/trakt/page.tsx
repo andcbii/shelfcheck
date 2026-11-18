@@ -419,7 +419,10 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ force, traktId }),
       });
-      if (!response.ok) throw new Error("Shelfcheck could not start the server-side scan.");
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || "Shelfcheck could not start the server-side scan.");
+      }
       await pollServerScan();
     } catch (scanError) {
       if (!(scanError instanceof DOMException && scanError.name === "AbortError")) setError(scanError instanceof Error ? scanError.message : "The server-side scan failed.");

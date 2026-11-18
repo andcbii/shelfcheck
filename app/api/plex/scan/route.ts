@@ -1,6 +1,8 @@
 import { readCatalogueSelections } from "@/lib/catalogue-selection-store";
 import { coverageState } from "@/lib/manual-coverage";
 import { clearPlexScanCache, getPlexReport, getPlexScanStatus, startPlexScan } from "@/lib/plex-scan";
+import { scanRunConflictResponse } from "@/lib/scan-run-conflict";
+import { ScanRunConflictError } from "@/lib/scan-run";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,6 +22,7 @@ export async function POST(request: Request) {
     const ratingKey = typeof body.ratingKey === "string" ? body.ratingKey.trim() || undefined : undefined;
     return Response.json({ scan: startPlexScan(ratingKey) }, { status: 202, headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
+    if (error instanceof ScanRunConflictError) return scanRunConflictResponse(error);
     return Response.json({ error: error instanceof Error ? error.message : "Shelfcheck could not start the Plex scan." }, { status: 409, headers: { "Cache-Control": "private, no-store" } });
   }
 }

@@ -1,7 +1,8 @@
 import { MULTIPLE_ID_REFRESH_AGE, reuseProviderCatalogue, tmdbFeedCovers, tmdbVerificationPlan, tvdbVerificationFrom } from "@/lib/plex-catalogue-policy";
 import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { isPlexScanActive, type PlexScanGlobal } from "@/lib/plex-scan-active";
+import { isPlexScanActive } from "@/lib/plex-scan-active";
+import { scanRuns } from "@/lib/scan-run";
 import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, invalidateSharedTmdbCrosswalk, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
@@ -57,7 +58,7 @@ type TmdbEpisodeFindResult = TmdbFindEpisode;
 type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
 type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };
 type TraktCredentials = { clientId: string; accessToken: string };
-type ScanGlobal = PlexScanGlobal & { __shelfcheckPlexLogger?: ScanLogger };
+type ScanGlobal = typeof globalThis & { __shelfcheckPlexLogger?: ScanLogger };
 
 const TMDB = "https://api.themoviedb.org/3";
 const TVDB = "https://api4.thetvdb.com/v4";
@@ -1445,17 +1446,23 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
   return { cleared };
 }
 
+/**
+ * Starts a Plex Scan run, full or single-show. It claims the shared scan run
+ * lock first; throws ScanRunConflictError, with no side effects, while any Scan
+ * run is active. A single-show check that cannot use the saved cache throws
+ * and releases the lock it claimed.
+ */
 export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
-  const global = globalThis as ScanGlobal;
-  if (isPlexScanActive()) return getPlexScanStatus();
-  if (targetRatingKey) {
-    const settings = parsePlexPreferences(readPlexSettings());
-    if (!plexReportCacheIsUsable(getPlexReport(), CACHE_VERSION, settings.autoCompoundEpisodes !== false)) {
-      throw new Error("Run a full Plex search before force-checking one show because the scan settings or cache format changed.");
+  const { owner } = scanRuns.start("plex", () => {
+    if (targetRatingKey) {
+      const settings = parsePlexPreferences(readPlexSettings());
+      if (!plexReportCacheIsUsable(getPlexReport(), CACHE_VERSION, settings.autoCompoundEpisodes !== false)) {
+        throw new Error("Run a full Plex search before force-checking one show because the scan settings or cache format changed.");
+      }
     }
-  }
-  global.__shelfcheckPlexScan = runPlexScan(targetRatingKey).finally(() => { global.__shelfcheckPlexScan = undefined; });
-  return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
+    return runPlexScan(targetRatingKey);
+  });
+  return { status: "running", processed: 0, total: 0, startedAt: owner.startedAt };
 }
 
 export type CoverageImpact = {members: CoverageMember[]};

@@ -104,6 +104,13 @@ async function fixture(t: test.TestContext) {
 
 const missing = (result: {report:{shows:{title:string;missing:unknown[]}[]}}, id: number) => result.report.shows.find(s=>s.title === `Show ${id}`)!.missing.length;
 
+/** Simulates the process ending: the next process starts with an empty owner record, and the abandoned run settles later. */
+function abandonRunningScan(): Promise<void> {
+  const global = globalThis as typeof globalThis & {__shelfcheckScanRun?: {owner?: unknown}};
+  const abandoned = global.__shelfcheckScanRun!;
+  global.__shelfcheckScanRun = {};
+  return (async () => { while (abandoned.owner) await new Promise(r=>setTimeout(r,10)); })();
+}
 test("a persistent isolated TVDB failure lets each provider verify and reuse catalogues day after day", async t => {
   const f = await fixture(t);
   f.state.failedTvdb.add(40);
@@ -301,9 +308,7 @@ test("interrupted TMDB verification recovery resumes after restart without repea
   for (let i=0; i<500 && (await (await scan.GET()).json()).scan.processed < 2; i++) await new Promise(r=>setTimeout(r,10));
   assert.deepEqual(f.downloads(),["/3/tv/10/season/1","/3/tv/30/season/1","/3/tv/50/season/1"],"recovery started for every uncovered catalogue");
   // Simulate a process restart while the scan is stuck on its last show.
-  const global = globalThis as typeof globalThis & {__shelfcheckPlexScan?: Promise<void>};
-  const interrupted = global.__shelfcheckPlexScan!;
-  delete global.__shelfcheckPlexScan;
+  const interrupted = abandonRunningScan();
   const release = f.state.heldTmdb.get(50)!;
   f.state.heldTmdb.delete(50);
   f.restart();

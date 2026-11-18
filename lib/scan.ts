@@ -9,6 +9,7 @@ import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { runWorkerPool } from "@/lib/scan-concurrency";
 import { isTerminalTraktError, TraktHttpError } from "@/lib/trakt-http";
+import { scanRuns } from "@/lib/scan-run";
 
 type ProgressSeason = { number: number; episodes: { number: number; completed: boolean }[] };
 type TraktSeason = { number: number; episodes?: { season?: number; number: number; first_aired?: string | null }[] };
@@ -27,7 +28,6 @@ const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resol
 
 type TraktRateLimit = { name?: string; period?: number; limit?: number; remaining?: number; until?: string };
 type ScanGlobal = typeof globalThis & {
-  __shelfcheckScan?: Promise<void>;
   __shelfcheckNextRequestAt?: number;
   __shelfcheckRequestGate?: Promise<void>;
   __shelfcheckLogger?: ScanLogger;
@@ -379,7 +379,7 @@ async function runScan(force = false, targetTraktId?: number) {
 
 export function getScanStatus(): ScanStatus {
   const scan = (readSingleUserScanStatus() as ScanStatus | null) || { status: "idle", processed: 0, total: 0 };
-  if (scan.status === "running" && !(globalThis as ScanGlobal).__shelfcheckScan) {
+  if (scan.status === "running" && !scanRuns.isActive("trakt")) {
     const interrupted: ScanStatus = { ...scan, status: "error", error: "The scan was interrupted by a server restart. Start it again to resume." };
     writeSingleUserScanStatus(interrupted);
     return interrupted;
@@ -387,18 +387,20 @@ export function getScanStatus(): ScanStatus {
   return scan;
 }
 
+/**
+ * Starts a Trakt Scan run. The Trakt bridge: the existing run claims the shared
+ * scan run lock and releases it once settled; its status, heartbeat and Resume
+ * point stay here until they move onto the lifecycle module. Throws
+ * ScanRunConflictError, with no side effects, while any Scan run is active.
+ */
 export function startScan(force = false, targetTraktId?: number): ScanStatus {
-  const global = globalThis as ScanGlobal;
-  if (!global.__shelfcheckScan) {
-    global.__shelfcheckScan = runScan(force, targetTraktId).finally(() => { global.__shelfcheckScan = undefined; });
-  }
-  return { status: "running", processed: 0, total: 0, startedAt: new Date().toISOString() };
+  const { owner } = scanRuns.start("trakt", () => runScan(force, targetTraktId));
+  return { status: "running", processed: 0, total: 0, startedAt: owner.startedAt };
 }
 
 export function clearScanCache(traktId?: number): { cleared: number } {
   if (traktId !== undefined && (!Number.isInteger(traktId) || traktId <= 0)) throw new Error("A positive Trakt show ID is required.");
-  const global = globalThis as ScanGlobal;
-  if (global.__shelfcheckScan) throw new Error("Wait for the current scan to finish before clearing the cache.");
+  if (scanRuns.isActive("trakt")) throw new Error("Wait for the current scan to finish before clearing the cache.");
   const state = readSingleUserState().state || {};
   const report = state.report as ScanReport | undefined;
   const checkpoint = state.checkpoint as ScanReport | undefined;

@@ -8,9 +8,10 @@ import test, { type TestContext } from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const store = await import("../lib/catalogue-selection-store");
 const sqlite = await import("../lib/sqlite");
+const { scanRuns } = await import("../lib/scan-run");
 hook.deregister();
 
-const global = globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync; __shelfcheckPlexScan?: Promise<void>};
+const global = globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync};
 const restart = () => { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase; };
 function temporaryDatabase(t: TestContext) {
   const dir = mkdtempSync(path.join(tmpdir(),"catalogue-selection-"));
@@ -79,8 +80,9 @@ test("candidate names are kept for retained IDs and do not affect the override",
 test("overrides cannot change while a Plex scan is active", t => {
   temporaryDatabase(t);
   store.observeCatalogueCandidates(show,{tmdb:[1,2],tvdb:[]},true);
-  global.__shelfcheckPlexScan = Promise.resolve();
-  t.after(() => { delete global.__shelfcheckPlexScan; });
+  let finish!: () => void;
+  const run = scanRuns.start("plex", () => new Promise<void>(resolve => { finish = resolve; }));
+  t.after(async () => { finish(); await run.settled; });
   assert.throws(() => store.saveCatalogueOverride(show,"tmdb",2), (error: unknown) => (error as {code?: string; status?: number}).code === "scan-active" && (error as {status?: number}).status === 409);
   assert.equal(store.readCatalogueSelections()[show].tmdb.override,undefined);
 });

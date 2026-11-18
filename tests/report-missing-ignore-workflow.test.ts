@@ -146,8 +146,9 @@ test("Ignore rejects an editor's stale draft, and respects the scan lock only wh
   const untouched = (await h.mappings()).find(mapping => mapping.id === oneToOne.id)!;
 
   // Applying Ignore while a scan is running is rejected when it would delete flags.
-  const lock = globalThis as typeof globalThis & { __shelfcheckPlexScan?: Promise<void> };
-  lock.__shelfcheckPlexScan = Promise.resolve();
+  const { scanRuns } = await import("../lib/scan-run");
+  let finish!: () => void;
+  const lock = scanRuns.start("plex", () => new Promise<void>(resolve => { finish = resolve; }));
   try {
     const blocked = await h.patchSettings({ ignoredShows: [forever("ratingKey:other", "Other")] });
     assert.equal(blocked.status, 409);
@@ -157,7 +158,8 @@ test("Ignore rejects an editor's stale draft, and respects the scan lock only wh
     const harmless = await h.patchSettings({ hideUnairedEpisodes: true });
     assert.equal(harmless.status, 200, "Saves that delete no flags are not blocked");
   } finally {
-    delete lock.__shelfcheckPlexScan;
+    finish();
+    await lock.settled;
   }
 
   await ignore(h, { ignoredShows: [forever("ratingKey:other", "Other")] });

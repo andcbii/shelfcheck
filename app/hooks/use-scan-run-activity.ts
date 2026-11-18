@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { parseActiveScanRun, scanRunLockMessage, type ActiveScanRun, type ScanRunActivityKind } from "@/lib/scan-run-activity";
+import { parseActiveScanRun, scanRunLockMessage, type ActiveScanRun, type ScanRunKind } from "@/lib/scan-run-activity";
 
 type ScanRunActivityOptions = {
   /** Whether the page is already following its own kind's Scan run: a start it requested, or its progress poller. */
@@ -29,7 +29,7 @@ type ScanRunActivityOptions = {
  * observation (a refresh or a reported 409) is ignored. The server still
  * refuses a conflicting start; this only keeps the page's controls honest.
  */
-export function useScanRunActivity(page: ScanRunActivityKind, options: ScanRunActivityOptions) {
+export function useScanRunActivity(page: ScanRunKind, options: ScanRunActivityOptions) {
   // undefined: no observation has arrived yet, so the owner is unknown.
   const [activeScanRun, setActiveScanRun] = useState<ActiveScanRun | null | undefined>(undefined);
   const activeRef = useRef<ActiveScanRun | null | undefined>(undefined);
@@ -112,6 +112,6 @@ export function useScanRunActivity(page: ScanRunActivityKind, options: ScanRunAc
 }
 
 /** An unknown owner (undefined) or the other kind's Scan run locks the page's scan controls. */
-function locks(run: ActiveScanRun | null | undefined, page: ScanRunActivityKind) {
+function locks(run: ActiveScanRun | null | undefined, page: ScanRunKind) {
   return run === undefined || (run !== null && run.kind !== page);
 }

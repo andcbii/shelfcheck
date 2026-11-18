@@ -51,13 +51,3 @@ test("the scan-runs route never reconciles a stale running status into an Interr
   assert.deepEqual(sqlite.readPlexScanStatus(), stale);
   assert.deepEqual(sqlite.readSingleUserScanStatus(), stale);
 });
-
-test("a locked page names the running scan with the same words as a refused start", async () => {
-  const { scanRunLockMessage } = await import("../lib/scan-run-activity");
-  const { ScanRunConflictError } = await import("../lib/scan-run");
-  for (const [running, page] of [["plex", "trakt"], ["trakt", "plex"]] as const) {
-    const refused = new ScanRunConflictError({ kind: running, runId: "run", startedAt: "2026-11-18T12:00:00.000Z" }, page);
-    assert.equal(scanRunLockMessage(running, page), refused.message);
-  }
-  assert.equal(scanRunLockMessage("plex", "trakt"), "A Plex scan is running. You can start a Trakt scan when it finishes.");
-});

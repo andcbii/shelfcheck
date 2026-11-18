@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { ActiveScanTracker, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
 import type { ScanLogger } from "@/lib/scan-log";
+import { SCAN_RUN_LABELS, scanRunLockMessage, type ScanRunKind } from "@/lib/scan-run-activity";
 
 /**
  * The scan run lifecycle: the one place that decides whether a Scan run, Trakt
@@ -16,7 +17,7 @@ import type { ScanLogger } from "@/lib/scan-log";
  * import the scan modes back.
  */
 
-export type ScanRunKind = "trakt" | "plex";
+export type { ScanRunKind };
 
 /** Who holds the lock: the kind, a unique run identity and when ownership was claimed. */
 export type ScanRunOwner = { kind: ScanRunKind; runId: string; startedAt: string };
@@ -39,8 +40,6 @@ export type ScanRunTimers = { setInterval: (callback: () => void, milliseconds: 
  */
 export type ScanRunState = { owner?: ScanRunOwner };
 
-export const SCAN_RUN_LABELS: Record<ScanRunKind, string> = { trakt: "Trakt", plex: "Plex" };
-
 /** More than this long without a heartbeat, a running status with no live owner is an Interrupted scan. */
 export const INTERRUPTED_AFTER_MS = 90_000;
 export const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -49,10 +48,7 @@ export const HEARTBEAT_INTERVAL_MS = 15_000;
 export class ScanRunConflictError extends Error {
   readonly status = 409;
   constructor(readonly owner: ScanRunOwner, requested: ScanRunKind) {
-    const running = SCAN_RUN_LABELS[owner.kind];
-    super(owner.kind === requested
-      ? `A ${running} scan is running. You can start another ${running} scan when it finishes.`
-      : `A ${running} scan is running. You can start a ${SCAN_RUN_LABELS[requested]} scan when it finishes.`);
+    super(scanRunLockMessage(owner.kind, requested));
     this.name = "ScanRunConflictError";
   }
 }

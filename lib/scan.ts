@@ -22,7 +22,7 @@ type ShowScanState = {
 type ScanCache = Record<string, ShowScanState>;
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
 /** A full-run Resume point: the report so far, plus when it was saved and its format version. */
-type ResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
+export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
 export type ScanStatus = ScanRunStatus;
 
 const TRAKT = "https://api.trakt.tv";
@@ -43,14 +43,14 @@ type ScanGlobal = typeof globalThis & {
  * their unprefixed names (`scan.start`, `checkpoint.saved`) in shelfcheck.log.
  * It raises no Coverage Issues.
  */
-const traktScanMode: ScanRunMode<ScanStatus, ResumePoint> = {
+const traktScanMode: ScanRunMode<ScanStatus, TraktResumePoint> = {
   kind: "trakt",
   eventPrefix: "",
   failureMessage: "The scan failed.",
   status: { read: () => readSingleUserScanStatus() as ScanStatus | null, write: writeSingleUserScanStatus },
   interruptedError: () => "The scan was interrupted by a server restart. Start it again to resume.",
   resumePoint: {
-    read: () => (readSingleUserState().state?.checkpoint as ResumePoint | undefined) || null,
+    read: () => (readSingleUserState().state?.checkpoint as TraktResumePoint | undefined) || null,
     write: (checkpoint) => { patchSingleUserState({ checkpoint }); },
     clear: () => { patchSingleUserState({ checkpoint: null }); },
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
@@ -61,7 +61,7 @@ const traktScanMode: ScanRunMode<ScanStatus, ResumePoint> = {
 };
 
 /** The live Trakt Scan run that dispatched the current request; a late callback from a settled run gets undefined. */
-const liveTraktRun = () => scanRuns.bound<ResumePoint>("trakt");
+const liveTraktRun = () => scanRuns.bound<TraktResumePoint>("trakt");
 
 /**
  * A Trakt rate-limit pause starting or ending. The pause globals pace later
@@ -410,7 +410,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
 }
 
 /** A Resume point without one show's result, cache entry and collection entry; everything else, savedAt included, is kept. */
-function resumePointWithoutShow(point: ResumePoint, traktId: number): ResumePoint {
+function resumePointWithoutShow(point: TraktResumePoint, traktId: number): TraktResumePoint {
   const scanCache = { ...(point.scanCache || {}) };
   delete scanCache[String(traktId)];
   return { ...point, scanCache, shows: (point.shows || []).filter((item) => item.show.ids.trakt !== traktId), missing: (point.missing || []).filter((episode) => episode.show.ids.trakt !== traktId) };
@@ -436,7 +436,7 @@ export function clearScanCache(traktId?: number): { cleared: number } {
   if (scanRuns.isActive("trakt")) throw new Error("Wait for the current scan to finish before clearing the cache.");
   const state = readSingleUserState().state || {};
   const report = state.report as ScanReport | undefined;
-  const checkpoint = state.checkpoint as ResumePoint | undefined;
+  const checkpoint = state.checkpoint as TraktResumePoint | undefined;
   if (traktId !== undefined) {
     const key = String(traktId);
     const hadReportCache = Boolean(report?.scanCache?.[key]);

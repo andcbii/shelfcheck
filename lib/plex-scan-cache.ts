@@ -1,3 +1,5 @@
+import { resumePointIsFresh } from "@/lib/resume-point-age";
+
 export const PLEX_CACHE_VERSION = 12;
 
 export type PlexScanCacheEntry = {
@@ -18,9 +20,8 @@ export function pruneEpisodeIdentityCache(cache: Record<string, string[]>, curre
 }
 
 export function checkpointIsUsable(checkpoint: { cacheVersion?: number; autoCompoundEpisodes?: boolean; savedAt?: string } | null, autoCompoundEpisodes: boolean, now = Date.now()) {
-  if (!checkpoint?.savedAt || checkpoint.cacheVersion !== PLEX_CACHE_VERSION || checkpoint.autoCompoundEpisodes !== autoCompoundEpisodes) return false;
-  const savedAt = Date.parse(checkpoint.savedAt);
-  return Number.isFinite(savedAt) && now - savedAt < 6 * 3600_000;
+  if (checkpoint?.cacheVersion !== PLEX_CACHE_VERSION || checkpoint.autoCompoundEpisodes !== autoCompoundEpisodes) return false;
+  return resumePointIsFresh(checkpoint.savedAt, now);
 }
 
 export function mergeScanProgress<T extends object>(current: T, progress: Partial<T>): T {

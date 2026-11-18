@@ -35,6 +35,7 @@ function harness(start = Date.parse("2026-11-18T12:00:00.000Z")) {
     kind: "plex",
     eventPrefix: "plex",
     failureMessage: "The Plex scan failed.",
+    vetoedError: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.",
     status: {
       read: () => stored === null ? null : JSON.parse(stored),
       write: (status) => { if (failures.statusWrite) throw new Error("status store unavailable"); stored = JSON.stringify(status); },
@@ -157,18 +158,69 @@ test("a completed run replaces its status cleanly, stops its heartbeat and a lat
   assert.ok(!h.events().includes("plex.late"));
 });
 
-test("a veto at completion is never a success: nothing is committed and no completed status is written", async () => {
+test("a veto at completion is never a success: it ends the run at once with a clean error status, committing and saving nothing", async () => {
   const h = harness();
   let committed = false;
   let outcome: string | undefined;
   await h.startRun(async (run) => {
-    outcome = run.complete({ commit: () => { committed = true; }, processed: 1, total: 1, finishedAt: h.iso(), details: {} });
-  }, { hooks: { veto: () => true, succeeded: () => assert.fail("a vetoed run does not succeed") } }).settled;
+    run.resumePoint.startIntervals();
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["a"] }, details: {} }));
+    run.progress(2, 4);
+    run.reportRateLimit("TVDB", true, h.iso(60_000));
+    run.activeWork.update("a", "Show A", "tvdb-series");
+    h.tick();
+    outcome = run.complete({ commit: () => { committed = true; }, processed: 4, total: 4, finishedAt: h.iso(20_000), details: {} });
+  }, { hooks: {
+    veto: () => true,
+    committed: () => assert.fail("a vetoed run completes no coverage recheck"),
+    succeeded: () => assert.fail("a vetoed run does not succeed"),
+    failed: () => assert.fail("a vetoed run raises no scan-failure Coverage Issue"),
+  } }).settled;
   assert.equal(outcome, "vetoed");
   assert.equal(committed, false);
-  assert.equal(h.status()?.status, "running", "the stored running status is later reconciled as an Interrupted scan");
-  assert.ok(!h.events().includes("plex.scan.complete"));
+  assert.deepEqual(h.status(), { status: "error", processed: 2, total: 4, startedAt: h.iso(), finishedAt: h.iso(15_000), error: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.", rateLimitPaused: false, currentPhase: "tvdb-series", heartbeatAt: h.iso(15_000) });
+  assert.equal(h.point, null, "no Resume point is forced for a vetoed report");
+  assert.ok(!h.events().some((event) => event === "plex.scan.complete" || event === "plex.scan.error" || event.startsWith("plex.checkpoint.")));
   assert.equal(h.timerCount(), 0);
+  assert.equal(h.runs.activeScanRun(), null);
+  h.advance(600_000);
+  assert.equal(h.runs.readStatus(h.mode)?.error, "Manual Matches changed while this scan was running. Start a new Plex scan to include them.");
+  assert.equal(h.interruptions.length, 0, "a vetoed run is never recorded as an Interrupted scan");
+});
+
+for (const hook of ["committed", "succeeded"] as const) {
+  test(`a ${hook} hook that throws after the report was committed records the error but forces no failure Resume point over it`, async () => {
+    const h = harness();
+    h.point = { savedAt: h.iso(-1_000), shows: ["earlier"] };
+    const failed: unknown[] = [];
+    await h.startRun(async (run) => {
+      run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["a"] }, details: {} }));
+      run.progress(4, 4);
+      run.complete({ commit: () => {}, processed: 4, total: 4, finishedAt: h.iso(), details: {} });
+    }, { hooks: { [hook]: () => { throw new Error("coverage store down"); }, failed: (error: unknown) => failed.push(error) } }).settled;
+    assert.equal(h.status()?.status, "error");
+    assert.equal(h.status()?.error, "coverage store down", "the original error is kept");
+    assert.equal((failed[0] as Error).message, "coverage store down");
+    assert.ok(!h.events().includes("plex.checkpoint.saved"), "no failure Resume point is written after the report committed");
+    if (hook === "committed") assert.deepEqual(h.point, { savedAt: h.iso(-1_000), shows: ["earlier"] });
+    else assert.equal(h.point, null, "the completed run's cleared Resume point stays cleared");
+  });
+}
+
+test("rate-limit reporting stores the resume time with the pause and clears it with the pause; a provider may give none", async () => {
+  const h = harness();
+  const work = deferred();
+  let run!: ScanRunContext<Point>;
+  h.startRun(async (context) => { run = context; await work.promise; });
+  await Promise.resolve();
+  run.reportRateLimit("TVDB", true, h.iso(60_000));
+  assert.deepEqual({ paused: h.status()?.rateLimitPaused, provider: h.status()?.rateLimitProvider, resumeAt: h.status()?.rateLimitResumeAt }, { paused: true, provider: "TVDB", resumeAt: h.iso(60_000) });
+  run.reportRateLimit("TVDB", false);
+  assert.ok(!("rateLimitResumeAt" in h.status()!), "the resume time is cleared with the pause");
+  run.reportRateLimit("Plex", true);
+  assert.equal(h.status()?.rateLimitPaused, true);
+  assert.ok(!("rateLimitResumeAt" in h.status()!), "a pause without a resume time stores none");
+  work.resolve();
 });
 
 test("a failed run keeps its error, clears pause and active work, and releases timer and owner", async () => {

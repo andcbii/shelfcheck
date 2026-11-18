@@ -153,3 +153,26 @@ test("a full Plex scan run that fails saves a Resume point at once, and the next
   assert.equal(resume.length, 1);
   assert.match(resume[0], new RegExp(`savedAt="${saved.savedAt}" shows=2`));
 });
+
+test("a Plex scan run vetoed by a coverage-revision change ends at once with a clean error, writing no report, Resume point or scan-failure Coverage Issue", async (t) => {
+  let changed = false;
+  await library(t, async (u) => {
+    if (u.pathname === "/3/tv/12" && !changed) {
+      // A Manual Match saved while the scan runs moves the coverage revision this run snapshotted.
+      changed = true;
+      sqlite.coverageDatabase().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1");
+    }
+    return undefined;
+  });
+  const status = await fullScan();
+  assert.ok(changed);
+  assert.equal(status.status, "error");
+  assert.equal(status.error, "Manual Matches changed while this scan was running. Start a new Plex scan to include them.");
+  assert.equal(status.rateLimitPaused, false);
+  assert.equal(status.activeShows, undefined);
+  assert.equal(status.currentShow, undefined);
+  assert.ok(status.finishedAt);
+  assert.equal(sqlite.readPlexReport(), null, "nothing is committed");
+  assert.equal(sqlite.readPlexCheckpoint(), null, "no Resume point is forced for a vetoed report");
+  assert.equal(issues.getCoverageIssue("scan-failure"), undefined);
+});

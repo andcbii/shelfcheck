@@ -73,6 +73,7 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   kind: "plex",
   eventPrefix: "plex",
   failureMessage: "The Plex scan failed.",
+  vetoedError: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.",
   status: { read: () => readPlexScanStatus() as PlexScanStatus | null, write: writePlexScanStatus },
   interruptedError: (status) => `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
   onInterrupted: (status) => setCoverageIssue({id:"scan-failure",operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
@@ -1383,7 +1384,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const finishedAt = new Date().toISOString();
   const coverageGroups=coverageGroupsForResults(results,manualInventory);
   const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
-  // A coverage-revision veto commits nothing and records no completion.
+  // A coverage-revision veto commits nothing and ends the run with an error status.
   run.complete({
     commit: () => {
       writePlexReport(report);

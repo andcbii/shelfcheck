@@ -207,6 +207,9 @@ const silentLogger: ScanLogger = { info() {}, warn() {}, error() {} };
 
 function report(message: string, error: unknown) { console.error(message, error); }
 
+/** Reports where a throw has nowhere to go, such as a timer callback: even a failing console is swallowed. */
+function reportSafely(message: string, error: unknown) { try { report(message, error); } catch { /* nothing left to report to */ } }
+
 export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: ScanRunState; newRunId?: () => string; timers?: ScanRunTimers } = {}) {
   // Read lazily, so clocks and timers mocked after module load apply.
   const clock = options.clock || { now: () => Date.now() };
@@ -400,13 +403,24 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         return "completed";
       },
     };
+    /**
+     * One heartbeat tick. It runs from a timer, outside the run's error
+     * boundary, so it must never throw. Recording is best effort: a failing
+     * logger or status store is reported to the console and the run keeps
+     * going, still owning the lock and its heartbeat until the body settles.
+     * A missed beat at worst lets a later read call the run interrupted.
+     */
     const beat = () => {
       // A queued tick after a terminal transition or settlement must never write running again.
       if (!live()) return;
-      const activeShows = activeWork.snapshot();
-      const heartbeatAt = iso();
-      runLogger.info(`${prefix}.scan.heartbeat`, { processed, total, activeShows, heartbeatAt });
-      update({ status: "running", processed, total, activeShows, currentShow: activeShows.length === 1 ? activeShows[0].show : undefined, currentPhase: activeShows.length > 1 ? `processing-${activeShows.length}-shows` : activeShows[0]?.phase || phase || "processing", heartbeatAt });
+      try {
+        const activeShows = activeWork.snapshot();
+        const heartbeatAt = iso();
+        try { runLogger.info(`${prefix}.scan.heartbeat`, { processed, total, activeShows, heartbeatAt }); } catch (logError) { reportSafely(`The ${label} scan could not log its heartbeat.`, logError); }
+        update({ status: "running", processed, total, activeShows, currentShow: activeShows.length === 1 ? activeShows[0].show : undefined, currentPhase: activeShows.length > 1 ? `processing-${activeShows.length}-shows` : activeShows[0]?.phase || phase || "processing", heartbeatAt });
+      } catch (error) {
+        reportSafely(`The ${label} scan could not record its heartbeat.`, error);
+      }
     };
 
     return dispatching.run({ kind: mode.kind, context: context as ScanRunContext<unknown> }, async () => {

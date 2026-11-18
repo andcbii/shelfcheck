@@ -134,6 +134,50 @@ test("a heartbeat is not progress: it neither counts a show nor makes a Resume p
   work.resolve();
 });
 
+// Heartbeat failures are best effort: the tick reports to the console and the
+// run keeps going, still owning the lock and its heartbeat until the body settles.
+test("a heartbeat whose logger throws is contained: the run keeps ownership, its heartbeat and records the beat", async (t) => {
+  const reported = t.mock.method(console, "error", () => {});
+  const h = harness();
+  const work = deferred();
+  const throwing = {
+    info: (event: string) => { if (event === "plex.scan.heartbeat") throw new Error("log disk full"); },
+    warn: () => {}, error: () => {},
+  };
+  const started = h.startRun(async () => { await work.promise; }, { createLogger: () => throwing });
+  await Promise.resolve();
+  assert.doesNotThrow(() => h.tick(), "a timer callback must never throw");
+  assert.equal(h.runs.isActive("plex"), true, "ownership is kept while the body is in flight");
+  assert.equal(h.timerCount(), 1, "the heartbeat keeps running");
+  assert.equal(h.status()?.heartbeatAt, h.iso(15_000), "the beat is still recorded");
+  assert.ok(reported.mock.callCount() >= 1, "the failure is reported");
+  work.resolve();
+  await started.settled;
+  assert.equal(h.runs.isActive(), false, "ownership is released once the body settles");
+  assert.equal(h.timerCount(), 0);
+});
+
+test("a heartbeat whose status store throws is contained: the run keeps ownership and beats again once the store recovers", async (t) => {
+  const reported = t.mock.method(console, "error", () => {});
+  const h = harness();
+  const work = deferred();
+  const started = h.startRun(async () => { await work.promise; });
+  await Promise.resolve();
+  h.failures.statusWrite = true;
+  assert.doesNotThrow(() => h.tick(), "a timer callback must never throw");
+  assert.equal(h.runs.isActive("plex"), true, "ownership is kept while the body is in flight");
+  assert.equal(h.timerCount(), 1, "the heartbeat keeps running");
+  assert.ok(reported.mock.callCount() >= 1, "the failure is reported");
+  h.failures.statusWrite = false;
+  h.tick();
+  assert.equal(h.status()?.heartbeatAt, h.iso(30_000), "the next beat is recorded");
+  assert.equal(h.status()?.status, "running");
+  work.resolve();
+  await started.settled;
+  assert.equal(h.runs.isActive(), false);
+  assert.equal(h.timerCount(), 0);
+});
+
 test("a completed run replaces its status cleanly, stops its heartbeat and a late tick never writes running", async () => {
   const h = harness();
   let run!: ScanRunContext<Point>;

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.1 - 2026-11-17
+
+### Changed
+
+- Run on Node.js 26, the current long-term support line, in the Docker image
+  and CI. Local development now needs Node.js 26 or newer.
+- Check every pull request by starting the image on linux/amd64 and
+  linux/arm64 and confirming pages, static files and saved settings work.
+- Dependabot no longer proposes Node major versions; those upgrades are
+  planned work.
+
 ## 2.6.0 - 2026-11-17
 
 ### Added

@@ -1,1 +1,1 @@
-export const SHELFCHECK_VERSION = "2.6.0";
+export const SHELFCHECK_VERSION = "2.6.1";

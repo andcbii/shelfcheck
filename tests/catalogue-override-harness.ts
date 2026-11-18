@@ -86,7 +86,7 @@ export async function fixture(t: TestContext) {
   type State = {scan:{status:string;error?:string};report:{shows:Show[]};coverage:{issues:{id:string;cause?:string}[]}};
   const state = async () => (await scan.GET()).json() as Promise<State>;
   const waitForScan = async () => {
-    for(let i=0;i<500;i++) { const current = await state(); if(current.scan.status !== "running") { assert.equal(current.scan.status,"completed",current.scan.error); return current; } await new Promise(r=>setTimeout(r,10)); }
+    for(let i=0;i<500;i++) { const current = await state(); if(current.scan.status !== "running") { assert.equal(current.scan.status,"completed",current.scan.error ?? "scan did not complete"); return current; } await new Promise(r=>setTimeout(r,10)); }
     throw new Error("Scan timed out");
   };
   return {

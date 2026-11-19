@@ -29,7 +29,7 @@ import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelecti
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
+import { isTraktAuthenticationFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
@@ -115,6 +115,21 @@ function relationshipIsReusable(key:string) {
   const show = comparisonIssueScope.getStore();
   return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !getCoverageIssue(episodeIdentityIssueId(show?.ratingKey, key))));
 }
+/** Thrown for a Trakt lookup skipped because the run's Trakt login cannot be recovered; it is not a failure of that lookup. */
+class TraktLoginUnavailableError extends Error {
+  constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
+}
+
+/** The run's Trakt login failed for good: its refresh failed, or Trakt still refused it. */
+function traktLoginFailed(error: unknown) {
+  return isTraktAuthenticationFailure(error) || (error as { provider?: unknown; requested?: { kind?: string } } | undefined)?.provider === "Trakt" && (error as { requested?: { kind?: string } }).requested?.kind === "authentication";
+}
+
+/** One library-scoped Coverage Issue for the Trakt login, with the actual cause and status. */
+function raiseTraktLoginIssue(error: unknown) {
+  setCoverageIssue({id:"provider-authentication:Trakt",operation:"provider-authentication",provider:"Trakt",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Trakt",kind:"authentication"},impact:"Trakt episode identity checks could not be verified. TMDB fallback checks remain available."})});
+}
+
 async function checkedJson<T>(url: string, init: RequestInit, provider: ProviderName, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}, auth?: ProviderAuth): Promise<T> {
   const relationships = relationshipScope.getStore();
   const key = relationshipKey(provider, url);
@@ -139,6 +154,8 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
     else { value = await scanProviderClient.json<T>(url, init, provider, auth); receivedAt = new Date().toISOString(); }
   }
   catch (error) {
+    // A login that cannot be recovered is one library issue, not a failure of each lookup it stops.
+    if (provider === "Trakt" && auth && traktLoginFailed(error)) { raiseTraktLoginIssue(error); throw new TraktLoginUnavailableError(error); }
     if (show && matching) {
       const externalId = episodeIdentity?.id;
       setCoverageIssue({id:issueId,failedAt:new Date().toISOString(),...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
@@ -154,6 +171,8 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
     throw error;
   }
   if (show && matching) resolveCoverageIssue(issueId);
+  // Only a successful Trakt lookup shows the login works again.
+  if (provider === "Trakt" && auth) resolveCoverageIssue("provider-authentication:Trakt");
   if (relationships) relationships[key] = {provider, value, receivedAt};
   return value;
 }
@@ -650,6 +669,8 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           const requestFailures: string[] = [];
           settled.forEach((result, index) => {
             if (result.status === "fulfilled") fulfilled.push({ tvdbEpisodeId: ids[index], value: result.value });
+            // Skipped for the run's Trakt login: not a lookup, so any earlier failure of it stays as it was.
+            else if (result.reason instanceof TraktLoginUnavailableError) crosswalksAttempted.delete(`${crosswalk}:${ids[index]}`);
             else if (failedLookup(crosswalk, ids[index], result.reason).kind === "request-failed") requestFailures.push(coverageIssueCause(result.reason));
           });
           return { fulfilled, requestFailures };
@@ -875,11 +896,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     setCoverageIssue({id:"provider-authentication:TVDB",operation:"provider-authentication",provider:"TVDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TVDB",kind:"authentication"},impact:"TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained."})});
     return "";
   });
-  // The run's Trakt login: read once, and refreshed now if it is about to expire.
-  const traktCredentials = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.current(); resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
-    const explanation = providerLookupContext(error,{source:[],requested:{provider:"Trakt",kind:"authentication"},impact:"Trakt episode identity checks could not be verified. TMDB fallback checks remain available."});
-    setCoverageIssue({id:"provider-authentication:Trakt",operation:"provider-authentication",provider:"Trakt",scope:"library",...explanation});
-    logger.warn("plex.crosswalk.trakt-unavailable", { error: explanation.cause });
+  // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
+  const traktCredentials = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.current(); else resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
+    raiseTraktLoginIssue(error);
+    logger.warn("plex.crosswalk.trakt-unavailable", { error: coverageIssueCause(error) });
     return null;
   });
   logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktCredentials), tmdbFallback: true });

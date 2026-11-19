@@ -158,8 +158,17 @@ function emptyMetrics(): Record<ProviderName, ProviderMetric> {
   return Object.fromEntries((["Plex", "TMDB", "TVDB", "Trakt"] as ProviderName[]).map((provider) => [provider, { requests: 0, failures: 0, retries: 0, networkMs: 0, queueWaitMs: 0, rateLimitWaitMs: 0 }])) as Record<ProviderName, ProviderMetric>;
 }
 
-/** One Scan run's state: its metrics, the pauses it has been shown, and providers unavailable for it. */
-type RunState = { metrics: Record<ProviderName, ProviderMetric>; shownPauseUntil: Map<ProviderName, number>; unavailable: Map<ProviderName, ProviderCooldownTooLongError> };
+/**
+ * A request's login failed for good: its refresh failed (an authentication
+ * request), or the provider still answered 401 after the refresh, or 403.
+ */
+function isLoginFailure(provider: ProviderName, error: unknown) {
+  if (!(error instanceof ProviderHttpError || error instanceof ProviderNetworkError || error instanceof ProviderResponseError) || error.provider !== provider) return false;
+  return error.requested?.kind === "authentication" || (error instanceof ProviderHttpError && (error.status === 401 || error.status === 403));
+}
+
+/** One Scan run's state: its metrics, the pauses it has been shown, and providers unavailable for it (after a provider cooldown or a login that cannot be recovered). */
+type RunState = { metrics: Record<ProviderName, ProviderMetric>; shownPauseUntil: Map<ProviderName, number>; unavailable: Map<ProviderName, Error> };
 const newRunState = (): RunState => ({ metrics: emptyMetrics(), shownPauseUntil: new Map(), unavailable: new Map() });
 
 /** An attempt that ran past its deadline, while waiting for headers or reading the body. */
@@ -340,6 +349,8 @@ export class ProviderClient {
         }
         await this.clock.sleep(delay);
       } catch (error) {
+        // A login that cannot be recovered makes the provider unavailable for the rest of the run, queued requests included.
+        if (auth && isLoginFailure(provider, error)) state.unavailable.set(provider, error as Error);
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
         // Typed failures, including a failed credential refresh, end the request without a transient retry.
         if (error instanceof ProviderHttpError || error instanceof ProviderResponseError || error instanceof ProviderNetworkError) { metric.failures += 1; throw error; }

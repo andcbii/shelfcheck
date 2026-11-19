@@ -111,9 +111,9 @@ for (const [name, oauth, check] of refreshFailures) {
     assert.equal(isTraktAuthenticationFailure(first.error), false, "a failed refresh is not proof the login expired");
     assert.equal(configFile(), before, "the saved login is untouched");
     const second = await time.runUntil(outcome(client.json(SEARCH, {}, "Trakt", credentials)));
-    assert.equal(second.error, first.error, "the same failure, without another refresh");
-    assert.equal(oauthRequests.length, 1);
-    assert.equal(http.requests.length, 2);
+    assert.equal(second.error, first.error, "the same failure: Trakt is unavailable for the rest of the run");
+    assert.equal(oauthRequests.length, 1, "no second refresh");
+    assert.equal(http.requests.length, 1, "no further Trakt request in the run");
   });
 }
 

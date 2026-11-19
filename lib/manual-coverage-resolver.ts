@@ -8,7 +8,8 @@ import { ProviderClient } from "@/lib/provider-client";
 import type { CoverageMember } from "@/lib/manual-coverage-model";
 const client = new ProviderClient();
 export async function resolveCoverageUrls(urls: unknown) {
-  // A failed attempt must not permanently disable later user-requested retries.
+  // A failed attempt, even one a provider cooldown ended, must not disable later user-requested retries.
+  client.forgetProviderDeadlines();
   client.startRun();
   try {
     return await resolveCoverageInputs(urls);

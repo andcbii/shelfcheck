@@ -19,7 +19,8 @@ export class ProviderStartGate<TProvider> {
 
   constructor(private readonly clock: Clock = { now: Date.now, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) }) {}
 
-  async wait(provider: TProvider, spacingMs: number) {
+  /** Waits for this provider's turn. `spacingMs` may be a function: it is read when the request starts, so it follows the latest pacing. */
+  async wait(provider: TProvider, spacingMs: number | (() => number)) {
     let release!: () => void;
     const previous = this.gates.get(provider) || Promise.resolve();
     this.gates.set(provider, new Promise<void>((resolve) => { release = resolve; }));
@@ -32,7 +33,7 @@ export class ProviderStartGate<TProvider> {
       await this.clock.sleep(remainingMs);
     }
     const startedAt = this.clock.now();
-    this.nextStarts.set(provider, startedAt + spacingMs);
+    this.nextStarts.set(provider, startedAt + (typeof spacingMs === "function" ? spacingMs() : spacingMs));
     release();
     return { waitMs, startedAt };
   }

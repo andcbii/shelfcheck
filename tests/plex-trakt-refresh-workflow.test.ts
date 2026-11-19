@@ -123,3 +123,23 @@ test("a rejected Trakt login keeps earlier episode evidence, and its Coverage Is
   assert.deepEqual(issuesOf(recovered).filter(issue => issue.id === "provider-authentication:Trakt"), [], "a successful Trakt lookup clears the login issue");
   assert.deepEqual(traktEpisodeIssues(recovered), []);
 });
+
+test("a Plex scan run's Trakt lookups follow Trakt's rate-limit header: with few calls left, the next waits for the reset", async t => {
+  const { rerun, state } = await harness(t, [tmdb1, tmdb2, tvdb1, tvdb2], [tmdb1, tmdb2]);
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret", accessToken: "token", refreshToken: "refresh", expiresAt: Date.now() + 86400_000, redirectUri: "http://localhost/callback" });
+  state.bodies.set("/3/find/301", { tv_episode_results: [] });
+  state.bodies.set("/3/find/302", { tv_episode_results: [] });
+  const starts: number[] = [];
+  state.respond = (url) => {
+    const search = url.pathname.match(/^\/search\/tvdb\/(\d+)$/);
+    if (!search) return undefined;
+    starts.push(performance.now());
+    // The first lookup reports 10 calls left until a reset one second from now.
+    const headers = starts.length === 1 ? { "X-Ratelimit": JSON.stringify({ remaining: 10, until: new Date(Date.now() + 1_000).toISOString() }) } : undefined;
+    return Response.json([mapping(search[1] === "301" ? tvdb1 : tvdb2, search[1] === "301" ? tmdb1 : tmdb2)], { headers });
+  };
+  const result = await rerun();
+  assert.deepEqual(missingKeys(result), []);
+  assert.equal(starts.length, 2);
+  assert.ok(starts[1] - starts[0] >= 1_000, `the second lookup waited for the reset: ${Math.round(starts[1] - starts[0])} ms`);
+});

@@ -54,8 +54,8 @@ function requestIdentity(url:string, provider:ProviderName):ProviderRequestIdent
   return undefined;
 }
 
-/** What a provider cooldown was asked for with: a 429's Retry-After, or a server error's Retry-After. */
-export type ProviderCooldownReason = "rate-limit" | "server";
+/** What a provider cooldown was asked for with: a 429's Retry-After, a server error's Retry-After, or a rate-limit reset the provider reported. */
+export type ProviderCooldownReason = "rate-limit" | "server" | "rate-limit-reset";
 
 /** A provider cooldown: why it was asked for, when it ends, and the safe evidence of the response that asked. */
 export type ProviderCooldown = { reason: ProviderCooldownReason; deadline: number; status?: number; requested?: ProviderRequestIdentity };
@@ -63,6 +63,7 @@ export type ProviderCooldown = { reason: ProviderCooldownReason; deadline: numbe
 const COOLDOWN_WORDING: Record<ProviderCooldownReason, (provider: ProviderName, minutes: number) => string> = {
   "rate-limit": (provider, minutes) => `${provider} requested a ${minutes}-minute cooldown.`,
   server: (provider, minutes) => `${provider} is unavailable and asked Shelfcheck to wait ${minutes} minutes.`,
+  "rate-limit-reset": (provider, minutes) => `${provider}'s rate limit resets in ${minutes} minutes.`,
 };
 
 /**
@@ -130,6 +131,13 @@ export type ProviderClientOptions = {
   /** The live Scan run that dispatched the current request; undefined outside one or once it settled. */
   run?: () => ProviderRun | undefined;
 };
+
+/** Trakt's own pacing: Shelfcheck's existing policy for its reported rate-limit window. */
+const TRAKT_SPACING_MS = 100;
+const TRAKT_LOW_SPACING_MS = 300;
+const TRAKT_LOW_REMAINING = 100;
+const TRAKT_PAUSE_REMAINING = 50;
+const TRAKT_RESET_CUSHION_MS = 250;
 
 /** Each attempt's deadline, covering the response headers and its body. */
 export const PROVIDER_ATTEMPT_TIMEOUT_MS = 30_000;
@@ -211,6 +219,8 @@ export class ProviderClient {
   private runState = newRunState();
   /** Process-wide: each provider's longest provider cooldown, kept until it ends (for this server process only). */
   private readonly cooldowns = new Map<ProviderName, ProviderCooldown>();
+  /** Process-wide: Trakt's last reported rate-limit window, from its X-Ratelimit header. */
+  private traktWindow?: { remaining: number; until?: number };
 
   constructor(options: ProviderClientOptions = {}) {
     this.clock = options.clock || systemClock;
@@ -272,8 +282,46 @@ export class ProviderClient {
     else if (remaining > MAX_PROVIDER_COOLDOWN_MS) throw this.recordCooldown(provider, cooldown, state);
     else {
       this.gate.delayUntil(provider, cooldown.deadline);
-      if (cooldown.reason === "rate-limit") this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, cooldown.deadline));
+      if (cooldown.reason !== "server") this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, cooldown.deadline));
     }
+  }
+
+  /**
+   * The gap before this provider's next request starts. Trakt follows its own
+   * reported window: 100 ms, or 300 ms with 100 or fewer calls left; a window
+   * that has ended no longer counts. Other providers keep their policy.
+   */
+  private spacing(provider: ProviderName) {
+    if (provider !== "Trakt") return PROVIDER_REQUEST_SPACING_MS[provider];
+    const window = this.traktWindow;
+    const current = window && (window.until === undefined || window.until > this.clock.now());
+    return current && window.remaining <= TRAKT_LOW_REMAINING ? TRAKT_LOW_SPACING_MS : TRAKT_SPACING_MS;
+  }
+
+  /**
+   * Reads Trakt's X-Ratelimit header. With 50 or fewer calls left, later
+   * requests wait for the reported reset plus a 250 ms cushion; a reset more
+   * than 15 minutes away is a provider cooldown, though this response is still
+   * used. Unreadable, non-finite or ended windows are ignored.
+   */
+  private observeTraktRateLimit(response: Response, run: ProviderRun | undefined, state: RunState) {
+    const header = response.headers.get("X-Ratelimit");
+    if (!header) return;
+    let reported: { remaining?: unknown; until?: unknown };
+    try { reported = JSON.parse(header); } catch { run?.logger.warn(this.event(run, "rate-limit.invalid"), { header }); return; }
+    run?.logger.info(this.event(run, "rate-limit"), reported as Record<string, unknown>);
+    const remaining = Number(reported?.remaining);
+    const until = typeof reported?.until === "string" ? Date.parse(reported.until) : NaN;
+    if (!Number.isFinite(remaining) || (Number.isFinite(until) && until <= this.clock.now())) return;
+    this.traktWindow = { remaining, ...(Number.isFinite(until) ? { until } : {}) };
+    if (remaining > TRAKT_PAUSE_REMAINING || !Number.isFinite(until)) return;
+    const resumeAt = until + TRAKT_RESET_CUSHION_MS;
+    if (resumeAt - this.clock.now() > MAX_PROVIDER_COOLDOWN_MS) {
+      this.recordCooldown("Trakt", { reason: "rate-limit-reset", deadline: resumeAt, status: response.status }, state);
+      return;
+    }
+    this.gate.delayUntil("Trakt", resumeAt);
+    this.rateLimitDeadline.set("Trakt", Math.max(this.rateLimitDeadline.get("Trakt") || 0, resumeAt));
   }
 
   /**
@@ -297,7 +345,7 @@ export class ProviderClient {
         }
         this.assertAvailable(provider, state);
       }
-      const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
+      const { waitMs: queueWaitMs } = await this.gate.wait(provider, () => this.spacing(provider));
       // Nothing is awaited from here to the send, so this check and the newest token hold at dispatch.
       this.assertAvailable(provider, state);
       const credential = auth?.credential();
@@ -322,6 +370,7 @@ export class ProviderClient {
         metric.networkMs += networkMs;
         metric.queueWaitMs += queueWaitMs;
         const parsed = new URL(url);
+        if (provider === "Trakt") this.observeTraktRateLimit(response, run, state);
         const details = { provider, path: `${parsed.pathname}${parsed.search}`, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, elapsedMs: networkMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
         if (response.ok) {
           run?.logger.info(this.event(run, "request.response"), details);

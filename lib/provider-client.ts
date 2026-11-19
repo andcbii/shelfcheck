@@ -159,10 +159,10 @@ function emptyMetrics(): Record<ProviderName, ProviderMetric> {
 }
 
 /**
- * A request's login failed for good: its refresh failed (an authentication
+ * A provider login failed for good: its refresh failed (an authentication
  * request), or the provider still answered 401 after the refresh, or 403.
  */
-function isLoginFailure(provider: ProviderName, error: unknown) {
+export function isProviderLoginFailure(provider: ProviderName, error: unknown): error is ProviderHttpError | ProviderNetworkError | ProviderResponseError {
   if (!(error instanceof ProviderHttpError || error instanceof ProviderNetworkError || error instanceof ProviderResponseError) || error.provider !== provider) return false;
   return error.requested?.kind === "authentication" || (error instanceof ProviderHttpError && (error.status === 401 || error.status === 403));
 }
@@ -285,6 +285,14 @@ export class ProviderClient {
       this.showPendingPause(provider, state);
       const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
       this.assertAvailable(provider, state);
+      // The credential is settled before the attempt's deadline starts: a refresh has its own timeout and keeps its own cause.
+      let credential: Awaited<ReturnType<ProviderAuth["current"]>> | undefined;
+      try {
+        credential = auth ? await auth.current() : undefined;
+      } catch (error) {
+        if (isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
+        throw error;
+      }
       const requestStarted = this.clock.now();
       const metric = state.metrics[provider];
       metric.requests += 1;
@@ -292,11 +300,9 @@ export class ProviderClient {
       try {
         let response: Response;
         let body: string | undefined;
-        let credential: Awaited<ReturnType<ProviderAuth["current"]>> | undefined;
         try {
           const headers = new Headers(init.headers);
           if (!headers.has("User-Agent")) headers.set("User-Agent", SHELFCHECK_USER_AGENT);
-          credential = auth ? await auth.current() : undefined;
           for (const [name, value] of Object.entries(credential?.headers || {})) headers.set(name, value);
           response = await this.fetch(url, { ...init, headers, signal: deadline.signal });
           if (response.ok) body = await readBody(response, deadline.signal);
@@ -350,7 +356,7 @@ export class ProviderClient {
         await this.clock.sleep(delay);
       } catch (error) {
         // A login that cannot be recovered makes the provider unavailable for the rest of the run, queued requests included.
-        if (auth && isLoginFailure(provider, error)) state.unavailable.set(provider, error as Error);
+        if (auth && isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
         // Typed failures, including a failed credential refresh, end the request without a transient retry.
         if (error instanceof ProviderHttpError || error instanceof ProviderResponseError || error instanceof ProviderNetworkError) { metric.failures += 1; throw error; }

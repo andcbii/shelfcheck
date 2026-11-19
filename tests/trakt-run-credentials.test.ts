@@ -126,3 +126,28 @@ test("tokens, secrets and Authorization headers never reach logs or errors", asy
   assert.doesNotMatch(text, /secret-|Bearer/);
   assert.ok(runs.lines.length > 0);
 });
+
+test("a token about to expire is refreshed before the first request, outside the attempt's deadline", async (t) => {
+  const { time, http, client, oauthRequests } = await setup(t, ({ init }) => bearer(init) === `Bearer ${NEW}` ? json({ ok: true }) : json({}, { status: 401 }));
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: OLD, refreshToken: "secret-refresh-old", expiresAt: Date.now() + 30_000, redirectUri: "http://localhost/callback" });
+  const expiring = (await TraktRunCredentials.open())!;
+  assert.deepEqual(await time.runUntil(client.json(SEARCH, {}, "Trakt", expiring)), { ok: true });
+  assert.equal(oauthRequests.length, 1);
+  assert.deepEqual(http.requests.map(({ init }) => bearer(init)), [`Bearer ${NEW}`], "the expiring token is never sent");
+});
+
+test("each scan run reads the saved login afresh", async (t) => {
+  const { credentials } = await setup(t, () => json({ ok: true }));
+  assert.equal((await credentials.current()).token, OLD);
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: "secret-access-relogin", refreshToken: "secret-refresh-relogin", expiresAt: Date.now() + 86400_000, redirectUri: "http://localhost/callback" });
+  assert.equal((await (await TraktRunCredentials.open())!.current()).token, "secret-access-relogin", "a new run sees a new login");
+});
+
+test("a token another caller already refreshed is adopted instead of spending its rotated refresh token", async (t) => {
+  const { time, http, client, credentials, oauthRequests } = await setup(t, ({ init }) => bearer(init) === "Bearer secret-access-elsewhere" ? json({ ok: true }) : json({}, { status: 401 }));
+  // Another caller (such as the Trakt scan) refreshed the login after this run read it.
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: "secret-access-elsewhere", refreshToken: "secret-refresh-elsewhere", expiresAt: Date.now() + 86400_000, redirectUri: "http://localhost/callback" });
+  assert.deepEqual(await time.runUntil(client.json(SEARCH, {}, "Trakt", credentials)), { ok: true });
+  assert.equal(oauthRequests.length, 0, "no refresh with the spent refresh token");
+  assert.deepEqual(http.requests.map(({ init }) => bearer(init)), [`Bearer ${OLD}`, "Bearer secret-access-elsewhere"]);
+});

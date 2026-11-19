@@ -29,7 +29,7 @@ import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelecti
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { isTraktAuthenticationFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
+import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
@@ -120,11 +120,6 @@ class TraktLoginUnavailableError extends Error {
   constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
 }
 
-/** The run's Trakt login failed for good: its refresh failed, or Trakt still refused it. */
-function traktLoginFailed(error: unknown) {
-  return isTraktAuthenticationFailure(error) || (error as { provider?: unknown; requested?: { kind?: string } } | undefined)?.provider === "Trakt" && (error as { requested?: { kind?: string } }).requested?.kind === "authentication";
-}
-
 /** One library-scoped Coverage Issue for the Trakt login, with the actual cause and status. */
 function raiseTraktLoginIssue(error: unknown) {
   setCoverageIssue({id:"provider-authentication:Trakt",operation:"provider-authentication",provider:"Trakt",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Trakt",kind:"authentication"},impact:"Trakt episode identity checks could not be verified. TMDB fallback checks remain available."})});
@@ -155,7 +150,7 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
   }
   catch (error) {
     // A login that cannot be recovered is one library issue, not a failure of each lookup it stops.
-    if (provider === "Trakt" && auth && traktLoginFailed(error)) { raiseTraktLoginIssue(error); throw new TraktLoginUnavailableError(error); }
+    if (provider === "Trakt" && auth && isProviderLoginFailure("Trakt", error)) { raiseTraktLoginIssue(error); throw new TraktLoginUnavailableError(error); }
     if (show && matching) {
       const externalId = episodeIdentity?.id;
       setCoverageIssue({id:issueId,failedAt:new Date().toISOString(),...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
@@ -222,8 +217,8 @@ const savedRelationshipsOnly: ProviderAuth = {
 };
 
 /** A Trakt request with the run's Trakt login, which the client refreshes once if Trakt rejects it. */
-async function traktJson<T>(path: string, trakt: ProviderAuth): Promise<T> {
-  return checkedJson<T>(`${TRAKT}${path}`, { headers: { Accept: "application/json" } }, "Trakt", undefined, trakt);
+async function traktJson<T>(path: string, traktAuth: ProviderAuth): Promise<T> {
+  return checkedJson<T>(`${TRAKT}${path}`, { headers: { Accept: "application/json" } }, "Trakt", undefined, traktAuth);
 }
 
 /** The Coverage Issue impact of an unavailable preferred series, from the shared description of the catalogue in use. */
@@ -387,9 +382,9 @@ async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | nul
  * `retry`: a previous Trakt crosswalk for this episode failed, so saved validation responses
  * are requested again instead of reused. `validationFailures` are failed validation lookups.
  */
-async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, trakt: ProviderAuth, tmdbToken: string, retry = false) {
+async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, traktAuth: ProviderAuth, tmdbToken: string, retry = false) {
   const cached = relationshipIsReusable(crosswalkRelationshipKey("Trakt", tvdbEpisodeId));
-  const results = await traktJson<unknown>(`/search/tvdb/${tvdbEpisodeId}?type=episode`, trakt);
+  const results = await traktJson<unknown>(`/search/tvdb/${tvdbEpisodeId}?type=episode`, traktAuth);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
   const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && Number.isFinite(result.episode.season) && Number.isFinite(result.episode.number));
@@ -560,7 +555,7 @@ type LoadedComparison = {
   tmdbEpisodeAliases: Set<number>; cachedTvdbEpisodeImdbIds: Record<string,string[]>;
   libraryTmdbEpisodeIds: Set<number>; libraryTvdbEpisodeIds: Set<number>; libraryImdbEpisodeIds: Set<string>;
   mappings: ReturnType<typeof listCoverageMappings>; manualInventory: CoverageEvidence[]; autoCompoundEpisodes: boolean;
-  config: {tmdbToken:string}; token: string; traktCredentials: ProviderAuth | null;
+  config: {tmdbToken:string}; token: string; traktAuth: ProviderAuth | null;
   tvdbChanges: Set<number> | null; logger: Pick<ScanLogger,"info"|"warn">;
   setHeartbeat: (key:string,title:string,phase:string)=>void;
   /** A live scan's TMDB external-ID crosswalk policy; absent in an offline replay. */
@@ -621,7 +616,7 @@ export function mappedMembersMissingFromCatalogue(catalogueEpisodes: ProviderEpi
 
 /** Resolve automatic evidence once, using either live saved relationships or strict saved-input replay. */
 async function compareLoadedPlexShow(input: LoadedComparison) {
-  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges,logger,setHeartbeat}=input;
+  const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktAuth,tvdbChanges,logger,setHeartbeat}=input;
   let {cachedTvdbEpisodeImdbIds}=input;
   const providerEpisodes=[...input.providerEpisodes,...mappedMembersMissingFromCatalogue(input.providerEpisodes,mappings,{tmdbId:tmdbShow ? tmdbShow.id : undefined,tvdbId:tvdbResolved ? tvdbId : undefined},input.malformedRecords)];
   let warning: string | undefined;
@@ -743,8 +738,8 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           let traktInvalid = 0;
           let traktFailed = 0;
           const traktFailureReasons = new Set<string>();
-          if (traktCredentials && tvdbId) {
-            const traktCrosswalks = await settleCrosswalks("Trakt", [...crosswalkCandidateTvdbIds], (tvdbEpisodeId) => findEpisodeViaTrakt(tvdbEpisodeId, equivalentTmdbIds, tvdbId!, libraryTmdbEpisodeIds, traktCredentials, config.tmdbToken, retryCrosswalks.has(`Trakt:${tvdbEpisodeId}`)));
+          if (traktAuth && tvdbId) {
+            const traktCrosswalks = await settleCrosswalks("Trakt", [...crosswalkCandidateTvdbIds], (tvdbEpisodeId) => findEpisodeViaTrakt(tvdbEpisodeId, equivalentTmdbIds, tvdbId!, libraryTmdbEpisodeIds, traktAuth, config.tmdbToken, retryCrosswalks.has(`Trakt:${tvdbEpisodeId}`)));
             traktFailed = traktCrosswalks.requestFailures.length;
             for (const reason of traktCrosswalks.requestFailures) traktFailureReasons.add(reason);
             for (const { tvdbEpisodeId, value: result } of traktCrosswalks.fulfilled) interpret("Trakt", tvdbEpisodeId, () => {
@@ -806,7 +801,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           if (!replayScope.getStore()) for (const failure of crosswalkFailures) if (failure.crosswalk === "TMDB" && failure.episode.id !== undefined) rejectTmdbCrosswalk(failure.episode.id);
           const failedCrosswalks = crosswalks.requestFailures.length;
           if (failedCrosswalks) recordWarning(`${failedCrosswalks} TMDB TVDB-ID ${failedCrosswalks === 1 ? "lookup" : "lookups"} failed; ${failedCrosswalks === 1 ? "it is" : "they are"} requested again on the next scan.`);
-          logger.info("plex.show.episode-crosswalk", { ratingKey, strategy: traktCredentials ? "trakt-validate-with-tmdb-then-find" : "tmdb-find-by-tvdb-episode-id", equivalentTmdbShowIds: [...equivalentTmdbIds], tvdbCandidates: crosswalkCandidateTvdbIds.size, traktReconciled, traktValidatedNotOwned, traktValidationFailed, traktInvalid, traktFailed, ...(traktFailureReasons.size ? { traktFailureReasons: [...traktFailureReasons].slice(0, 3) } : {}), tmdbFallback: tmdbFallbackIds.size, reconciled: locallySatisfiedTvdbIds.size, rejectedOtherShow, unmatched, failed: failedCrosswalks, crosswalkFailures: crosswalkFailures.length });
+          logger.info("plex.show.episode-crosswalk", { ratingKey, strategy: traktAuth ? "trakt-validate-with-tmdb-then-find" : "tmdb-find-by-tvdb-episode-id", equivalentTmdbShowIds: [...equivalentTmdbIds], tvdbCandidates: crosswalkCandidateTvdbIds.size, traktReconciled, traktValidatedNotOwned, traktValidationFailed, traktInvalid, traktFailed, ...(traktFailureReasons.size ? { traktFailureReasons: [...traktFailureReasons].slice(0, 3) } : {}), tmdbFallback: tmdbFallbackIds.size, reconciled: locallySatisfiedTvdbIds.size, rejectedOtherShow, unmatched, failed: failedCrosswalks, crosswalkFailures: crosswalkFailures.length });
           for (const tvdbEpisodeId of crosswalkCandidateTvdbIds) logger.info("plex.show.episode-crosswalk-decision", { ratingKey, tmdbShowId: tmdbShow.id, tvdbShowId: tvdbId, tvdbEpisodeId, ...crosswalkDetails.get(tvdbEpisodeId), outcome: crosswalkDecisions.get(tvdbEpisodeId) || "lookup-failed" });
           phaseTimings.crosswalkMs = Date.now() - crosswalkStarted;
         }
@@ -897,12 +892,12 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     return "";
   });
   // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
-  const traktCredentials = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.current(); else resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
+  const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.current(); else resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
     raiseTraktLoginIssue(error);
     logger.warn("plex.crosswalk.trakt-unavailable", { error: coverageIssueCause(error) });
     return null;
   });
-  logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktCredentials), tmdbFallback: true });
+  logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktAuth), tmdbFallback: true });
   const inputs = readPlexInputs();
   const utcDate = startedAt.slice(0, 10);
   // A scan belongs to its planned UTC start date, even when it finishes after midnight.
@@ -1367,7 +1362,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const retainedComparison = (saved: SavedPlexComparison) => ({...withLiveCrosswalkOutcomes(saved,relationships,checkedTmdbCrosswalks),refresh});
     try {
     await comparisonIssueScope.run({ratingKey,title:primary.title,tmdbId,tvdbId,tmdbSource,tvdbSource,providerEpisodes,tmdbCached:tmdbCatalogueReused,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError}, () => relationshipScope.run(relationships, async () => {
-      const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktCredentials,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat,tmdbCrosswalkScan:{startedAt,forced:!reuseTmdbRelationships,requested:requestedTmdbCrosswalks},checkedTmdbCrosswalks});
+      const compared = await compareLoadedPlexShow({group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,providerEpisodes,malformedRecords,tmdbEpisodeAliases,cachedTvdbEpisodeImdbIds,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,config,token,traktAuth,tvdbChanges:tvdbVerifiedChanges,logger,setHeartbeat,tmdbCrosswalkScan:{startedAt,forced:!reuseTmdbRelationships,requested:requestedTmdbCrosswalks},checkedTmdbCrosswalks});
       ({tmdbSeriesMatches,tvdbSeriesMatches,cachedTvdbEpisodeImdbIds}=compared);
       recordCatalogueCandidateNames(ratingKey,"tmdb",tmdbSeriesMatches);
       recordCatalogueCandidateNames(ratingKey,"tvdb",tvdbSeriesMatches);
@@ -1749,7 +1744,7 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
     ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
     providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},
     ...index,mappings,manualInventory:inputs.inventory.evidence,autoCompoundEpisodes:settings.autoCompoundEpisodes!==false,
-    config:{tmdbToken:""},token:"",traktCredentials:Object.values(input.relationships).some(relationship=>relationship.provider==="Trakt") ? savedRelationshipsOnly : null,
+    config:{tmdbToken:""},token:"",traktAuth:Object.values(input.relationships).some(relationship=>relationship.provider==="Trakt") ? savedRelationshipsOnly : null,
     tvdbChanges:new Set(),logger:{info:()=>{},warn:()=>{}},setHeartbeat:()=>{},
   }))));
   if (replay.missing.size) throw new Error(`Saved provider identity relationships are incomplete (${[...replay.missing].join(", ")}).`);

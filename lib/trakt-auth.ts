@@ -108,8 +108,11 @@ export class TraktRunCredentials implements ProviderAuth {
     return credentials ? new TraktRunCredentials(credentials) : null;
   }
 
-  async current() {
+  async ready() {
     if (this.credentials.expiresAt <= Date.now() + REFRESH_BEFORE_EXPIRY_MS) await this.recover(this.credentials.accessToken);
+  }
+
+  credential() {
     const { accessToken, clientId } = this.credentials;
     return { token: accessToken, headers: { Authorization: `Bearer ${accessToken}`, "trakt-api-key": clientId, "trakt-api-version": "2" } };
   }

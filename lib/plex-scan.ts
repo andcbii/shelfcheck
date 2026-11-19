@@ -212,7 +212,8 @@ async function tmdbJson<T>(path: string, token: string, episodeIdentity?: {provi
 
 /** Offline rechecks answer every Trakt lookup from saved relationships, so they never send this login. */
 const savedRelationshipsOnly: ProviderAuth = {
-  current: async () => { throw new Error("An offline recheck does not contact Trakt."); },
+  ready: async () => { throw new Error("An offline recheck does not contact Trakt."); },
+  credential: () => { throw new Error("An offline recheck does not contact Trakt."); },
   recover: async () => {},
 };
 
@@ -892,7 +893,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     return "";
   });
   // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
-  const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.current(); else resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
+  const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.ready(); else resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
     raiseTraktLoginIssue(error);
     logger.warn("plex.crosswalk.trakt-unavailable", { error: coverageIssueCause(error) });
     return null;

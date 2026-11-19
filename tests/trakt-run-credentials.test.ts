@@ -138,9 +138,9 @@ test("a token about to expire is refreshed before the first request, outside the
 
 test("each scan run reads the saved login afresh", async (t) => {
   const { credentials } = await setup(t, () => json({ ok: true }));
-  assert.equal((await credentials.current()).token, OLD);
+  assert.equal(credentials.credential().token, OLD);
   await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: "secret-access-relogin", refreshToken: "secret-refresh-relogin", expiresAt: Date.now() + 86400_000, redirectUri: "http://localhost/callback" });
-  assert.equal((await (await TraktRunCredentials.open())!.current()).token, "secret-access-relogin", "a new run sees a new login");
+  assert.equal((await TraktRunCredentials.open())!.credential().token, "secret-access-relogin", "a new run sees a new login");
 });
 
 test("a token another caller already refreshed is adopted instead of spending its rotated refresh token", async (t) => {
@@ -150,4 +150,35 @@ test("a token another caller already refreshed is adopted instead of spending it
   assert.deepEqual(await time.runUntil(client.json(SEARCH, {}, "Trakt", credentials)), { ok: true });
   assert.equal(oauthRequests.length, 0, "no refresh with the spent refresh token");
   assert.deepEqual(http.requests.map(({ init }) => bearer(init)), [`Bearer ${OLD}`, "Bearer secret-access-elsewhere"]);
+});
+
+test("requests that waited out a slow proactive refresh still start at least 250 ms apart", async (t) => {
+  const starts: number[] = [];
+  const { time, client } = await setup(t, () => { starts.push(time.elapsed()); return json({ ok: true }); }, async () => { await time.clock.sleep(2_000); return renewed(); });
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: OLD, refreshToken: "secret-refresh-old", expiresAt: Date.now() + 30_000, redirectUri: "http://localhost/callback" });
+  const expiring = (await TraktRunCredentials.open())!;
+  await time.runUntil(Promise.all([1, 2, 3].map(() => client.json(SEARCH, {}, "Trakt", expiring))));
+  assert.equal(starts.length, 3);
+  for (let index = 1; index < starts.length; index += 1) assert.ok(starts[index] - starts[index - 1] >= 250, `actual starts are spaced: ${starts}`);
+});
+
+test("a request still waiting for its credential is not sent once another request's 403 makes Trakt unavailable", async (t) => {
+  const { time, http, client, credentials } = await setup(t, async ({ index }) => {
+    if (index === 0) { await time.clock.sleep(40_000); return json({}, { status: 403 }); }
+    return json({ ok: true });
+  }, async () => { await time.clock.sleep(10_000); return renewed(); });
+  // Valid for 90 s: the first request needs no refresh; by 35 s the second must refresh first.
+  const started = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now: started });
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: OLD, refreshToken: "secret-refresh-old", expiresAt: Date.now() + 90_000, redirectUri: "http://localhost/callback" });
+  const soon = (await TraktRunCredentials.open())!;
+  void credentials;
+  const first = outcome(client.json(SEARCH, {}, "Trakt", soon));
+  await time.advance(35_000);
+  t.mock.timers.setTime(started + 35_000);
+  const second = outcome(client.json(SEARCH, {}, "Trakt", soon));
+  const [refused, held] = await time.runUntil(Promise.all([first, second]));
+  assert.ok(refused.error instanceof ProviderHttpError && refused.error.status === 403);
+  assert.equal(held.error, refused.error, "the held request ends with the run's login failure");
+  assert.equal(http.requests.length, 1, "the held request is never sent");
 });

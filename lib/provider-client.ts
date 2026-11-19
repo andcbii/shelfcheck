@@ -110,12 +110,16 @@ export type ProviderRun = {
 };
 
 /**
- * A provider login a request sends: the credential for each attempt, and how
- * to recover once the provider rejects it with a 401.
+ * A provider login a request sends. Its asynchronous work (a proactive
+ * refresh) happens in `ready`, before the request queues at the gate; the
+ * credential itself is read synchronously at dispatch, so the request sends
+ * the newest token with no wait between its availability check and the send.
  */
 export type ProviderAuth = {
-  /** The token for the next attempt and the headers that send it; read again for every attempt, including queued ones. */
-  current(): Promise<{ token: string; headers: Record<string, string> }>;
+  /** Makes the credential usable, refreshing it first if it is about to expire. */
+  ready(): Promise<void>;
+  /** The token to send now and the headers that send it. */
+  credential(): { token: string; headers: Record<string, string> };
   /** Called with the token a 401 rejected; resolves once newer credentials are in place. */
   recover(rejectedToken: string): Promise<void>;
 };
@@ -283,16 +287,20 @@ export class ProviderClient {
     this.assertAvailable(provider, state);
     for (let attempt = 0; attempt < PROVIDER_ATTEMPTS; attempt += 1) {
       this.showPendingPause(provider, state);
-      const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
-      this.assertAvailable(provider, state);
-      // The credential is settled before the attempt's deadline starts: a refresh has its own timeout and keeps its own cause.
-      let credential: Awaited<ReturnType<ProviderAuth["current"]>> | undefined;
-      try {
-        credential = auth ? await auth.current() : undefined;
-      } catch (error) {
-        if (isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
-        throw error;
+      // Credential work finishes before the request queues: a refresh keeps its own timeout and cause, and never holds a gate slot.
+      if (auth) {
+        try {
+          await auth.ready();
+        } catch (error) {
+          if (isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
+          throw error;
+        }
+        this.assertAvailable(provider, state);
       }
+      const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
+      // Nothing is awaited from here to the send, so this check and the newest token hold at dispatch.
+      this.assertAvailable(provider, state);
+      const credential = auth?.credential();
       const requestStarted = this.clock.now();
       const metric = state.metrics[provider];
       metric.requests += 1;

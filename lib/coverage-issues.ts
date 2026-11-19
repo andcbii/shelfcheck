@@ -1,6 +1,6 @@
 import "server-only";
 import { coverageDatabase } from "@/lib/sqlite";
-import { ProviderHttpError, ProviderCooldownTooLongError, ProviderNetworkError, ProviderResponseError } from "@/lib/plex-provider-client";
+import { ProviderHttpError, ProviderCooldownTooLongError, ProviderNetworkError, ProviderResponseError } from "@/lib/provider-client";
 
 export type LookupSourceStep = { provider: "Plex" | "TMDB" | "TVDB" | "Trakt"; kind: string; id?: number; cached?: boolean };
 export type ProviderLookup = {
@@ -13,8 +13,9 @@ export type ProviderLookup = {
 
 /** Store only selected identities and typed evidence, never raw request URLs or errors. */
 export function providerLookupContext(error: unknown, context: Omit<ProviderLookup, "status" | "failureKind">): Pick<CoverageIssue, "category" | "lookup" | "cause" | "action"> {
-  if ((error instanceof ProviderHttpError || error instanceof ProviderNetworkError || error instanceof ProviderResponseError) && error.requested) context = {...context,requested:error.requested};
-  const status = error instanceof ProviderHttpError ? error.status : undefined;
+  if ((error instanceof ProviderHttpError || error instanceof ProviderNetworkError || error instanceof ProviderResponseError || error instanceof ProviderCooldownTooLongError) && error.requested) context = {...context,requested:error.requested};
+  // A server error's long wait keeps its HTTP status; only a rate-limit cooldown reads as a rate limit.
+  const status = error instanceof ProviderHttpError ? error.status : error instanceof ProviderCooldownTooLongError && error.reason === "server" ? error.status : undefined;
   const failureKind = status !== undefined ? "http" : error instanceof ProviderCooldownTooLongError ? "rate-limit" : error instanceof TypeError || error instanceof Error && /network|fetch|request failed after retries|timeout/i.test(error.message) ? "network" : "invalid-response";
   const provider = context.requested?.provider || "Provider";
   const source = context.source.at(-1);

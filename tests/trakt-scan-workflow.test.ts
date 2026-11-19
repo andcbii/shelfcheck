@@ -16,6 +16,8 @@ const plex = await import("../lib/plex-scan");
 const issues = await import("../lib/coverage-issues");
 const lifecycle = await import("../lib/scan-run");
 const logs = await import("../app/api/logs/route");
+const { scanProviderClient } = await import("../lib/scan-provider-client");
+const { systemClock } = await import("../lib/provider-client");
 hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
@@ -55,10 +57,9 @@ async function fixture(t: TestContext) {
   const previous = { data: process.env.SHELFCHECK_DATA_DIR, config: process.env.SHELFCHECK_CONFIG_DIR };
   process.env.SHELFCHECK_DATA_DIR = dir;
   process.env.SHELFCHECK_CONFIG_DIR = dir;
-  const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync; __shelfcheckNextRequestAt?: number; __shelfcheckRequestGate?: Promise<void>; __shelfcheckRateLimit?: unknown };
-  delete global.__shelfcheckNextRequestAt;
-  delete global.__shelfcheckRequestGate;
-  delete global.__shelfcheckRateLimit;
+  const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+  // Each test is a fresh server process for provider pacing and deadlines.
+  scanProviderClient.forgetProviderDeadlines();
   t.after(() => {
     global.__shelfcheckDatabase?.close();
     delete global.__shelfcheckDatabase;
@@ -76,10 +77,14 @@ async function fixture(t: TestContext) {
     progress: structuredClone(progress),
     /** Responses, by request path, served before the normal answer. */
     failures: new Map<string, (Response | Promise<Response> | (() => Response | Promise<Response>))[]>(),
+    /** Token refreshes Trakt's OAuth server answered, and its answer. */
+    refreshes: 0,
+    oauth: () => Response.json({ access_token: "refreshed-access", refresh_token: "refreshed-refresh", expires_in: 86_400, created_at: Math.floor(Date.now() / 1000) }),
   };
   const requests: string[] = [];
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = new URL(String(input));
+    if (url.hostname === "auth.trakt.tv" && url.pathname === "/oauth/token") { trakt.refreshes += 1; return trakt.oauth(); }
     assert.equal(url.hostname, "api.trakt.tv", `no request leaves the controlled Trakt API: ${url}`);
     requests.push(url.pathname);
     const failure = trakt.failures.get(url.pathname)?.shift();
@@ -510,4 +515,122 @@ test("Trakt checkpoint.saved log lines keep their reasons: interval, rate-limit 
   f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
   assert.equal((await f.run({ force: true })).status, "error");
   assert.deepEqual(savedReasons(await logLines()), ["error"], "a failure save logs reason error, as before");
+});
+
+// SHELFCHECK-67: today's login recovery, its wording and request log names, pinned before the
+// Trakt scan moves onto the shared provider client.
+
+test("a Trakt login that expires during a scan run is refreshed once and the scan run completes", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 401 })]);
+  const status = await f.run();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.equal(f.trakt.refreshes, 1);
+  assert.equal((await config.readTraktCredentials())?.accessToken, "refreshed-access");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+});
+
+test("a login Trakt still rejects after its refresh ends the scan run with the expired-login message", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 401 }), new Response("{}", { status: 401 })]);
+  const status = await f.run();
+  assert.equal(status.status, "error");
+  assert.equal(status.error, "Your Trakt login has expired. Log out, then log in again.");
+});
+
+test("Trakt scan request log lines keep their names, and a rate-limit header is logged", async (t) => {
+  const f = await fixture(t);
+  await f.settings({ diagnosticsEnabled: true });
+  f.trakt.failures.set("/sync/collection/shows", [() => Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1", "X-Ratelimit": JSON.stringify({ name: "AUTHED_API_GET_LIMIT", period: 300, limit: 1000, remaining: 990, until: "2026-11-11T12:05:00Z" }) } })]);
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 503 })]);
+  assert.equal((await f.run()).status, "completed");
+  const events = new Set((await logLines()).map((line) => line.match(/\] (\S+) \|/)?.[1]));
+  for (const event of ["request.start", "request.response", "request.retry", "rate-limit"]) assert.ok(events.has(event), `shelfcheck.log has ${event}: ${[...events].join(", ")}`);
+});
+
+// SHELFCHECK-69: a provider cooldown ends the Trakt scan run promptly.
+
+const cooldown = (status: number, seconds: number) => new Response("{}", { status, headers: { "Retry-After": String(seconds) } });
+
+test("a Trakt cooldown over 15 minutes fails the full scan run at once, keeps its completed shows in a Resume point, and a restart fails the same way", async (t) => {
+  const f = await fixture(t);
+  await f.run();
+  const lastGood = await f.report();
+  f.trakt.library[1].show.aired_episodes = 4;
+  f.trakt.failures.set("/shows/2/progress/collection", [cooldown(429, 1200)]);
+  const started = Date.now();
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "Trakt asked Shelfcheck to wait 20 minutes. Start the scan again after that to resume.");
+  assert.ok(Date.now() - started < 60_000, "no 20-minute sleep first");
+  assert.deepEqual(await f.report(), lastGood, "no completed report is written");
+  const point = await storedResumePoint();
+  assert.ok(point, "the full run saved a Resume point");
+  assert.ok(!point.shows.some((item: { show: { title: string } }) => item.show.title === "Bravo") || !point.scanCache?.["2"], "the unfinished show is not marked checked");
+
+  const again = await f.run();
+  assert.equal(again.status, "error");
+  assert.match(again.error || "", /^Trakt asked Shelfcheck to wait (19|20) minutes\. Start the scan again after that to resume\.$/);
+  assert.deepEqual(perShow(f.requests), [], "the restart sends Trakt no show requests while the cooldown lasts");
+});
+
+test("a Trakt server error asking for a long wait says Trakt is unavailable", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/3/progress/collection", [cooldown(503, 1800)]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "Trakt is unavailable and asked Shelfcheck to wait 30 minutes. Start the scan again after that to resume.");
+});
+
+test("a cooldown in a single-show check creates no Resume point", async (t) => {
+  const f = await fixture(t);
+  await f.run();
+  f.trakt.library[1].show.aired_episodes = 4;
+  f.trakt.failures.set("/shows/2/progress/collection", [cooldown(429, 1200)]);
+  const failed = await f.run({ traktId: 2 });
+  assert.equal(failed.status, "error");
+  assert.equal(await storedResumePoint(), null);
+});
+
+test("a cooldown before the collection downloads keeps an existing usable Resume point without saving new progress", async (t) => {
+  const f = await fixture(t);
+  await seedResumePoint(f);
+  const seeded = await storedResumePoint();
+  f.trakt.failures.set("/sync/collection/shows", [cooldown(429, 1200)]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.deepEqual(await storedResumePoint(), seeded);
+});
+
+test("an air-date lookup that hits a cooldown ends the scan run instead of being skipped", async (t) => {
+  const f = await fixture(t);
+  await f.run();
+  const lastGood = await f.report();
+  // Trakt updated Charlie, so a Deep Scan rechecks it, air dates included.
+  f.trakt.library[2].show.updated_at = "2026-11-10T00:00:00.000Z";
+  f.trakt.failures.set("/shows/3/seasons", [cooldown(429, 1200)]);
+  const airDates = await f.run({ force: true });
+  assert.equal(airDates.status, "error");
+  assert.match(airDates.error || "", /^Trakt asked Shelfcheck to wait 20 minutes/);
+  assert.deepEqual(await f.report(), lastGood);
+});
+
+test("a poster lookup that Trakt refuses (403) ends the scan run instead of being skipped", async (t) => {
+  const f = await fixture(t);
+  f.trakt.library[2].show.images = { poster: [] };
+  f.trakt.failures.set("/shows/3", [new Response("{}", { status: 403 })]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.match(failed.error || "", /Trakt rejected this request \(403\)/);
+});
+
+test("a Trakt rate-limit reset more than 15 minutes away ends the scan run with the reset wording", async (t) => {
+  const f = await fixture(t);
+  // The reset is set from the provider clock, which the mocked Date does not move (earlier mocked sleeps do).
+  const until = new Date(systemClock.now() + 19.5 * 60_000).toISOString();
+  f.trakt.failures.set("/sync/collection/shows", [() => Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1", "X-Ratelimit": JSON.stringify({ remaining: 0, until }) } })]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "Trakt's rate limit resets in 20 minutes. Start the scan again after that to resume.");
+  assert.deepEqual(perShow(f.requests), [], "the collection response was used; the next request was not sent");
 });

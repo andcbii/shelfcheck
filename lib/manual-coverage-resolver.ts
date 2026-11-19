@@ -4,13 +4,13 @@ import { randomUUID } from "node:crypto";
 import { readPlexProviders } from "@/lib/server-config";
 import { coverageDatabase } from "@/lib/sqlite";
 import { CoverageError } from "@/lib/manual-coverage";
-import { PlexProviderClient } from "@/lib/plex-provider-client";
+import { ProviderClient } from "@/lib/provider-client";
 import type { CoverageMember } from "@/lib/manual-coverage-model";
-const client = new PlexProviderClient(() => undefined, () => {
-});
+const client = new ProviderClient();
 export async function resolveCoverageUrls(urls: unknown) {
-  // A failed attempt must not permanently disable later user-requested retries.
-  client.resetMetrics();
+  // A failed attempt, even one a provider cooldown ended, must not disable later user-requested retries.
+  client.forgetProviderDeadlines();
+  client.startRun();
   try {
     return await resolveCoverageInputs(urls);
   } catch (error) {

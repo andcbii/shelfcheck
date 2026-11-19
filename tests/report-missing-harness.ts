@@ -59,17 +59,20 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `onRequest`: called with each request's pathname before it is answered (e.g. to advance a controlled clock).
   // `raw`: per-pathname successful (HTTP 200) response bodies sent as-is, e.g. one that is not JSON.
   // `hold`: per-pathname gates; a matching request is recorded at once but answered only when its gate settles.
-  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
+  // `respond`: answers a request first when it returns a response, e.g. by its Authorization header.
+  const state = { onRequest: undefined as ((pathname: string) => void) | undefined, respond: undefined as ((url: URL, init?: RequestInit) => Response | undefined) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const otherShow = { ratingKey: "other", title: "Other", Guid: [{ id: "tmdb://11" }, { id: "tvdb://21" }] };
   const library = () => [show, ...(hasOther ? [otherShow] : [])];
-  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
     state.onRequest?.(u.pathname);
     await state.hold.get(u.pathname);
+    const responded = state.respond?.(u, init);
+    if (responded) return responded;
     if (state.statuses.has(u.pathname)) return Response.json({}, { status: state.statuses.get(u.pathname) });
     if (state.raw.has(u.pathname)) return new Response(state.raw.get(u.pathname), { status: 200, headers: { "Content-Type": "application/json" } });
     if (state.bodies.has(u.pathname)) return Response.json(state.bodies.get(u.pathname));

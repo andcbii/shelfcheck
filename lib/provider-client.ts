@@ -1,5 +1,5 @@
 import { ProviderStartGate } from "@/lib/scan-concurrency";
-import { PROVIDER_REQUEST_SPACING_MS, type PlexProviderName } from "@/lib/plex-provider-policy";
+import { PROVIDER_REQUEST_SPACING_MS, type ProviderName } from "@/lib/provider-policy";
 import type { ScanLogger } from "@/lib/scan-log";
 
 type ProviderMetric = { requests: number; failures: number; retries: number; networkMs: number; queueWaitMs: number; rateLimitWaitMs: number };
@@ -8,19 +8,19 @@ const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resol
 export const MAX_PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
 
 export class ProviderHttpError extends Error {
-  constructor(readonly provider: PlexProviderName, readonly status: number, readonly requested?: ProviderRequestIdentity) {
+  constructor(readonly provider: ProviderName, readonly status: number, readonly requested?: ProviderRequestIdentity) {
     super(`${provider} request failed (${status}).`);
   }
 }
 
-export type ProviderRequestIdentity = {provider:PlexProviderName;kind:string;id?:number};
+export type ProviderRequestIdentity = {provider:ProviderName;kind:string;id?:number};
 export class ProviderResponseError extends Error {
-  constructor(readonly provider:PlexProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} returned an incomplete or unreadable response.`); }
+  constructor(readonly provider:ProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} returned an incomplete or unreadable response.`); }
 }
 export class ProviderNetworkError extends Error {
-  constructor(readonly provider:PlexProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} network request failed after retries.`); }
+  constructor(readonly provider:ProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} network request failed after retries.`); }
 }
-function requestIdentity(url:string, provider:PlexProviderName):ProviderRequestIdentity | undefined {
+function requestIdentity(url:string, provider:ProviderName):ProviderRequestIdentity | undefined {
   const path = new URL(url).pathname;
   if (path === "/v4/login") return {provider,kind:"authentication"};
   if (path === "/library/sections") return {provider,kind:"library sections"};
@@ -46,7 +46,7 @@ function requestIdentity(url:string, provider:PlexProviderName):ProviderRequestI
 }
 
 export class ProviderCooldownTooLongError extends Error {
-  constructor(readonly provider: PlexProviderName, readonly retryAfterMs: number) {
+  constructor(readonly provider: ProviderName, readonly retryAfterMs: number) {
     super(`${provider} requested a ${Math.ceil(retryAfterMs / 60_000)}-minute cooldown. Affected shows will be checked again next scan.`);
   }
 }
@@ -62,28 +62,28 @@ export function retryDelay(response: Response, attempt: number) {
   return Math.min(30_000, 1000 * 2 ** attempt);
 }
 
-export function acceptedRetryDelay(provider: PlexProviderName, response: Response, attempt: number) {
+export function acceptedRetryDelay(provider: ProviderName, response: Response, attempt: number) {
   const delay = retryDelay(response, attempt);
   if (response.status === 429 && delay > MAX_PROVIDER_COOLDOWN_MS) throw new ProviderCooldownTooLongError(provider, delay);
   return delay;
 }
 
-function emptyMetrics(): Record<PlexProviderName, ProviderMetric> {
-  return Object.fromEntries((["Plex", "TMDB", "TVDB", "Trakt"] as PlexProviderName[]).map((provider) => [provider, { requests: 0, failures: 0, retries: 0, networkMs: 0, queueWaitMs: 0, rateLimitWaitMs: 0 }])) as Record<PlexProviderName, ProviderMetric>;
+function emptyMetrics(): Record<ProviderName, ProviderMetric> {
+  return Object.fromEntries((["Plex", "TMDB", "TVDB", "Trakt"] as ProviderName[]).map((provider) => [provider, { requests: 0, failures: 0, retries: 0, networkMs: 0, queueWaitMs: 0, rateLimitWaitMs: 0 }])) as Record<ProviderName, ProviderMetric>;
 }
 
-export class PlexProviderClient {
-  private readonly gate = new ProviderStartGate<PlexProviderName>();
+export class ProviderClient {
+  private readonly gate = new ProviderStartGate<ProviderName>();
   private currentMetrics = emptyMetrics();
-  private readonly rateLimitedUntil = new Map<PlexProviderName, number>();
-  private readonly unavailable = new Map<PlexProviderName, ProviderCooldownTooLongError>();
+  private readonly rateLimitedUntil = new Map<ProviderName, number>();
+  private readonly unavailable = new Map<ProviderName, ProviderCooldownTooLongError>();
 
-  constructor(private readonly logger: () => ScanLogger | undefined, private readonly onRateLimit: (provider: PlexProviderName, paused: boolean) => void) {}
+  constructor(private readonly logger: () => ScanLogger | undefined, private readonly onRateLimit: (provider: ProviderName, paused: boolean) => void) {}
 
   resetMetrics() { this.currentMetrics = emptyMetrics(); this.rateLimitedUntil.clear(); this.unavailable.clear(); }
   metrics() { return this.currentMetrics; }
 
-  async json<T>(url: string, init: RequestInit, provider: PlexProviderName): Promise<T> {
+  async json<T>(url: string, init: RequestInit, provider: ProviderName): Promise<T> {
     const requested = requestIdentity(url,provider);
     const unavailable = this.unavailable.get(provider);
     if (unavailable) throw unavailable;

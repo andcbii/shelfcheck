@@ -15,6 +15,7 @@ import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, trackScanIgnores, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
+import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
 import { episodeReference, titleDependentTvdbEpisodeIds, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
@@ -22,14 +23,14 @@ import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
-import { PLEX_SCAN_WORKERS, type PlexProviderName } from "@/lib/plex-provider-policy";
+import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
+import { ProviderClient, ProviderResponseError } from "@/lib/provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
@@ -62,7 +63,6 @@ const TMDB = "https://api.themoviedb.org/3";
 const TVDB = "https://api4.thetvdb.com/v4";
 const TRAKT = "https://api.trakt.tv";
 const CACHE_VERSION = PLEX_CACHE_VERSION;
-type ProviderName = PlexProviderName;
 
 /**
  * The Plex scan mode's adapter to the scan run lifecycle: its status and
@@ -87,7 +87,7 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
 };
 
 // Provider callbacks reach only the live Plex Scan run that dispatched the request; a late one is a no-op.
-const providerClient = new PlexProviderClient(
+const providerClient = new ProviderClient(
   () => scanRuns.bound("plex")?.logger,
   (provider, paused) => scanRuns.bound("plex")?.reportRateLimit(provider, paused),
 );
@@ -208,7 +208,7 @@ async function traktJson<T>(path: string, credentials: TraktCredentials): Promis
     Authorization: `Bearer ${credentials.accessToken}`,
     "trakt-api-key": credentials.clientId,
     "trakt-api-version": "2",
-    "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
+    "User-Agent": SHELFCHECK_USER_AGENT,
   } }, "Trakt");
 }
 

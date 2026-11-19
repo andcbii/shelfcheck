@@ -1,7 +1,7 @@
 import "server-only";
 import { episodeReference, usableTitle } from "@/lib/compound-episodes";
 import { providerLookupContext } from "@/lib/coverage-issues";
-import { ProviderHttpError } from "@/lib/plex-provider-client";
+import { ProviderHttpError } from "@/lib/provider-client";
 import { isRecord } from "@/lib/value-guards";
 import { titleRecoveryIssueId } from "@/lib/episode-check-issues";
 import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison";

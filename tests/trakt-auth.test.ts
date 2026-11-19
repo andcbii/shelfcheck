@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SHELFCHECK_VERSION } from "../lib/version";
-import { ProviderHttpError } from "../lib/plex-provider-client";
+import { ProviderHttpError } from "../lib/provider-client";
 
 const serverOnlyHook = registerHooks({
   resolve(specifier, context, nextResolve) {

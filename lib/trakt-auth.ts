@@ -1,8 +1,8 @@
 import "server-only";
 
 import { readTraktApplication, readTraktCredentials, writeTraktCredentials, type TraktCredentials } from "@/lib/server-config";
-import { ProviderHttpError, ProviderNetworkError, ProviderResponseError } from "@/lib/plex-provider-client";
-import { SHELFCHECK_VERSION } from "@/lib/version";
+import { ProviderHttpError, ProviderNetworkError, ProviderResponseError } from "@/lib/provider-client";
+import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
 
 const TOKEN_URL = "https://auth.trakt.tv/oauth/token";
 
@@ -34,7 +34,7 @@ async function tokenRequest(body: Record<string, string>, application: { clientI
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
+      "User-Agent": SHELFCHECK_USER_AGENT,
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(15_000),

@@ -4,9 +4,9 @@ import { randomUUID } from "node:crypto";
 import { readPlexProviders } from "@/lib/server-config";
 import { coverageDatabase } from "@/lib/sqlite";
 import { CoverageError } from "@/lib/manual-coverage";
-import { PlexProviderClient } from "@/lib/plex-provider-client";
+import { ProviderClient } from "@/lib/provider-client";
 import type { CoverageMember } from "@/lib/manual-coverage-model";
-const client = new PlexProviderClient(() => undefined, () => {
+const client = new ProviderClient(() => undefined, () => {
 });
 export async function resolveCoverageUrls(urls: unknown) {
   // A failed attempt must not permanently disable later user-requested retries.

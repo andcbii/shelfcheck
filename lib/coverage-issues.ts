@@ -1,6 +1,6 @@
 import "server-only";
 import { coverageDatabase } from "@/lib/sqlite";
-import { ProviderHttpError, ProviderCooldownTooLongError, ProviderNetworkError, ProviderResponseError } from "@/lib/plex-provider-client";
+import { ProviderHttpError, ProviderCooldownTooLongError, ProviderNetworkError, ProviderResponseError } from "@/lib/provider-client";
 
 export type LookupSourceStep = { provider: "Plex" | "TMDB" | "TVDB" | "Trakt"; kind: string; id?: number; cached?: boolean };
 export type ProviderLookup = {

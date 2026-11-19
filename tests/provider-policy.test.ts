@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PLEX_SCAN_WORKERS, PROVIDER_REQUEST_SPACING_MS } from "../lib/plex-provider-policy";
+import { PLEX_SCAN_WORKERS, PROVIDER_REQUEST_SPACING_MS } from "../lib/provider-policy";
 import { hasPlexEpisodeCoordinate } from "../lib/plex-inventory";
 
 test("Plex scans overlap three shows while retaining a single 200ms TVDB gate", () => {

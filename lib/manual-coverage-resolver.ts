@@ -6,11 +6,10 @@ import { coverageDatabase } from "@/lib/sqlite";
 import { CoverageError } from "@/lib/manual-coverage";
 import { ProviderClient } from "@/lib/provider-client";
 import type { CoverageMember } from "@/lib/manual-coverage-model";
-const client = new ProviderClient(() => undefined, () => {
-});
+const client = new ProviderClient();
 export async function resolveCoverageUrls(urls: unknown) {
   // A failed attempt must not permanently disable later user-requested retries.
-  client.resetMetrics();
+  client.startRun();
   try {
     return await resolveCoverageInputs(urls);
   } catch (error) {

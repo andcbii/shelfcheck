@@ -4,7 +4,6 @@ import type { ScanLogger } from "@/lib/scan-log";
 
 type ProviderMetric = { requests: number; failures: number; retries: number; networkMs: number; queueWaitMs: number; rateLimitWaitMs: number };
 
-const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 export const MAX_PROVIDER_COOLDOWN_MS = 15 * 60 * 1000;
 
 export class ProviderHttpError extends Error {
@@ -51,19 +50,60 @@ export class ProviderCooldownTooLongError extends Error {
   }
 }
 
-export function retryDelay(response: Response, attempt: number) {
+/** Time, sleeping and per-attempt deadlines, injectable so pacing and timeouts can be tested in exact virtual milliseconds. */
+export type ProviderClock = {
+  now(): number;
+  sleep(milliseconds: number): Promise<void>;
+  /** An abort signal that fires after `milliseconds`, and a way to cancel it once the attempt ends. */
+  deadline(milliseconds: number): { signal: AbortSignal; clear(): void };
+};
+
+// Captured at load, as the request gate always did: pacing follows real time even where a caller fakes Date.
+const realNow = Date.now;
+
+export const systemClock: ProviderClock = {
+  now: () => realNow(),
+  sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  deadline: (milliseconds) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new DOMException("The provider request timed out.", "TimeoutError")), milliseconds);
+    timer.unref?.();
+    return { signal: controller.signal, clear: () => clearTimeout(timer) };
+  },
+};
+
+/** The Scan run that dispatched a request: where its log lines and rate-limit pauses go. */
+export type ProviderRun = {
+  logger: ScanLogger;
+  /** The run's log event prefix; empty keeps unprefixed names such as the Trakt scan's `request.response`. */
+  eventPrefix: string;
+  reportRateLimit(provider: ProviderName, paused: boolean, resumeAt?: string): void;
+};
+
+export type ProviderClientOptions = {
+  clock?: ProviderClock;
+  fetch?: typeof fetch;
+  /** The live Scan run that dispatched the current request; undefined outside one or once it settled. */
+  run?: () => ProviderRun | undefined;
+};
+
+/** Each attempt's deadline, covering the response headers and its body. */
+export const PROVIDER_ATTEMPT_TIMEOUT_MS = 30_000;
+const PROVIDER_ATTEMPTS = 5;
+
+export function retryDelay(response: Response, attempt: number, now = Date.now()) {
   const retryAfter = response.headers.get("Retry-After");
   if (retryAfter) {
     const seconds = Number(retryAfter);
     if (Number.isFinite(seconds)) return Math.max(1_000, seconds * 1000);
     const date = Date.parse(retryAfter);
-    if (Number.isFinite(date)) return Math.max(1_000, date - Date.now());
+    if (Number.isFinite(date)) return Math.max(1_000, date - now);
   }
   return Math.min(30_000, 1000 * 2 ** attempt);
 }
 
-export function acceptedRetryDelay(provider: ProviderName, response: Response, attempt: number) {
-  const delay = retryDelay(response, attempt);
+export function acceptedRetryDelay(provider: ProviderName, response: Response, attempt: number, now = Date.now()) {
+  const delay = retryDelay(response, attempt, now);
   if (response.status === 429 && delay > MAX_PROVIDER_COOLDOWN_MS) throw new ProviderCooldownTooLongError(provider, delay);
   return delay;
 }
@@ -72,76 +112,140 @@ function emptyMetrics(): Record<ProviderName, ProviderMetric> {
   return Object.fromEntries((["Plex", "TMDB", "TVDB", "Trakt"] as ProviderName[]).map((provider) => [provider, { requests: 0, failures: 0, retries: 0, networkMs: 0, queueWaitMs: 0, rateLimitWaitMs: 0 }])) as Record<ProviderName, ProviderMetric>;
 }
 
+/** An attempt that ran past its deadline, while waiting for headers or reading the body. */
+class AttemptTimedOut extends Error {}
+
+/** Reads the body within the attempt's deadline: a body that stops arriving is a timed-out attempt, not an unreadable response. */
+async function readBody(response: Response, signal: AbortSignal): Promise<string> {
+  if (signal.aborted) throw new AttemptTimedOut();
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_, reject) => { onAbort = () => reject(new AttemptTimedOut()); signal.addEventListener("abort", onAbort, { once: true }); });
+  try {
+    return await Promise.race([response.text(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    if (signal.aborted) response.body?.cancel().catch(() => {});
+  }
+}
+
+/**
+ * The one HTTP client for scan requests to Plex, TMDB, TVDB and Trakt.
+ *
+ * Transport state lasts as long as the client: each provider's request gate
+ * and rate-limit deadline, so a new Scan run still honours a Retry-After an
+ * earlier run received. Run state (metrics, the pauses this run has been
+ * shown, providers unavailable for this run) is reset by `startRun`. Log lines
+ * and pause reports go only to the run that dispatched the request.
+ */
 export class ProviderClient {
-  private readonly gate = new ProviderStartGate<ProviderName>();
+  private readonly clock: ProviderClock;
+  private readonly fetch: typeof fetch;
+  private readonly run: () => ProviderRun | undefined;
+  private readonly gate: ProviderStartGate<ProviderName>;
+  /** Process-wide: when each provider's latest rate-limit wait ends. */
+  private readonly rateLimitDeadline = new Map<ProviderName, number>();
   private currentMetrics = emptyMetrics();
+  /** Run state: the end of the pause this run has been shown, per provider. */
   private readonly rateLimitedUntil = new Map<ProviderName, number>();
   private readonly unavailable = new Map<ProviderName, ProviderCooldownTooLongError>();
 
-  constructor(private readonly logger: () => ScanLogger | undefined, private readonly onRateLimit: (provider: ProviderName, paused: boolean) => void) {}
+  constructor(options: ProviderClientOptions = {}) {
+    this.clock = options.clock || systemClock;
+    this.fetch = options.fetch || ((input, init) => globalThis.fetch(input, init));
+    this.run = options.run || (() => undefined);
+    this.gate = new ProviderStartGate<ProviderName>(this.clock);
+  }
 
-  resetMetrics() { this.currentMetrics = emptyMetrics(); this.rateLimitedUntil.clear(); this.unavailable.clear(); }
+  /** Starts a Scan run's state: metrics, shown pauses and run-only unavailability. Provider deadlines are kept. */
+  startRun() { this.currentMetrics = emptyMetrics(); this.rateLimitedUntil.clear(); this.unavailable.clear(); }
   metrics() { return this.currentMetrics; }
+
+  private event(run: ProviderRun | undefined, name: string) {
+    return run?.eventPrefix ? `${run.eventPrefix}.${name}` : name;
+  }
+
+  /** Shows the dispatching run a rate-limit pause still in force, such as one an earlier run received. */
+  private showPendingPause(provider: ProviderName) {
+    const until = this.rateLimitDeadline.get(provider) || 0;
+    if (until <= this.clock.now() || (this.rateLimitedUntil.get(provider) || 0) >= until) return;
+    this.rateLimitedUntil.set(provider, until);
+    this.run()?.reportRateLimit(provider, true, new Date(until).toISOString());
+  }
 
   async json<T>(url: string, init: RequestInit, provider: ProviderName): Promise<T> {
     const requested = requestIdentity(url,provider);
     const unavailable = this.unavailable.get(provider);
     if (unavailable) throw unavailable;
-    for (let attempt = 0; attempt < 5; attempt += 1) {
+    for (let attempt = 0; attempt < PROVIDER_ATTEMPTS; attempt += 1) {
+      this.showPendingPause(provider);
       const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
       const queuedUnavailable = this.unavailable.get(provider);
       if (queuedUnavailable) throw queuedUnavailable;
-      const requestStarted = Date.now();
+      const requestStarted = this.clock.now();
       const metric = this.currentMetrics[provider];
       metric.requests += 1;
+      const deadline = this.clock.deadline(PROVIDER_ATTEMPT_TIMEOUT_MS);
       try {
-        const response = await fetch(url, { ...init, signal: AbortSignal.timeout(30_000) });
-        const networkMs = Date.now() - requestStarted;
+        let response: Response;
+        let body: string | undefined;
+        try {
+          response = await this.fetch(url, { ...init, signal: deadline.signal });
+          if (response.ok) body = await readBody(response, deadline.signal);
+        } catch (error) {
+          throw deadline.signal.aborted ? new AttemptTimedOut() : error;
+        }
+        const run = this.run();
+        const networkMs = this.clock.now() - requestStarted;
         metric.networkMs += networkMs;
         metric.queueWaitMs += queueWaitMs;
         const parsed = new URL(url);
-        const details = { provider, path: `${parsed.pathname}${parsed.search}`, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
+        const details = { provider, path: `${parsed.pathname}${parsed.search}`, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, elapsedMs: networkMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
         if (response.ok) {
-          this.logger()?.info("plex.request.response", details);
-          if ((this.rateLimitedUntil.get(provider) || 0) <= Date.now()) {
+          run?.logger.info(this.event(run, "request.response"), details);
+          const shownUntil = this.rateLimitedUntil.get(provider);
+          if (shownUntil !== undefined && shownUntil <= this.clock.now()) {
             this.rateLimitedUntil.delete(provider);
-            this.onRateLimit(provider, false);
+            run?.reportRateLimit(provider, false);
           }
-          try { return await response.json() as T; } catch { throw new ProviderResponseError(provider, requested); }
+          try { return JSON.parse(body!) as T; } catch { throw new ProviderResponseError(provider, requested); }
         }
-        this.logger()?.warn("plex.request.response", details);
+        run?.logger.warn(this.event(run, "request.response"), details);
         if (response.status !== 429 && response.status < 500) throw new ProviderHttpError(provider, response.status, requested);
-        if (attempt === 4) throw new ProviderHttpError(provider, response.status, requested);
+        if (attempt === PROVIDER_ATTEMPTS - 1) throw new ProviderHttpError(provider, response.status, requested);
         let delay: number;
         try {
-          delay = acceptedRetryDelay(provider, response, attempt);
+          delay = acceptedRetryDelay(provider, response, attempt, this.clock.now());
         } catch (error) {
           if (error instanceof ProviderCooldownTooLongError) {
             this.unavailable.set(provider, error);
-            this.rateLimitedUntil.delete(provider);
-            this.onRateLimit(provider, false);
+            if (this.rateLimitedUntil.delete(provider)) run?.reportRateLimit(provider, false);
           }
           throw error;
         }
         metric.retries += 1;
         metric.rateLimitWaitMs += response.status === 429 ? delay : 0;
-        this.logger()?.warn("plex.request.retry", { ...details, delayMs: delay });
-        const retryAt = Date.now() + delay;
+        run?.logger.warn(this.event(run, "request.retry"), { ...details, delayMs: delay });
+        const retryAt = this.clock.now() + delay;
         if (response.status === 429) {
-          this.rateLimitedUntil.set(provider, Math.max(this.rateLimitedUntil.get(provider) || 0, retryAt));
-          this.onRateLimit(provider, true);
+          this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, retryAt));
+          const until = Math.max(this.rateLimitedUntil.get(provider) || 0, retryAt);
+          this.rateLimitedUntil.set(provider, until);
+          run?.reportRateLimit(provider, true, new Date(until).toISOString());
         }
         this.gate.delayUntil(provider, retryAt);
-        await wait(delay);
+        await this.clock.sleep(delay);
       } catch (error) {
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
         if (error instanceof ProviderHttpError || error instanceof ProviderResponseError) { metric.failures += 1; throw error; }
-        if (attempt === 4) { metric.failures += 1; throw new ProviderNetworkError(provider,requested); }
+        if (attempt === PROVIDER_ATTEMPTS - 1) { metric.failures += 1; throw new ProviderNetworkError(provider,requested); }
         const delay = Math.min(30_000, 1000 * 2 ** attempt);
         metric.retries += 1;
-        this.logger()?.warn("plex.request.network-retry", { provider, attempt: attempt + 1, delayMs: delay, error: `${provider} network request failed` });
-        this.gate.delayUntil(provider, Date.now() + delay);
-        await wait(delay);
+        const run = this.run();
+        run?.logger.warn(this.event(run, "request.network-retry"), { provider, attempt: attempt + 1, delayMs: delay, error: error instanceof AttemptTimedOut ? `${provider} request timed out` : `${provider} network request failed` });
+        this.gate.delayUntil(provider, this.clock.now() + delay);
+        await this.clock.sleep(delay);
+      } finally {
+        deadline.clear();
       }
     }
     throw new Error(`${provider} request failed.`);

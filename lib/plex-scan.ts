@@ -30,7 +30,8 @@ import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelecti
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { ProviderClient, ProviderResponseError } from "@/lib/provider-client";
+import { ProviderResponseError } from "@/lib/provider-client";
+import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
@@ -86,11 +87,8 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   },
 };
 
-// Provider callbacks reach only the live Plex Scan run that dispatched the request; a late one is a no-op.
-const providerClient = new ProviderClient(
-  () => scanRuns.bound("plex")?.logger,
-  (provider, paused) => scanRuns.bound("plex")?.reportRateLimit(provider, paused),
-);
+// The shared scan provider client: its log lines and pauses reach only the Scan run that dispatched each request.
+const providerClient = scanProviderClient;
 
 /** The saved relationship key of one provider request: its provider and URL. */
 function relationshipKey(provider: ProviderName, url: string) { return `${provider}:${url}`; }
@@ -843,7 +841,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         // Ignore tracking spans every report and Resume point write, including a forced failure save.
         finishIgnoreTracking = trackScanIgnores("plex", Date.parse(owner.startedAt));
         if (mappings.length) beginCoverageRecheck(coverageRevision);
-        providerClient.resetMetrics();
+        providerClient.startRun();
       },
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,

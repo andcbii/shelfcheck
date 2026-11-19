@@ -163,6 +163,8 @@ export type ScanRunSnapshot<P> = { point: P; details: LogDetails };
 /** What the run body uses. Every operation is a no-op once the run has settled. */
 export type ScanRunContext<P> = {
   owner: ScanRunOwner;
+  /** The mode's log event prefix, for the provider request events this run dispatches. */
+  eventPrefix: string;
   startedAt: string;
   /** This run's logger; silent once the run has settled. */
   logger: ScanLogger;
@@ -350,6 +352,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     };
     const context: ScanRunContext<P> = {
       owner,
+      eventPrefix: prefix,
       startedAt,
       logger: runLogger,
       activeWork,
@@ -502,13 +505,13 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
   }
 
   /**
-   * The live Scan run of `kind` that dispatched the current asynchronous work.
-   * A late callback from a settled run, a callback from another kind's run,
-   * and work outside any run get undefined.
+   * The live Scan run that dispatched the current asynchronous work, of `kind`
+   * when one is given. A late callback from a settled run, a callback from
+   * another kind's run, and work outside any run get undefined.
    */
-  function bound<P>(kind: ScanRunKind): ScanRunContext<P> | undefined {
+  function bound<P>(kind?: ScanRunKind): ScanRunContext<P> | undefined {
     const current = dispatching.getStore();
-    if (!current || current.kind !== kind || !current.context.isLive()) return undefined;
+    if (!current || (kind && current.kind !== kind) || !current.context.isLive()) return undefined;
     return current.context as ScanRunContext<P>;
   }
 

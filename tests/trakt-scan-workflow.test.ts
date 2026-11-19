@@ -76,10 +76,14 @@ async function fixture(t: TestContext) {
     progress: structuredClone(progress),
     /** Responses, by request path, served before the normal answer. */
     failures: new Map<string, (Response | Promise<Response> | (() => Response | Promise<Response>))[]>(),
+    /** Token refreshes Trakt's OAuth server answered, and its answer. */
+    refreshes: 0,
+    oauth: () => Response.json({ access_token: "refreshed-access", refresh_token: "refreshed-refresh", expires_in: 86_400, created_at: Math.floor(Date.now() / 1000) }),
   };
   const requests: string[] = [];
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = new URL(String(input));
+    if (url.hostname === "auth.trakt.tv" && url.pathname === "/oauth/token") { trakt.refreshes += 1; return trakt.oauth(); }
     assert.equal(url.hostname, "api.trakt.tv", `no request leaves the controlled Trakt API: ${url}`);
     requests.push(url.pathname);
     const failure = trakt.failures.get(url.pathname)?.shift();
@@ -510,4 +514,35 @@ test("Trakt checkpoint.saved log lines keep their reasons: interval, rate-limit 
   f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
   assert.equal((await f.run({ force: true })).status, "error");
   assert.deepEqual(savedReasons(await logLines()), ["error"], "a failure save logs reason error, as before");
+});
+
+// SHELFCHECK-67: today's login recovery, its wording and request log names, pinned before the
+// Trakt scan moves onto the shared provider client.
+
+test("a Trakt login that expires during a scan run is refreshed once and the scan run completes", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 401 })]);
+  const status = await f.run();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.equal(f.trakt.refreshes, 1);
+  assert.equal((await config.readTraktCredentials())?.accessToken, "refreshed-access");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+});
+
+test("a login Trakt still rejects after its refresh ends the scan run with the expired-login message", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 401 }), new Response("{}", { status: 401 })]);
+  const status = await f.run();
+  assert.equal(status.status, "error");
+  assert.equal(status.error, "Your Trakt login has expired. Log out, then log in again.");
+});
+
+test("Trakt scan request log lines keep their names, and a rate-limit header is logged", async (t) => {
+  const f = await fixture(t);
+  await f.settings({ diagnosticsEnabled: true });
+  f.trakt.failures.set("/sync/collection/shows", [() => Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1", "X-Ratelimit": JSON.stringify({ name: "AUTHED_API_GET_LIMIT", period: 300, limit: 1000, remaining: 990, until: "2026-11-11T12:05:00Z" }) } })]);
+  f.trakt.failures.set("/shows/2/progress/collection", [new Response("{}", { status: 503 })]);
+  assert.equal((await f.run()).status, "completed");
+  const events = new Set((await logLines()).map((line) => line.match(/\] (\S+) \|/)?.[1]));
+  for (const event of ["request.start", "request.response", "request.retry", "rate-limit"]) assert.ok(events.has(event), `shelfcheck.log has ${event}: ${[...events].join(", ")}`);
 });

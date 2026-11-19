@@ -57,14 +57,24 @@ test("concurrent requests rejected with the same token share one refresh, and ea
 });
 
 test("a late 401 for the old token reuses the newer token instead of refreshing again", async (t) => {
-  const { time, http, client, credentials, oauthRequests } = await setup(t, async ({ init, index }) => {
-    if (index === 1) { await time.clock.sleep(5_000); return json({}, { status: 401 }); }
-    return bearer(init) === `Bearer ${OLD}` ? json({}, { status: 401 }) : json({ ok: true });
+  // Barriers fix the order: both requests are sent with the old token before the first 401,
+  // and the second request's 401 arrives only after the refreshed login is in use.
+  let bothSent!: () => void;
+  const bothSentWithOld = new Promise<void>((resolve) => { bothSent = resolve; });
+  let refreshed!: () => void;
+  const newTokenInUse = new Promise<void>((resolve) => { refreshed = resolve; });
+  let oldSent = 0;
+  const { time, http, client, credentials, oauthRequests } = await setup(t, async ({ init }) => {
+    if (bearer(init) === `Bearer ${NEW}`) { refreshed(); return json({ ok: true }); }
+    oldSent += 1;
+    if (oldSent === 2) bothSent();
+    await (oldSent === 1 ? bothSentWithOld : newTokenInUse);
+    return json({}, { status: 401 });
   });
   const results = await time.runUntil(Promise.all([client.json(SEARCH, {}, "Trakt", credentials), client.json(SEARCH, {}, "Trakt", credentials)]));
   assert.deepEqual(results, [{ ok: true }, { ok: true }]);
   assert.equal(oauthRequests.length, 1, "the late rejection of the old token does not spend the new refresh token");
-  assert.equal(bearer(http.requests.at(-1)!.init), `Bearer ${NEW}`);
+  assert.deepEqual(http.requests.map(({ init }) => bearer(init)), [`Bearer ${OLD}`, `Bearer ${OLD}`, `Bearer ${NEW}`, `Bearer ${NEW}`]);
 });
 
 test("a 401 after a transient retry still gets its one authentication recovery", async (t) => {

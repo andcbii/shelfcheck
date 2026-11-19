@@ -17,6 +17,7 @@ const issues = await import("../lib/coverage-issues");
 const lifecycle = await import("../lib/scan-run");
 const logs = await import("../app/api/logs/route");
 const { scanProviderClient } = await import("../lib/scan-provider-client");
+const { systemClock } = await import("../lib/provider-client");
 hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
@@ -621,4 +622,15 @@ test("a poster lookup that Trakt refuses (403) ends the scan run instead of bein
   const failed = await f.run();
   assert.equal(failed.status, "error");
   assert.match(failed.error || "", /Trakt rejected this request \(403\)/);
+});
+
+test("a Trakt rate-limit reset more than 15 minutes away ends the scan run with the reset wording", async (t) => {
+  const f = await fixture(t);
+  // The reset is set from the provider clock, which the mocked Date does not move (earlier mocked sleeps do).
+  const until = new Date(systemClock.now() + 19.5 * 60_000).toISOString();
+  f.trakt.failures.set("/sync/collection/shows", [() => Response.json(f.trakt.library, { headers: { "X-Pagination-Page-Count": "1", "X-Ratelimit": JSON.stringify({ remaining: 0, until }) } })]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "Trakt's rate limit resets in 20 minutes. Start the scan again after that to resume.");
+  assert.deepEqual(perShow(f.requests), [], "the collection response was used; the next request was not sent");
 });

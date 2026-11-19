@@ -8,7 +8,7 @@ import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { runTrackedWorkerPool } from "@/lib/scan-concurrency";
-import { isProviderLoginFailure, isTraktAuthenticationFailure, ProviderCooldownTooLongError, type ProviderAuth, type ProviderCooldownReason } from "@/lib/provider-client";
+import { COOLDOWN_WORDING, isProviderLoginFailure, isTraktAuthenticationFailure, ProviderCooldownTooLongError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { scanRuns, type ScanRunMode, type ScanRunOwner, type ScanRunStatus } from "@/lib/scan-run";
 
@@ -94,11 +94,9 @@ function gracePeriod(value: unknown): number {
 const TRAKT_LOGIN_EXPIRED = "Your Trakt login has expired. Log out, then log in again.";
 const TRAKT_FORBIDDEN = "Trakt rejected this request (403). Check that the token and Client ID belong to the same application.";
 
-const TRAKT_COOLDOWN_WORDING: Record<ProviderCooldownReason, (minutes: number) => string> = {
-  "rate-limit": (minutes) => `Trakt asked Shelfcheck to wait ${minutes} minutes.`,
-  server: (minutes) => `Trakt is unavailable and asked Shelfcheck to wait ${minutes} minutes.`,
-  "rate-limit-reset": (minutes) => `Trakt's rate limit resets in ${minutes} minutes.`,
-};
+/** The Trakt scan's cooldown wording: its own for a rate limit, the shared provider wording otherwise. */
+const traktCooldownWording = (error: ProviderCooldownTooLongError, minutes: number) =>
+  error.reason === "rate-limit" ? `Trakt asked Shelfcheck to wait ${minutes} minutes.` : COOLDOWN_WORDING[error.reason]("Trakt", minutes);
 
 /**
  * Ends the Trakt scan run: a provider cooldown, or a Trakt login that cannot be
@@ -110,23 +108,28 @@ class TraktScanStoppedError extends Error {}
 function presentTraktFailure(error: unknown): unknown {
   if (error instanceof ProviderCooldownTooLongError) {
     // The time still to wait, which a later run reports as it shrinks; only the wording is rounded.
-    return new TraktScanStoppedError(`${TRAKT_COOLDOWN_WORDING[error.reason](Math.ceil(error.retryAfterMs / 60_000))} Start the scan again after that to resume.`, { cause: error });
+    return new TraktScanStoppedError(`${traktCooldownWording(error, Math.ceil(error.retryAfterMs / 60_000))} Start the scan again after that to resume.`, { cause: error });
   }
   if (isTraktAuthenticationFailure(error)) return new TraktScanStoppedError(error.status === 401 ? TRAKT_LOGIN_EXPIRED : TRAKT_FORBIDDEN, { cause: error });
   if (isProviderLoginFailure("Trakt", error)) return new TraktScanStoppedError(error.message, { cause: error });
   return error;
 }
 
-const traktRequest: RequestInit = { headers: { Accept: "application/json", "Content-Type": "application/json" } };
+const traktJsonInit: RequestInit = { headers: { Accept: "application/json", "Content-Type": "application/json" } };
+
+/** An optional lookup's fallback for an ordinary failure; a failure that ends the run is never swallowed. */
+function unlessRunStops<T>(fallback: (error: unknown) => T) {
+  return (error: unknown): T => { if (error instanceof TraktScanStoppedError) throw error; return fallback(error); };
+}
 
 /** One Trakt request through the shared provider client, with the run's Trakt login. */
 async function traktJson<T>(trakt: ProviderAuth, path: string): Promise<T> {
-  try { return await scanProviderClient.json<T>(`${TRAKT}${path}`, traktRequest, "Trakt", trakt); } catch (error) { throw presentTraktFailure(error); }
+  try { return await scanProviderClient.json<T>(`${TRAKT}${path}`, traktJsonInit, "Trakt", trakt); } catch (error) { throw presentTraktFailure(error); }
 }
 
 /** Every page of a Trakt list through the shared provider client. */
 async function traktAll<T>(trakt: ProviderAuth, path: string): Promise<T[]> {
-  try { return await scanProviderClient.pages<T>(`${TRAKT}${path}`, traktRequest, "Trakt", trakt); } catch (error) { throw presentTraktFailure(error); }
+  try { return await scanProviderClient.pages<T>(`${TRAKT}${path}`, traktJsonInit, "Trakt", trakt); } catch (error) { throw presentTraktFailure(error); }
 }
 
 /**
@@ -260,12 +263,11 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         let airDateRequestSucceeded = true;
         if (requiresAirDates) activeWork.update(id, item.show.title, "air-dates");
         const episodeDates = requiresAirDates
-          ? await traktJson<TraktSeason[]>(trakt, `/shows/${id}/seasons?extended=episodes,full`).catch((error) => {
-            if (error instanceof TraktScanStoppedError) throw error;
+          ? await traktJson<TraktSeason[]>(trakt, `/shows/${id}/seasons?extended=episodes,full`).catch(unlessRunStops((error) => {
             airDateRequestSucceeded = false;
             logger.warn("show.airdates-unavailable", { traktId: item.show.ids.trakt, title: item.show.title, error: error instanceof Error ? error.message : String(error) });
             return [];
-          })
+          }))
           : [];
         const firstAiredByEpisode = new Map<string, string | null | undefined>();
         for (const season of episodeDates) for (const episode of season.episodes || []) {
@@ -286,7 +288,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });
         if (missing.length && !item.show.images?.poster?.length) {
           activeWork.update(id, item.show.title, "poster");
-          const details = await traktJson<TraktShow>(trakt, `/shows/${id}?extended=full,images`).catch((error) => { if (error instanceof TraktScanStoppedError) throw error; return null; });
+          const details = await traktJson<TraktShow>(trakt, `/shows/${id}?extended=full,images`).catch(unlessRunStops(() => null));
           if (details?.images?.poster?.[0]) item.show = compactTraktShow({ ...item.show, images: { poster: [details.images.poster[0]] } });
           for (const result of missing) result.show = item.show;
         }

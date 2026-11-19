@@ -60,7 +60,7 @@ export type ProviderCooldownReason = "rate-limit" | "server" | "rate-limit-reset
 /** A provider cooldown: why it was asked for, when it ends, and the safe evidence of the response that asked. */
 export type ProviderCooldown = { reason: ProviderCooldownReason; deadline: number; status?: number; requested?: ProviderRequestIdentity };
 
-const COOLDOWN_WORDING: Record<ProviderCooldownReason, (provider: ProviderName, minutes: number) => string> = {
+export const COOLDOWN_WORDING: Record<ProviderCooldownReason, (provider: ProviderName, minutes: number) => string> = {
   "rate-limit": (provider, minutes) => `${provider} requested a ${minutes}-minute cooldown.`,
   server: (provider, minutes) => `${provider} is unavailable and asked Shelfcheck to wait ${minutes} minutes.`,
   "rate-limit-reset": (provider, minutes) => `${provider}'s rate limit resets in ${minutes} minutes.`,
@@ -89,20 +89,28 @@ export type ProviderClock = {
 };
 
 /**
- * The provider clock: real time (read through the Date.now captured at load,
- * so a faked Date never moves it), advanced by every completed sleep and never
- * running backwards. A sleep therefore always reaches its target, whether
- * timers are real or mocked, and deadlines measured with it stay consistent.
+ * The provider clock. Real time comes from performance.now, offset to the wall
+ * clock once at load, so it never runs backwards and a faked Date never moves
+ * it. With real timers it simply follows real time. When timers are mocked, a
+ * completed sleep advances it to that sleep's target, so a wait always reaches
+ * its target and deadlines measured with it stay consistent.
  */
 function monotonicClock(): ProviderClock {
-  const realNow = Date.now;
+  const offset = Date.now() - performance.now();
+  const realNow = () => offset + performance.now();
   let reached = 0;
   const now = () => Math.max(reached, realNow());
   return {
     now,
     sleep: (milliseconds) => {
-      const target = now() + Math.max(0, milliseconds);
-      return new Promise<void>((resolve) => setTimeout(() => { reached = Math.max(reached, target); resolve(); }, milliseconds));
+      const wait = Math.max(0, milliseconds);
+      const startedReal = realNow();
+      const target = now() + wait;
+      return new Promise<void>((resolve) => setTimeout(() => {
+        // Real timers took real time: follow it. A timer that fired without real time passing was mocked: jump to the target.
+        if (realNow() - startedReal < wait - MOCKED_SLEEP_TOLERANCE_MS) reached = Math.max(reached, target);
+        resolve();
+      }, milliseconds));
     },
     deadline: (milliseconds) => {
       const controller = new AbortController();
@@ -112,6 +120,9 @@ function monotonicClock(): ProviderClock {
     },
   };
 }
+
+/** How much earlier than asked a real timer may fire before the clock treats it as mocked. */
+const MOCKED_SLEEP_TOLERANCE_MS = 5;
 
 export const systemClock: ProviderClock = monotonicClock();
 
@@ -260,6 +271,11 @@ export class ProviderClient {
     return run?.eventPrefix ? `${run.eventPrefix}.${name}` : name;
   }
 
+  /** Keeps the longest rate-limit pause for a provider, which runs are shown while they wait on it. */
+  private extendRateLimitPause(provider: ProviderName, until: number) {
+    this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, until));
+  }
+
   /** Shows the dispatching run a rate-limit pause still in force, such as one an earlier run received. */
   private showPendingPause(provider: ProviderName, state: RunState) {
     const until = this.rateLimitDeadline.get(provider) || 0;
@@ -299,7 +315,7 @@ export class ProviderClient {
     else if (remaining > MAX_PROVIDER_COOLDOWN_MS) throw this.recordCooldown(provider, cooldown, state);
     else {
       this.gate.delayUntil(provider, cooldown.deadline);
-      if (cooldown.reason !== "server") this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, cooldown.deadline));
+      if (cooldown.reason !== "server") this.extendRateLimitPause(provider, cooldown.deadline);
     }
   }
 
@@ -338,7 +354,7 @@ export class ProviderClient {
       return;
     }
     this.gate.delayUntil("Trakt", resumeAt);
-    this.rateLimitDeadline.set("Trakt", Math.max(this.rateLimitDeadline.get("Trakt") || 0, resumeAt));
+    this.extendRateLimitPause("Trakt", resumeAt);
   }
 
   /**
@@ -373,6 +389,8 @@ export class ProviderClient {
   private async request<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<{ value: T; headers: Headers }> {
     let recovered = false;
     const requested = requestIdentity(url,provider);
+    const parsedUrl = new URL(url);
+    const path = `${parsedUrl.pathname}${parsedUrl.search}`;
     const state = this.runState;
     this.assertAvailable(provider, state);
     for (let attempt = 0; attempt < PROVIDER_ATTEMPTS; attempt += 1) {
@@ -402,8 +420,8 @@ export class ProviderClient {
           const headers = new Headers(init.headers);
           if (!headers.has("User-Agent")) headers.set("User-Agent", SHELFCHECK_USER_AGENT);
           for (const [name, value] of Object.entries(credential?.headers || {})) headers.set(name, value);
-          const sending = this.run();
-          sending?.logger.info(this.event(sending, "request.start"), { provider, path: `${new URL(url).pathname}${new URL(url).search}`, attempt: attempt + 1 });
+          const dispatchingRun = this.run();
+          dispatchingRun?.logger.info(this.event(dispatchingRun, "request.start"), { provider, path, attempt: attempt + 1 });
           response = await this.fetch(url, { ...init, headers, signal: deadline.signal });
           if (response.ok) body = await readBody(response, deadline.signal);
         } catch (error) {
@@ -413,9 +431,8 @@ export class ProviderClient {
         const networkMs = this.clock.now() - requestStarted;
         metric.networkMs += networkMs;
         metric.queueWaitMs += queueWaitMs;
-        const parsed = new URL(url);
         if (provider === "Trakt") this.observeTraktRateLimit(response, run, state);
-        const details = { provider, path: `${parsed.pathname}${parsed.search}`, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, elapsedMs: networkMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
+        const details = { provider, path, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, elapsedMs: networkMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
         if (response.ok) {
           run?.logger.info(this.event(run, "request.response"), details);
           const shownUntil = state.shownPauseUntil.get(provider);
@@ -444,7 +461,7 @@ export class ProviderClient {
         // The provider's wait binds every later request, even when this request has no attempts left.
         const retryAt = this.clock.now() + delay;
         this.gate.delayUntil(provider, retryAt);
-        if (response.status === 429) this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, retryAt));
+        if (response.status === 429) this.extendRateLimitPause(provider, retryAt);
         if (attempt === PROVIDER_ATTEMPTS - 1) throw new ProviderHttpError(provider, response.status, requested);
         metric.retries += 1;
         metric.rateLimitWaitMs += response.status === 429 ? delay : 0;

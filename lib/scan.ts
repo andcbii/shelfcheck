@@ -5,6 +5,7 @@ import { createScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, trackScanIgnores, writeSingleUserScanStatus } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
+import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { runTrackedWorkerPool } from "@/lib/scan-concurrency";
@@ -164,7 +165,7 @@ async function traktRequest(path: string): Promise<Response> {
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
-          "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
+          "User-Agent": SHELFCHECK_USER_AGENT,
           "trakt-api-version": "2",
           "trakt-api-key": credentials.clientId,
           Authorization: `Bearer ${credentials.accessToken}`,

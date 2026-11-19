@@ -15,6 +15,7 @@ import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, trackScanIgnores, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
 import { validTraktCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
+import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
 import { episodeReference, titleDependentTvdbEpisodeIds, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
@@ -22,14 +23,15 @@ import { recoverTvdbTitles, withTitleRecovery, type TitleRecoveryState } from "@
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
-import { PLEX_SCAN_WORKERS, type PlexProviderName } from "@/lib/plex-provider-policy";
+import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { PlexProviderClient, ProviderResponseError } from "@/lib/plex-provider-client";
+import { ProviderResponseError } from "@/lib/provider-client";
+import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
@@ -62,7 +64,6 @@ const TMDB = "https://api.themoviedb.org/3";
 const TVDB = "https://api4.thetvdb.com/v4";
 const TRAKT = "https://api.trakt.tv";
 const CACHE_VERSION = PLEX_CACHE_VERSION;
-type ProviderName = PlexProviderName;
 
 /**
  * The Plex scan mode's adapter to the scan run lifecycle: its status and
@@ -86,11 +87,6 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   },
 };
 
-// Provider callbacks reach only the live Plex Scan run that dispatched the request; a late one is a no-op.
-const providerClient = new PlexProviderClient(
-  () => scanRuns.bound("plex")?.logger,
-  (provider, paused) => scanRuns.bound("plex")?.reportRateLimit(provider, paused),
-);
 
 /** The saved relationship key of one provider request: its provider and URL. */
 function relationshipKey(provider: ProviderName, url: string) { return `${provider}:${url}`; }
@@ -141,8 +137,8 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
   let receivedAt: string;
   try {
     if (provider === "TVDB" && show?.tvdbAuthenticationError) throw show.tvdbAuthenticationError;
-    if (sharedCrosswalk !== undefined) ({value, receivedAt} = await requestTmdbCrosswalk(sharedCrosswalk, () => providerClient.json<T>(url, init, provider)));
-    else { value = await providerClient.json<T>(url, init, provider); receivedAt = new Date().toISOString(); }
+    if (sharedCrosswalk !== undefined) ({value, receivedAt} = await requestTmdbCrosswalk(sharedCrosswalk, () => scanProviderClient.json<T>(url, init, provider)));
+    else { value = await scanProviderClient.json<T>(url, init, provider); receivedAt = new Date().toISOString(); }
   }
   catch (error) {
     if (show && matching) {
@@ -208,7 +204,7 @@ async function traktJson<T>(path: string, credentials: TraktCredentials): Promis
     Authorization: `Bearer ${credentials.accessToken}`,
     "trakt-api-key": credentials.clientId,
     "trakt-api-version": "2",
-    "User-Agent": `Shelfcheck/${SHELFCHECK_VERSION} (+https://github.com/andcbii/shelfcheck)`,
+    "User-Agent": SHELFCHECK_USER_AGENT,
   } }, "Trakt");
 }
 
@@ -843,14 +839,14 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         // Ignore tracking spans every report and Resume point write, including a forced failure save.
         finishIgnoreTracking = trackScanIgnores("plex", Date.parse(owner.startedAt));
         if (mappings.length) beginCoverageRecheck(coverageRevision);
-        providerClient.resetMetrics();
+        scanProviderClient.startRun();
       },
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,
       committed: () => completeCoverageRecheck(coverageRevision),
       succeeded: () => resolveCoverageIssue("scan-failure"),
       failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
-      failureDetails: () => ({ providerMetrics: providerClient.metrics() }),
+      failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
       ended: () => finishIgnoreTracking?.(),
     },
   }, async (run) => {
@@ -859,7 +855,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const setHeartbeat = (key: string, show: string, phase: string) => activeWork.update(key, show, phase);
   const config = await readPlexProviders();
   if (config && mappings.length) {
-    await recheckCoverageHealth(providerClient, config);
+    await recheckCoverageHealth(scanProviderClient, config);
     coverageRevision = coverageState().revision;
     mappings = listCoverageMappings();
   }
@@ -875,7 +871,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
   logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
   let tvdbAuthenticationError: unknown;
-  const token = await authenticateTvdb(providerClient, config.tvdbApiKey, config.tvdbPin).then(token=>{resolveCoverageIssue("provider-authentication:TVDB");return token;}).catch(error=>{
+  const token = await authenticateTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin).then(token=>{resolveCoverageIssue("provider-authentication:TVDB");return token;}).catch(error=>{
     tvdbAuthenticationError = error;
     setCoverageIssue({id:"provider-authentication:TVDB",operation:"provider-authentication",provider:"TVDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TVDB",kind:"authentication"},impact:"TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained."})});
     return "";
@@ -1187,7 +1183,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
       }
     };
-    const requestEnglishTitle = (tvdbEpisodeId: number) => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : providerClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
+    const requestEnglishTitle = (tvdbEpisodeId: number) => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : scanProviderClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
     const loadTvdb = async (id: number, mandatory: boolean, refreshAfter?: number) => {
       const savedTvdb = inputs.tvdb[String(id)];
       const reuseTvdb = reuseProviderCatalogue({provider:"tvdb",now:startedAt,downloadedAt:savedTvdb?.downloadedAt,usable:usableProviderCatalogue(savedTvdb),mandatory,targeted:!!targetRatingKey,changed:tvdbCatalogueChanges.has(id),refreshAfter});
@@ -1404,7 +1400,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     processed,
     total: candidates.length,
     finishedAt,
-    details: { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: providerClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) },
+    details: { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: scanProviderClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) },
   });
   });
 }

@@ -12,6 +12,7 @@ const api = await import("../app/api/plex/manual-coverage/route");
 const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 const scan = await import("../app/api/plex/scan/route");
+const { scanProviderClient } = await import("../lib/scan-provider-client");
 hook.deregister();
 test("reviewed one-to-one mappings are durable and membership conflicts leave saved mappings intact", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "coverage-"));
@@ -227,6 +228,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   healthFailure = 429;
   assert.equal((await rerun()).coverage.pending,1,"Long cooldowns retain pending state without deleting mappings");
   assert.equal((await mappingList()).find((m: {id:string})=>m.id===saved.mapping.id).health,"pending");
+  // TVDB asked for a day; a server restart forgets that provider cooldown, so the next scan contacts TVDB again.
+  scanProviderClient.forgetProviderDeadlines();
   healthFailure = 404;
   const deletedMember = await rerun();
   let broken = (await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acceptedRetryDelay, ProviderCooldownTooLongError, retryDelay } from "../lib/plex-provider-client";
+import { acceptedRetryDelay, ProviderCooldownTooLongError, retryDelay } from "../lib/provider-client";
 
 test("provider retries honor the complete Retry-After duration", () => {
   const response = new Response(null, { status: 429, headers: { "Retry-After": "127" } });

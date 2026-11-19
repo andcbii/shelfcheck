@@ -3,11 +3,11 @@ import { authenticateTvdb } from "@/lib/tvdb-auth";
 import "server-only";
 import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 import { listCoverageMappings, MISSING_MEMBER_MESSAGE, updateCoverageHealth } from "@/lib/manual-coverage";
-import { PlexProviderClient, ProviderHttpError, ProviderResponseError } from "@/lib/plex-provider-client";
+import { ProviderClient, ProviderHttpError, ProviderResponseError } from "@/lib/provider-client";
 
 type Credentials = {tmdbToken:string;tvdbApiKey:string;tvdbPin?:string};
 
-export async function recheckCoverageHealth(client: PlexProviderClient, config: Credentials) {
+export async function recheckCoverageHealth(client: ProviderClient, config: Credentials) {
   let token: Promise<string> | undefined;
   const tvdbToken = () => token ||= authenticateTvdb(client, config.tvdbApiKey, config.tvdbPin);
   async function memberHealth(member: CoverageMember): Promise<NonNullable<CoverageMapping["health"]>> {

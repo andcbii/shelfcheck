@@ -297,6 +297,8 @@ export class ProviderClient {
     const error = new ProviderCooldownTooLongError(provider, longest.deadline - this.clock.now(), longest);
     state.unavailable.set(provider, error);
     if (state.shownPauseUntil.delete(provider)) this.run()?.reportRateLimit(provider, false);
+    // Requests sleeping on this provider (queued at the gate, or between retries) look again at once.
+    this.gate.wake(provider);
     return error;
   }
 
@@ -335,23 +337,29 @@ export class ProviderClient {
    * Reads Trakt's X-Ratelimit header. With 50 or fewer calls left, later
    * requests wait for the reported reset plus a 250 ms cushion; a reset more
    * than 15 minutes away is a provider cooldown, though this response is still
-   * used. Unreadable, non-finite or ended windows are ignored.
+   * used: the reset cooldown is returned for a failed response to end on.
+   * A header that is not an object with a finite numeric quota, or whose
+   * window has ended, is logged as invalid and changes nothing.
    */
-  private observeTraktRateLimit(response: Response, run: ProviderRun | undefined, state: RunState) {
+  private observeTraktRateLimit(response: Response, run: ProviderRun | undefined, state: RunState): ProviderCooldownTooLongError | undefined {
     const header = response.headers.get("X-Ratelimit");
     if (!header) return;
-    let reported: { remaining?: unknown; until?: unknown };
-    try { reported = JSON.parse(header); } catch { run?.logger.warn(this.event(run, "rate-limit.invalid"), { header }); return; }
-    run?.logger.info(this.event(run, "rate-limit"), reported as Record<string, unknown>);
-    const remaining = Number(reported?.remaining);
-    const until = typeof reported?.until === "string" ? Date.parse(reported.until) : NaN;
-    if (!Number.isFinite(remaining) || (Number.isFinite(until) && until <= this.clock.now())) return;
-    this.traktWindow = { remaining, ...(Number.isFinite(until) ? { until } : {}) };
-    if (remaining > TRAKT_PAUSE_REMAINING || !Number.isFinite(until)) return;
+    let reported: unknown;
+    try { reported = JSON.parse(header); } catch { reported = undefined; }
+    const record = reported && typeof reported === "object" && !Array.isArray(reported) ? reported as Record<string, unknown> : undefined;
+    const remaining = typeof record?.remaining === "number" && Number.isFinite(record.remaining) ? record.remaining : undefined;
+    const until = typeof record?.until === "string" ? Date.parse(record.until) : record?.until === undefined ? undefined : NaN;
+    if (!record || remaining === undefined || (until !== undefined && !Number.isFinite(until))) {
+      run?.logger.warn(this.event(run, "rate-limit.invalid"), { header });
+      return;
+    }
+    run?.logger.info(this.event(run, "rate-limit"), record);
+    if (until !== undefined && until <= this.clock.now()) return;
+    this.traktWindow = { remaining, ...(until !== undefined ? { until } : {}) };
+    if (remaining > TRAKT_PAUSE_REMAINING || until === undefined) return;
     const resumeAt = until + TRAKT_RESET_CUSHION_MS;
     if (resumeAt - this.clock.now() > MAX_PROVIDER_COOLDOWN_MS) {
-      this.recordCooldown("Trakt", { reason: "rate-limit-reset", deadline: resumeAt, status: response.status }, state);
-      return;
+      return this.recordCooldown("Trakt", { reason: "rate-limit-reset", deadline: resumeAt, status: response.status }, state);
     }
     this.gate.delayUntil("Trakt", resumeAt);
     this.extendRateLimitPause("Trakt", resumeAt);
@@ -405,7 +413,7 @@ export class ProviderClient {
         }
         this.assertAvailable(provider, state);
       }
-      const { waitMs: queueWaitMs } = await this.gate.wait(provider, () => this.spacing(provider));
+      const { waitMs: queueWaitMs } = await this.gate.wait(provider, () => this.spacing(provider), () => this.assertAvailable(provider, state));
       // Nothing is awaited from here to the send, so this check and the newest token hold at dispatch.
       this.assertAvailable(provider, state);
       const credential = auth?.credential();
@@ -431,7 +439,7 @@ export class ProviderClient {
         const networkMs = this.clock.now() - requestStarted;
         metric.networkMs += networkMs;
         metric.queueWaitMs += queueWaitMs;
-        if (provider === "Trakt") this.observeTraktRateLimit(response, run, state);
+        const resetCooldown = provider === "Trakt" ? this.observeTraktRateLimit(response, run, state) : undefined;
         const details = { provider, path, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, elapsedMs: networkMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
         if (response.ok) {
           run?.logger.info(this.event(run, "request.response"), details);
@@ -443,6 +451,8 @@ export class ProviderClient {
           try { return { value: JSON.parse(body!) as T, headers: response.headers }; } catch { throw new ProviderResponseError(provider, requested); }
         }
         run?.logger.warn(this.event(run, "request.response"), details);
+        // A failed response that reported a reset over the limit ends here: no recovery, no retry sleep.
+        if (resetCooldown) throw resetCooldown;
         if (response.status === 401 && auth && credential && !recovered) {
           // The one authentication recovery: refresh, then replay without spending a transient attempt.
           recovered = true;
@@ -471,7 +481,7 @@ export class ProviderClient {
           state.shownPauseUntil.set(provider, until);
           run?.reportRateLimit(provider, true, new Date(until).toISOString());
         }
-        await this.clock.sleep(delay);
+        await this.gate.sleep(provider, delay);
       } catch (error) {
         // A login that cannot be recovered makes the provider unavailable for the rest of the run, queued requests included.
         if (auth && isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
@@ -484,7 +494,7 @@ export class ProviderClient {
         const run = this.run();
         run?.logger.warn(this.event(run, "request.network-retry"), { provider, attempt: attempt + 1, delayMs: delay, error: error instanceof AttemptTimedOut ? `${provider} request timed out` : `${provider} network request failed` });
         this.gate.delayUntil(provider, this.clock.now() + delay);
-        await this.clock.sleep(delay);
+        await this.gate.sleep(provider, delay);
       } finally {
         deadline.clear();
       }

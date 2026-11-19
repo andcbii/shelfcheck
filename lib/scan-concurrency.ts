@@ -19,25 +19,55 @@ export class ProviderStartGate<TProvider> {
 
   constructor(private readonly clock: Clock = { now: Date.now, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) }) {}
 
-  /** Waits for this provider's turn. `spacingMs` may be a function: it is read when the request starts, so it follows the latest pacing. */
-  async wait(provider: TProvider, spacingMs: number | (() => number)) {
+  private readonly sleepers = new Map<TProvider, Set<() => void>>();
+
+  /**
+   * Waits for this provider's turn. `spacingMs` may be a function: it is read
+   * when the request starts, so it follows the latest pacing. `check` runs
+   * before the wait and whenever a wait ends or is woken; a throw ends the wait
+   * and releases the turn, so queued requests can stop as soon as the provider
+   * becomes unavailable.
+   */
+  async wait(provider: TProvider, spacingMs: number | (() => number), check?: () => void) {
     let release!: () => void;
     const previous = this.gates.get(provider) || Promise.resolve();
     this.gates.set(provider, new Promise<void>((resolve) => { release = resolve; }));
     await previous;
-    let waitMs = 0;
-    // A completed sleep counts as reaching its target even if the clock reads earlier (a frozen or
-    // differently mocked clock); only a later deadline set meanwhile, such as a cooldown, waits again.
-    let now = this.clock.now();
-    for (let target = this.nextStarts.get(provider) || 0; target > now; target = this.nextStarts.get(provider) || 0) {
-      waitMs += target - now;
-      await this.clock.sleep(target - now);
-      now = Math.max(this.clock.now(), target);
+    try {
+      check?.();
+      let waitMs = 0;
+      // A completed sleep counts as reaching its target even if the clock reads earlier (a frozen or
+      // differently mocked clock); only a later deadline set meanwhile, such as a cooldown, waits again.
+      let now = this.clock.now();
+      for (let target = this.nextStarts.get(provider) || 0; target > now; target = this.nextStarts.get(provider) || 0) {
+        waitMs += target - now;
+        const completed = await this.sleep(provider, target - now);
+        check?.();
+        now = completed ? Math.max(this.clock.now(), target) : this.clock.now();
+      }
+      const startedAt = now;
+      this.nextStarts.set(provider, startedAt + (typeof spacingMs === "function" ? spacingMs() : spacingMs));
+      return { waitMs, startedAt };
+    } finally {
+      release();
     }
-    const startedAt = now;
-    this.nextStarts.set(provider, startedAt + (typeof spacingMs === "function" ? spacingMs() : spacingMs));
-    release();
-    return { waitMs, startedAt };
+  }
+
+  /** Sleeps for this provider until the time passes (true) or `wake` ends it early (false). */
+  sleep(provider: TProvider, milliseconds: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const sleepers = this.sleepers.get(provider) || new Set<() => void>();
+      this.sleepers.set(provider, sleepers);
+      const finish = (completed: boolean) => { if (sleepers.delete(woken)) resolve(completed); };
+      const woken = () => finish(false);
+      sleepers.add(woken);
+      this.clock.sleep(milliseconds).then(() => finish(true));
+    });
+  }
+
+  /** Ends every current sleep for this provider early, so its waiters look again. */
+  wake(provider: TProvider) {
+    for (const woken of [...(this.sleepers.get(provider) || [])]) woken();
   }
 
   /** Forgets every provider's next start, as a server restart does. */

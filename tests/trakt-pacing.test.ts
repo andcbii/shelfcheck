@@ -91,3 +91,60 @@ test("other providers keep their own spacing", async () => {
   await time.runUntil(Promise.all([1, 2, 3].map(() => client.json("https://api.themoviedb.org/3/tv/1", {}, "TMDB"))));
   assert.deepEqual(gaps(starts), [50, 50], "a rate-limit header on another provider changes nothing");
 });
+
+test("rate-limit headers that are not an object with a finite numeric quota are ignored and never break a successful response", async () => {
+  const headers = [
+    { "X-Ratelimit": "null" },
+    { "X-Ratelimit": "42" },
+    { "X-Ratelimit": "\"text\"" },
+    { "X-Ratelimit": JSON.stringify({ remaining: null, until: new Date(START + 20 * MINUTE).toISOString() }) },
+    { "X-Ratelimit": JSON.stringify({ remaining: "5", until: new Date(START + 20 * MINUTE).toISOString() }) },
+    { "X-Ratelimit": JSON.stringify({ remaining: 3, until: 12345 }) },
+    {},
+  ];
+  const { time, runs, http, starts, client } = setup((index) => (headers[index] || {}) as Record<string, string>);
+  const run = runs.start("trakt", async () => {
+    client.startRun();
+    for (let index = 0; index < headers.length; index += 1) assert.deepEqual(await client.json(TRAKT, {}, "Trakt"), { index });
+  });
+  await time.runUntil(run.settled);
+  assert.equal(http.requests.length, headers.length, "each response was used once, never retried");
+  assert.deepEqual(gaps(starts), headers.slice(1).map(() => 100), "no pause, slower spacing or cooldown from a malformed header");
+  for (const line of runs.lines.filter((entry) => /rate-limit/.test(entry.event))) {
+    assert.ok(line.details && typeof line.details === "object" && !Array.isArray(line.details), `log details stay an object: ${JSON.stringify(line)}`);
+  }
+});
+
+test("a failed response that reports a reset over 15 minutes away ends the request at once, without its Retry-After sleep", async () => {
+  const time = fakeClock(START);
+  const http = fakeFetch(() => new Response(null, { status: 429, headers: { ...limit(0, 20 * MINUTE), "Retry-After": "600" } }));
+  const client = new ProviderClient({ clock: time.clock, fetch: http.fetch });
+  client.startRun();
+  const error = await time.runUntil(client.json(TRAKT, {}, "Trakt").then(() => undefined, (caught: unknown) => caught));
+  assert.ok(error instanceof ProviderCooldownTooLongError);
+  assert.equal(error.reason, "rate-limit-reset");
+  assert.equal(time.elapsed(), 0, "no 600-second sleep first");
+  assert.equal(http.requests.length, 1);
+});
+
+test("a request already waiting at the gate on an earlier reset is rejected as soon as another response reports a reset over 15 minutes away", async () => {
+  // Two requests in flight: the first answers at 500 ms with a 10-minute reset, the second at 1,100 ms with a 20-minute one.
+  const time = fakeClock(START);
+  const http = fakeFetch(async ({ index }) => {
+    await time.clock.sleep(index === 0 ? 500 : 1_000);
+    return index === 0 ? json({ first: true }, { headers: limit(0, 10 * MINUTE) }) : json({ second: true }, { headers: limit(0, 20 * MINUTE) });
+  });
+  const client = new ProviderClient({ clock: time.clock, fetch: http.fetch });
+  client.startRun();
+  const first = client.json(TRAKT, {}, "Trakt");
+  const second = client.json(TRAKT, {}, "Trakt");
+  await time.advance(600);
+  // Queued after the 10-minute reset is known, so it sleeps at the gate.
+  const queued = client.json(TRAKT, {}, "Trakt").then(() => undefined, (caught: unknown) => caught);
+  const [firstValue, secondValue, queuedError] = await time.runUntil(Promise.all([first, second, queued]));
+  assert.deepEqual(firstValue, { first: true });
+  assert.deepEqual(secondValue, { second: true }, "the response that reported the far-off reset is still used");
+  assert.ok(queuedError instanceof ProviderCooldownTooLongError && queuedError.reason === "rate-limit-reset", String(queuedError));
+  assert.ok(time.elapsed() < 5_000, `the queued request is rejected promptly, not after the 10-minute wait: ${time.elapsed()} ms`);
+  assert.equal(http.requests.length, 2);
+});

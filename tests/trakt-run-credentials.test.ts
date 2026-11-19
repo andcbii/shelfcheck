@@ -162,14 +162,14 @@ test("a token another caller already refreshed is adopted instead of spending it
   assert.deepEqual(http.requests.map(({ init }) => bearer(init)), [`Bearer ${OLD}`, "Bearer secret-access-elsewhere"]);
 });
 
-test("requests that waited out a slow proactive refresh still start at least 250 ms apart", async (t) => {
+test("requests that waited out a slow proactive refresh still start Trakt's 100 ms spacing apart", async (t) => {
   const starts: number[] = [];
   const { time, client } = await setup(t, () => { starts.push(time.elapsed()); return json({ ok: true }); }, async () => { await time.clock.sleep(2_000); return renewed(); });
   await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret-client-secret", accessToken: OLD, refreshToken: "secret-refresh-old", expiresAt: Date.now() + 30_000, redirectUri: "http://localhost/callback" });
   const expiring = (await TraktRunCredentials.open())!;
   await time.runUntil(Promise.all([1, 2, 3].map(() => client.json(SEARCH, {}, "Trakt", expiring))));
   assert.equal(starts.length, 3);
-  for (let index = 1; index < starts.length; index += 1) assert.ok(starts[index] - starts[index - 1] >= 250, `actual starts are spaced: ${starts}`);
+  for (let index = 1; index < starts.length; index += 1) assert.ok(starts[index] - starts[index - 1] >= 100, `actual starts keep the gate spacing: ${starts}`);
 });
 
 test("a request still waiting for its credential is not sent once another request's 403 makes Trakt unavailable", async (t) => {

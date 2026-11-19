@@ -1,15 +1,15 @@
 import "server-only";
 
-import { validTraktCredentials } from "@/lib/trakt-auth";
+import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { createScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
 import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, trackScanIgnores, writeSingleUserScanStatus } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
-import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { runTrackedWorkerPool } from "@/lib/scan-concurrency";
-import { isTerminalTraktError, TraktHttpError } from "@/lib/trakt-http";
+import { COOLDOWN_WORDING, isProviderLoginFailure, isTraktAuthenticationFailure, ProviderCooldownTooLongError, type ProviderAuth } from "@/lib/provider-client";
+import { scanProviderClient } from "@/lib/scan-provider-client";
 import { scanRuns, type ScanRunMode, type ScanRunOwner, type ScanRunStatus } from "@/lib/scan-run";
 
 type ProgressSeason = { number: number; episodes: { number: number; completed: boolean }[] };
@@ -26,17 +26,6 @@ type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan
 export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
 
 const TRAKT = "https://api.trakt.tv";
-const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-type TraktRateLimit = { name?: string; period?: number; limit?: number; remaining?: number; until?: string };
-type ScanGlobal = typeof globalThis & {
-  __shelfcheckNextRequestAt?: number;
-  __shelfcheckRequestGate?: Promise<void>;
-  __shelfcheckRateLimit?: TraktRateLimit;
-  __shelfcheckRateLimitPaused?: boolean;
-  __shelfcheckRateLimitResumeAt?: number;
-};
-
 /**
  * The Trakt scan mode's adapter to the scan run lifecycle: its status and
  * Resume point stores and Interrupted scan wording. Its lifecycle events keep
@@ -59,46 +48,6 @@ const traktScanMode: ScanRunMode<ScanRunStatus, TraktResumePoint> = {
     savedReason: (reason) => (reason === "failure" ? "error" : reason),
   },
 };
-
-/** The live Trakt Scan run that dispatched the current request; a late callback from a settled run gets undefined. */
-const liveTraktRun = () => scanRuns.bound<TraktResumePoint>("trakt");
-
-/**
- * A Trakt rate-limit pause starting or ending. The pause globals pace later
- * requests; the run that dispatched the request records the pause, its resume
- * time and the forced Resume point save. Outside a live Trakt run it does nothing.
- */
-function setRateLimitPaused(global: ScanGlobal, paused: boolean, resumeAt?: number) {
-  const run = liveTraktRun();
-  if (!run) return;
-  global.__shelfcheckRateLimitPaused = paused;
-  global.__shelfcheckRateLimitResumeAt = paused ? Math.max(global.__shelfcheckRateLimitResumeAt || 0, resumeAt || Date.now()) : undefined;
-  run.reportRateLimit("Trakt", paused, paused ? new Date(global.__shelfcheckRateLimitResumeAt!).toISOString() : undefined);
-}
-
-function requestSpacing(global: ScanGlobal): number {
-  const remaining = global.__shelfcheckRateLimit?.remaining;
-  return Number.isFinite(remaining) && (remaining as number) <= 100 ? 300 : 100;
-}
-
-function rateLimitPause(global: ScanGlobal): number {
-  const rateLimit = global.__shelfcheckRateLimit;
-  if (!Number.isFinite(rateLimit?.remaining) || (rateLimit?.remaining as number) > 50 || !rateLimit?.until) return 0;
-  const resetAt = Date.parse(rateLimit.until);
-  return Number.isFinite(resetAt) ? Math.max(0, resetAt - Date.now() + 250) : 0;
-}
-
-function updateRateLimit(response: Response, global: ScanGlobal) {
-  const header = response.headers.get("X-Ratelimit");
-  if (!header) return;
-  try {
-    const rateLimit = JSON.parse(header) as TraktRateLimit;
-    global.__shelfcheckRateLimit = rateLimit;
-    liveTraktRun()?.logger.info("rate-limit", rateLimit);
-  } catch {
-    liveTraktRun()?.logger.warn("rate-limit.invalid", { header });
-  }
-}
 
 function compactCache(cache: ScanCache | undefined): ScanCache {
   return Object.fromEntries(Object.entries(cache || {}).map(([id, entry]) => {
@@ -142,83 +91,45 @@ function gracePeriod(value: unknown): number {
   return Math.max(0, Math.min(30, Math.trunc(Number(value) || 0)));
 }
 
-async function traktRequest(path: string): Promise<Response> {
-  let credentials = await validTraktCredentials();
-  if (!credentials) throw new Error("Trakt is not configured.");
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const global = globalThis as ScanGlobal;
-    let release!: () => void;
-    const previous = global.__shelfcheckRequestGate || Promise.resolve();
-    global.__shelfcheckRequestGate = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      const delay = Math.max(rateLimitPause(global), (global.__shelfcheckNextRequestAt || 0) - Date.now());
-      if (delay) await wait(delay);
-      global.__shelfcheckNextRequestAt = Date.now() + requestSpacing(global);
-    } finally { release(); }
-    const requestStarted = Date.now();
-    liveTraktRun()?.logger.info("request.start", { path, attempt: attempt + 1 });
-    try {
-      if (!credentials) throw new Error("Log in to Trakt before scanning.");
-      const response = await fetch(`${TRAKT}${path}`, {
-        signal: AbortSignal.timeout(15_000),
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": SHELFCHECK_USER_AGENT,
-          "trakt-api-version": "2",
-          "trakt-api-key": credentials.clientId,
-          Authorization: `Bearer ${credentials.accessToken}`,
-        },
-      });
-      updateRateLimit(response, global);
-      liveTraktRun()?.logger.info("request.response", { path, attempt: attempt + 1, status: response.status, elapsedMs: Date.now() - requestStarted });
-      if (response.status === 401 && attempt === 0) {
-        credentials = await validTraktCredentials(true);
-        if (!credentials) throw new Error("Log in to Trakt before scanning.");
-        continue;
-      }
-      if (response.status === 401) throw new TraktHttpError(401, "Your Trakt login has expired. Log out, then log in again.");
-      if (response.status === 403) throw new TraktHttpError(403, "Trakt rejected this request (403). Check that the token and Client ID belong to the same application.");
-      if (response.status === 429 || response.status >= 500) {
-        if (attempt === 4) throw new Error(`Trakt request failed (${response.status}).`);
-        const retryAfter = Number(response.headers.get("Retry-After"));
-        const delayMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** attempt;
-        global.__shelfcheckNextRequestAt = Math.max(global.__shelfcheckNextRequestAt || 0, Date.now() + delayMs);
-        if (response.status === 429) setRateLimitPaused(global, true, Date.now() + delayMs);
-        liveTraktRun()?.logger.warn("request.retry", { path, attempt: attempt + 1, status: response.status, delayMs });
-        await wait(delayMs);
-        continue;
-      }
-      if (!response.ok) throw new Error(`Trakt request failed (${response.status}).`);
-      if (global.__shelfcheckRateLimitPaused && Date.now() >= (global.__shelfcheckRateLimitResumeAt || 0)) setRateLimitPaused(global, false);
-      return response;
-    } catch (error) {
-      liveTraktRun()?.logger.warn("request.error", { path, attempt: attempt + 1, elapsedMs: Date.now() - requestStarted, error: error instanceof Error ? error.message : String(error) });
-      if (isTerminalTraktError(error)) throw error;
-      if (attempt === 4) throw new Error(error instanceof Error ? error.message : "The Trakt request failed.");
-      await wait(1000 * 2 ** attempt);
-    }
+const TRAKT_LOGIN_EXPIRED = "Your Trakt login has expired. Log out, then log in again.";
+const TRAKT_FORBIDDEN = "Trakt rejected this request (403). Check that the token and Client ID belong to the same application.";
+
+/** The Trakt scan's cooldown wording: its own for a rate limit, the shared provider wording otherwise. */
+const traktCooldownWording = (error: ProviderCooldownTooLongError, minutes: number) =>
+  error.reason === "rate-limit" ? `Trakt asked Shelfcheck to wait ${minutes} minutes.` : COOLDOWN_WORDING[error.reason]("Trakt", minutes);
+
+/**
+ * Ends the Trakt scan run: a provider cooldown, or a Trakt login that cannot be
+ * recovered. Optional lookups (air dates, posters) never swallow it.
+ */
+class TraktScanStoppedError extends Error {}
+
+/** The Trakt scan's wording for a failure that ends the run; every other failure keeps its own message. */
+function presentTraktFailure(error: unknown): unknown {
+  if (error instanceof ProviderCooldownTooLongError) {
+    // The time still to wait, which a later run reports as it shrinks; only the wording is rounded.
+    return new TraktScanStoppedError(`${traktCooldownWording(error, Math.ceil(error.retryAfterMs / 60_000))} Start the scan again after that to resume.`, { cause: error });
   }
-  throw new Error("The Trakt request failed.");
+  if (isTraktAuthenticationFailure(error)) return new TraktScanStoppedError(error.status === 401 ? TRAKT_LOGIN_EXPIRED : TRAKT_FORBIDDEN, { cause: error });
+  if (isProviderLoginFailure("Trakt", error)) return new TraktScanStoppedError(error.message, { cause: error });
+  return error;
 }
 
-async function traktJson<T>(path: string): Promise<T> {
-  return (await traktRequest(path)).json() as Promise<T>;
+const traktJsonInit: RequestInit = { headers: { Accept: "application/json", "Content-Type": "application/json" } };
+
+/** An optional lookup's fallback for an ordinary failure; a failure that ends the run is never swallowed. */
+function unlessRunStops<T>(fallback: (error: unknown) => T) {
+  return (error: unknown): T => { if (error instanceof TraktScanStoppedError) throw error; return fallback(error); };
 }
 
-async function traktAll<T>(path: string): Promise<T[]> {
-  const items: T[] = [];
-  let page = 1;
-  let pageCount = 1;
-  do {
-    const separator = path.includes("?") ? "&" : "?";
-    const response = await traktRequest(`${path}${separator}page=${page}&limit=100`);
-    items.push(...await response.json() as T[]);
-    pageCount = Number(response.headers.get("X-Pagination-Page-Count")) || page;
-    page += 1;
-  } while (page <= pageCount && page <= 100);
-  return items;
+/** One Trakt request through the shared provider client, with the run's Trakt login. */
+async function traktJson<T>(trakt: ProviderAuth, path: string): Promise<T> {
+  try { return await scanProviderClient.json<T>(`${TRAKT}${path}`, traktJsonInit, "Trakt", trakt); } catch (error) { throw presentTraktFailure(error); }
+}
+
+/** Every page of a Trakt list through the shared provider client. */
+async function traktAll<T>(trakt: ProviderAuth, path: string): Promise<T[]> {
+  try { return await scanProviderClient.pages<T>(`${TRAKT}${path}`, traktJsonInit, "Trakt", trakt); } catch (error) { throw presentTraktFailure(error); }
 }
 
 /**
@@ -241,10 +152,8 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     startDetails: { version: SHELFCHECK_VERSION, mode: targetTraktId ? "single-show" : force ? "deep" : "quick", targetTraktId, airingGraceDays: gracePeriod(state.airingGraceDays) },
     hooks: {
       begin: () => {
-        // A new run starts unpaused; the request gate and spacing globals keep pacing requests.
-        const scanGlobal = globalThis as ScanGlobal;
-        scanGlobal.__shelfcheckRateLimitPaused = false;
-        scanGlobal.__shelfcheckRateLimitResumeAt = undefined;
+        // A new run's provider state; pacing and provider deadlines carry over from earlier runs.
+        scanProviderClient.startRun();
         // Ignore tracking spans every report and Resume point write, including a forced failure save.
         finishIgnoreTracking = trackScanIgnores("trakt", Date.parse(owner.startedAt));
       },
@@ -255,12 +164,15 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     const airingGraceDays = gracePeriod(state.airingGraceDays);
     // An unusable Resume point is discarded and cleared; the saved report and its scan cache are the fallback.
     const { usable: checkpoint } = run.resumePoint.load((point) => traktResumePointIsUsable(point, airingGraceDays, Date.now()));
+    // The run's Trakt login: read once after the Resume point is judged, refreshed before use when it is about to expire.
+    const trakt = await TraktRunCredentials.open();
+    if (!trakt) throw new Error("Trakt is not configured.");
     const prior: ScanReport | undefined = checkpoint || (state.report as ScanReport | undefined);
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
     const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
-    const downloadedAll = await traktAll<CollectionShow>("/sync/collection/shows?extended=full,images");
+    const downloadedAll = await traktAll<CollectionShow>(trakt, "/sync/collection/shows?extended=full,images");
     const ignoredIds = ignoredTraktIds(state.ignoredShows, Date.parse(startedAt));
     const downloaded = downloadedAll.filter((item) => !ignoredIds.has(item.show.ids.trakt));
     logger.info("collection.ignored-skipped", { ignored: downloadedAll.length - downloaded.length, checked: downloaded.length });
@@ -338,7 +250,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
           logger.info("show.collection-complete", { traktId: item.show.ids.trakt, title: item.show.title, reason });
         } else {
           activeWork.update(id, item.show.title, "collection-progress");
-          const progress = await traktJson<{ aired?: number; completed?: number; seasons?: ProgressSeason[] }>(`/shows/${id}/progress/collection?hidden=false&specials=false&count_specials=false&extended=full`);
+          const progress = await traktJson<{ aired?: number; completed?: number; seasons?: ProgressSeason[] }>(trakt, `/shows/${id}/progress/collection?hidden=false&specials=false&count_specials=false&extended=full`);
           const seasons = progress.seasons || [];
           const aired = progress.aired ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.length : 0), 0);
           const completed = progress.completed ?? seasons.reduce((sum, season) => sum + (season.number ? season.episodes.filter((episode) => episode.completed).length : 0), 0);
@@ -351,11 +263,11 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         let airDateRequestSucceeded = true;
         if (requiresAirDates) activeWork.update(id, item.show.title, "air-dates");
         const episodeDates = requiresAirDates
-          ? await traktJson<TraktSeason[]>(`/shows/${id}/seasons?extended=episodes,full`).catch((error) => {
+          ? await traktJson<TraktSeason[]>(trakt, `/shows/${id}/seasons?extended=episodes,full`).catch(unlessRunStops((error) => {
             airDateRequestSucceeded = false;
             logger.warn("show.airdates-unavailable", { traktId: item.show.ids.trakt, title: item.show.title, error: error instanceof Error ? error.message : String(error) });
             return [];
-          })
+          }))
           : [];
         const firstAiredByEpisode = new Map<string, string | null | undefined>();
         for (const season of episodeDates) for (const episode of season.episodes || []) {
@@ -376,7 +288,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });
         if (missing.length && !item.show.images?.poster?.length) {
           activeWork.update(id, item.show.title, "poster");
-          const details = await traktJson<TraktShow>(`/shows/${id}?extended=full,images`).catch(() => null);
+          const details = await traktJson<TraktShow>(trakt, `/shows/${id}?extended=full,images`).catch(unlessRunStops(() => null));
           if (details?.images?.poster?.[0]) item.show = compactTraktShow({ ...item.show, images: { poster: [details.images.poster[0]] } });
           for (const result of missing) result.show = item.show;
         }

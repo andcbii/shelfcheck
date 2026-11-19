@@ -57,9 +57,11 @@ export function fakeClock(start = Date.parse("2026-11-19T12:00:00.000Z")) {
       let settled = false;
       promise.then(() => { settled = true; }, () => { settled = true; });
       await flush();
-      for (let step = 0; !settled && step < 10_000; step += 1) {
-        if (!fireNext()) throw new Error("The promise is waiting on something other than the clock.");
-        await flush();
+      // With no timer due, real I/O (such as a config file write) may still be finishing: give it real time.
+      for (let step = 0, idle = 0; !settled && step < 10_000; step += 1) {
+        if (fireNext()) { idle = 0; await flush(); continue; }
+        if ((idle += 1) > 200) throw new Error("The promise is waiting on something other than the clock.");
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
       return promise;
     },

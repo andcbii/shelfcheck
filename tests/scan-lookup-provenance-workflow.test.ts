@@ -205,8 +205,9 @@ test("episode failures explain catalogue identity sources and persist safe parse
   assert.equal(auth.lookup.status,401);
   assert.deepEqual(auth.lookup.requested,{provider:"Trakt",kind:"authentication"});
   assert.ok(!JSON.stringify(auth).includes("secret-"));
+  // Saving working credentials is only a credential read for the scan: the login issue stays until a Trakt lookup succeeds.
   await config.writeTraktCredentials({clientId:"secret-client",clientSecret:"secret-client-secret",accessToken:"secret-access",refreshToken:"secret-refresh",expiresAt:Date.now()+86400_000,redirectUri:"http://localhost/callback"});
-  assert.deepEqual((await run()).coverage.issues,[]);
+  assert.deepEqual((await run()).coverage.issues.map((i:{id:string})=>i.id),["provider-authentication:Trakt"]);
 });
 
 test("shared scan state preserves independent legacy causes and groups explicit nested impacts after reload", async t => {

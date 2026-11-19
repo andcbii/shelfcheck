@@ -14,6 +14,15 @@ export class ProviderHttpError extends Error {
 }
 
 export type ProviderRequestIdentity = {provider:ProviderName;kind:string;id?:number};
+
+/**
+ * Trakt refused the login for a data request: a 401 that survived its one
+ * refresh, or a 403. A failed refresh itself (an authentication request) is
+ * not one: it does not prove the login expired.
+ */
+export function isTraktAuthenticationFailure(error: unknown): error is ProviderHttpError {
+  return error instanceof ProviderHttpError && error.provider === "Trakt" && (error.status === 401 || error.status === 403) && error.requested?.kind !== "authentication";
+}
 export class ProviderResponseError extends Error {
   constructor(readonly provider:ProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} returned an incomplete or unreadable response.`); }
 }
@@ -100,6 +109,21 @@ export type ProviderRun = {
   reportRateLimit(provider: ProviderName, paused: boolean, resumeAt?: string): void;
 };
 
+/**
+ * A provider login a request sends. Its asynchronous work (a proactive
+ * refresh) happens in `ready`, before the request queues at the gate; the
+ * credential itself is read synchronously at dispatch, so the request sends
+ * the newest token with no wait between its availability check and the send.
+ */
+export type ProviderAuth = {
+  /** Makes the credential usable, refreshing it first if it is about to expire. */
+  ready(): Promise<void>;
+  /** The token to send now and the headers that send it. */
+  credential(): { token: string; headers: Record<string, string> };
+  /** Called with the token a 401 rejected; resolves once newer credentials are in place. */
+  recover(rejectedToken: string): Promise<void>;
+};
+
 export type ProviderClientOptions = {
   clock?: ProviderClock;
   fetch?: typeof fetch;
@@ -138,8 +162,17 @@ function emptyMetrics(): Record<ProviderName, ProviderMetric> {
   return Object.fromEntries((["Plex", "TMDB", "TVDB", "Trakt"] as ProviderName[]).map((provider) => [provider, { requests: 0, failures: 0, retries: 0, networkMs: 0, queueWaitMs: 0, rateLimitWaitMs: 0 }])) as Record<ProviderName, ProviderMetric>;
 }
 
-/** One Scan run's state: its metrics, the pauses it has been shown, and providers unavailable for it. */
-type RunState = { metrics: Record<ProviderName, ProviderMetric>; shownPauseUntil: Map<ProviderName, number>; unavailable: Map<ProviderName, ProviderCooldownTooLongError> };
+/**
+ * A provider login failed for good: its refresh failed (an authentication
+ * request), or the provider still answered 401 after the refresh, or 403.
+ */
+export function isProviderLoginFailure(provider: ProviderName, error: unknown): error is ProviderHttpError | ProviderNetworkError | ProviderResponseError {
+  if (!(error instanceof ProviderHttpError || error instanceof ProviderNetworkError || error instanceof ProviderResponseError) || error.provider !== provider) return false;
+  return error.requested?.kind === "authentication" || (error instanceof ProviderHttpError && (error.status === 401 || error.status === 403));
+}
+
+/** One Scan run's state: its metrics, the pauses it has been shown, and providers unavailable for it (after a provider cooldown or a login that cannot be recovered). */
+type RunState = { metrics: Record<ProviderName, ProviderMetric>; shownPauseUntil: Map<ProviderName, number>; unavailable: Map<ProviderName, Error> };
 const newRunState = (): RunState => ({ metrics: emptyMetrics(), shownPauseUntil: new Map(), unavailable: new Map() });
 
 /** An attempt that ran past its deadline, while waiting for headers or reading the body. */
@@ -243,14 +276,31 @@ export class ProviderClient {
     }
   }
 
-  async json<T>(url: string, init: RequestInit, provider: ProviderName): Promise<T> {
+  /**
+   * One JSON request. With `auth`, each attempt sends the current credential,
+   * and a 401 gets one recovery and replay, separate from transient retries.
+   */
+  async json<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<T> {
+    let recovered = false;
     const requested = requestIdentity(url,provider);
     const state = this.runState;
     this.assertAvailable(provider, state);
     for (let attempt = 0; attempt < PROVIDER_ATTEMPTS; attempt += 1) {
       this.showPendingPause(provider, state);
+      // Credential work finishes before the request queues: a refresh keeps its own timeout and cause, and never holds a gate slot.
+      if (auth) {
+        try {
+          await auth.ready();
+        } catch (error) {
+          if (isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
+          throw error;
+        }
+        this.assertAvailable(provider, state);
+      }
       const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
+      // Nothing is awaited from here to the send, so this check and the newest token hold at dispatch.
       this.assertAvailable(provider, state);
+      const credential = auth?.credential();
       const requestStarted = this.clock.now();
       const metric = state.metrics[provider];
       metric.requests += 1;
@@ -261,6 +311,7 @@ export class ProviderClient {
         try {
           const headers = new Headers(init.headers);
           if (!headers.has("User-Agent")) headers.set("User-Agent", SHELFCHECK_USER_AGENT);
+          for (const [name, value] of Object.entries(credential?.headers || {})) headers.set(name, value);
           response = await this.fetch(url, { ...init, headers, signal: deadline.signal });
           if (response.ok) body = await readBody(response, deadline.signal);
         } catch (error) {
@@ -282,6 +333,13 @@ export class ProviderClient {
           try { return JSON.parse(body!) as T; } catch { throw new ProviderResponseError(provider, requested); }
         }
         run?.logger.warn(this.event(run, "request.response"), details);
+        if (response.status === 401 && auth && credential && !recovered) {
+          // The one authentication recovery: refresh, then replay without spending a transient attempt.
+          recovered = true;
+          await auth.recover(credential.token);
+          attempt -= 1;
+          continue;
+        }
         if (response.status !== 429 && response.status < 500) throw new ProviderHttpError(provider, response.status, requested);
         let delay: number;
         try {
@@ -305,8 +363,11 @@ export class ProviderClient {
         }
         await this.clock.sleep(delay);
       } catch (error) {
+        // A login that cannot be recovered makes the provider unavailable for the rest of the run, queued requests included.
+        if (auth && isProviderLoginFailure(provider, error)) state.unavailable.set(provider, error);
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
-        if (error instanceof ProviderHttpError || error instanceof ProviderResponseError) { metric.failures += 1; throw error; }
+        // Typed failures, including a failed credential refresh, end the request without a transient retry.
+        if (error instanceof ProviderHttpError || error instanceof ProviderResponseError || error instanceof ProviderNetworkError) { metric.failures += 1; throw error; }
         if (attempt === PROVIDER_ATTEMPTS - 1) { metric.failures += 1; throw new ProviderNetworkError(provider,requested); }
         const delay = backoffDelay(attempt);
         metric.retries += 1;

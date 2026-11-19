@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A Plex scan run now refreshes a Trakt login that expires part-way through
+  and carries on. Before, every Trakt episode identity check after the expiry
+  failed and was reported against its own episode.
+- When the Trakt login cannot be recovered, a Plex scan run reports one Trakt
+  login Coverage Issue with the real cause, stops asking Trakt for the rest of
+  the run, and keeps its TMDB checks, instead of a failure for every episode.
+  A failed token refresh never overwrites the saved Trakt login, and the issue
+  clears once a Trakt lookup succeeds again.
+
+### Changed
+
+- Both scans send Trakt requests through one provider client: one token
+  refresh is shared by every request that needs it, and Trakt requests are
+  paced from Trakt's own rate-limit header in both scans.
+- A provider cooldown longer than 15 minutes, asked for by Plex, TMDB, TVDB or
+  Trakt (a rate limit, a server outage or a rate-limit reset), makes that
+  provider unavailable for the scan run instead of waiting it out. A Plex scan
+  run continues with its other providers; a Trakt scan run fails at once with
+  "Trakt asked Shelfcheck to wait N minutes. Start the scan again after that
+  to resume." and resumes from its Resume point. A later scan run honours
+  whatever remains of the cooldown until Shelfcheck restarts.
+- Trakt requests now have 30 seconds per attempt, including reading the
+  response.
+
 ## 2.6.2 - 2026-11-18
 
 ### Changed

@@ -8,7 +8,7 @@ import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { runTrackedWorkerPool } from "@/lib/scan-concurrency";
-import { isTraktAuthenticationFailure, type ProviderAuth } from "@/lib/provider-client";
+import { isProviderLoginFailure, isTraktAuthenticationFailure, ProviderCooldownTooLongError, type ProviderAuth, type ProviderCooldownReason } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { scanRuns, type ScanRunMode, type ScanRunOwner, type ScanRunStatus } from "@/lib/scan-run";
 
@@ -94,10 +94,27 @@ function gracePeriod(value: unknown): number {
 const TRAKT_LOGIN_EXPIRED = "Your Trakt login has expired. Log out, then log in again.";
 const TRAKT_FORBIDDEN = "Trakt rejected this request (403). Check that the token and Client ID belong to the same application.";
 
-/** The Trakt scan's wording for a login Trakt refused; every other failure keeps its own message. */
+const TRAKT_COOLDOWN_WORDING: Record<ProviderCooldownReason, (minutes: number) => string> = {
+  "rate-limit": (minutes) => `Trakt asked Shelfcheck to wait ${minutes} minutes.`,
+  server: (minutes) => `Trakt is unavailable and asked Shelfcheck to wait ${minutes} minutes.`,
+  "rate-limit-reset": (minutes) => `Trakt's rate limit resets in ${minutes} minutes.`,
+};
+
+/**
+ * Ends the Trakt scan run: a provider cooldown, or a Trakt login that cannot be
+ * recovered. Optional lookups (air dates, posters) never swallow it.
+ */
+class TraktScanStoppedError extends Error {}
+
+/** The Trakt scan's wording for a failure that ends the run; every other failure keeps its own message. */
 function presentTraktFailure(error: unknown): unknown {
-  if (!isTraktAuthenticationFailure(error)) return error;
-  return Object.assign(new Error(error.status === 401 ? TRAKT_LOGIN_EXPIRED : TRAKT_FORBIDDEN), { cause: error });
+  if (error instanceof ProviderCooldownTooLongError) {
+    // The time still to wait, which a later run reports as it shrinks; only the wording is rounded.
+    return new TraktScanStoppedError(`${TRAKT_COOLDOWN_WORDING[error.reason](Math.ceil(error.retryAfterMs / 60_000))} Start the scan again after that to resume.`, { cause: error });
+  }
+  if (isTraktAuthenticationFailure(error)) return new TraktScanStoppedError(error.status === 401 ? TRAKT_LOGIN_EXPIRED : TRAKT_FORBIDDEN, { cause: error });
+  if (isProviderLoginFailure("Trakt", error)) return new TraktScanStoppedError(error.message, { cause: error });
+  return error;
 }
 
 const traktRequest: RequestInit = { headers: { Accept: "application/json", "Content-Type": "application/json" } };
@@ -244,6 +261,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         if (requiresAirDates) activeWork.update(id, item.show.title, "air-dates");
         const episodeDates = requiresAirDates
           ? await traktJson<TraktSeason[]>(trakt, `/shows/${id}/seasons?extended=episodes,full`).catch((error) => {
+            if (error instanceof TraktScanStoppedError) throw error;
             airDateRequestSucceeded = false;
             logger.warn("show.airdates-unavailable", { traktId: item.show.ids.trakt, title: item.show.title, error: error instanceof Error ? error.message : String(error) });
             return [];
@@ -268,7 +286,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });
         if (missing.length && !item.show.images?.poster?.length) {
           activeWork.update(id, item.show.title, "poster");
-          const details = await traktJson<TraktShow>(trakt, `/shows/${id}?extended=full,images`).catch(() => null);
+          const details = await traktJson<TraktShow>(trakt, `/shows/${id}?extended=full,images`).catch((error) => { if (error instanceof TraktScanStoppedError) throw error; return null; });
           if (details?.images?.poster?.[0]) item.show = compactTraktShow({ ...item.show, images: { poster: [details.images.poster[0]] } });
           for (const result of missing) result.show = item.show;
         }

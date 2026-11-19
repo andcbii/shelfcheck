@@ -546,3 +546,79 @@ test("Trakt scan request log lines keep their names, and a rate-limit header is 
   const events = new Set((await logLines()).map((line) => line.match(/\] (\S+) \|/)?.[1]));
   for (const event of ["request.start", "request.response", "request.retry", "rate-limit"]) assert.ok(events.has(event), `shelfcheck.log has ${event}: ${[...events].join(", ")}`);
 });
+
+// SHELFCHECK-69: a provider cooldown ends the Trakt scan run promptly.
+
+const cooldown = (status: number, seconds: number) => new Response("{}", { status, headers: { "Retry-After": String(seconds) } });
+
+test("a Trakt cooldown over 15 minutes fails the full scan run at once, keeps its completed shows in a Resume point, and a restart fails the same way", async (t) => {
+  const f = await fixture(t);
+  await f.run();
+  const lastGood = await f.report();
+  f.trakt.library[1].show.aired_episodes = 4;
+  f.trakt.failures.set("/shows/2/progress/collection", [cooldown(429, 1200)]);
+  const started = Date.now();
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "Trakt asked Shelfcheck to wait 20 minutes. Start the scan again after that to resume.");
+  assert.ok(Date.now() - started < 60_000, "no 20-minute sleep first");
+  assert.deepEqual(await f.report(), lastGood, "no completed report is written");
+  const point = await storedResumePoint();
+  assert.ok(point, "the full run saved a Resume point");
+  assert.ok(!point.shows.some((item: { show: { title: string } }) => item.show.title === "Bravo") || !point.scanCache?.["2"], "the unfinished show is not marked checked");
+
+  const again = await f.run();
+  assert.equal(again.status, "error");
+  assert.match(again.error || "", /^Trakt asked Shelfcheck to wait (19|20) minutes\. Start the scan again after that to resume\.$/);
+  assert.deepEqual(perShow(f.requests), [], "the restart sends Trakt no show requests while the cooldown lasts");
+});
+
+test("a Trakt server error asking for a long wait says Trakt is unavailable", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/3/progress/collection", [cooldown(503, 1800)]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "Trakt is unavailable and asked Shelfcheck to wait 30 minutes. Start the scan again after that to resume.");
+});
+
+test("a cooldown in a single-show check creates no Resume point", async (t) => {
+  const f = await fixture(t);
+  await f.run();
+  f.trakt.library[1].show.aired_episodes = 4;
+  f.trakt.failures.set("/shows/2/progress/collection", [cooldown(429, 1200)]);
+  const failed = await f.run({ traktId: 2 });
+  assert.equal(failed.status, "error");
+  assert.equal(await storedResumePoint(), null);
+});
+
+test("a cooldown before the collection downloads keeps an existing usable Resume point without saving new progress", async (t) => {
+  const f = await fixture(t);
+  await seedResumePoint(f);
+  const seeded = await storedResumePoint();
+  f.trakt.failures.set("/sync/collection/shows", [cooldown(429, 1200)]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.deepEqual(await storedResumePoint(), seeded);
+});
+
+test("an air-date lookup that hits a cooldown ends the scan run instead of being skipped", async (t) => {
+  const f = await fixture(t);
+  await f.run();
+  const lastGood = await f.report();
+  // Trakt updated Charlie, so a Deep Scan rechecks it, air dates included.
+  f.trakt.library[2].show.updated_at = "2026-11-10T00:00:00.000Z";
+  f.trakt.failures.set("/shows/3/seasons", [cooldown(429, 1200)]);
+  const airDates = await f.run({ force: true });
+  assert.equal(airDates.status, "error");
+  assert.match(airDates.error || "", /^Trakt asked Shelfcheck to wait 20 minutes/);
+  assert.deepEqual(await f.report(), lastGood);
+});
+
+test("a poster lookup that Trakt refuses (403) ends the scan run instead of being skipped", async (t) => {
+  const f = await fixture(t);
+  f.trakt.library[2].show.images = { poster: [] };
+  f.trakt.failures.set("/shows/3", [new Response("{}", { status: 403 })]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.match(failed.error || "", /Trakt rejected this request \(403\)/);
+});

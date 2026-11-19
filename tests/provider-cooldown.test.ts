@@ -129,3 +129,15 @@ test("a later scan run waiting out the last 15 minutes of a rate-limit cooldown 
   await time.runUntil(second.settled);
   assert.equal(http.requests.length, 2);
 });
+
+test("a Retry-After within the limit on the final attempt is still honoured by later requests", async () => {
+  const { time, client } = setup(({ index }) => index < 5
+    ? new Response(null, { status: 503, headers: { "Retry-After": index === 4 ? "600" : "1" } })
+    : json({ ok: true }));
+  const failure = await time.runUntil(outcome(client.json(TMDB, {}, "TMDB")));
+  assert.ok("error" in failure && failure.error instanceof ProviderHttpError, "the exhausted request fails with its HTTP status");
+  const failedAt = time.elapsed();
+  client.startRun();
+  assert.deepEqual(await time.runUntil(client.json(TMDB, {}, "TMDB")), { ok: true });
+  assert.ok(time.elapsed() >= failedAt + 600_000, `the next request waited out the final Retry-After: ${time.elapsed()}`);
+});

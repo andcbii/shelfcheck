@@ -110,3 +110,27 @@ test("every provider request identifies Shelfcheck with its User-Agent unless th
   assert.deepEqual(agents, [SHELFCHECK_USER_AGENT, "Caller/1"]);
   assert.equal(new Headers(http.requests[0].init.headers).get("Authorization"), "Bearer test", "the caller's headers are kept");
 });
+
+test("a settled run's late 429 and retry never change the next run's pause or metrics", async () => {
+  const { time, runs, client } = setup(async ({ index }) => {
+    if (index === 0) { await time.clock.sleep(5_000); return new Response(null, { status: 429, headers: { "Retry-After": "10" } }); }
+    return json({ ok: true });
+  });
+  const first = runs.start("plex", async () => { client.startRun(); void client.json(TMDB, {}, "TMDB").catch(() => {}); });
+  await time.advance(1);
+  await first.settled;
+  let metrics: ReturnType<ProviderClient["metrics"]> | undefined;
+  // Run B starts at 2 s, before run A's late 429 arrives at 5 s, and requests TMDB at 6 s.
+  await time.advance(1_999);
+  const second = runs.start("plex", async () => {
+    client.startRun();
+    await time.clock.sleep(4_000);
+    await client.json(TMDB, {}, "TMDB");
+    await time.clock.sleep(10_000);
+    metrics = structuredClone(client.metrics());
+  });
+  await time.advance(4_001);
+  assert.equal(runs.statuses.plex?.rateLimitPaused, true, "run B shows the pause it waits on");
+  await time.runUntil(second.settled);
+  assert.equal(metrics?.TMDB.requests, 1, "only run B's own request is counted");
+});

@@ -138,6 +138,10 @@ function emptyMetrics(): Record<ProviderName, ProviderMetric> {
   return Object.fromEntries((["Plex", "TMDB", "TVDB", "Trakt"] as ProviderName[]).map((provider) => [provider, { requests: 0, failures: 0, retries: 0, networkMs: 0, queueWaitMs: 0, rateLimitWaitMs: 0 }])) as Record<ProviderName, ProviderMetric>;
 }
 
+/** One Scan run's state: its metrics, the pauses it has been shown, and providers unavailable for it. */
+type RunState = { metrics: Record<ProviderName, ProviderMetric>; shownPauseUntil: Map<ProviderName, number>; unavailable: Map<ProviderName, ProviderCooldownTooLongError> };
+const newRunState = (): RunState => ({ metrics: emptyMetrics(), shownPauseUntil: new Map(), unavailable: new Map() });
+
 /** An attempt that ran past its deadline, while waiting for headers or reading the body. */
 class AttemptTimedOut extends Error {}
 
@@ -170,10 +174,8 @@ export class ProviderClient {
   private readonly gate: ProviderStartGate<ProviderName>;
   /** Process-wide: when each provider's latest rate-limit wait ends. */
   private readonly rateLimitDeadline = new Map<ProviderName, number>();
-  private currentMetrics = emptyMetrics();
-  /** Run state: the end of the pause this run has been shown, per provider. */
-  private readonly shownPauseUntil = new Map<ProviderName, number>();
-  private readonly unavailable = new Map<ProviderName, ProviderCooldownTooLongError>();
+  /** The current Scan run's state. Each request keeps the state it started with, so a settled run's late responses never touch the next run's. */
+  private runState = newRunState();
   /** Process-wide: each provider's longest provider cooldown, kept until it ends (for this server process only). */
   private readonly cooldowns = new Map<ProviderName, ProviderCooldown>();
 
@@ -185,24 +187,24 @@ export class ProviderClient {
   }
 
   /** Starts a Scan run's state: metrics, shown pauses and run-only unavailability. Provider deadlines are kept. */
-  startRun() { this.currentMetrics = emptyMetrics(); this.shownPauseUntil.clear(); this.unavailable.clear(); }
+  startRun() { this.runState = newRunState(); }
   /**
    * Forgets provider cooldowns and rate-limit deadlines, as a server restart
    * does. For requests outside Scan runs that a user retries on demand, such as
    * resolving a Manual Match, and for tests that simulate a restart.
    */
   forgetProviderDeadlines() { this.cooldowns.clear(); this.rateLimitDeadline.clear(); }
-  metrics() { return this.currentMetrics; }
+  metrics() { return this.runState.metrics; }
 
   private event(run: ProviderRun | undefined, name: string) {
     return run?.eventPrefix ? `${run.eventPrefix}.${name}` : name;
   }
 
   /** Shows the dispatching run a rate-limit pause still in force, such as one an earlier run received. */
-  private showPendingPause(provider: ProviderName) {
+  private showPendingPause(provider: ProviderName, state: RunState) {
     const until = this.rateLimitDeadline.get(provider) || 0;
-    if (until <= this.clock.now() || (this.shownPauseUntil.get(provider) || 0) >= until) return;
-    this.shownPauseUntil.set(provider, until);
+    if (until <= this.clock.now() || (state.shownPauseUntil.get(provider) || 0) >= until) return;
+    state.shownPauseUntil.set(provider, until);
     this.run()?.reportRateLimit(provider, true, new Date(until).toISOString());
   }
 
@@ -212,13 +214,13 @@ export class ProviderClient {
    * for it, so requests already queued reach their availability check at once
    * instead of sleeping. Returns the error to throw.
    */
-  private recordCooldown(provider: ProviderName, cooldown: ProviderCooldown) {
+  private recordCooldown(provider: ProviderName, cooldown: ProviderCooldown, state: RunState) {
     const kept = this.cooldowns.get(provider);
     const longest = kept && kept.deadline >= cooldown.deadline ? kept : cooldown;
     this.cooldowns.set(provider, longest);
     const error = new ProviderCooldownTooLongError(provider, longest.deadline - this.clock.now(), longest);
-    this.unavailable.set(provider, error);
-    if (this.shownPauseUntil.delete(provider)) this.run()?.reportRateLimit(provider, false);
+    state.unavailable.set(provider, error);
+    if (state.shownPauseUntil.delete(provider)) this.run()?.reportRateLimit(provider, false);
     return error;
   }
 
@@ -227,14 +229,14 @@ export class ProviderClient {
    * provider cooldown still has more than 15 minutes to run, such as one an
    * earlier run received. Within 15 minutes the gate waits out the remainder.
    */
-  private assertAvailable(provider: ProviderName) {
-    const unavailable = this.unavailable.get(provider);
+  private assertAvailable(provider: ProviderName, state: RunState) {
+    const unavailable = state.unavailable.get(provider);
     if (unavailable) throw unavailable;
     const cooldown = this.cooldowns.get(provider);
     if (!cooldown) return;
     const remaining = cooldown.deadline - this.clock.now();
     if (remaining <= 0) this.cooldowns.delete(provider);
-    else if (remaining > MAX_PROVIDER_COOLDOWN_MS) throw this.recordCooldown(provider, cooldown);
+    else if (remaining > MAX_PROVIDER_COOLDOWN_MS) throw this.recordCooldown(provider, cooldown, state);
     else {
       this.gate.delayUntil(provider, cooldown.deadline);
       if (cooldown.reason === "rate-limit") this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, cooldown.deadline));
@@ -243,13 +245,14 @@ export class ProviderClient {
 
   async json<T>(url: string, init: RequestInit, provider: ProviderName): Promise<T> {
     const requested = requestIdentity(url,provider);
-    this.assertAvailable(provider);
+    const state = this.runState;
+    this.assertAvailable(provider, state);
     for (let attempt = 0; attempt < PROVIDER_ATTEMPTS; attempt += 1) {
-      this.showPendingPause(provider);
+      this.showPendingPause(provider, state);
       const { waitMs: queueWaitMs } = await this.gate.wait(provider, PROVIDER_REQUEST_SPACING_MS[provider]);
-      this.assertAvailable(provider);
+      this.assertAvailable(provider, state);
       const requestStarted = this.clock.now();
-      const metric = this.currentMetrics[provider];
+      const metric = state.metrics[provider];
       metric.requests += 1;
       const deadline = this.clock.deadline(PROVIDER_ATTEMPT_TIMEOUT_MS);
       try {
@@ -271,9 +274,9 @@ export class ProviderClient {
         const details = { provider, path: `${parsed.pathname}${parsed.search}`, status: response.status, attempt: attempt + 1, networkMs, queueWaitMs, elapsedMs: networkMs, retryAfter: response.headers.get("Retry-After") || undefined, rateLimitRemaining: response.headers.get("X-Ratelimit-Remaining") || response.headers.get("X-RateLimit-Remaining") || undefined };
         if (response.ok) {
           run?.logger.info(this.event(run, "request.response"), details);
-          const shownUntil = this.shownPauseUntil.get(provider);
+          const shownUntil = state.shownPauseUntil.get(provider);
           if (shownUntil !== undefined && shownUntil <= this.clock.now()) {
-            this.shownPauseUntil.delete(provider);
+            state.shownPauseUntil.delete(provider);
             run?.reportRateLimit(provider, false);
           }
           try { return JSON.parse(body!) as T; } catch { throw new ProviderResponseError(provider, requested); }
@@ -285,20 +288,21 @@ export class ProviderClient {
           // Decided before the final attempt gives up, so a long wait is never lost as a plain HTTP failure.
           delay = acceptedRetryDelay(provider, response, attempt, this.clock.now(), requested);
         } catch (error) {
-          throw error instanceof ProviderCooldownTooLongError ? this.recordCooldown(provider, error.cooldown) : error;
+          throw error instanceof ProviderCooldownTooLongError ? this.recordCooldown(provider, error.cooldown, state) : error;
         }
+        // The provider's wait binds every later request, even when this request has no attempts left.
+        const retryAt = this.clock.now() + delay;
+        this.gate.delayUntil(provider, retryAt);
+        if (response.status === 429) this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, retryAt));
         if (attempt === PROVIDER_ATTEMPTS - 1) throw new ProviderHttpError(provider, response.status, requested);
         metric.retries += 1;
         metric.rateLimitWaitMs += response.status === 429 ? delay : 0;
         run?.logger.warn(this.event(run, "request.retry"), { ...details, delayMs: delay });
-        const retryAt = this.clock.now() + delay;
         if (response.status === 429) {
-          this.rateLimitDeadline.set(provider, Math.max(this.rateLimitDeadline.get(provider) || 0, retryAt));
-          const until = Math.max(this.shownPauseUntil.get(provider) || 0, retryAt);
-          this.shownPauseUntil.set(provider, until);
+          const until = Math.max(state.shownPauseUntil.get(provider) || 0, retryAt);
+          state.shownPauseUntil.set(provider, until);
           run?.reportRateLimit(provider, true, new Date(until).toISOString());
         }
-        this.gate.delayUntil(provider, retryAt);
         await this.clock.sleep(delay);
       } catch (error) {
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }

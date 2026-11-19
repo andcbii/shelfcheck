@@ -26,17 +26,22 @@ export class ProviderStartGate<TProvider> {
     this.gates.set(provider, new Promise<void>((resolve) => { release = resolve; }));
     await previous;
     let waitMs = 0;
-    while (true) {
-      const remainingMs = Math.max(0, (this.nextStarts.get(provider) || 0) - this.clock.now());
-      if (!remainingMs) break;
-      waitMs += remainingMs;
-      await this.clock.sleep(remainingMs);
+    // A completed sleep counts as reaching its target even if the clock reads earlier (a frozen or
+    // differently mocked clock); only a later deadline set meanwhile, such as a cooldown, waits again.
+    let now = this.clock.now();
+    for (let target = this.nextStarts.get(provider) || 0; target > now; target = this.nextStarts.get(provider) || 0) {
+      waitMs += target - now;
+      await this.clock.sleep(target - now);
+      now = Math.max(this.clock.now(), target);
     }
-    const startedAt = this.clock.now();
+    const startedAt = now;
     this.nextStarts.set(provider, startedAt + (typeof spacingMs === "function" ? spacingMs() : spacingMs));
     release();
     return { waitMs, startedAt };
   }
+
+  /** Forgets every provider's next start, as a server restart does. */
+  reset() { this.nextStarts.clear(); }
 
   delayUntil(provider: TProvider, timestamp: number) {
     this.nextStarts.set(provider, Math.max(this.nextStarts.get(provider) || 0, timestamp));

@@ -88,19 +88,32 @@ export type ProviderClock = {
   deadline(milliseconds: number): { signal: AbortSignal; clear(): void };
 };
 
-// Captured at load, as the request gate always did: pacing follows real time even where a caller fakes Date.
-const realNow = Date.now;
+/**
+ * The provider clock: real time (read through the Date.now captured at load,
+ * so a faked Date never moves it), advanced by every completed sleep and never
+ * running backwards. A sleep therefore always reaches its target, whether
+ * timers are real or mocked, and deadlines measured with it stay consistent.
+ */
+function monotonicClock(): ProviderClock {
+  const realNow = Date.now;
+  let reached = 0;
+  const now = () => Math.max(reached, realNow());
+  return {
+    now,
+    sleep: (milliseconds) => {
+      const target = now() + Math.max(0, milliseconds);
+      return new Promise<void>((resolve) => setTimeout(() => { reached = Math.max(reached, target); resolve(); }, milliseconds));
+    },
+    deadline: (milliseconds) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new DOMException("The provider request timed out.", "TimeoutError")), milliseconds);
+      timer.unref?.();
+      return { signal: controller.signal, clear: () => clearTimeout(timer) };
+    },
+  };
+}
 
-export const systemClock: ProviderClock = {
-  now: () => realNow(),
-  sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-  deadline: (milliseconds) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new DOMException("The provider request timed out.", "TimeoutError")), milliseconds);
-    timer.unref?.();
-    return { signal: controller.signal, clear: () => clearTimeout(timer) };
-  },
-};
+export const systemClock: ProviderClock = monotonicClock();
 
 /** The Scan run that dispatched a request: where its log lines and rate-limit pauses go. */
 export type ProviderRun = {
@@ -142,6 +155,9 @@ const TRAKT_RESET_CUSHION_MS = 250;
 /** Each attempt's deadline, covering the response headers and its body. */
 export const PROVIDER_ATTEMPT_TIMEOUT_MS = 30_000;
 const PROVIDER_ATTEMPTS = 5;
+/** Paged lists: items per page, and the most pages read. */
+const PAGE_LIMIT = 100;
+const MAX_PAGES = 100;
 
 /** The bounded exponential backoff between attempts: 1, 2, 4, 8 seconds, never over 30. */
 function backoffDelay(attempt: number) { return Math.min(30_000, 1000 * 2 ** attempt); }
@@ -232,11 +248,12 @@ export class ProviderClient {
   /** Starts a Scan run's state: metrics, shown pauses and run-only unavailability. Provider deadlines are kept. */
   startRun() { this.runState = newRunState(); }
   /**
-   * Forgets provider cooldowns and rate-limit deadlines, as a server restart
+   * Forgets provider cooldowns, rate-limit deadlines, pacing and Trakt's
+   * reported window, as a server restart
    * does. For requests outside Scan runs that a user retries on demand, such as
    * resolving a Manual Match, and for tests that simulate a restart.
    */
-  forgetProviderDeadlines() { this.cooldowns.clear(); this.rateLimitDeadline.clear(); }
+  forgetProviderDeadlines() { this.cooldowns.clear(); this.rateLimitDeadline.clear(); this.gate.reset(); this.traktWindow = undefined; }
   metrics() { return this.runState.metrics; }
 
   private event(run: ProviderRun | undefined, name: string) {
@@ -329,6 +346,31 @@ export class ProviderClient {
    * and a 401 gets one recovery and replay, separate from transient retries.
    */
   async json<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<T> {
+    return (await this.request<T>(url, init, provider, auth)).value;
+  }
+
+  /**
+   * A paged list: \`page\` and \`limit=100\` are added to \`url\`, and pages are read
+   * until the provider's \`X-Pagination-Page-Count\` (the first page alone when
+   * it is absent), at most 100 pages. Each page is an ordinary paced,
+   * authenticated request.
+   */
+  async pages<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<T[]> {
+    const items: T[] = [];
+    let pageCount = 1;
+    for (let page = 1; page <= pageCount && page <= MAX_PAGES; page += 1) {
+      const pageUrl = new URL(url);
+      pageUrl.searchParams.set("page", String(page));
+      pageUrl.searchParams.set("limit", String(PAGE_LIMIT));
+      const { value, headers } = await this.request<T[]>(pageUrl.href, init, provider, auth);
+      if (!Array.isArray(value)) throw new ProviderResponseError(provider, requestIdentity(url, provider));
+      items.push(...value);
+      pageCount = Number(headers.get("X-Pagination-Page-Count")) || page;
+    }
+    return items;
+  }
+
+  private async request<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<{ value: T; headers: Headers }> {
     let recovered = false;
     const requested = requestIdentity(url,provider);
     const state = this.runState;
@@ -360,6 +402,8 @@ export class ProviderClient {
           const headers = new Headers(init.headers);
           if (!headers.has("User-Agent")) headers.set("User-Agent", SHELFCHECK_USER_AGENT);
           for (const [name, value] of Object.entries(credential?.headers || {})) headers.set(name, value);
+          const sending = this.run();
+          sending?.logger.info(this.event(sending, "request.start"), { provider, path: `${new URL(url).pathname}${new URL(url).search}`, attempt: attempt + 1 });
           response = await this.fetch(url, { ...init, headers, signal: deadline.signal });
           if (response.ok) body = await readBody(response, deadline.signal);
         } catch (error) {
@@ -379,7 +423,7 @@ export class ProviderClient {
             state.shownPauseUntil.delete(provider);
             run?.reportRateLimit(provider, false);
           }
-          try { return JSON.parse(body!) as T; } catch { throw new ProviderResponseError(provider, requested); }
+          try { return { value: JSON.parse(body!) as T, headers: response.headers }; } catch { throw new ProviderResponseError(provider, requested); }
         }
         run?.logger.warn(this.event(run, "request.response"), details);
         if (response.status === 401 && auth && credential && !recovered) {

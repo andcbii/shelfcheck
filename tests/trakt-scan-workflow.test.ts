@@ -16,6 +16,7 @@ const plex = await import("../lib/plex-scan");
 const issues = await import("../lib/coverage-issues");
 const lifecycle = await import("../lib/scan-run");
 const logs = await import("../app/api/logs/route");
+const { scanProviderClient } = await import("../lib/scan-provider-client");
 hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
@@ -55,10 +56,9 @@ async function fixture(t: TestContext) {
   const previous = { data: process.env.SHELFCHECK_DATA_DIR, config: process.env.SHELFCHECK_CONFIG_DIR };
   process.env.SHELFCHECK_DATA_DIR = dir;
   process.env.SHELFCHECK_CONFIG_DIR = dir;
-  const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync; __shelfcheckNextRequestAt?: number; __shelfcheckRequestGate?: Promise<void>; __shelfcheckRateLimit?: unknown };
-  delete global.__shelfcheckNextRequestAt;
-  delete global.__shelfcheckRequestGate;
-  delete global.__shelfcheckRateLimit;
+  const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+  // Each test is a fresh server process for provider pacing and deadlines.
+  scanProviderClient.forgetProviderDeadlines();
   t.after(() => {
     global.__shelfcheckDatabase?.close();
     delete global.__shelfcheckDatabase;

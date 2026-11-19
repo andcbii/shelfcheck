@@ -100,6 +100,17 @@ export type ProviderRun = {
   reportRateLimit(provider: ProviderName, paused: boolean, resumeAt?: string): void;
 };
 
+/**
+ * A provider login a request sends: the credential for each attempt, and how
+ * to recover once the provider rejects it with a 401.
+ */
+export type ProviderAuth = {
+  /** The token for the next attempt and the headers that send it; read again for every attempt, including queued ones. */
+  current(): Promise<{ token: string; headers: Record<string, string> }>;
+  /** Called with the token a 401 rejected; resolves once newer credentials are in place. */
+  recover(rejectedToken: string): Promise<void>;
+};
+
 export type ProviderClientOptions = {
   clock?: ProviderClock;
   fetch?: typeof fetch;
@@ -243,7 +254,12 @@ export class ProviderClient {
     }
   }
 
-  async json<T>(url: string, init: RequestInit, provider: ProviderName): Promise<T> {
+  /**
+   * One JSON request. With `auth`, each attempt sends the current credential,
+   * and a 401 gets one recovery and replay, separate from transient retries.
+   */
+  async json<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<T> {
+    let recovered = false;
     const requested = requestIdentity(url,provider);
     const state = this.runState;
     this.assertAvailable(provider, state);
@@ -258,9 +274,12 @@ export class ProviderClient {
       try {
         let response: Response;
         let body: string | undefined;
+        let credential: Awaited<ReturnType<ProviderAuth["current"]>> | undefined;
         try {
           const headers = new Headers(init.headers);
           if (!headers.has("User-Agent")) headers.set("User-Agent", SHELFCHECK_USER_AGENT);
+          credential = auth ? await auth.current() : undefined;
+          for (const [name, value] of Object.entries(credential?.headers || {})) headers.set(name, value);
           response = await this.fetch(url, { ...init, headers, signal: deadline.signal });
           if (response.ok) body = await readBody(response, deadline.signal);
         } catch (error) {
@@ -282,6 +301,13 @@ export class ProviderClient {
           try { return JSON.parse(body!) as T; } catch { throw new ProviderResponseError(provider, requested); }
         }
         run?.logger.warn(this.event(run, "request.response"), details);
+        if (response.status === 401 && auth && credential && !recovered) {
+          // The one authentication recovery: refresh, then replay without spending a transient attempt.
+          recovered = true;
+          await auth.recover(credential.token);
+          attempt -= 1;
+          continue;
+        }
         if (response.status !== 429 && response.status < 500) throw new ProviderHttpError(provider, response.status, requested);
         let delay: number;
         try {
@@ -306,7 +332,8 @@ export class ProviderClient {
         await this.clock.sleep(delay);
       } catch (error) {
         if (error instanceof ProviderCooldownTooLongError) { metric.failures += 1; throw error; }
-        if (error instanceof ProviderHttpError || error instanceof ProviderResponseError) { metric.failures += 1; throw error; }
+        // Typed failures, including a failed credential refresh, end the request without a transient retry.
+        if (error instanceof ProviderHttpError || error instanceof ProviderResponseError || error instanceof ProviderNetworkError) { metric.failures += 1; throw error; }
         if (attempt === PROVIDER_ATTEMPTS - 1) { metric.failures += 1; throw new ProviderNetworkError(provider,requested); }
         const delay = backoffDelay(attempt);
         metric.retries += 1;

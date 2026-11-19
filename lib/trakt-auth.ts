@@ -1,7 +1,7 @@
 import "server-only";
 
 import { readTraktApplication, readTraktCredentials, writeTraktCredentials, type TraktCredentials } from "@/lib/server-config";
-import { ProviderHttpError, ProviderNetworkError, ProviderResponseError } from "@/lib/provider-client";
+import { ProviderHttpError, ProviderNetworkError, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
 
 const TOKEN_URL = "https://auth.trakt.tv/oauth/token";
@@ -59,18 +59,55 @@ export async function exchangeAuthorizationCode(code: string, redirectUri: strin
 
 let refreshPromise: Promise<TraktCredentials> | null = null;
 
+/**
+ * Refreshes the saved Trakt login. Every caller shares the one refresh in
+ * flight, so Trakt's rotating refresh token is never spent twice; a failed
+ * refresh leaves the saved credentials untouched.
+ */
+function refreshCredentials(credentials: TraktCredentials): Promise<TraktCredentials> {
+  refreshPromise ||= tokenRequest({
+    refresh_token: credentials.refreshToken,
+    client_id: credentials.clientId,
+    client_secret: credentials.clientSecret,
+    redirect_uri: credentials.redirectUri,
+    grant_type: "refresh_token",
+  }, credentials, credentials.redirectUri).finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
 export async function validTraktCredentials(forceRefresh = false): Promise<{ clientId: string; accessToken: string } | null> {
   const credentials = await readTraktCredentials();
   if (!credentials) return null;
   if (!forceRefresh && credentials.expiresAt > Date.now() + 60_000) return credentials;
-  if (!refreshPromise) {
-    refreshPromise = tokenRequest({
-      refresh_token: credentials.refreshToken,
-      client_id: credentials.clientId,
-      client_secret: credentials.clientSecret,
-      redirect_uri: credentials.redirectUri,
-      grant_type: "refresh_token",
-    }, credentials, credentials.redirectUri).finally(() => { refreshPromise = null; });
+  return refreshCredentials(credentials);
+}
+
+/** How close to expiry a Trakt token is refreshed before use. */
+const REFRESH_BEFORE_EXPIRY_MS = 60_000;
+
+/**
+ * The Trakt login one Scan run sends with its Trakt requests. It is read once
+ * when the run opens it, refreshed within a minute of expiry or after Trakt
+ * rejects its token, and never kept for a later run.
+ */
+export class TraktRunCredentials implements ProviderAuth {
+  private constructor(private credentials: TraktCredentials) {}
+
+  /** The saved Trakt login for a new Scan run, or null when Trakt is not logged in. */
+  static async open(): Promise<TraktRunCredentials | null> {
+    const credentials = await readTraktCredentials();
+    return credentials ? new TraktRunCredentials(credentials) : null;
   }
-  return refreshPromise;
+
+  async current() {
+    if (this.credentials.expiresAt <= Date.now() + REFRESH_BEFORE_EXPIRY_MS) await this.recover(this.credentials.accessToken);
+    const { accessToken, clientId } = this.credentials;
+    return { token: accessToken, headers: { Authorization: `Bearer ${accessToken}`, "trakt-api-key": clientId, "trakt-api-version": "2" } };
+  }
+
+  async recover(rejectedToken: string) {
+    // Only the token still in use is refreshed; a newer one is already in place.
+    if (rejectedToken !== this.credentials.accessToken) return;
+    this.credentials = await refreshCredentials(this.credentials);
+  }
 }

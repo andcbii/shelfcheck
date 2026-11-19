@@ -14,6 +14,15 @@ export class ProviderHttpError extends Error {
 }
 
 export type ProviderRequestIdentity = {provider:ProviderName;kind:string;id?:number};
+
+/**
+ * Trakt refused the login for a data request: a 401 that survived its one
+ * refresh, or a 403. A failed refresh itself (an authentication request) is
+ * not one: it does not prove the login expired.
+ */
+export function isTraktAuthenticationFailure(error: unknown): error is ProviderHttpError {
+  return error instanceof ProviderHttpError && error.provider === "Trakt" && (error.status === 401 || error.status === 403) && error.requested?.kind !== "authentication";
+}
 export class ProviderResponseError extends Error {
   constructor(readonly provider:ProviderName, readonly requested?:ProviderRequestIdentity) { super(`${provider} returned an incomplete or unreadable response.`); }
 }

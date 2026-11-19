@@ -91,6 +91,9 @@ const REFRESH_BEFORE_EXPIRY_MS = 60_000;
  * rejects its token, and never kept for a later run.
  */
 export class TraktRunCredentials implements ProviderAuth {
+  /** A refresh that failed in this run, and the token it tried to replace: it is not tried again for that token. */
+  private failedRefresh?: { token: string; error: unknown };
+
   private constructor(private credentials: TraktCredentials) {}
 
   /** The saved Trakt login for a new Scan run, or null when Trakt is not logged in. */
@@ -108,6 +111,12 @@ export class TraktRunCredentials implements ProviderAuth {
   async recover(rejectedToken: string) {
     // Only the token still in use is refreshed; a newer one is already in place.
     if (rejectedToken !== this.credentials.accessToken) return;
-    this.credentials = await refreshCredentials(this.credentials);
+    if (this.failedRefresh?.token === rejectedToken) throw this.failedRefresh.error;
+    try {
+      this.credentials = await refreshCredentials(this.credentials);
+    } catch (error) {
+      this.failedRefresh = { token: rejectedToken, error };
+      throw error;
+    }
   }
 }

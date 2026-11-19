@@ -49,3 +49,21 @@ test("a Plex scan run refreshes a Trakt token that expires mid-run and its remai
   const issues = (result as unknown as { coverage: { issues: { provider?: string }[] } }).coverage.issues;
   assert.deepEqual(issues.filter(issue => issue.provider === "Trakt"), [], "no Trakt failure is recorded");
 });
+
+test("when Trakt rejects the token for every lookup at once, the Plex scan run refreshes it once", async t => {
+  const { rerun, state } = await harness(t, [tmdb1, tmdb2, tvdb1, tvdb2], [tmdb1, tmdb2]);
+  await config.writeTraktCredentials({ clientId: "client", clientSecret: "secret", accessToken: "old", refreshToken: "refresh", expiresAt: Date.now() + 86400_000, redirectUri: "http://localhost/callback" });
+  state.bodies.set("/3/find/301", { tv_episode_results: [] });
+  state.bodies.set("/3/find/302", { tv_episode_results: [] });
+  let refreshes = 0;
+  state.respond = (url, init) => {
+    if (url.hostname === "auth.trakt.tv") { refreshes += 1; return Response.json({ access_token: "new", refresh_token: "refresh-2", expires_in: 86400, created_at: Math.floor(Date.now() / 1000) }); }
+    const search = url.pathname.match(/^\/search\/tvdb\/(\d+)$/);
+    if (!search) return undefined;
+    if (authorization(init) !== "Bearer new") return Response.json({ error: "expired" }, { status: 401 });
+    return Response.json([mapping(search[1] === "301" ? tvdb1 : tvdb2, search[1] === "301" ? tmdb1 : tmdb2)]);
+  };
+  const result = await rerun();
+  assert.deepEqual(missingKeys(result), []);
+  assert.equal(refreshes, 1);
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ProviderClient, ProviderCooldownTooLongError, ProviderHttpError } from "../lib/provider-client";
-import { fakeClock, fakeFetch, json } from "./provider-test-support";
+import { fakeClock, fakeFetch, json, runHarness } from "./provider-test-support";
 
 const TMDB = "https://api.themoviedb.org/3/tv/1";
 const MINUTE = 60_000;
@@ -112,4 +112,20 @@ test("an unreadable Retry-After falls back to the bounded backoff", async () => 
   const { time, client } = setup(({ index }) => index === 0 ? new Response(null, { status: 503, headers: { "Retry-After": "later, please" } }) : json({ ok: true }));
   assert.deepEqual(await time.runUntil(client.json(TMDB, {}, "TMDB")), { ok: true });
   assert.equal(time.elapsed(), 1_000);
+});
+
+test("a later scan run waiting out the last 15 minutes of a rate-limit cooldown shows that pause", async () => {
+  const time = fakeClock();
+  const runs = runHarness(time.now);
+  const http = fakeFetch(({ index }) => index === 0 ? new Response(null, { status: 429, headers: { "Retry-After": "1800" } }) : json({ ok: true }));
+  const client = new ProviderClient({ clock: time.clock, fetch: http.fetch, run: () => runs.runs.bound() });
+  const first = runs.start("plex", async () => { client.startRun(); await client.json(TMDB, {}, "TMDB").catch(() => {}); });
+  await time.runUntil(first.settled);
+  await time.advance(20 * MINUTE);
+  const second = runs.start("plex", async () => { client.startRun(); await client.json(TMDB, {}, "TMDB"); });
+  await time.advance(1_000);
+  assert.equal(runs.statuses.plex?.rateLimitPaused, true);
+  assert.equal(runs.statuses.plex?.rateLimitResumeAt, new Date(time.now() - 20 * MINUTE - 1_000 + 30 * MINUTE).toISOString());
+  await time.runUntil(second.settled);
+  assert.equal(http.requests.length, 2);
 });

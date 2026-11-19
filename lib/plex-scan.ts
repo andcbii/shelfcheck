@@ -87,8 +87,6 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   },
 };
 
-// The shared scan provider client: its log lines and pauses reach only the Scan run that dispatched each request.
-const providerClient = scanProviderClient;
 
 /** The saved relationship key of one provider request: its provider and URL. */
 function relationshipKey(provider: ProviderName, url: string) { return `${provider}:${url}`; }
@@ -139,8 +137,8 @@ async function checkedJson<T>(url: string, init: RequestInit, provider: Provider
   let receivedAt: string;
   try {
     if (provider === "TVDB" && show?.tvdbAuthenticationError) throw show.tvdbAuthenticationError;
-    if (sharedCrosswalk !== undefined) ({value, receivedAt} = await requestTmdbCrosswalk(sharedCrosswalk, () => providerClient.json<T>(url, init, provider)));
-    else { value = await providerClient.json<T>(url, init, provider); receivedAt = new Date().toISOString(); }
+    if (sharedCrosswalk !== undefined) ({value, receivedAt} = await requestTmdbCrosswalk(sharedCrosswalk, () => scanProviderClient.json<T>(url, init, provider)));
+    else { value = await scanProviderClient.json<T>(url, init, provider); receivedAt = new Date().toISOString(); }
   }
   catch (error) {
     if (show && matching) {
@@ -841,14 +839,14 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         // Ignore tracking spans every report and Resume point write, including a forced failure save.
         finishIgnoreTracking = trackScanIgnores("plex", Date.parse(owner.startedAt));
         if (mappings.length) beginCoverageRecheck(coverageRevision);
-        providerClient.startRun();
+        scanProviderClient.startRun();
       },
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,
       committed: () => completeCoverageRecheck(coverageRevision),
       succeeded: () => resolveCoverageIssue("scan-failure"),
       failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
-      failureDetails: () => ({ providerMetrics: providerClient.metrics() }),
+      failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
       ended: () => finishIgnoreTracking?.(),
     },
   }, async (run) => {
@@ -857,7 +855,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const setHeartbeat = (key: string, show: string, phase: string) => activeWork.update(key, show, phase);
   const config = await readPlexProviders();
   if (config && mappings.length) {
-    await recheckCoverageHealth(providerClient, config);
+    await recheckCoverageHealth(scanProviderClient, config);
     coverageRevision = coverageState().revision;
     mappings = listCoverageMappings();
   }
@@ -873,7 +871,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
   logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
   let tvdbAuthenticationError: unknown;
-  const token = await authenticateTvdb(providerClient, config.tvdbApiKey, config.tvdbPin).then(token=>{resolveCoverageIssue("provider-authentication:TVDB");return token;}).catch(error=>{
+  const token = await authenticateTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin).then(token=>{resolveCoverageIssue("provider-authentication:TVDB");return token;}).catch(error=>{
     tvdbAuthenticationError = error;
     setCoverageIssue({id:"provider-authentication:TVDB",operation:"provider-authentication",provider:"TVDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TVDB",kind:"authentication"},impact:"TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained."})});
     return "";
@@ -1185,7 +1183,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
       }
     };
-    const requestEnglishTitle = (tvdbEpisodeId: number) => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : providerClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
+    const requestEnglishTitle = (tvdbEpisodeId: number) => tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : scanProviderClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
     const loadTvdb = async (id: number, mandatory: boolean, refreshAfter?: number) => {
       const savedTvdb = inputs.tvdb[String(id)];
       const reuseTvdb = reuseProviderCatalogue({provider:"tvdb",now:startedAt,downloadedAt:savedTvdb?.downloadedAt,usable:usableProviderCatalogue(savedTvdb),mandatory,targeted:!!targetRatingKey,changed:tvdbCatalogueChanges.has(id),refreshAfter});
@@ -1402,7 +1400,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     processed,
     total: candidates.length,
     finishedAt,
-    details: { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: providerClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) },
+    details: { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: scanProviderClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) },
   });
   });
 }

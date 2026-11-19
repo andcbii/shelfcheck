@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ProviderClient } from "../lib/provider-client";
 import { fakeClock, fakeFetch, json, runHarness } from "./provider-test-support";
+import { SHELFCHECK_USER_AGENT } from "../lib/user-agent";
 
 const TMDB = "https://api.themoviedb.org/3/tv/1";
 const TRAKT = "https://api.trakt.tv/shows/1";
@@ -99,4 +100,13 @@ test("an attempt's 30-second deadline covers reading the body, and a timed-out a
   assert.equal(http.requests.length, 2);
   assert.ok(time.elapsed() >= 31_000 && time.elapsed() < 32_000, `retried after the 30 s deadline and a 1 s backoff: ${time.elapsed()}`);
   assert.ok(runs.linesOf(run.runId).some((line) => line.event === "plex.request.network-retry"));
+});
+
+test("every provider request identifies Shelfcheck with its User-Agent unless the caller set one", async () => {
+  const { time, http, client } = setup(() => json({ ok: true }));
+  await time.runUntil(client.json(TMDB, { headers: { Authorization: "Bearer test" } }, "TMDB"));
+  await time.runUntil(client.json(TRAKT, { headers: { "User-Agent": "Caller/1" } }, "Trakt"));
+  const agents = http.requests.map((request) => new Headers(request.init.headers).get("User-Agent"));
+  assert.deepEqual(agents, [SHELFCHECK_USER_AGENT, "Caller/1"]);
+  assert.equal(new Headers(http.requests[0].init.headers).get("Authorization"), "Bearer test", "the caller's headers are kept");
 });

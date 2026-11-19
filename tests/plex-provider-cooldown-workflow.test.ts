@@ -10,6 +10,7 @@ const scan = await import("../app/api/plex/scan/route");
 const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 const issues = await import("../lib/coverage-issues");
+const { scanProviderClient } = await import("../lib/scan-provider-client");
 hook.deregister();
 
 // Provider cooldowns last for the server process, as the shared scan provider client does, so
@@ -31,7 +32,7 @@ async function fixture(t: test.TestContext) {
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
   sqlite.writePlexSettings({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date(day(0))});
-  const state = { tvdbChanged:[] as number[], tvdbCooldown:false, plexCooldown:false };
+  const state = { tvdbChanged:[] as number[], tvdbCooldown:false, tmdbChanged:[] as number[], tmdbCooldown:false, plexCooldown:false };
   const requests: URL[] = [];
   const unexpected: string[] = [];
   t.after(() => assert.deepEqual(unexpected,[],"every request is one the fixture expects"));
@@ -46,9 +47,10 @@ async function fixture(t: test.TestContext) {
       return Response.json({MediaContainer:{Metadata:[shows.find(s=>u.pathname === `/library/metadata/${s.ratingKey}`)]}});
     }
     if(u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
-    if(u.pathname === "/3/tv/changes") return Response.json({results:[],total_pages:1});
+    if(u.pathname === "/3/tv/changes") return Response.json({results:state.tmdbChanged.map(id=>({id})),total_pages:1});
     if(u.pathname === "/v4/updates") return Response.json({data:state.tvdbChanged.map(id=>({entityType:"series",recordId:id}))});
     const tmdb = u.pathname.match(/^\/3\/tv\/(\d+)(\/season\/1)?$/);
+    if(tmdb && tmdb[2] && state.tmdbCooldown) return new Response(null,{status:503,headers:{"Retry-After":"1200"}});
     if(tmdb && tmdb[2]) return Response.json({episodes:[{id:Number(tmdb[1])*10,season_number:1,episode_number:1,name:"Pilot",air_date:"2020-01-01"}]});
     if(tmdb) return Response.json({id:Number(tmdb[1]),name:`Show ${tmdb[1]}`,seasons:[{season_number:1}],external_ids:{tvdb_id:Number(tmdb[1])+10}});
     const tvdb = u.pathname.match(/^\/v4\/series\/(\d+)(\/episodes\/default)?$/);
@@ -96,6 +98,31 @@ test("a TVDB provider cooldown makes only TVDB unavailable: the Plex scan run co
   assert.equal(next.scan.status,"completed",next.scan.error || "");
   assert.deepEqual(tvdbRequests(f.requests).map(u=>u.pathname),[],"over 15 minutes remain, so this run sends TVDB nothing");
   assert.deepEqual(missing(next),missing(baseline));
+
+  // Once the cooldown ends (a server restart forgets it), TVDB's refresh obligations from the cooled run are met.
+  scanProviderClient.forgetProviderDeadlines();
+  f.state.tvdbCooldown = false;
+  f.state.tvdbChanged = [];
+  f.at(3);
+  const recovered = await f.run();
+  assert.equal(recovered.scan.status,"completed",recovered.scan.error || "");
+  assert.deepEqual(tvdbRequests(f.requests).filter(u=>u.pathname.endsWith("/episodes/default")).map(u=>u.pathname).sort(),["/v4/series/20/episodes/default","/v4/series/40/episodes/default","/v4/series/60/episodes/default"],"each changed TVDB catalogue is downloaded once TVDB is available again");
+});
+
+test("a TMDB provider cooldown makes only TMDB unavailable: TVDB checks continue and last-good TMDB data is kept", async t => {
+  const f = await fixture(t);
+  const baseline = await f.run();
+  assert.equal(baseline.scan.status,"completed",baseline.scan.error || "");
+  f.at(1);
+  f.state.tmdbChanged = [10,30,50];
+  f.state.tmdbCooldown = true;
+  const cooled = await f.run();
+  assert.equal(cooled.scan.status,"completed",cooled.scan.error || "");
+  assert.deepEqual(missing(cooled),missing(baseline));
+  assert.equal(f.requests.filter(u=>u.hostname.includes("themoviedb") && u.pathname.endsWith("/season/1")).length,1,"only the first season download is sent");
+  assert.ok(tvdbRequests(f.requests).length > 0,"TVDB checks continue");
+  assert.ok(issues.listCoverageIssues().some(issue=>issue.provider === "TMDB" && issue.lookup?.status === 503));
+  scanProviderClient.forgetProviderDeadlines();
 });
 
 test("a Plex provider cooldown during library inventory still fails the Plex scan run", async t => {

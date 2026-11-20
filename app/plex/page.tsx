@@ -25,6 +25,7 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
+import { useClearCache } from "@/app/hooks/use-clear-cache";
 import { useLocalToday } from "@/app/hooks/use-local-today";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodePlexManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
@@ -98,9 +99,17 @@ export default function PlexPage() {
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [cacheClearConfirmOpen, setCacheClearConfirmOpen] = useState(false);
-  const [clearingCache, setClearingCache] = useState(false);
-  const [cacheMessage, setCacheMessage] = useState("");
+  // Plex's whole clear removes its report; a show's clear removes only its cache key.
+  const { confirmOpen: cacheClearConfirmOpen, clearing: clearingCache, message: cacheMessage, clearMessage: clearCacheMessage, openConfirm: openCacheClearConfirm, cancelConfirm: cancelCacheClear, clearCache, clearShowCache } = useClearCache<Show>({
+    cacheAddress: "/api/plex/scan",
+    showAddress: (show) => `/api/plex/scan?ratingKey=${encodeURIComponent(show.ratingKey)}`,
+    showTitle: (show) => show.title,
+    cacheName: "Plex",
+    onCacheCleared: () => setReport(null),
+    onShowCleared: (show) => setReport((current) => current ? { ...current, scanCache: Object.fromEntries(Object.entries(current.scanCache || {}).filter(([key]) => key !== show.ratingKey)) } : current),
+    closeShowMenu: () => setOpenShowMenu(null),
+    onError: setError,
+  });
   const [fields, setFields] = useState({ plexUrl: "", plexToken: "", tmdbToken: "", tvdbApiKey: "", tvdbPin: "" });
   const [changedFields, setChangedFields] = useState<Partial<Record<FieldKey, boolean>>>({});
   const [configStatus, setConfigStatus] = useState<ConfigStatus>(EMPTY_CONFIG);
@@ -218,7 +227,7 @@ export default function PlexPage() {
 
   async function forceCheckShow(show: Show) {
     if (activity.isLocked()) return;
-    setOpenShowMenu(null); setCacheMessage("");
+    setOpenShowMenu(null); clearCacheMessage();
     await scan(show);
   }
 
@@ -311,16 +320,6 @@ export default function PlexPage() {
     saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons });
     setSeasonIgnoreShow(null);
   }
-  async function clearShowCache(show: Show) {
-    setOpenShowMenu(null); setCacheMessage("");
-    try {
-      const response = await fetch(`/api/plex/scan?ratingKey=${encodeURIComponent(show.ratingKey)}`, { method: "DELETE" });
-      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || `Shelfcheck could not clear ${show.title}'s cache.`);
-      setReport((current) => current ? { ...current, scanCache: Object.fromEntries(Object.entries(current.scanCache || {}).filter(([key]) => key !== show.ratingKey)) } : current);
-      setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
-    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : `Shelfcheck could not clear ${show.title}'s cache.`); }
-  }
   function chooseSort(field: "title" | "percent") {
     if (field === sortField) setSortAscending((ascending) => !ascending);
     else { setSortField(field); setSortAscending(field === "title"); }
@@ -356,17 +355,6 @@ export default function PlexPage() {
       return next;
     });
     setOpenEpisodeMenu(null);
-  }
-  async function clearCache() {
-    setClearingCache(true); setCacheMessage("");
-    try {
-      const response = await fetch("/api/plex/scan", { method: "DELETE" });
-      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || "Shelfcheck could not clear the Plex scan cache.");
-      setReport(null); setCacheClearConfirmOpen(false);
-      setCacheMessage(`${body.cleared || 0} cached Plex show results cleared. The next scan will rebuild them.`);
-    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : "Shelfcheck could not clear the Plex scan cache."); }
-    finally { setClearingCache(false); }
   }
   function linkEpisode(show: Show, episode: Missing) {
     setCoverageMappingId(undefined);
@@ -473,9 +461,9 @@ export default function PlexPage() {
           <p className="diagnostics-toggle scan-cache-title">Scan cache</p>
           <p>Plex scans save the latest provider comparison so results remain available between visits. Clear the cache to remove that report and make the next scan rebuild every show.</p>
           <p className="scan-cache-status">Cached results for {cacheCount} {cacheCount === 1 ? "show" : "shows"}{report ? ` · Latest scan ${new Date(report.lastScan).toLocaleString()}` : ""}</p>
-          {!cacheClearConfirmOpen ? <button type="button" onClick={() => { setCacheMessage(""); setCacheClearConfirmOpen(true); }} disabled={scanning || cacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
+          {!cacheClearConfirmOpen ? <button type="button" onClick={openCacheClearConfirm} disabled={scanning || cacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
             <p>This clears Plex scan results only. Your credentials, preferences, ignored shows, Trakt data, and logs will not change.</p>
-            <div><button type="button" onClick={() => setCacheClearConfirmOpen(false)} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
+            <div><button type="button" onClick={cancelCacheClear} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
           </div>}
           {cacheMessage && <p className="cache-message">{cacheMessage}</p>}
         </div>

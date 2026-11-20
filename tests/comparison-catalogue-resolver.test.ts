@@ -878,7 +878,7 @@ test("any successful download from a single-ID provider clears its open refresh 
   }
 });
 
-test("with no Plex TMDB ID and one Plex TVDB ID, TMDB is derived from that ID before TVDB loads, as the scan does", async () => {
+test("with no Plex TMDB ID and one Plex TVDB ID, TMDB is derived from that ID before TVDB loads", async () => {
   const { source, requests } = inMemoryCatalogueSource({
     now: NOW, saved: { tmdb: { 50: before(DAY) }, tvdb: { 1: before(DAY) } }, associations: { 1: { outcome: "found", id: 50, cached: false } },
   });

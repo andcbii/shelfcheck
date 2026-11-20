@@ -20,7 +20,7 @@ const closeCached = () => { cache.__shelfcheckDatabase?.close(); delete cache.__
 const EVERY_TABLE = [
   "shelfcheck_catalogue_candidates", "shelfcheck_catalogue_overrides", "shelfcheck_catalogue_selections",
   "shelfcheck_coverage_evidence", "shelfcheck_coverage_issues", "shelfcheck_coverage_mappings", "shelfcheck_coverage_members",
-  "shelfcheck_coverage_previews", "shelfcheck_coverage_state", "shelfcheck_plex_generated_inputs", "shelfcheck_scan_state",
+  "shelfcheck_coverage_previews", "shelfcheck_coverage_state", "shelfcheck_plex_generated_inputs", "shelfcheck_scan_state", "shelfcheck_series_not_found",
 ];
 
 /** The database file in a disposable data directory, opened fresh: no cached handle survives into or out of it. */
@@ -53,7 +53,7 @@ test("opening an empty data directory creates every table at the current version
   assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 4);
+    assert.equal(version(db), 5);
     assert.deepEqual(tables(db), EVERY_TABLE);
   });
 });
@@ -113,7 +113,7 @@ test("opening an older sparse layout adds missing tables and columns without era
   assert.equal(sqlite.savedScanState("trakt").status.read(), null, "A missing Trakt status table has no status");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 4);
+    assert.equal(version(db), 5);
     assert.deepEqual(tables(db), EVERY_TABLE);
     assert.deepEqual(db.prepare("SELECT provider,episode_id,mapping_id,report_missing FROM shelfcheck_coverage_members").all().map(row => ({ ...row })), [{ provider: "TMDB", episode_id: 1, mapping_id: "m", report_missing: 0 }], "Older members gain Report Missing off");
     assert.deepEqual({ ...db.prepare("SELECT revision,pending FROM shelfcheck_coverage_state").get() }, { revision: 3, pending: 0 });
@@ -152,13 +152,13 @@ test("ownership-correction retirement runs once, with today's revision and pendi
 
 test("a database from a newer Shelfcheck is refused and left untouched", (t) => {
   const file = freshDatabaseFile(t);
-  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 5;");
+  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 6;");
   const before = inspect(file, db => ({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 5, newer than this Shelfcheck supports \(4\)/);
+  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 6, newer than this Shelfcheck supports \(5\)/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.deepEqual({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }, before);
   });
 });
@@ -233,7 +233,7 @@ test("a migration failing after a real schema change rolls back everything, and 
   sqlite.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 4);
+    assert.equal(version(db), 5);
     assert.deepEqual(coverageState(db), { revision: 5, pending: 1 }, "The retry retires corrections exactly once");
   });
 });
@@ -356,7 +356,7 @@ test("no backup is written for a new database, on a later open, or beside a refu
   closeCached();
   assert.deepEqual(directoryEntries(), [], "A later open with no pending migration writes no backup");
 
-  inspect(file, db => db.exec("PRAGMA user_version = 5"));
+  inspect(file, db => db.exec("PRAGMA user_version = 6"));
   assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /newer than this Shelfcheck supports/);
   assert.deepEqual(directoryEntries(), [], "A refused newer database gets no backup");
 });
@@ -379,7 +379,7 @@ test("upgrading Plex keeps its Settings, including unknown fields, and discards 
   assert.deepEqual(sqlite.savedScanState("trakt").options.read(), { diagnostics: true }, "Trakt moves in the same open");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 4);
+    assert.equal(version(db), 5);
     assert.equal(tables(db).includes("shelfcheck_plex_state"), false, "The old Plex table is dropped");
   });
 });
@@ -438,7 +438,7 @@ test("upgrading Trakt keeps its options, including unknown fields, and discards 
   assert.deepEqual(sqlite.savedScanState("plex").options.read(), { libraries: ["1"] }, "Plex is not touched again");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 4);
+    assert.equal(version(db), 5);
     assert.equal(tables(db).includes("shelfcheck_states"), false, "The old Trakt state table is dropped");
     assert.equal(tables(db).includes("shelfcheck_scan_status"), false, "The old Trakt status table is dropped");
   });
@@ -545,10 +545,12 @@ for (const upgrade of UPGRADES) {
     closeCached();
 
     inspect(file, db => {
-      assert.equal(version(db), 4);
+      assert.equal(version(db), 5);
       assert.deepEqual(tables(db), EVERY_TABLE, "The old scan state tables are dropped");
       const after = everyRow(db);
       for (const name of OLD_SCAN_STATE_TABLES) { delete before[name]; delete after[name]; }
+      assert.deepEqual(after.shelfcheck_series_not_found, [], "Migration 5 starts the 404 history empty");
+      delete after.shelfcheck_series_not_found;
       assert.deepEqual(after, before, "Every other table and row is kept");
     });
     const backups = readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
@@ -578,13 +580,14 @@ const plexRowV3 = { report: { shows: [{ ratingKey: "kept" }] }, resumePoint: { s
 
 /**
  * A version 3 database, as the release before migration 4 left it, with its one backup beside it.
- * Today's open builds the layout; no later migration changed it, so stepping user_version back is that release's database.
+ * Today's open builds the layout; stepping user_version back and dropping the table migration 5 added is that release's database.
  */
 function versionThree(file: string, trakt: { report: unknown } | null, seed?: (db: DatabaseSync) => void) {
   sqlite.savedScanState("plex").snapshot();
   closeCached();
   inspect(file, db => {
     db.exec("PRAGMA user_version = 3");
+    db.exec("DROP TABLE shelfcheck_series_not_found");
     db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('plex',?,?,?,?,'2026-01-01 00:00:00')")
       .run(...[plexRowV3.report, plexRowV3.resumePoint, plexRowV3.status, plexRowV3.options].map(value => JSON.stringify(value)));
     if (trakt) db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('trakt',?,?,?,?,'2026-01-02 03:04:05')")
@@ -614,10 +617,12 @@ for (const [name, report] of Object.entries(OLD_TRAKT_REPORTS)) {
     closeCached();
 
     inspect(file, db => {
-      assert.equal(version(db), 4);
+      assert.equal(version(db), 5);
       const after = everyRow(db);
       delete before.shelfcheck_scan_state;
       delete after.shelfcheck_scan_state;
+      assert.deepEqual(after.shelfcheck_series_not_found, [], "Migration 5 starts the 404 history empty");
+      delete after.shelfcheck_series_not_found;
       assert.deepEqual(after, before, "Every other table and row is kept");
     });
     const backups = readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
@@ -632,7 +637,7 @@ test("upgrading a version 3 database with no Trakt row leaves it without one", (
   assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 4);
+    assert.equal(version(db), 5);
     assert.deepEqual(db.prepare("SELECT mode FROM shelfcheck_scan_state ORDER BY mode").all().map(row => row.mode), ["plex"]);
   });
 });
@@ -649,7 +654,7 @@ test("after migration 4, a new Trakt report and Resume point survive a reopen, s
   assert.deepEqual(trakt.report.read(), report);
   assert.deepEqual(trakt.resumePoint.read(), { ...report, savedAt: "after", resumePointVersion: 2 });
   closeCached();
-  inspect(file, db => assert.equal(version(db), 4, "The version advanced once"));
+  inspect(file, db => assert.equal(version(db), 5, "The version advanced once"));
 });
 
 test("a failure after migration 4 clears the Trakt results rolls back the clear and the version together", (t) => {

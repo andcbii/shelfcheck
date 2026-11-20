@@ -116,6 +116,8 @@ export type RefreshObligationChange = "set" | "clear" | "unchanged";
 export type ProviderResolution<T> = {
   /** The provider's series identity after resolution: the series compared, else the one that is unavailable. */
   identity?: number;
+  /** How that identity was found (its lookup provenance), for this provider's later Coverage Issues; empty with no identity. */
+  lookupSource: LookupSourceStep[];
   /** Absent when no catalogue is usable. */
   catalogue?: ComparedCatalogue<T>;
   use: CatalogueUseProposal;
@@ -132,6 +134,14 @@ export type ProviderResolution<T> = {
 export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
   /** `pending`: a provider with an identity has no usable catalogue, or its series cannot be resolved, so last-good results stay. */
   outcome: "comparable" | "pending";
+  /** The order the providers were resolved in: TVDB first when TMDB is derived from a TVDB catalogue chosen among several. */
+  resolutionOrder: readonly CatalogueProvider[];
+  /** The order the comparison runs the catalogues in, whatever the resolution order: TMDB, then TVDB. */
+  comparisonOrder: readonly CatalogueProvider[];
+  /** The Coverage Issue IDs explaining each missing catalogue, in resolution order: the comparison-inputs issue's causes. */
+  unavailableCauses: string[];
+  /** The providers' warnings for the show's result, in resolution order. */
+  warnings: string[];
 } & { [K in CatalogueProvider]: ProviderResolution<P[K]> };
 
 /** One provider's progress, final once its candidate choice is: a provider-scoped patch to persist. */
@@ -168,7 +178,13 @@ export async function resolveComparisonCatalogues<P extends CataloguePayloads>(r
   const { tmdb, tvdb } = resolved as Resolved<P>;
   const missing = (resolution: ProviderResolution<unknown>) => (resolution.identity !== undefined && !resolution.catalogue) || !!resolution.incomplete;
   const pending = missing(tmdb) || missing(tvdb) || (tmdb.identity === undefined && tvdb.identity === undefined);
-  return { outcome: pending ? "pending" : "comparable", tmdb, tvdb };
+  const inOrder = order.map(provider => (resolved as Resolved<P>)[provider] as ProviderResolution<unknown>);
+  return {
+    outcome: pending ? "pending" : "comparable", resolutionOrder: order, comparisonOrder: PROVIDERS,
+    unavailableCauses: inOrder.flatMap(resolution => resolution.unavailableCause ? [resolution.unavailableCause] : []),
+    warnings: inOrder.flatMap(resolution => resolution.warning ? [resolution.warning] : []),
+    tmdb, tvdb,
+  };
 }
 
 type Resolved<P extends CataloguePayloads> = { [K in CatalogueProvider]: ProviderResolution<P[K]> };
@@ -215,8 +231,8 @@ function catalogueIssues(provider: CatalogueProvider, request: ComparisonCatalog
 }
 
 /** No series to derive: the provider compares nothing, its recorded use is cleared and its catalogue issues resolve. */
-function noDerivedSeries(provider: CatalogueProvider, request: ComparisonCatalogueRequest): ProviderResolution<never> {
-  return { use: { action: "clear" }, obligation: "unchanged", issues: catalogueIssues(provider, request, { tmdb: undefined, tvdb: undefined }).resolvedIssues };
+function noDerivedSeries(provider: CatalogueProvider, request: ComparisonCatalogueRequest, lookupSource: LookupSourceStep[] = []): ProviderResolution<never> {
+  return { lookupSource, use: { action: "clear" }, obligation: "unchanged", issues: catalogueIssues(provider, request, { tmdb: undefined, tvdb: undefined }).resolvedIssues };
 }
 
 /** The TVDB series named by the TMDB catalogue in use, for a show Plex reports no TVDB ID for. */
@@ -229,7 +245,7 @@ async function deriveTvdb<P extends CataloguePayloads>(request: ComparisonCatalo
   const identities = { tmdb: compared.id, tvdb: tvdbId };
   const load = await loadDerived(source, "tvdb", tvdbId, request.tvdb.refreshObligation);
   if (load.outcome !== "failed")
-    return { identity: load.id, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, load.outcome), issues: catalogueIssues("tvdb", request, identities).resolvedIssues };
+    return { identity: load.id, lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, load.outcome), issues: catalogueIssues("tvdb", request, identities).resolvedIssues };
   // A derived series whose load fails keeps its saved catalogue at any age, as a single Plex ID does.
   const saved = source.savedCatalogue("tvdb", tvdbId);
   return derivedFailure("tvdb", request, identities, load, { kind: "series", id: tvdbId }, lookupSource, saved, derivedUse(saved?.downloadedAt));
@@ -241,9 +257,9 @@ async function deriveTmdb<P extends CataloguePayloads>(request: ComparisonCatalo
   const plexStep: LookupSourceStep = { provider: "Plex", kind: "TVDB series", id: tvdbId };
   let association: SeriesAssociation;
   try { association = await source.tmdbSeriesForTvdb(tvdbId); } catch (error) { association = { outcome: "failed", error }; }
-  if (association.outcome === "known-empty") return noDerivedSeries("tmdb", request);
+  if (association.outcome === "known-empty") return noDerivedSeries("tmdb", request, [plexStep]);
   if (association.outcome === "missing") return {
-    use: { action: "unchanged" }, obligation: "unchanged", issues: [], incomplete: true,
+    lookupSource: [plexStep], use: { action: "unchanged" }, obligation: "unchanged", issues: [], incomplete: true,
     warning: `TMDB's association for TVDB series ${tvdbId} is not saved, so its TMDB series could not be resolved from saved inputs. Last-good results were kept until the next Plex scan.`,
   };
   // A derived TMDB series that cannot be loaded keeps comparing the one last compared for this TVDB series, at any age.
@@ -257,7 +273,7 @@ async function deriveTmdb<P extends CataloguePayloads>(request: ComparisonCatalo
   const lookupSource: LookupSourceStep[] = [plexStep, { provider: "TMDB", kind: "resolved show", id: association.id, cached: association.cached }];
   const load = await loadDerived(source, "tmdb", association.id, request.tmdb.refreshObligation);
   if (load.outcome !== "failed") return {
-    identity: load.id, catalogue: comparedFrom(load, load.outcome),
+    identity: load.id, lookupSource, catalogue: comparedFrom(load, load.outcome),
     use: { action: "set", use: { usingId: load.id, state: "derived", derivedFrom: tvdbId, usingDownloadedAt: load.downloadedAt } },
     obligation: loadedObligation(request.tmdb, load.outcome),
     issues: catalogueIssues("tmdb", request, { tmdb: load.id, tvdb: tvdbId }).resolvedIssues,
@@ -290,9 +306,10 @@ function derivedFailure<T>(provider: CatalogueProvider, request: ComparisonCatal
   ];
   const message = warning(failure, provider === "tmdb" ? "TMDB lookup failed." : "Provider lookup failed.");
   const obligation: RefreshObligationChange = request[provider].refreshObligation ? "unchanged" : "set";
-  if (saved) return { identity: saved.id, catalogue: comparedFrom(saved, "saved"), use, obligation, issues, warning: message };
+  const provenance = failure.lookupSource || lookupSource;
+  if (saved) return { identity: saved.id, lookupSource: provenance, catalogue: comparedFrom(saved, "saved"), use, obligation, issues, warning: message };
   const identity = identities[provider];
-  return { ...(identity !== undefined ? { identity } : {}), use, obligation, issues, unavailableCause: refreshId, warning: message };
+  return { ...(identity !== undefined ? { identity } : {}), lookupSource: provenance, use, obligation, issues, unavailableCause: refreshId, warning: message };
 }
 
 /** A provider with several Plex candidates: preferred, its saved copy within 60 days, the lowest usable fallback, else unavailable. */
@@ -336,5 +353,6 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const obligation: RefreshObligationChange = choice.preferredError
     ? (providerRequest.refreshObligation ? "unchanged" : "set")
     : choice.state === "preferred" && catalogue?.origin === "downloaded" && providerRequest.refreshObligation ? "clear" : "unchanged";
-  return { identity, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, obligation, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}) };
+  // A fallback keeps the preference's provenance, as today's scan does.
+  return { identity, lookupSource: providerRequest.lookupSource, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, obligation, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}) };
 }

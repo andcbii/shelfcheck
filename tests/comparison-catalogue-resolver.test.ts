@@ -433,3 +433,74 @@ test("in the TVDB-first case, TVDB's patch is acknowledged by the progress sink 
   await resolving;
   assert.deepEqual(events, ["load tvdb 1", "load tvdb 3", "patch tvdb set", "acknowledged tvdb", "association 3", "load tmdb 50", "patch tmdb unchanged", "acknowledged tmdb"]);
 });
+
+test("each provider reports the provenance of its identity: Plex for a reported ID, the derivation chain for a derived one", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: { 7: before(DAY) } }, failing: { tmdb: { 11: notFound(11) } }, tvdbOfTmdb: { 10: 7 } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, noTvdb), { source });
+  assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TMDB show", id: 11 }], "a fallback keeps the provenance of the preference");
+  assert.deepEqual(resolved.tvdb.lookupSource, [{ provider: "Plex", kind: "TMDB show", id: 11 }, { provider: "TMDB", kind: "external TVDB ID", id: 7, cached: true }]);
+
+  const derivedTmdb = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 50: before(DAY) }, tvdb: { 3: before(DAY) } }, failing: { tvdb: { 1: notFound(1) } }, associations: { 3: { outcome: "found", id: 50, cached: true } } });
+  const tvdbFirst = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source: derivedTmdb.source });
+  assert.deepEqual(tvdbFirst.tvdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }]);
+  assert.deepEqual(tvdbFirst.tmdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 3 }, { provider: "TMDB", kind: "resolved show", id: 50, cached: true }], "derived from the TVDB fallback compared");
+
+  const empty = inMemoryCatalogueSource({ now: NOW, saved: { tvdb: tvdbSaved }, associations: { 1: { outcome: "known-empty" } } });
+  const none = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source: empty.source });
+  assert.deepEqual(none.tmdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }]);
+  const noName = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: tmdbSaved } });
+  assert.deepEqual((await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, noTvdb), { source: noName.source })).tvdb.lookupSource, []);
+});
+
+test("with TVDB chosen first and unavailable, TMDB is still derived from the preferred TVDB series and compared, and the live outcome is pending", async () => {
+  const { source, associationRequests } = inMemoryCatalogueSource({
+    now: NOW, saved: { tmdb: { 50: before(DAY) }, tvdb: { 1: before(61 * DAY) } },
+    failing: { tvdb: { 1: notFound(1), 3: notFound(3) } }, associations: { 1: { outcome: "found", id: 50, cached: false } },
+  });
+  const patches: unknown[] = [];
+  const resolved = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source, onProviderResolved: async progress => { patches.push(progress); } });
+
+  assert.equal(resolved.outcome, "pending");
+  assert.deepEqual(associationRequests, [1]);
+  assert.deepEqual([resolved.tvdb.identity, resolved.tvdb.catalogue], [1, undefined]);
+  assert.deepEqual(resolved.tvdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }]);
+  assert.equal(resolved.tvdb.issues[0].action, "set");
+  assert.deepEqual(resolved.tvdb.use, { action: "set", use: { preferredId: 1, state: "unavailable", preferredDownloadedAt: before(61 * DAY), preferredUsableUntil: usableUntil(before(61 * DAY)), preferredFailedAt: NOW } });
+  assert.deepEqual([resolved.tmdb.identity, resolved.tmdb.catalogue?.id], [50, 50], "TMDB's independent work still happens");
+  assert.deepEqual(resolved.tmdb.use, { action: "set", use: { usingId: 50, state: "derived", derivedFrom: 1, usingDownloadedAt: before(DAY) } });
+  assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
+  assert.deepEqual(resolved.unavailableCauses, ["catalogue-refresh:TVDB:show-1"]);
+  assert.deepEqual(patches, [{ provider: "tvdb", obligation: "set" }, { provider: "tmdb", obligation: "unchanged" }]);
+});
+
+test("a pending outcome lists the comparison-inputs issue's causes and the warnings in resolution order, while comparison order stays TMDB then TVDB", async () => {
+  const tmdbDown = { error: new Error("TMDB is down.") };
+  const { source } = inMemoryCatalogueSource({
+    now: NOW, saved: { tvdb: { 3: before(DAY) } },
+    failing: { tvdb: { 1: { error: new Error("TVDB is down.") } }, tmdb: { 50: tmdbDown } }, associations: { 3: { outcome: "found", id: 50, cached: false } },
+  });
+  const tvdbFirst = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source });
+  assert.equal(tvdbFirst.outcome, "pending");
+  assert.deepEqual(tvdbFirst.resolutionOrder, ["tvdb", "tmdb"]);
+  assert.deepEqual(tvdbFirst.unavailableCauses, ["catalogue-refresh:TMDB:show-1"], "the TVDB fallback is compared, so only TMDB is a cause");
+  assert.deepEqual(tvdbFirst.warnings, ["TMDB is down."]);
+
+  const both = inMemoryCatalogueSource({ now: NOW, failing: { tvdb: { 1: { error: new Error("TVDB is down.") }, 3: { error: new Error("TVDB is down.") } }, tmdb: { 50: tmdbDown } }, associations: { 1: { outcome: "found", id: 50, cached: false } } });
+  const neither = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source: both.source });
+  assert.deepEqual(neither.unavailableCauses, ["catalogue-refresh:TVDB:show-1", "catalogue-refresh:TMDB:show-1"]);
+  assert.deepEqual(neither.warnings, ["TVDB is down.", "TMDB is down."]);
+  assert.deepEqual(neither.resolutionOrder, ["tvdb", "tmdb"]);
+
+  const { source: tmdbFirstSource } = inMemoryCatalogueSource({ now: NOW, failing: { tmdb: { 10: notFound(10), 11: notFound(11) }, tvdb: { 1: { error: new Error("TVDB is down.") }, 3: { error: new Error("TVDB is down.") } } } });
+  const tmdbFirst = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source: tmdbFirstSource });
+  assert.deepEqual(tmdbFirst.resolutionOrder, ["tmdb", "tvdb"]);
+  assert.deepEqual(tmdbFirst.unavailableCauses, ["catalogue-refresh:TMDB:show-1", "catalogue-refresh:TVDB:show-1"]);
+  assert.deepEqual(tmdbFirst.warnings, ["TMDB request failed (404).", "TVDB is down."]);
+});
+
+test("whatever the resolution order, the comparison runs TMDB's catalogue then TVDB's", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 50: before(DAY) }, tvdb: tvdbSaved }, associations: { 1: { outcome: "found", id: 50, cached: false } } });
+  const resolved = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source });
+  assert.deepEqual(resolved.resolutionOrder, ["tvdb", "tmdb"]);
+  assert.deepEqual(resolved.comparisonOrder.map(provider => resolved[provider].catalogue?.catalogue.provider), ["tmdb", "tvdb"]);
+});

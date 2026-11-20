@@ -66,6 +66,9 @@ A match determined and controlled by Shelfcheck through automatic matching.
 **Coverage Issue**:
 An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists. The Scan Issues report lists them.
 
+**Provider Lookup Failure**:
+A Coverage Issue recording that a show or episode could not be looked up at a provider, for any reason: a missing ID, "not found", an outage, a rate limit, a failed sign-in or an unreadable answer.
+
 **Gone provider record**:
 A provider series record that has answered "not found" on 15 separate UTC days since its last successful download, and whose saved catalogue is more than 60 days old. Its saved catalogue is kept but never compared, and one successful download makes it usable again. Outages and other failures never count toward it.
 _Avoid_: Deleted show, dead ID

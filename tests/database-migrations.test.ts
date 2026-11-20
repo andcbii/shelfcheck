@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -243,4 +243,92 @@ test("a second open runs no migration but still removes ignored results at open"
     assert.equal(tables(db).includes("shelfcheck_coverage_corrections"), true, "Migration 1 did not run again");
     assert.deepEqual(coverageState(db), { revision: 0, pending: 0 });
   });
+});
+
+// Written next to the database before the first migration; see lib/sqlite-migrations.ts.
+const backupOf = (file: string) => path.join(path.dirname(file), "shelfcheck-pre-migration-backup.db");
+/** Open the backup on its own, read-only, so a missing file fails instead of being created. */
+function inspectBackup<T>(file: string, read: (db: DatabaseSync) => T): T {
+  const db = new DatabaseSync(backupOf(file), { readOnly: true });
+  try { return read(db); } finally { db.close(); }
+}
+const legacyOptions = { ignoredShows: [], diagnostics: true, futureOption: { kept: true } };
+
+test("upgrading an unversioned database first writes a complete backup, including committed WAL data", (t) => {
+  const file = dataDirectory(t);
+  fixture(file, TODAY_LAYOUT);
+  // A legacy process left committed writes in the WAL: auto-checkpoint is off and its handle stays open.
+  const legacy = new DatabaseSync(file);
+  try {
+    legacy.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;");
+    legacy.prepare("INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user',?)").run(JSON.stringify({ ...legacyOptions, report: { shows: [{ show: { ids: { trakt: 1 } } }] }, checkpoint: { done: 1 } }));
+    legacy.prepare("INSERT INTO shelfcheck_scan_status(user_id,payload) VALUES('single-user',?)").run(JSON.stringify({ status: "completed" }));
+    legacy.prepare("INSERT INTO shelfcheck_plex_state(user_id,report,checkpoint,scan_status,settings) VALUES('single-user',?,?,?,?)").run("{\"shows\":[]}", "{\"done\":2}", "{\"status\":\"completed\"}", JSON.stringify({ libraries: ["1"], futureSetting: 3 }));
+    legacy.exec(`INSERT INTO shelfcheck_coverage_mappings VALUES('m','{"id":"m"}');
+      INSERT INTO shelfcheck_coverage_members VALUES('TMDB',1,'m',1);`);
+    for (const key of GENERATED_KEYS) legacy.prepare("INSERT INTO shelfcheck_plex_generated_inputs VALUES(?,?)").run(key, JSON.stringify({ key }));
+    const before = { schema: schema(legacy), rows: everyRow(legacy) };
+    assert.equal(before.rows.shelfcheck_states.length, 1, "The fixture's writes are committed, but only in the WAL");
+
+    sqlite.readPlexSettings();
+    closeCached();
+    inspectBackup(file, db => {
+      assert.equal(version(db), 0, "The backup holds the old, unversioned database");
+      assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before, "Old schema, both modes' state, options with unknown fields and unrelated data");
+    });
+  } finally {
+    legacy.close();
+  }
+});
+
+test("when the backup cannot be written, no migration runs and the open fails", (t) => {
+  const file = dataDirectory(t);
+  fixture(file, `${TODAY_LAYOUT} INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user','{"diagnostics":true}');`);
+  // A directory where the backup belongs obstructs it the same way on every platform.
+  mkdirSync(backupOf(file));
+  const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+  assert.throws(() => sqlite.readSingleUserState());
+  assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+  inspect(file, db => {
+    assert.equal(version(db), 0, "No migration ran");
+    assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before);
+  });
+});
+
+test("a retry after a failed migration keeps the original backup, and a partial file never counts as one", (t) => {
+  const file = dataDirectory(t);
+  fixture(file, `${CORRECTIONS_LAYOUT}
+    CREATE TRIGGER forced_failure BEFORE UPDATE ON shelfcheck_coverage_state BEGIN SELECT RAISE(ABORT, 'forced migration failure'); END;`);
+  // An interrupted earlier attempt left an incomplete file under the temporary name.
+  writeFileSync(`${backupOf(file)}.partial`, "incomplete");
+  const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+  assert.throws(() => sqlite.readPlexSettings(), /forced migration failure/);
+  inspectBackup(file, db => assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before, "The backup is the complete original, not the partial file"));
+  const original = readFileSync(backupOf(file));
+  inspect(file, db => db.exec("DROP TRIGGER forced_failure"));
+
+  sqlite.readPlexSettings();
+  closeCached();
+  assert.deepEqual(readFileSync(backupOf(file)), original, "The retry keeps the original backup");
+  assert.deepEqual(readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db")), [path.basename(backupOf(file))], "No second backup and no partial file");
+});
+
+test("no backup is written for a new database, on a later open, or beside a refused newer database", (t) => {
+  const file = dataDirectory(t);
+  const directoryEntries = () => readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
+  sqlite.readSingleUserState();
+  closeCached();
+  assert.deepEqual(directoryEntries(), [], "A database that did not exist before is not backed up");
+
+  sqlite.patchSingleUserState({ diagnostics: true });
+  closeCached();
+  sqlite.readSingleUserState();
+  closeCached();
+  assert.deepEqual(directoryEntries(), [], "A later open with no pending migration writes no backup");
+
+  inspect(file, db => db.exec("PRAGMA user_version = 2"));
+  assert.throws(() => sqlite.readSingleUserState(), /newer than this Shelfcheck supports/);
+  assert.deepEqual(directoryEntries(), [], "A refused newer database gets no backup");
 });

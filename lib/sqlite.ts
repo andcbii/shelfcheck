@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ignoredPlexKeys, ignoredTraktIds } from "@/lib/ignored-shows";
-import { migrateDatabase, refuseNewerDatabase } from "@/lib/sqlite-migrations";
+import { backupBeforeFirstMigration, migrateDatabase, refuseNewerDatabase } from "@/lib/sqlite-migrations";
 
 const SINGLE_USER_ID = "single-user";
 
@@ -116,10 +116,10 @@ function openDatabase(file: string) {
   const db = new DatabaseSync(file);
   try {
     refuseNewerDatabase(db);
+    backupBeforeFirstMigration(db, file);
     // Connection settings cannot change inside the migration transaction.
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA foreign_keys = ON");
-    // A pre-migration step (such as a backup of an existing database) belongs here.
     migrateDatabase(db);
     normalizeStoredIgnores(db);
     db.exec("PRAGMA optimize");

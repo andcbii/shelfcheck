@@ -1,5 +1,7 @@
 import "server-only";
 
+import { renameSync, rmSync, statSync } from "node:fs";
+import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 // Every table is created and upgraded here, by numbered migrations tracked by the
@@ -24,6 +26,30 @@ function newerDatabaseError(found: number) {
 export function refuseNewerDatabase(db: DatabaseSync) {
   const found = userVersion(db);
   if (found > SCHEMA_VERSION) throw newerDatabaseError(found);
+}
+
+// The one backup taken before migrations first change a database written by an
+// earlier release: shelfcheck-pre-migration-backup.db, next to shelfcheck.db. To roll
+// back, stop Shelfcheck and restore this file as shelfcheck.db with the old image.
+// It is written under a ".partial" name and renamed into place only once complete,
+// so a file at the backup name is always a complete backup and is never replaced.
+export const BACKUP_FILE_NAME = "shelfcheck-pre-migration-backup.db";
+
+/**
+ * Back up an unversioned database that already holds tables, before its first
+ * migration. Throws, so that nothing is migrated, if the backup cannot be written.
+ */
+export function backupBeforeFirstMigration(db: DatabaseSync, file: string) {
+  if (userVersion(db) !== 0) return;
+  const tables = db.prepare("SELECT COUNT(*) AS count FROM sqlite_master").get() as { count: number };
+  if (!tables.count) return;
+  const backup = path.join(path.dirname(file), BACKUP_FILE_NAME);
+  if (statSync(backup, { throwIfNoEntry: false })?.isFile()) return;
+  const partial = `${backup}.partial`;
+  rmSync(partial, { force: true });
+  // VACUUM INTO reads through this connection, so committed data still in the WAL is included.
+  db.prepare("VACUUM INTO ?").run(partial);
+  renameSync(partial, backup);
 }
 
 /** Apply every pending migration in one write transaction, or none of them. */

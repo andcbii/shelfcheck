@@ -73,9 +73,16 @@ A Coverage Issue recording that a show or episode could not be looked up at a pr
 A provider series record that has answered "not found" on 15 separate UTC days since its last successful download, and whose saved catalogue is more than 60 days old. Its saved catalogue is kept but never compared, and one successful download makes it usable again. Outages and other failures never count toward it.
 _Avoid_: Deleted show, dead ID
 
+**Total Provider Lookup Failure**:
+A provider for which none of a show's series IDs currently works: Plex reports none, or the latest download attempt for every reported ID failed. A catalogue reused without a new attempt still works. The show may still fall back to a saved catalogue from that provider until it becomes a Gone provider record.
+
 **Unmatched show**:
-A library show for which neither a TMDB nor a TVDB series could be resolved. A show that still has one resolved provider is not unmatched; it is compared with that provider alone.
-_Avoid_: Unmatched (for a show with one resolved provider)
+A library show with no usable catalogue from any provider, live or saved. The Unmatched Shows report lists them.
+_Avoid_: Unmatched (for a show that still has results)
+
+**Partially matched show**:
+A show that is not unmatched but has a Total Provider Lookup Failure for at least one provider, including one that is falling back to a saved catalogue. It is compared with whatever catalogues remain usable.
+_Avoid_: Partial Match (Manual Match and Auto Match are episode matches)
 
 **Episode-scoped failure**:
 An unresolved episode lookup or coverage check whose impact is limited to the affected episode and relationships that depend on it. Independent episode checks remain usable, including other ways to establish coverage for that episode.

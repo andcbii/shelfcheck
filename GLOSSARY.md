@@ -64,7 +64,15 @@ _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
 A match determined and controlled by Shelfcheck through automatic matching.
 
 **Coverage Issue**:
-An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists.
+An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists. The Scan Issues report lists them.
+
+**Gone provider record**:
+A provider series record that has answered "not found" on 15 separate UTC days since its last successful download, and whose saved catalogue is more than 60 days old. Its saved catalogue is kept but never compared, and one successful download makes it usable again. Outages and other failures never count toward it.
+_Avoid_: Deleted show, dead ID
+
+**Unmatched show**:
+A library show for which neither a TMDB nor a TVDB series could be resolved. A show that still has one resolved provider is not unmatched; it is compared with that provider alone.
+_Avoid_: Unmatched (for a show with one resolved provider)
 
 **Episode-scoped failure**:
 An unresolved episode lookup or coverage check whose impact is limited to the affected episode and relationships that depend on it. Independent episode checks remain usable, including other ways to establish coverage for that episode.

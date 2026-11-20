@@ -19,12 +19,14 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
-import { activeIgnores, createIgnoreTiming, isIgnoreActive, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
+import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, createIgnoreTiming, decodeTraktManagerKey, ignoreManagerKey, isIgnoreActive, restoreIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
 type IgnoredTraktShow = TraktShow & IgnoreTiming;
 type IgnoredTraktSeasons = { traktId: number; title: string; seasons: number[] } & IgnoreTiming;
+const traktShowKey = (show: TraktShow) => show.ids.trakt;
+const traktSeasonsKey = (rule: IgnoredTraktSeasons) => rule.traktId;
 type ServerState = {
   report?: ScanReport;
   ignoredShows?: IgnoredTraktShow[];
@@ -264,7 +266,7 @@ export default function Home() {
     reportInvalidations.current.add(show.ids.trakt);
     loadedCacheKeys.current.delete(String(show.ids.trakt));
     setScanCacheCount(loadedCacheKeys.current.size);
-    const next = [...activeIgnores(ignoredShows).filter((item) => item.ids.trakt !== show.ids.trakt), { ...compactTraktShow(show), ...createIgnoreTiming(duration) }].sort((a, b) => a.title.localeCompare(b.title));
+    const next = applyIgnore(ignoredShows, traktShowKey, compactTraktShow(show), duration, Date.now());
     setIgnoredShows(next);
     saveIgnoreLists({ ignoredShows: next });
     setShows((current) => current.filter((item) => item.show.ids.trakt !== show.ids.trakt));
@@ -274,28 +276,32 @@ export default function Home() {
   }
 
   function restoreShow(traktId: number) {
-    const next = activeIgnores(ignoredShows).filter((show) => show.ids.trakt !== traktId);
+    const next = restoreIgnore(ignoredShows, traktShowKey, traktId, Date.now());
     setIgnoredShows(next);
     saveIgnoreLists({ ignoredShows: next });
   }
 
   function restoreSeasons(traktId: number) {
-    const next = activeIgnores(ignoredSeasons).filter((show) => show.traktId !== traktId);
+    const next = restoreIgnore(ignoredSeasons, traktSeasonsKey, traktId, Date.now());
     setIgnoredSeasons(next);
     saveIgnoreLists({ ignoredSeasons: next });
   }
 
+  function restoreManagerItem(key: string | number) {
+    const target = decodeTraktManagerKey(key);
+    if (target?.kind === "show") restoreShow(target.key);
+    else if (target?.kind === "seasons") restoreSeasons(target.key);
+  }
+
   function changeIgnoreDuration(key: string | number, duration: IgnoreDuration) {
-    const value = String(key);
-    const timing = createIgnoreTiming(duration);
-    if (value.startsWith("show|")) {
-      const traktId = Number(value.slice(5));
-      const next = activeIgnores(ignoredShows).map((show) => show.ids.trakt === traktId ? { ...show, expiresAt: undefined, ...timing } : show);
+    const target = decodeTraktManagerKey(key);
+    const now = Date.now();
+    if (target?.kind === "show") {
+      const next = changeIgnoreRuleDuration(ignoredShows, traktShowKey, target.key, duration, now);
       setIgnoredShows(next);
       saveIgnoreLists({ ignoredShows: next });
-    } else if (value.startsWith("seasons|")) {
-      const traktId = Number(value.slice(8));
-      const next = activeIgnores(ignoredSeasons).map((show) => show.traktId === traktId ? { ...show, expiresAt: undefined, ...timing } : show);
+    } else if (target?.kind === "seasons") {
+      const next = changeIgnoreRuleDuration(ignoredSeasons, traktSeasonsKey, target.key, duration, now);
       setIgnoredSeasons(next);
       saveIgnoreLists({ ignoredSeasons: next });
     }
@@ -487,7 +493,7 @@ export default function Home() {
           <div><span>MISSING EPISODES</span><strong>{lastScan ? visibleMissing.length : "—"}</strong></div>
           <div className="ignored-stat" data-menu-root="ignored"><button type="button" onClick={() => setIgnoredManagerOpen((open) => !open)} aria-expanded={ignoredManagerOpen}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div>
         </section>
-        {ignoredManagerOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: `show|${show.ids.trakt}`, title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: `seasons|${show.traktId}`, title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredManagerOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={(key) => { const value = String(key); if (value.startsWith("show|")) restoreShow(Number(value.slice(5))); else if (value.startsWith("seasons|")) restoreSeasons(Number(value.slice(8))); }} showCount />}
+        {ignoredManagerOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: ignoreManagerKey("show", show.ids.trakt), title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: ignoreManagerKey("seasons", show.traktId), title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredManagerOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={restoreManagerItem} showCount />}
       </div>
 
       <section className="report">

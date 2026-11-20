@@ -37,6 +37,8 @@ export function inMemoryCatalogueSource(options: {
   targeted?: boolean;
   /** Saved records too incomplete to compare: series ID to original download time. */
   unusable?: Partial<Record<CatalogueProvider, Record<number, string>>>;
+  /** Each series' counted 404 days; an unlisted series has none. */
+  seriesNotFoundDays?: Partial<Record<CatalogueProvider, Record<number, number>>>;
 }) {
   const saved: Record<CatalogueProvider, Map<number, string>> = {
     tmdb: new Map(Object.entries(options.saved?.tmdb || {}).map(([id, at]) => [Number(id), at])),
@@ -69,6 +71,9 @@ export function inMemoryCatalogueSource(options: {
     },
     savedRecordDownloadedAt(provider, id) {
       return saved[provider].get(id) ?? options.unusable?.[provider]?.[id];
+    },
+    seriesNotFoundDays(provider, id) {
+      return options.seriesNotFoundDays?.[provider]?.[id] ?? 0;
     },
     async tmdbSeriesForTvdb(tvdbId, settings) {
       associationRequests.push({ tvdbId, mandatory: settings.mandatory });

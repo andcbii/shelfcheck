@@ -196,3 +196,33 @@ test("after the upgrade a Plex page is idle and its next full scan starts over, 
   assert.equal(logEvents(dir, "plex.checkpoint.discarded").length, 0, "No Resume point was left to discard");
   assert.equal(status.processed, 3, "Every show is scanned");
 });
+
+/** A usable Resume point that resumes show 10, saved by an earlier full run. */
+const earlierResumePoint = () => ({ shows: [{ ratingKey: "ratingKey:10", title: "Show 10", plexEpisodes: 0, missing: [] }], scanCache: { "ratingKey:10": {} }, cacheVersion: PLEX_CACHE_VERSION, autoCompoundEpisodes: true, savedAt: new Date().toISOString() });
+const earlierReport = { shows: [], scanCache: {}, lastScan: "earlier", finishedAt: "earlier" };
+
+test("a full Plex scan whose completion the store rejects keeps the earlier report with the earlier Resume point", async (t) => {
+  await library(t);
+  const store = sqlite.savedScanState("plex");
+  const point = earlierResumePoint();
+  store.report.write(earlierReport);
+  store.resumePoint.write(point);
+  // The store rejects every Resume point change, so the clear that completes the run fails.
+  cache.__shelfcheckDatabase!.exec("CREATE TRIGGER fail_resume_point BEFORE UPDATE OF resume_point ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'resume point store unavailable'); END;");
+  const status = await fullScan();
+  assert.equal(status.status, "error");
+  assert.deepEqual(store.report.read(), earlierReport, "No new report is saved beside the earlier Resume point");
+  assert.deepEqual(store.resumePoint.read(), point, "The earlier Resume point stays");
+});
+
+test("a completed full Plex scan saves its report with no Resume point left", async (t) => {
+  await library(t);
+  const store = sqlite.savedScanState("plex");
+  store.report.write(earlierReport);
+  store.resumePoint.write(earlierResumePoint());
+  const status = await fullScan();
+  assert.equal(status.status, "completed", status.error || "");
+  const report = store.report.read() as { shows: { ratingKey: string }[] };
+  assert.deepEqual(report.shows.map((show) => show.ratingKey).sort(), ["ratingKey:10", "ratingKey:11", "ratingKey:12"]);
+  assert.equal(store.resumePoint.read(), null);
+});

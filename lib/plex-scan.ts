@@ -1408,7 +1408,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // A coverage-revision veto commits nothing and ends the run with an error status.
   run.complete({
     commit: () => {
-      plexSavedState.report.write(report);
+      // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
+      if (targetRatingKey) plexSavedState.report.write(report); else plexSavedState.commitReport(report);
       const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
       if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
       if (!targetRatingKey) {

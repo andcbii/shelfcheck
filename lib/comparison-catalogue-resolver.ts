@@ -3,7 +3,7 @@ import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, mult
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
-import { MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
+import { GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
 import { combinePatches, effectivePatch, PREFERRED_REQUIRED, requiresDownload, satisfiedByDownload, type AttemptedCatalogue, type RefreshObligation, type RefreshObligationPatch } from "@/lib/refresh-obligation";
 
 /**
@@ -124,14 +124,15 @@ export type PriorSelection = {
  * which IDs Plex reports. `working`: the catalogue in use comes from a series whose latest download
  * attempt succeeded or that was reused without one, whether Plex reported it or it was found through
  * the other provider. `total-failure`: a Total Provider Lookup Failure, comparing a saved copy kept
- * after a failed attempt (`saved`) or with nothing usable (`none`); `cause` is its catalogue-refresh
+ * after a failed attempt (`saved`), with nothing usable (`none`), or whose series is a Gone provider
+ * record (`gone`: its saved catalogue is kept but never compared); `cause` is its catalogue-refresh
  * Coverage Issue's cause. `no-series`: no series to look up (no Plex ID and none found through the
  * other provider, or the provider answered that it has no such series); never a failure.
  * `pending`: saved evidence cannot resolve the series yet. Candidates not tried never count as failing.
  */
 export type ProviderLookupStatus =
   | { state: "working" }
-  | { state: "total-failure"; catalogue: "saved" | "none"; cause: string }
+  | { state: "total-failure"; catalogue: "saved" | "none" | "gone"; cause: string }
   | { state: "no-series" }
   | { state: "pending" };
 
@@ -211,6 +212,8 @@ export type ProviderResolution<T> = {
   warning?: string;
   /** Saved evidence cannot resolve this provider's series, so the comparison is pending. */
   incomplete?: true;
+  /** The provider's series is a Gone provider record: its saved catalogue is kept but not compared. */
+  gone?: true;
   /** Plex reports at most one ID for this provider, so its series is the single Plex ID's or a derived one, under the single-catalogue policy. */
   singleCatalogue?: true;
   /** The provider's lookup status for this show, from the catalogue in use. */
@@ -326,7 +329,7 @@ function judged<T>(request: ComparisonCatalogueRequest, provider: CatalogueProvi
   const failure = choice.issues.find(action => action.action === "set" && (action.issue.id === refreshId || action.issue.id === fallbackId));
   const cause = failure?.action === "set" ? failure.issue.cause : undefined;
   if (choice.catalogue) return { ...choice, status: choice.catalogue.origin === "saved" && cause !== undefined ? { state: "total-failure", catalogue: "saved", cause } : { state: "working" } };
-  return { ...choice, status: cause !== undefined ? { state: "total-failure", catalogue: "none", cause } : { state: "no-series" } };
+  return { ...choice, status: cause !== undefined ? { state: "total-failure", catalogue: choice.gone ? "gone" : "none", cause } : { state: "no-series" } };
 }
 
 /** A provider's progress as the progress sink receives it. */
@@ -414,9 +417,10 @@ async function singleIdCatalogue<P extends CataloguePayloads, K extends Catalogu
     obligation: loadedObligation(providerRequest, load.outcome), issues: resolvedIssues(provider, request),
   };
   // Shares the derived series' failure: the saved catalogue at any age, else unavailable.
-  const saved = source.savedCatalogue(provider, id);
+  const gone = goneRecord(source, provider, id, request.resolvedAt);
+  const saved = gone ? undefined : source.savedCatalogue(provider, id);
   const use: CatalogueUseProposal = { action: "set", use: failedSingleIdUse(id, saved?.downloadedAt, request.resolvedAt) };
-  return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, load, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, saved, use, downloadedAt: source.savedRecordDownloadedAt(provider, id) });
+  return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, load, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, saved, use, downloadedAt: source.savedRecordDownloadedAt(provider, id), gone });
 }
 
 /** A provider's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs. */
@@ -438,25 +442,41 @@ function preservedIssues(provider: CatalogueProvider, request: ComparisonCatalog
 }
 
 /** A provider's catalogue-refresh Coverage Issue value, in the shape the scan sets it. */
-function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; downloadedAt?: string }): CoverageIssue {
+function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; downloadedAt?: string; gone?: GoneRecord }): CoverageIssue {
   const name = PROVIDER_NAME[provider];
   const ids = { ...identities, [provider]: input.seriesId };
   return {
     id: input.id, ...(input.failedAt ? { failedAt: input.failedAt } : {}), ...(input.failure.causedBy?.length ? { causedBy: input.failure.causedBy } : {}),
     operation: "catalogue-refresh", provider: name, scope: "show",
     show: { ...request.show, tmdbId: ids.tmdb, tvdbId: ids.tvdb },
-    ...(input.seriesId !== undefined ? { catalogueRefresh: catalogueRefreshState(request, input.failure, input.downloadedAt) } : {}),
+    ...(input.seriesId !== undefined ? { catalogueRefresh: catalogueRefreshState(request, input.failure, input.downloadedAt, input.gone) } : {}),
     ...providerLookupContext(input.failure.error, { source: input.failure.lookupSource || input.source, requested: { provider: name, ...input.requested }, impact: input.impact }),
     ...(input.candidates ? { candidates: input.candidates } : {}),
   } as CoverageIssue;
 }
 
 /** The failed series' catalogue age and 404 progress, as of this resolution. */
-function catalogueRefreshState(request: ComparisonCatalogueRequest, failure: Failure, downloadedAt: string | undefined): CatalogueRefreshState {
+function catalogueRefreshState(request: ComparisonCatalogueRequest, failure: Failure, downloadedAt: string | undefined, gone?: GoneRecord): CatalogueRefreshState {
+  // A gone record shows its counted 404 days whatever today's failure was.
+  const seriesNotFoundDays = gone?.seriesNotFoundDays ?? (failure.kind === "series-not-found" ? failure.seriesNotFoundDays : undefined);
   return {
     checkedAt: request.resolvedAt, ...(downloadedAt ? { downloadedAt } : {}),
-    ...(failure.kind === "series-not-found" && failure.seriesNotFoundDays !== undefined ? { seriesNotFoundDays: failure.seriesNotFoundDays } : {}),
+    ...(seriesNotFoundDays !== undefined ? { seriesNotFoundDays } : {}),
+    ...(gone ? { gone: true } : {}),
   };
+}
+
+/** A Gone provider record's counted 404 days. */
+export type GoneRecord = { seriesNotFoundDays: number };
+
+/**
+ * Whether a series is a Gone provider record as of this resolution (ADR-0006), from the source's
+ * counted 404 days and the saved record's last complete download. The one rule for every path that
+ * could compare a saved copy: one Plex ID, a derived series, a cached recheck, each of several candidates.
+ */
+export function goneRecord(source: Pick<ComparisonCatalogueSource<CataloguePayloads>, "seriesNotFoundDays" | "savedRecordDownloadedAt">, provider: CatalogueProvider, id: number, resolvedAt: string): GoneRecord | undefined {
+  const seriesNotFoundDays = source.seriesNotFoundDays(provider, id);
+  return goneProviderRecord({ seriesNotFoundDays, downloadedAt: source.savedRecordDownloadedAt(provider, id), now: resolvedAt }) ? { seriesNotFoundDays } : undefined;
 }
 
 const failureWarning = (failure: Failure, fallback: string) => failure.error instanceof Error ? failure.error.message : fallback;
@@ -475,14 +495,15 @@ async function deriveTvdb<P extends CataloguePayloads>(resolving: Resolving<P>):
   const lookupSource: LookupSourceStep[] = [...request.tmdb.lookupSource, { provider: "TMDB", kind: "external TVDB ID", id: tvdbId, cached: compared.origin !== "downloaded" }];
   const derivedUse = (downloadedAt?: string): CatalogueUseProposal => ({ action: "set", use: { usingId: tvdbId, state: "derived", derivedFrom: compared.id, ...(downloadedAt ? { usingDownloadedAt: downloadedAt } : {}) } });
   const identities = { tmdb: compared.id, tvdb: tvdbId };
-  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tvdb", tvdbId) : await loadSingleCatalogue(source, "tvdb", tvdbId, requiresDownload(request.tvdb.refreshObligation, THE_ONE_CATALOGUE));
-  if (!load) return missingFromSaved("tvdb", request, tvdbId, lookupSource);
+  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tvdb", tvdbId, request.resolvedAt) : await loadSingleCatalogue(source, "tvdb", tvdbId, requiresDownload(request.tvdb.refreshObligation, THE_ONE_CATALOGUE));
+  if (!load) return missingFromSaved(resolving, "tvdb", tvdbId, lookupSource);
   if (load.outcome === "no-series") return noSeries("tvdb", request, tvdbId, lookupSource, derivedUse());
   if (load.outcome !== "failed")
     return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, load.outcome), issues: loadedIssues("tvdb", request) };
   // A derived series whose load fails keeps its saved catalogue at any age, as a single Plex ID does.
-  const saved = source.savedCatalogue("tvdb", tvdbId);
-  return singleCatalogueFailure("tvdb", request, identities, load, { kind: "series", id: tvdbId }, { lookupSource, saved, use: derivedUse(saved?.downloadedAt), downloadedAt: source.savedRecordDownloadedAt("tvdb", tvdbId) });
+  const gone = goneRecord(source, "tvdb", tvdbId, request.resolvedAt);
+  const saved = gone ? undefined : source.savedCatalogue("tvdb", tvdbId);
+  return singleCatalogueFailure("tvdb", request, identities, load, { kind: "series", id: tvdbId }, { lookupSource, saved, use: derivedUse(saved?.downloadedAt), downloadedAt: source.savedRecordDownloadedAt("tvdb", tvdbId), gone });
 }
 
 /**
@@ -514,7 +535,8 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
   // A derived TMDB series that cannot be loaded keeps comparing the one last compared for this TVDB series, at any age.
   const previous = request.previousComparison;
   const retainedId = previous?.tvdbId === tvdbId ? previous.tmdbId : undefined;
-  const saved = retainedId === undefined ? undefined : source.savedCatalogue("tmdb", retainedId);
+  // A retained series that is a Gone provider record is never compared.
+  const saved = retainedId === undefined || goneRecord(source, "tmdb", retainedId, request.resolvedAt) ? undefined : source.savedCatalogue("tmdb", retainedId);
   const resolvedStep = (id: number, cached: boolean): LookupSourceStep => ({ provider: "TMDB", kind: "resolved show", id, cached });
   if (association.outcome === "failed") {
     const failure: Failure = { outcome: "failed", error: association.error, ...(association.causedBy ? { causedBy: association.causedBy } : {}) };
@@ -523,8 +545,8 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
     return failed.catalogue ? { ...failed, lookupSource: [plexStep, resolvedStep(failed.catalogue.id, true)] } : failed;
   }
   const lookupSource: LookupSourceStep[] = [plexStep, resolvedStep(association.id, association.cached)];
-  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tmdb", association.id) : await loadSingleCatalogue(source, "tmdb", association.id, requiresDownload(request.tmdb.refreshObligation, THE_ONE_CATALOGUE));
-  if (!load) return missingFromSaved("tmdb", request, association.id, lookupSource);
+  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tmdb", association.id, request.resolvedAt) : await loadSingleCatalogue(source, "tmdb", association.id, requiresDownload(request.tmdb.refreshObligation, THE_ONE_CATALOGUE));
+  if (!load) return missingFromSaved(resolving, "tmdb", association.id, lookupSource);
   if (load.outcome === "no-series") return noSeries("tmdb", request, association.id, lookupSource, { action: "set", use: { usingId: association.id, state: "derived", derivedFrom: tvdbId } });
   if (load.outcome !== "failed") return {
     identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome),
@@ -534,7 +556,7 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
   };
   // The series resolved before the failure is the one its Coverage Issue names, with its provenance.
   const resolvedId = load.resolvedId ?? association.id;
-  return singleCatalogueFailure("tmdb", request, { tmdb: resolvedId, tvdb: tvdbId }, load, { kind: "show", id: resolvedId }, { lookupSource, saved, use: { action: "clear" }, downloadedAt: source.savedRecordDownloadedAt("tmdb", resolvedId) });
+  return singleCatalogueFailure("tmdb", request, { tmdb: resolvedId, tvdb: tvdbId }, load, { kind: "show", id: resolvedId }, { lookupSource, saved, use: { action: "clear" }, downloadedAt: source.savedRecordDownloadedAt("tmdb", resolvedId), gone: goneRecord(source, "tmdb", resolvedId, request.resolvedAt) });
 }
 
 /**
@@ -566,7 +588,9 @@ const loadedObligation = (providerRequest: ProviderRequest, outcome: "downloaded
 const failedObligation = (providerRequest: ProviderRequest): RefreshObligationChange => effectivePatch(providerRequest.refreshObligation, PREFERRED_REQUIRED);
 
 /** The impact of a single catalogue that could not be loaded. */
-function singleCatalogueFailureImpact(provider: CatalogueProvider, request: ComparisonCatalogueRequest, retained: boolean) {
+function singleCatalogueFailureImpact(provider: CatalogueProvider, request: ComparisonCatalogueRequest, retained: boolean, goneId?: number) {
+  const name = PROVIDER_NAME[provider];
+  if (goneId !== undefined) return `${name} episode coverage could not be verified. ${name} series ${goneId} is a gone provider record: its series request has answered 404 on ${GONE_RECORD_NOT_FOUND_DAYS} or more days and its saved catalogue is more than 60 days old, so that catalogue is kept but no longer compared. One complete download makes it usable again.`;
   return `${PROVIDER_NAME[provider]} episode coverage could not be fully verified. ${retained ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${request.previousComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`;
 }
 
@@ -574,19 +598,21 @@ function singleCatalogueFailureImpact(provider: CatalogueProvider, request: Comp
  * A single Plex ID or derived series that could not be resolved or loaded: its catalogue-refresh issue,
  * and the saved catalogue kept (any age), if any.
  */
-function singleCatalogueFailure<T>(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, failure: Failure, requested: { kind: RequestedKind; id: number }, kept: { lookupSource: LookupSourceStep[]; saved: SavedCatalogue<T> | undefined; use: CatalogueUseProposal; downloadedAt?: string }): ProviderChoice<T> {
+function singleCatalogueFailure<T>(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, failure: Failure, requested: { kind: RequestedKind; id: number }, kept: { lookupSource: LookupSourceStep[]; saved: SavedCatalogue<T> | undefined; use: CatalogueUseProposal; downloadedAt?: string; gone?: GoneRecord }): ProviderChoice<T> {
   const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
   const { lookupSource, saved, use, downloadedAt } = kept;
+  const seriesId = identities[provider];
+  // Only the failed series itself is reported gone, and only when nothing else is compared in its place.
+  const gone = !saved && seriesId !== undefined ? kept.gone : undefined;
   const issues: CatalogueIssueAction[] = [
-    { action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: identities[provider], requested, source: lookupSource, impact: singleCatalogueFailureImpact(provider, request, !!saved), downloadedAt }) },
+    { action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId, requested, source: lookupSource, impact: singleCatalogueFailureImpact(provider, request, !!saved, gone && seriesId), downloadedAt, gone }) },
     { action: "resolve", id: fallbackId },
   ];
   const warning = failureWarning(failure, PROVIDER_TERMS[provider].lookupFailed);
   const obligation = failedObligation(request[provider]);
   const provenance = failure.lookupSource || lookupSource;
   if (saved) return { identity: saved.id, lookupSource: provenance, catalogue: comparedFrom(saved, "saved"), use, obligation, issues, warning };
-  const identity = identities[provider];
-  return { ...(identity !== undefined ? { identity } : {}), lookupSource: provenance, use, obligation, issues, unavailableCause: refreshId, warning };
+  return { ...(seriesId !== undefined ? { identity: seriesId } : {}), lookupSource: provenance, use, obligation, issues, unavailableCause: refreshId, warning, ...(gone ? { gone: true as const } : {}) };
 }
 
 /** A provider with several Plex candidates: preferred, its saved copy within 60 days, the lowest usable fallback, else unavailable. */
@@ -671,15 +697,27 @@ const unchangedResolution = { use: { action: "unchanged" } as const, obligation:
 const missingSavedCatalogue = (provider: CatalogueProvider, id: number) =>
   `Saved ${PROVIDER_NAME[provider]} catalogue ${id} is missing or incomplete. Run a Plex scan to download the ${PROVIDER_NAME[provider]} catalogue.`;
 
-/** A cached read of a series' saved catalogue, as a reuse; absent when no usable copy is saved. */
-function readSaved<P extends CataloguePayloads, K extends CatalogueProvider>(source: ComparisonCatalogueSource<P>, provider: K, id: number): CatalogueLoad<P[K]> | undefined {
+/**
+ * A cached read of a series' saved catalogue, as a reuse; absent when no usable copy is saved or the
+ * series is a Gone provider record, which a cached recheck never compares.
+ */
+function readSaved<P extends CataloguePayloads, K extends CatalogueProvider>(source: ComparisonCatalogueSource<P>, provider: K, id: number, resolvedAt: string): CatalogueLoad<P[K]> | undefined {
+  if (goneRecord(source, provider, id, resolvedAt)) return undefined;
   const saved = source.savedCatalogue(provider, id);
   return saved && { outcome: "reused", ...saved };
 }
 
-/** A series the cached recheck compares but cannot read: pending, with last-good results kept. */
-function missingFromSaved(provider: CatalogueProvider, request: ComparisonCatalogueRequest, id: number, lookupSource: LookupSourceStep[]): ProviderChoice<never> {
-  return { identity: id, lookupSource, ...unchangedResolution, issues: preservedIssues(provider, request), incomplete: true, warning: missingSavedCatalogue(provider, id) };
+/**
+ * A series the cached recheck compares but cannot read, or that has become a Gone provider record
+ * since the last scan: pending, with last-good results kept until the next scan judges it. A recheck
+ * never judges a provider again, so it never changes the show's status by itself.
+ */
+function missingFromSaved<P extends CataloguePayloads>(resolving: Resolving<P>, provider: CatalogueProvider, id: number, lookupSource: LookupSourceStep[]): ProviderChoice<never> {
+  const { request, source } = resolving;
+  const warning = goneRecord(source, provider, id, request.resolvedAt)
+    ? `${PROVIDER_NAME[provider]} series ${id} is a gone provider record, so its saved catalogue is no longer compared. Last-good results were kept until the next Plex scan.`
+    : missingSavedCatalogue(provider, id);
+  return { identity: id, lookupSource, ...unchangedResolution, issues: preservedIssues(provider, request), incomplete: true, warning };
 }
 
 /** The provenance of a derived series a cached recheck keeps: the derivation chain from the series it follows. */
@@ -697,11 +735,11 @@ function keepCompared<P extends CataloguePayloads, K extends CatalogueProvider>(
   const issues = preservedIssues(provider, request);
   const id = request.previousComparison?.[`${provider}Id`];
   if (id === undefined) return { lookupSource: [], ...unchangedResolution, issues };
-  // The last scan had no catalogue for this provider, so the recheck compares none either and keeps that status.
+  // The last scan had no catalogue for this provider, or judged its series gone, so the recheck compares none either and keeps that status.
   const recorded = request.previousComparison?.status?.[provider];
-  if (recorded?.state === "total-failure" && recorded.catalogue === "none") return { identity: id, lookupSource, ...unchangedResolution, issues };
-  const saved = source.savedCatalogue(provider, id);
-  if (!saved) return missingFromSaved(provider, request, id, lookupSource);
+  if (recorded?.state === "total-failure" && recorded.catalogue !== "saved") return { identity: id, lookupSource, ...unchangedResolution, issues, ...(recorded.catalogue === "gone" ? { gone: true as const } : {}) };
+  const saved = goneRecord(source, provider, id, request.resolvedAt) ? undefined : source.savedCatalogue(provider, id);
+  if (!saved) return missingFromSaved(resolving, provider, id, lookupSource);
   return { identity: id, lookupSource, catalogue: comparedFrom(saved, "reused"), ...unchangedResolution, issues };
 }
 

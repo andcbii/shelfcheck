@@ -14,6 +14,8 @@ const plexScan = await import("../lib/plex-scan");
 const catalogues = await import("../lib/plex-catalogues");
 const reportData = await import("../app/reports/report-data");
 const { ActiveScanTracker } = await import("../lib/scan-concurrency");
+const { seriesNotFoundHistory } = await import("../lib/series-not-found-history");
+const manualCoverage = await import("../lib/manual-coverage");
 hook.deregister();
 
 const DAY = 86400_000;
@@ -82,6 +84,11 @@ async function fixture(t: TestContext) {
       if(!tvdbSeries[2]) return Response.json({data:{id,name:`TVDB ${id}`,slug:`tvdb-${id}`}});
       return Response.json({data:{episodes:Array.from({length:series.episodes},(_,n)=>({id:id*1000+n+1,seasonNumber:1,number:n+1,name:`Episode ${n+1}`,aired:"2020-01-01"}))}});
     }
+    // Manual Match member verification: a TMDB episode answers 404 while its series fails.
+    const tmdbEpisode = u.pathname.match(/^\/3\/tv\/(\d+)\/season\/1\/episode\/(\d+)$/);
+    if(tmdbEpisode) return tmdb[Number(tmdbEpisode[1])]?.fail ? Response.json({},{status:404}) : Response.json({id:Number(tmdbEpisode[1])*100+Number(tmdbEpisode[2])});
+    const tvdbEpisode = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/);
+    if(tvdbEpisode) return Response.json({data:{id:Number(tvdbEpisode[1])}});
     const findAnswer = find[Number(u.pathname.match(/^\/3\/find\/(\d+)$/)?.[1])];
     if(findAnswer?.fail) return Response.json({status_message:"unavailable"},{status:404});
     if(findAnswer?.tmdb) return Response.json({tv_results:[{id:findAnswer.tmdb,name:`TMDB ${findAnswer.tmdb}`}],tv_episode_results:[]});
@@ -765,4 +772,48 @@ test("a show with only a TMDB ID that fails with no saved data, and no TVDB foun
   assert.equal(show.providerResolution?.status,"unmatched");
   assert.deepEqual(show.providerResolution?.providers?.tvdb,{state:"no-series"});
   assert.deepEqual(unmatchedKeys(),[f.identity]);
+});
+
+test("a TMDB record gone after 15 counted 404 days and 60 days stops being compared in scans and cached rechecks, keeps its Manual Match, and one download restores it", async t => {
+  const f = await fixture(t);
+  let show = await f.run() as Judged;
+  assert.deepEqual(missingTmdb(show),[1002]);
+  const member = (provider: "TMDB"|"TVDB", id: number, showId: number, episode: number) => ({provider,id,showId,show:`${provider} ${showId}`,title:`Episode ${episode}`,season:1,episode,url:""});
+  manualCoverage.saveCoverageMapping([member("TMDB",1002,10,2),member("TVDB",3001,3,1)]);
+  // 14 earlier 404 days on TMDB series 10's series request.
+  for (let n = 40; n < 54; n++) seriesNotFoundHistory().recordNotFound("tmdb",10,day(n));
+  const recheck = async () => {
+    await plexScan.requestCoverageRecheck({members:[{provider:"TVDB",id:1001,showId:1,show:"TVDB 1",title:"Episode 1",season:1,episode:1,url:""}]});
+    return (await (await scan.GET()).json()).report.shows[0] as Judged;
+  };
+  f.tmdb[10].fail = true; f.changes([10]);
+
+  f.at(day(61)); show = await f.run() as Judged;
+  assert.equal(seriesNotFoundHistory().countedDays("tmdb",10),15);
+  assert.deepEqual(show.providerResolution?.providers?.tmdb,{state:"total-failure",catalogue:"saved",cause:"404 — record not found"},"15 days with a catalogue exactly 60 days old is not gone");
+  assert.deepEqual(missingTmdb(show),[1002]);
+
+  f.at(day(62)); show = await recheck();
+  assert.deepEqual(missingTmdb(show),[1002],"a copy gone since the last scan is not compared: last-good results stay until the next scan");
+  assert.equal(seriesNotFoundHistory().countedDays("tmdb",10),15,"a cached recheck never counts");
+
+  show = await f.run() as Judged;
+  assert.deepEqual(missingTmdb(show),[],"the gone catalogue is not compared");
+  assert.equal(show.missing.length,0,"TVDB is still compared");
+  assert.deepEqual(show.providerResolution?.providers?.tmdb,{state:"total-failure",catalogue:"gone",cause:"404 — record not found"});
+  assert.equal(show.providerResolution?.status,"partially-matched");
+  const issue = (await f.issues() as {id:string;catalogueRefresh?:object}[]).find(item=>item.id === `catalogue-refresh:TMDB:${f.identity}`);
+  assert.deepEqual(issue?.catalogueRefresh,{checkedAt:day(62),downloadedAt:day(1),seriesNotFoundDays:16,gone:true});
+  assert.ok(catalogues.readPlexInputs().tmdb["10"],"the saved catalogue is kept");
+
+  f.at(day(63)); show = await recheck();
+  assert.deepEqual(missingTmdb(show),[],"a cached recheck never compares a gone record");
+  assert.equal(show.providerResolution?.providers?.tmdb?.catalogue,"gone");
+  assert.equal(manualCoverage.listCoverageMappings().length,1,"the Manual Match on the gone record stays saved");
+
+  f.tmdb[10].fail = false;
+  f.at(day(64)); show = await f.run() as Judged;
+  assert.deepEqual(missingTmdb(show),[1002],"one complete download makes it usable again");
+  assert.equal(show.providerResolution?.status,"matched");
+  assert.equal(seriesNotFoundHistory().countedDays("tmdb",10),0);
 });

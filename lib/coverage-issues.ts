@@ -58,8 +58,10 @@ export type CatalogueRefreshState = {
   checkedAt: string;
   /** The series' last complete catalogue download; absent when it was never downloaded. */
   downloadedAt?: string;
-  /** Only when the series request itself answered 404: its counted 404 days, this one included. */
+  /** When the series request itself answered 404 (this one included), or the series is gone: its counted 404 days. */
   seriesNotFoundDays?: number;
+  /** The series is a Gone provider record (ADR-0006): its saved catalogue is kept but not compared. */
+  gone?: true;
 };
 export function listCoverageIssues(): CoverageIssue[] {
   const issues: CoverageIssue[] = (database().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));

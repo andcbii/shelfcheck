@@ -32,6 +32,15 @@
   including for each ID listed in a several-ID entry. Shelfcheck keeps this
   count per provider series ID across restarts and Clear cache; only a
   complete catalogue download resets it.
+- A TMDB or TVDB series that has answered "not found" on 15 UTC days and whose
+  saved catalogue is more than 60 days old is now treated as gone: its saved
+  catalogue is kept but no longer compared, in scans and in rechecks from
+  saved data, so a deleted provider record stops producing missing episodes.
+  The show is compared with the other provider, and its Scan Issues entry
+  reads, for example, "Gone: 404 on 16 days · catalogue 74 days old". Outages,
+  rate limits and sign-in failures still keep the last saved catalogue at any
+  age, Manual Matches on a gone series stay saved, and one complete download
+  makes the series usable again.
 - A show whose preferred catalogue cannot be loaded no longer downloads its
   fallback catalogue again on every Plex scan. The preferred catalogue is
   still retried on every full scan; the fallback is downloaded again only when

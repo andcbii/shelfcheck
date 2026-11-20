@@ -14,6 +14,10 @@ test("a 404 still counting toward gone shows its progress and the catalogue's ag
   assert.equal(catalogueRefreshProgress({ checkedAt: CHECKED, downloadedAt: daysBefore(74), seriesNotFoundDays: 7 }), "404 on 7 of 15 days · catalogue 74 days old");
 });
 
+test("a Gone provider record says so, with its counted 404 days and catalogue age", () => {
+  assert.equal(catalogueRefreshProgress({ checkedAt: CHECKED, downloadedAt: daysBefore(74), seriesNotFoundDays: 16, gone: true }), "Gone: 404 on 16 days · catalogue 74 days old");
+});
+
 test("a never-downloaded series shows its 404 days without a limit or age", () => {
   assert.equal(catalogueRefreshProgress({ checkedAt: CHECKED, seriesNotFoundDays: 3 }), "404 on 3 days · never downloaded");
   assert.equal(catalogueRefreshProgress({ checkedAt: CHECKED, seriesNotFoundDays: 1 }), "404 on 1 day · never downloaded");

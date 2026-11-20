@@ -46,7 +46,8 @@ const progress: Record<number, { aired: number; completed: number; seasons: { nu
 
 const airDates: Record<number, string[]> = {
   1: ["2020-01-01T00:00:00.000Z", "2020-01-08T00:00:00.000Z"],
-  2: ["2021-01-01T00:00:00.000Z", "2021-01-08T00:00:00.000Z", "2026-11-20T00:00:00.000Z"],
+  // Bravo S1E4 is in the seasons list only: progress never reports it, so no scan saves it.
+  2: ["2021-01-01T00:00:00.000Z", "2021-01-08T00:00:00.000Z", "2026-11-20T00:00:00.000Z", "2027-01-01T00:00:00.000Z"],
   3: ["2022-01-01T00:00:00.000Z", "2022-01-08T00:00:00.000Z"],
 };
 

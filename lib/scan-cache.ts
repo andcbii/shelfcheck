@@ -56,7 +56,7 @@ export function shouldSaveCheckpoint(processed: number, lastProcessed: number, n
  * The Trakt Resume point format. A Resume point of any other version, or none
  * (saved before 2.6.2), is discarded. Version 2 saves every missing episode
  * Trakt's progress reports, with its original first_aired timestamp when usable;
- * version 1 points left out episodes inside the airing grace period.
+ * version 1 points left out episodes inside the Air-date delay.
  */
 export const TRAKT_RESUME_POINT_VERSION = 2;
 

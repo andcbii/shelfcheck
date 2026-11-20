@@ -77,6 +77,19 @@ test("an open Trakt page shows an episode at local midnight with no request, and
   assert.equal(page.requests.length, requests, "no request");
 });
 
+test("an open Trakt page shows an episode inside the Air-date delay at the local midnight its delay ends, with no request", async (t) => {
+  const page = await mountTrakt(t, { airingGraceDays: 1 });
+  const requests = page.requests.length;
+  await page.run(() => page.clock.advanceTo(new Date(2026, 10, 21, 12)));
+  assert.equal(page.heading(), "3 missing episodes", "Alpha S1E2 aired today but is still inside the one-day delay");
+  await page.run(() => page.clock.advanceTo(new Date(new Date(2026, 10, 22).getTime() - 1)));
+  assert.equal(page.heading(), "3 missing episodes");
+  await page.run(() => page.clock.advanceTo(new Date(2026, 10, 22)));
+  assert.equal(page.heading(), "4 missing episodes");
+  assert.deepEqual(page.episodes(), ["S01E01", "S01E02", "S01E03", "S01E01"]);
+  assert.equal(page.requests.length, requests, "no request");
+});
+
 test("changing the Air-date delay on the Trakt page redraws both ways with no scan", async (t) => {
   const page = await mountTrakt(t);
   await page.run(() => page.clock.advanceTo(new Date(2026, 10, 21, 12)));

@@ -27,9 +27,10 @@ import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
-import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
+import { chooseAvailableCatalogue, failedSingleIdUse, multipleIdUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { unavailablePreferredImpact } from "@/lib/comparison-catalogue-resolver";
+import { resolveComparisonCatalogues, unavailablePreferredImpact, type PriorSelection, type ProviderRequest } from "@/lib/comparison-catalogue-resolver";
+import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
@@ -1661,68 +1662,50 @@ function savedComparisonContext(inputs: PlexGeneratedInputs, settings: ReturnTyp
 class PendingSavedComparison extends Error {}
 
 /**
- * The saved inputs an offline recheck compares for one show. Each provider with several Plex IDs
- * compares its preferred series' saved catalogue while within 60 days of `now`, else (once a scan has
- * tried that preference) the lowest remaining candidate with such a catalogue. A TVDB series derived
- * from TMDB follows the TMDB catalogue compared, and a TMDB series resolved from TVDB follows the TVDB series
- * compared, from TMDB's saved association for it. `uses` are the catalogue uses to publish, `null`
- * clearing one. Throws `PendingSavedComparison` when the saved catalogues cannot support it.
+ * Choose the catalogues an offline recheck compares for one show through the comparison catalogue
+ * resolver, from saved inputs only: the saved catalogue source never requests, and the recheck's
+ * prior-selection history (each provider's recorded catalogue use and unresolved catalogue-refresh
+ * issue) decides whether a preference has been tried. Throws `PendingSavedComparison` when saved
+ * inputs cannot support the comparison, so last-good results stay.
  */
-function assembleSavedComparison(identity: string, saved: SavedPlexComparison, inputs: PlexGeneratedInputs, selection: ShowCatalogueSelection | undefined, now: string) {
-  const input: SavedPlexComparison={...saved};
-  const uses: Partial<Record<CatalogueProvider, CatalogueUse | null>>={};
-  const savedCatalogue=(provider: CatalogueProvider, id: number | undefined) => { const catalogue=id ? inputs[provider][String(id)] : undefined; return usableProviderCatalogue(catalogue) ? catalogue : undefined; };
-  for (const provider of PROVIDERS) {
-    const choice=selection?.[provider];
-    if (!choice || !hasMultipleCandidates(choice) || choice.preferredId === undefined) continue;
-    const name=PROVIDER_NAME[provider], preferredId=choice.preferredId, current=choice.current;
-    const tried=current?.preferredId === preferredId;
-    const usingId=chooseSavedCatalogue({preferredId,candidates:choice.candidates.map(candidate=>candidate.id),now,tried,downloadedAt:id=>savedCatalogue(provider,id)?.downloadedAt});
-    if (usingId === undefined) throw new PendingSavedComparison(tried
-      ? `No reported ${name} series has a saved catalogue from the last 60 days, so this show could not be rechecked from saved inputs. Last-good results were kept.`
-      : `${name} series ${preferredId} has no saved catalogue from the last 60 days, so it could not be compared yet. Results from the previously compared catalogue were kept.`);
-    if (provider === "tmdb") input.tmdbId=usingId; else input.tvdbId=usingId;
-    // The last scan's failure provenance, else an unresolved lookup failure of this same series.
-    const issue=getCoverageIssue(`catalogue-refresh:${name}:${identity}`);
-    const preferredFailedAt=tried ? current?.preferredFailedAt : issue?.show?.[provider === "tmdb" ? "tmdbId" : "tvdbId"] === preferredId ? issue.failedAt : undefined;
-    uses[provider]=savedCatalogueUse({preferredId,usingId,preferredDownloadedAt:savedCatalogue(provider,preferredId)?.downloadedAt ?? (tried ? current?.preferredDownloadedAt : undefined),usingDownloadedAt:savedCatalogue(provider,usingId)!.downloadedAt,preferredFailedAt,
-      ...(tried && current?.usingId === usingId ? {usingFailedAt:current.usingFailedAt} : {})});
-  }
-  if (selection && !selection.tvdb.candidates.length && input.tmdbId !== saved.tmdbId) {
-    // Never keep a TVDB ID derived from a TMDB catalogue no longer compared.
-    input.tvdbId=savedCatalogue("tmdb",input.tmdbId)?.show.external_ids?.tvdb_id || undefined;
-    uses.tvdb=input.tvdbId ? {usingId:input.tvdbId,state:"derived",derivedFrom:input.tmdbId,...(savedCatalogue("tvdb",input.tvdbId) ? {usingDownloadedAt:savedCatalogue("tvdb",input.tvdbId)!.downloadedAt} : {})} : null;
-  }
-  if (selection && !selection.tmdb.candidates.length && input.tvdbId !== saved.tvdbId) {
-    // Never keep a TMDB ID resolved from a TVDB series no longer compared: resolve it as a scan
-    // would, from TMDB's saved answer for the TVDB series now compared.
-    const association=input.tvdbId ? saved.relationships[relationshipKey("TMDB",`${TMDB}/find/${input.tvdbId}?external_source=tvdb_id`)] : undefined;
-    if (input.tvdbId && !association) throw new PendingSavedComparison(`TMDB's association for TVDB series ${input.tvdbId} is not saved, so its TMDB series could not be resolved from saved inputs. Last-good results were kept until the next Plex scan.`);
-    input.tmdbId=(association?.value as {tv_results?: {id?: number}[]} | undefined)?.tv_results?.[0]?.id || undefined;
-    uses.tmdb=input.tmdbId ? {usingId:input.tmdbId,state:"derived",derivedFrom:input.tvdbId,...(savedCatalogue("tmdb",input.tmdbId) ? {usingDownloadedAt:savedCatalogue("tmdb",input.tmdbId)!.downloadedAt} : {})} : null;
-  }
-  for (const provider of PROVIDERS) {
-    const name=PROVIDER_NAME[provider], id=provider === "tmdb" ? input.tmdbId : input.tvdbId;
-    if (id && !savedCatalogue(provider,id)) throw new PendingSavedComparison(`Saved ${name} catalogue ${id} is missing or incomplete. Run a Plex scan to download the ${name} catalogue.`);
-  }
-  return {input,uses};
+async function resolveSavedComparison(identity: string, saved: SavedPlexComparison, inputs: PlexGeneratedInputs, selection: ShowCatalogueSelection | undefined, now: string) {
+  const history=(provider: CatalogueProvider): PriorSelection => {
+    const issue=getCoverageIssue(`catalogue-refresh:${PROVIDER_NAME[provider]}:${identity}`);
+    return {recordedUse:selection?.[provider].current,...(issue ? {refreshIssue:{seriesId:issue.show?.[provider === "tmdb" ? "tmdbId" : "tvdbId"],failedAt:issue.failedAt}} : {})};
+  };
+  const providerRequest=(provider: CatalogueProvider): ProviderRequest => ({
+    candidates:selection?.[provider].candidates.map(candidate=>candidate.id) || [],preferredId:selection?.[provider].preferredId,
+    refreshObligation:!!saved.refresh?.[provider],lookupSource:[],
+  });
+  const resolution=await resolveComparisonCatalogues({
+    context:{kind:"cached-recheck",history:{tmdb:history("tmdb"),tvdb:history("tvdb")}},
+    show:{ratingKey:identity,title:saved.group.records[0]?.title},resolvedAt:now,
+    previousComparison:{tmdbId:saved.tmdbId,tvdbId:saved.tvdbId,complete:!!saved.complete},
+    tmdb:providerRequest("tmdb"),tvdb:providerRequest("tvdb"),
+  },{source:savedCatalogueSource(inputs,saved)});
+  // Today's recheck reports a multiple-ID choice's problem before any other, then the rest in provider order.
+  const multipleIds=(provider: CatalogueProvider) => !!selection && hasMultipleCandidates(selection[provider]) && selection[provider].preferredId !== undefined;
+  const pending=[...PROVIDERS].sort((a,b)=>Number(multipleIds(b))-Number(multipleIds(a))).find(provider=>resolution[provider].incomplete);
+  if (pending) throw new PendingSavedComparison(resolution[pending].warning);
+  return {input:{...saved,tmdbId:resolution.tmdb.identity,tvdbId:resolution.tvdb.identity},resolution};
 }
 
 /**
- * Compare one show offline from the saved inputs `assembleSavedComparison` selects, then publish the
+ * Compare one show offline from the saved inputs `resolveSavedComparison` selects, then publish the
  * catalogues it compared with the saved comparison and the catalogue uses, so reports and notices
  * never describe another catalogue. No request is made and no time or obligation is consumed.
  */
 async function compareAssembledShow(identity: string, saved: SavedPlexComparison, context: SavedComparisonContext, now: string) {
   const selection=readShowCatalogueSelection(identity);
-  const {input,uses}=assembleSavedComparison(identity,saved,context.inputs,selection,now);
+  const {input,resolution}=await resolveSavedComparison(identity,saved,context.inputs,selection,now);
   const compared=await compareSavedShow(identity,input,context);
   if (input.tmdbId !== saved.tmdbId || input.tvdbId !== saved.tvdbId)
     savePlexComparison(identity,{...readPlexInputs().comparisons[identity] || input,tmdbId:input.tmdbId,tvdbId:input.tvdbId,tmdbAliases:compared.tmdbSeriesMatches.map(show=>show.id),tvdbAliases:compared.tvdbSeriesMatches.map(show=>show.id)});
+  // Catalogue issue actions (all preserved) and obligation changes (none) are not applied by a recheck.
   for (const provider of PROVIDERS) {
-    const use=uses[provider], current=selection?.[provider].current;
-    if (use === null) clearCatalogueUse(identity,provider);
-    else if (use && !sameCatalogueUse(current,use)) recordCatalogueUse(identity,provider,use);
+    const proposal=resolution[provider].use, current=selection?.[provider].current;
+    if (proposal.action === "clear") clearCatalogueUse(identity,provider);
+    else if (proposal.action === "set" && !sameCatalogueUse(current,proposal.use)) recordCatalogueUse(identity,provider,proposal.use);
   }
   return compared;
 }

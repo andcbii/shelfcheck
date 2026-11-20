@@ -46,11 +46,12 @@ const progress: Record<number, { aired: number; completed: number; seasons: { nu
 
 const airDates: Record<number, string[]> = {
   1: ["2020-01-01T00:00:00.000Z", "2020-01-08T00:00:00.000Z"],
-  2: ["2021-01-01T00:00:00.000Z", "2021-01-08T00:00:00.000Z", "2026-11-20T00:00:00.000Z"],
+  // Bravo S1E4 is in the seasons list only: progress never reports it, so no scan saves it.
+  2: ["2021-01-01T00:00:00.000Z", "2021-01-08T00:00:00.000Z", "2026-11-20T00:00:00.000Z", "2027-01-01T00:00:00.000Z"],
   3: ["2022-01-01T00:00:00.000Z", "2022-01-08T00:00:00.000Z"],
 };
 
-type Report = { shows: { show: { title: string; ids: { trakt: number } } }[]; missing: { show: { title: string }; season: number; episode: number }[]; lastScan: string; scanCache?: Record<string, unknown> };
+type Report = { shows: { show: { title: string; ids: { trakt: number } } }[]; missing: { show: { title: string }; season: number; episode: number; firstAired?: string }[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: string; processed: number; total: number; error?: string; finishedAt?: string; rateLimitPaused?: boolean; rateLimitResumeAt?: string; heartbeatAt?: string; activeShows?: unknown[] };
 
 /** `earlierRelease`, when given, leaves a database in the data directory before Shelfcheck first opens it. */
@@ -126,23 +127,30 @@ async function fixture(t: TestContext, earlierRelease?: (dataDirectory: string) 
 }
 
 const missing = (report: Report | undefined) => report?.missing.map((episode) => `${episode.show.title} S${episode.season}E${episode.episode}`);
+/** Each saved missing episode with the original Trakt first_aired timestamp it carries, or "none". */
+const dated = (report: Report | undefined) => report?.missing.map((episode) => `${episode.show.title} S${episode.season}E${episode.episode} ${episode.firstAired ?? "none"}`);
+/** Every progress candidate of the fixture, with its first_aired; Bravo S1E3 airs after NOW. */
+const ALL_DATED = ["Bravo S1E2 2021-01-08T00:00:00.000Z", "Bravo S1E3 2026-11-20T00:00:00.000Z", "Charlie S1E2 2022-01-08T00:00:00.000Z"];
 const perShow = (requests: string[]) => requests.filter((request) => request.startsWith("/shows/")).sort();
 
-test("a Quick scan reports every incomplete episode of a partly collected show and trusts a complete collection", async (t) => {
+test("a Quick scan with delay 0 saves every incomplete episode with its air date and trusts a complete collection", async (t) => {
   const f = await fixture(t);
   const status = await f.run();
   assert.equal(status.status, "completed");
   assert.equal(status.processed, 3);
   assert.equal(status.total, 3);
-  assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/3/progress/collection"]);
+  assert.deepEqual(perShow(f.requests), [
+    "/shows/2/progress/collection", "/shows/2/seasons",
+    "/shows/3/progress/collection", "/shows/3/seasons",
+  ], "one seasons request per re-checked show with missing episodes; none for the complete show");
   const report = await f.report();
   assert.deepEqual(report?.shows.map((item) => item.show.title), ["Alpha", "Bravo", "Charlie"]);
-  assert.deepEqual(missing(report), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+  assert.deepEqual(dated(report), ALL_DATED, "Bravo S1E3, still unaired, is saved with its date; the page hides it");
   assert.ok(Date.parse(report?.lastScan || "") >= Date.parse(NOW), "the report records when the scan finished");
   assert.deepEqual(Object.keys(report?.scanCache || {}).sort(), ["1", "2", "3"]);
 });
 
-test("a Deep Scan checks every show's progress and air dates and reports only incomplete episodes that have aired", async (t) => {
+test("a Deep Scan checks every show's progress and saves every incomplete episode with its air date", async (t) => {
   const f = await fixture(t);
   const status = await f.run({ force: true });
   assert.equal(status.status, "completed");
@@ -152,7 +160,7 @@ test("a Deep Scan checks every show's progress and air dates and reports only in
     "/shows/2/progress/collection", "/shows/2/seasons",
     "/shows/3/progress/collection", "/shows/3/seasons",
   ]);
-  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Charlie S1E2"]);
+  assert.deepEqual(dated(await f.report()), ALL_DATED, "no future episode from the seasons list is added; the unaired one progress reports is kept");
 });
 
 test("a single-show check rechecks only that show and keeps the other shows' results", async (t) => {
@@ -165,7 +173,7 @@ test("a single-show check rechecks only that show and keeps the other shows' res
   assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/2/seasons"]);
   const report = await f.report();
   assert.deepEqual(report?.shows.map((item) => item.show.title), ["Alpha", "Bravo", "Charlie"]);
-  assert.deepEqual(missing(report), ["Bravo S1E2", "Charlie S1E2"]);
+  assert.deepEqual(dated(report), ALL_DATED, "the checked show is saved with its dates and Charlie keeps its own");
 });
 
 test("a Quick scan reuses unchanged shows from the scan cache and rechecks a show whose collection changed", async (t) => {
@@ -174,15 +182,64 @@ test("a Quick scan reuses unchanged shows from the scan cache and rechecks a sho
   const unchanged = await f.run();
   assert.equal(unchanged.status, "completed");
   assert.equal(unchanged.processed, 3);
-  assert.deepEqual(f.requests, ["/sync/collection/shows"], "every show is reused from the scan cache");
-  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+  assert.deepEqual(f.requests, ["/sync/collection/shows"], "every show is reused from the scan cache, with no seasons request");
+  assert.deepEqual(dated(await f.report()), ALL_DATED, "cached shows keep their saved air dates");
 
   f.trakt.library[2].seasons = collected([1, 2]);
   f.trakt.library[2].show.aired_episodes = 3;
   f.trakt.progress[3] = { aired: 3, completed: 2, seasons: [{ number: 1, episodes: [{ number: 1, completed: true }, { number: 2, completed: true }, { number: 3, completed: false }] }] };
   await f.run();
-  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection"], "only the changed show is rechecked");
+  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection", "/shows/3/seasons"], "only the changed show is rechecked");
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E3"]);
+});
+
+test("an air date Trakt does not give, or a failed air-date request, saves the episode undated and uncached until a later scan repairs it", async (t) => {
+  const f = await fixture(t);
+  // Charlie's seasons list has no usable date for S1E2; Bravo's seasons request fails outright.
+  const realDates = airDates[3];
+  airDates[3] = [realDates[0], "not a date"];
+  t.after(() => { airDates[3] = realDates; });
+  f.trakt.failures.set("/shows/2/seasons", [new Response("{}", { status: 404 })]);
+  const status = await f.run();
+  assert.equal(status.status, "completed", "an ordinary air-date lookup failure does not stop the run");
+  const first = await f.report();
+  assert.deepEqual(dated(first), ["Bravo S1E2 none", "Bravo S1E3 none", "Charlie S1E2 none"], "every candidate is saved, undated");
+  assert.deepEqual(Object.keys(first?.scanCache || {}), ["1"], "only the show with no missing episodes is cached");
+
+  airDates[3] = realDates;
+  await f.run();
+  assert.deepEqual(perShow(f.requests), [
+    "/shows/2/progress/collection", "/shows/2/seasons",
+    "/shows/3/progress/collection", "/shows/3/seasons",
+  ], "the next Quick scan tries both shows again");
+  const repaired = await f.report();
+  assert.deepEqual(dated(repaired), ALL_DATED);
+  assert.deepEqual(Object.keys(repaired?.scanCache || {}).sort(), ["1", "2", "3"]);
+});
+
+test("a Quick scan with a delay above 0 saves the same dated candidates; the server no longer filters by delay", async (t) => {
+  const f = await fixture(t);
+  await f.settings({ airingGraceDays: 3 });
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
+});
+
+test("changing the Air-date delay does not queue cached shows for a re-check", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.run()).status, "completed");
+  await f.settings({ airingGraceDays: 3 });
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(perShow(f.requests), [], "every cached show is reused after a delay change");
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
+});
+
+test("saved air dates survive closing and reopening the database", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.run()).status, "completed");
+  const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+  global.__shelfcheckDatabase?.close();
+  delete global.__shelfcheckDatabase;
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
 });
 
 test("a failed scan run reports its error and keeps the last good report", async (t) => {
@@ -217,8 +274,8 @@ test("a rate-limited or failing Trakt request is retried after its backoff on th
   assert.equal(status.status, "completed");
   assert.ok(Date.now() - started >= 30_000, "the Retry-After wait elapsed on the mocked clock");
   assert.deepEqual(perShow(f.requests), [
-    "/shows/2/progress/collection", "/shows/2/progress/collection",
-    "/shows/3/progress/collection", "/shows/3/progress/collection", "/shows/3/progress/collection",
+    "/shows/2/progress/collection", "/shows/2/progress/collection", "/shows/2/seasons",
+    "/shows/3/progress/collection", "/shows/3/progress/collection", "/shows/3/progress/collection", "/shows/3/seasons",
   ]);
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
 });
@@ -258,10 +315,10 @@ test("a Trakt rate-limit pause and its resume time survive progress updates and 
   const f = await fixture(t);
   let release!: (response: Response) => void;
   let charlieRequested!: () => void;
-  // Bravo is rate limited once Charlie's progress request is in flight; Charlie's answer is held until the pause has started.
+  // Bravo is rate limited once Charlie's air-date request is in flight; Charlie's answer is held until the pause has started.
   const charlieInFlight = new Promise<void>((resolve) => { charlieRequested = resolve; });
   f.trakt.failures.set("/shows/2/progress/collection", [charlieInFlight.then(() => new Response("{}", { status: 429, headers: { "Retry-After": "60" } }))]);
-  f.trakt.failures.set("/shows/3/progress/collection", [() => { charlieRequested(); return new Promise<Response>((resolve) => { release = resolve; }); }]);
+  f.trakt.failures.set("/shows/3/seasons", [() => { charlieRequested(); return new Promise<Response>((resolve) => { release = resolve; }); }]);
   await f.start();
   let paused = await status();
   for (let step = 0; step < 100 && !paused.rateLimitPaused; step += 1) {
@@ -273,7 +330,7 @@ test("a Trakt rate-limit pause and its resume time survive progress updates and 
   assert.equal(paused.rateLimitPaused, true);
   assert.ok(Date.parse(paused.rateLimitResumeAt || "") >= Date.now() + 55_000, "the resume time is when Trakt said the pause ends");
 
-  release(Response.json(progress[3]));
+  release(Response.json([{ number: 1, episodes: airDates[3].map((first_aired, index) => ({ season: 1, number: index + 1, first_aired })) }]));
   await flush();
   const progressed = await status();
   assert.equal(progressed.processed, paused.processed + 1, "Charlie completed during the pause");
@@ -394,13 +451,13 @@ async function seedResumePoint(f: Awaited<ReturnType<typeof fixture>>, fields: (
   assert.equal((await f.run()).status, "completed");
   const report = await f.report();
   const now = Date.now();
-  const point: Record<string, unknown> = { ...report, missing: report!.missing.filter((episode) => episode.show.title === "Bravo" && episode.episode === 2), savedAt: new Date(now - HOUR).toISOString(), resumePointVersion: 1, airingGraceDays: 0, ...fields(now) };
+  const point: Record<string, unknown> = { ...report, missing: report!.missing.filter((episode) => episode.show.title === "Bravo" && episode.episode === 2), savedAt: new Date(now - HOUR).toISOString(), resumePointVersion: 2, airingGraceDays: 0, ...fields(now) };
   for (const [key, value] of Object.entries(point)) if (value === undefined) delete point[key];
   sqlite.savedScanState("trakt").resumePoint.write(point);
   return report!;
 }
 
-test("a full Trakt scan run resumes from a Resume point under 6 hours old with the current format and grace period", async (t) => {
+test("a full Trakt scan run resumes from a Resume point under 6 hours old with the current format", async (t) => {
   const f = await fixture(t);
   await seedResumePoint(f, (now) => ({ savedAt: new Date(now - 6 * HOUR + 1).toISOString() }));
   assert.equal((await f.run()).status, "completed");
@@ -408,13 +465,23 @@ test("a full Trakt scan run resumes from a Resume point under 6 hours old with t
   assert.equal(await storedResumePoint(), null, "a completed run clears its Resume point");
 });
 
+test("a current Resume point is still used after the Air-date delay changes", async (t) => {
+  const f = await fixture(t);
+  await seedResumePoint(f);
+  await f.settings({ airingGraceDays: 3 });
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(perShow(f.requests), [], "no show is rechecked");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2"], "the run resumed from the Resume point");
+  assert.equal(await storedResumePoint(), null);
+});
+
 for (const [name, fields] of [
   ["a legacy Resume point without savedAt, format version or grace period", () => legacy],
   ["a Resume point exactly 6 hours old", (now: number) => ({ savedAt: new Date(now - 6 * HOUR).toISOString() })],
   ["a future-dated Resume point", (now: number) => ({ savedAt: new Date(now + 60_000).toISOString() })],
   ["a Resume point whose savedAt does not parse", () => ({ savedAt: "not a date" })],
-  ["a Resume point of another format version", () => ({ resumePointVersion: 2 })],
-  ["a Resume point of another airing grace period", () => ({ airingGraceDays: 3 })],
+  ["a Resume point of the format before air dates were saved", () => ({ resumePointVersion: 1 })],
+  ["a Resume point of another format version", () => ({ resumePointVersion: 3 })],
 ] as const) {
   test(`${name} is discarded and cleared, and the run falls back to the saved report and scan cache`, async (t) => {
     const f = await fixture(t);
@@ -450,8 +517,8 @@ test("a single-show check does not resume from a full-run Resume point, and keep
   assert.deepEqual(missing(kept!), ["Bravo S1E2"]);
 
   assert.equal((await f.run()).status, "completed");
-  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection"], "the next full run resumes and rechecks only the pruned show");
-  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Charlie S1E2"]);
+  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection", "/shows/3/seasons"], "the next full run resumes and rechecks only the pruned show");
+  assert.deepEqual(dated(await f.report()), ["Bravo S1E2 2021-01-08T00:00:00.000Z", "Charlie S1E2 2022-01-08T00:00:00.000Z"], "the resumed episode keeps the air date saved with it");
 });
 
 test("a failed single-show check creates no Resume point", async (t) => {
@@ -465,18 +532,22 @@ test("a failed single-show check creates no Resume point", async (t) => {
 
 test("a failed full scan run saves a Resume point of its completed shows, and the next full run resumes from it", async (t) => {
   const f = await fixture(t);
-  f.trakt.failures.set("/shows/3/progress/collection", [new Response("{}", { status: 403 })]);
+  // Charlie's progress request fails once Bravo has its air dates, so Bravo completes first.
+  let bravoDated!: () => void;
+  const bravoDone = new Promise<void>((resolve) => { bravoDated = resolve; });
+  f.trakt.failures.set("/shows/2/seasons", [() => { bravoDated(); return Response.json([{ number: 1, episodes: airDates[2].map((first_aired, index) => ({ season: 1, number: index + 1, first_aired })) }]); }]);
+  f.trakt.failures.set("/shows/3/progress/collection", [bravoDone.then(() => new Response("{}", { status: 403 }))]);
   assert.equal((await f.run()).status, "error");
   const saved = await storedResumePoint();
-  assert.equal(saved?.resumePointVersion, 1);
-  assert.equal(saved?.airingGraceDays, 0);
+  assert.equal(saved?.resumePointVersion, 2, "the format version went up when missing episodes gained air dates");
+  assert.equal("airingGraceDays" in (saved || {}), false, "the Air-date delay is not saved with it");
   assert.ok(Date.parse(saved?.savedAt || "") >= Date.parse(NOW), "it records when it was saved");
   assert.deepEqual(Object.keys(saved?.scanCache || {}).sort(), ["1", "2"], "only completed shows are saved");
-  assert.deepEqual(missing(saved!), ["Bravo S1E2", "Bravo S1E3"]);
+  assert.deepEqual(dated(saved!), ALL_DATED.slice(0, 2));
 
   assert.equal((await f.run()).status, "completed");
-  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection"], "the completed shows are resumed, not rechecked");
-  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"]);
+  assert.deepEqual(perShow(f.requests), ["/shows/3/progress/collection", "/shows/3/seasons"], "the completed shows are resumed, not rechecked");
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
   assert.equal(await storedResumePoint(), null);
 });
 
@@ -491,7 +562,7 @@ test("a Trakt rate-limit pause saves a Resume point of the shows completed so fa
   for (let step = 0; step < 100 && !(await status()).rateLimitPaused; step += 1) { t.mock.timers.tick(50); await flush(); }
   assert.equal((await status()).rateLimitPaused, true);
   const saved = await storedResumePoint();
-  assert.equal(saved?.resumePointVersion, 1);
+  assert.equal(saved?.resumePointVersion, 2);
   assert.ok(saved?.savedAt);
   assert.deepEqual(Object.keys(saved?.scanCache || {}), ["1"], "the paused and in-flight shows are not in it");
   assert.deepEqual(missing(saved!), []);
@@ -618,6 +689,14 @@ test("an air-date lookup that hits a cooldown ends the scan run instead of being
   assert.deepEqual(await f.report(), lastGood);
 });
 
+test("an air-date lookup that Trakt refuses (403) ends the scan run instead of being skipped", async (t) => {
+  const f = await fixture(t);
+  f.trakt.failures.set("/shows/3/seasons", [new Response("{}", { status: 403 })]);
+  const failed = await f.run();
+  assert.equal(failed.status, "error");
+  assert.match(failed.error || "", /Trakt rejected this request \(403\)/);
+});
+
 test("a poster lookup that Trakt refuses (403) ends the scan run instead of being skipped", async (t) => {
   const f = await fixture(t);
   f.trakt.library[2].show.images = { poster: [] };
@@ -658,6 +737,30 @@ test("after the upgrade the Trakt page is idle and its next full scan starts ove
   const status = await f.run();
   assert.equal(status.status, "completed", status.error || "");
   assert.equal(status.processed, 3);
-  assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/3/progress/collection"], "Nothing is reused from the old Resume point or report");
+  assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/2/seasons", "/shows/3/progress/collection", "/shows/3/seasons"], "Nothing is reused from the old Resume point or report");
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"], "The scan started over rather than resuming");
+});
+
+test("after migration 4 the next Trakt scan rechecks every show, though the old report's scan cache and Resume point would have been reused", async (t) => {
+  // A version 3 database: an old report whose scan cache matches the library and an empty missing
+  // list, and a Resume point in the current format, both saved before episodes inside the delay were kept.
+  const f = await fixture(t, (dir) => {
+    const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+    sqlite.savedScanState("trakt").snapshot();
+    global.__shelfcheckDatabase?.close();
+    delete global.__shelfcheckDatabase;
+    const older = new DatabaseSync(path.join(dir, "shelfcheck.db"));
+    const scanCache = Object.fromEntries(library().map((item) => [String(item.show.ids.trakt), { collectionFingerprint: collectionFingerprint(item), airedEpisodes: item.show.aired_episodes, traktUpdatedAt: item.show.updated_at, lastCheckedAt: NOW }]));
+    const report = { shows: library().map((item) => ({ show: item.show })), missing: [], lastScan: NOW, scanCache, airingGraceDays: 0 };
+    const resumePoint = { ...report, savedAt: new Date(Date.parse(NOW) - 3_600_000).toISOString(), resumePointVersion: 2 };
+    older.prepare("INSERT INTO shelfcheck_scan_state(mode, report, resume_point, options) VALUES('trakt', ?, ?, ?)").run(JSON.stringify(report), JSON.stringify(resumePoint), JSON.stringify({ airingGraceDays: 0, diagnosticsEnabled: false }));
+    older.exec("PRAGMA user_version = 3");
+    older.close();
+  });
+
+  assert.equal(await f.report(), undefined, "The old report is cleared");
+  const status = await f.run();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/2/seasons", "/shows/3/progress/collection", "/shows/3/seasons"], "Every incomplete show is rechecked; nothing comes from the old scan cache or Resume point");
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
 });

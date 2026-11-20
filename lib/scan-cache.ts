@@ -3,14 +3,13 @@ import type { TraktResumePoint } from "@/lib/scan";
 
 export type ScanCacheInputs = {
   deep: boolean;
-  gracePeriodChanged: boolean;
   cached: boolean;
   collectionChanged: boolean;
   airedChanged: boolean;
   traktUpdated: boolean;
 };
 
-export type ScanReason = "new" | "collection-changed" | "aired-changed" | "trakt-updated" | "settings-changed" | "forced-show-check";
+export type ScanReason = "new" | "collection-changed" | "aired-changed" | "trakt-updated" | "forced-show-check";
 
 type CollectedShow = {
   show: { aired_episodes?: number };
@@ -37,7 +36,6 @@ export function collectedEpisodeCount(item: CollectedShow): number {
 }
 
 export function scanReason(inputs: ScanCacheInputs): ScanReason | null {
-  if (inputs.gracePeriodChanged) return "settings-changed";
   if (!inputs.cached) return "new";
   if (inputs.collectionChanged) return "collection-changed";
   if (inputs.airedChanged) return "aired-changed";
@@ -45,10 +43,7 @@ export function scanReason(inputs: ScanCacheInputs): ScanReason | null {
   return null;
 }
 
-export function shouldReportIncompleteEpisode(deep: boolean, graceDays: number, airedAfterGrace: boolean, airDateKnown = true): boolean {
-  return !airDateKnown || (!deep && graceDays === 0) || airedAfterGrace;
-}
-
+/** A re-checked show's result is cacheable only when every missing episode got a usable air date, so a later scan repairs any gap. */
 export function canCacheAirDateResult(requiresAirDates: boolean, requestSucceeded: boolean, unknownAirDates: number): boolean {
   return !requiresAirDates || (requestSucceeded && unknownAirDates === 0);
 }
@@ -57,17 +52,23 @@ export function shouldSaveCheckpoint(processed: number, lastProcessed: number, n
   return processed - lastProcessed >= 10 || now - lastSavedAt >= 5_000;
 }
 
-/** The Trakt Resume point format. A Resume point of any other version, or none (saved before 2.6.2), is discarded. */
-export const TRAKT_RESUME_POINT_VERSION = 1;
+/**
+ * The Trakt Resume point format. A Resume point of any other version, or none
+ * (saved before 2.6.2), is discarded. Version 2 saves every missing episode
+ * Trakt's progress reports, with its original first_aired timestamp when usable;
+ * version 1 points left out episodes inside the Air-date delay.
+ */
+export const TRAKT_RESUME_POINT_VERSION = 2;
 
 /**
  * Whether a full Trakt Scan run may resume from a stored Resume point: its
- * format version and normalized airing grace period match this run's, and its
- * `savedAt` parses, is not in the future and is under 6 hours old. Exactly 6
- * hours old is unusable. The stored value is checked field by field, so a
- * malformed one is rejected rather than trusted.
+ * format version matches this run's, and its `savedAt` parses, is not in the
+ * future and is under 6 hours old. Exactly 6 hours old is unusable. The
+ * Air-date delay plays no part: the page applies it as it draws. The stored
+ * value is checked field by field, so a malformed one is rejected rather than
+ * trusted.
  */
-export function traktResumePointIsUsable(point: TraktResumePoint | null | undefined, airingGraceDays: number, now: number): boolean {
-  if (point?.resumePointVersion !== TRAKT_RESUME_POINT_VERSION || point.airingGraceDays !== airingGraceDays) return false;
+export function traktResumePointIsUsable(point: TraktResumePoint | null | undefined, now: number): boolean {
+  if (point?.resumePointVersion !== TRAKT_RESUME_POINT_VERSION) return false;
   return resumePointIsFresh(point.savedAt, now, { rejectFuture: true });
 }

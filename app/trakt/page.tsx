@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { matchesSearch } from "@/lib/search";
+import { resultsView } from "@/lib/results-view";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { DiagnosticLogActions } from "@/app/components/diagnostic-log-actions";
 import { IgnoredShowsManager } from "@/app/components/ignored-shows-manager";
@@ -13,12 +13,15 @@ import { IgnoreDurationModal } from "@/app/components/ignore-duration-modal";
 import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
-import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
+import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, traktLocalAirDate, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
+import { useLocalToday } from "@/app/hooks/use-local-today";
+import { useClearCache } from "@/app/hooks/use-clear-cache";
+import { useMenuClosing } from "@/app/hooks/use-menu-closing";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodeTraktManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
@@ -52,6 +55,11 @@ function savedIgnoredShows(state: ServerState): IgnoredTraktShow[] {
 // The saved season Ignore list; a missing list is empty.
 function savedIgnoredSeasons(state: ServerState): IgnoredTraktSeasons[] {
   return Array.isArray(state.ignoredSeasons) ? state.ignoredSeasons : [];
+}
+
+// Trakt's own collection percent (completed ÷ aired), whatever the page filters out.
+function traktPercent(show: TraktShow): number {
+  return show.collection?.aired ? (show.collection.completed / show.collection.aired) * 100 : 0;
 }
 
 // One missing episode's identity: its show, season and episode number.
@@ -117,9 +125,6 @@ export default function Home() {
   const [fullRescanConfirmOpen, setFullRescanConfirmOpen] = useState(false);
   const [rateLimitPaused, setRateLimitPaused] = useState(false);
   const [scanCacheCount, setScanCacheCount] = useState(0);
-  const [cacheClearConfirmOpen, setCacheClearConfirmOpen] = useState(false);
-  const [clearingCache, setClearingCache] = useState(false);
-  const [cacheMessage, setCacheMessage] = useState("");
   // Restoring a show does not make responses from this scan safe to reuse.
   const reportInvalidations = useRef(new Set<number>());
   const loadedCacheKeys = useRef(new Set<string>());
@@ -196,32 +201,11 @@ export default function Home() {
     };
   }, [abortScanPoll, pollServerScan]);
 
-  useEffect(() => {
-    if (!sortMenuOpen && openShowMenu === null && !ignoredManagerOpen) return;
-
-    const closeMenusOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-
-      if (sortMenuOpen && !target.closest('[data-menu-root="sort"]')) setSortMenuOpen(false);
-      if (openShowMenu !== null && !target.closest(`[data-show-menu-id="${openShowMenu}"]`)) setOpenShowMenu(null);
-      if (ignoredManagerOpen && !target.closest('[data-menu-root="ignored"]')) setIgnoredManagerOpen(false);
-    };
-    const closeMenusOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setSortMenuOpen(false);
-      setOpenShowMenu(null);
-      setSeasonIgnoreShow(null);
-      setIgnoredManagerOpen(false);
-    };
-
-    document.addEventListener("pointerdown", closeMenusOnOutsidePointer);
-    document.addEventListener("keydown", closeMenusOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeMenusOnOutsidePointer);
-      document.removeEventListener("keydown", closeMenusOnEscape);
-    };
-  }, [ignoredManagerOpen, openShowMenu, sortMenuOpen]);
+  useMenuClosing([
+    { open: sortMenuOpen, isInside: (target) => target.closest('[data-menu-root="sort"]') !== null, close: () => setSortMenuOpen(false) },
+    { open: openShowMenu !== null, isInside: (target) => target.closest(`[data-show-menu-id="${openShowMenu}"]`) !== null, close: () => setOpenShowMenu(null) },
+    { open: ignoredManagerOpen, isInside: (target) => target.closest('[data-menu-root="ignored"]') !== null, close: () => setIgnoredManagerOpen(false) },
+  ], [() => setSeasonIgnoreShow(null)]);
 
   // Saves a settings patch. On a rejected save, onRejected runs before the error shows.
   function syncServerState(patch: Partial<ServerState>, onRejected?: () => Promise<void>) {
@@ -271,47 +255,54 @@ export default function Home() {
     syncServerState({ airingGraceDays: days });
   }
 
-  async function clearCache() {
-    setClearingCache(true);
-    setCacheMessage("");
-    try {
-      const response = await fetch("/api/scan", { method: "DELETE" });
-      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || "Shelfcheck could not clear the scan cache.");
-      replaceReportCache(new Set());
-      setCacheClearConfirmOpen(false);
-      setCacheMessage(`${body.cleared || 0} cached show results cleared. The next scan will rebuild them.`);
-    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : "Shelfcheck could not clear the scan cache."); }
-    finally { setClearingCache(false); }
-  }
+  // Trakt's whole clear keeps its results and empties their cache keys; a show's
+  // clear removes only its cache key.
+  const { confirmOpen: cacheClearConfirmOpen, clearing: clearingCache, message: cacheMessage, clearMessage: clearCacheMessage, openConfirm: openCacheClearConfirm, cancelConfirm: cancelCacheClear, clearCache, clearShowCache } = useClearCache<TraktShow>({
+    cacheAddress: "/api/scan",
+    showAddress: (show) => `/api/scan?traktId=${show.ids.trakt}`,
+    showTitle: (show) => show.title,
+    onCacheCleared: () => replaceReportCache(new Set()),
+    onShowCleared: (show) => {
+      const remaining = new Set(loadedCacheKeys.current);
+      remaining.delete(String(show.ids.trakt));
+      replaceReportCache(remaining);
+    },
+    closeShowMenu: () => setOpenShowMenu(null),
+    onError: setError,
+  });
 
   const ignoreRules = useMemo(() => [...ignoredShows, ...ignoredSeasons], [ignoredShows, ignoredSeasons]);
   const ignoreNow = useIgnoreClock(ignoreRules);
   const activeIgnoredShows = useMemo(() => activeIgnores(ignoredShows, ignoreNow), [ignoredShows, ignoreNow]);
   const activeIgnoredSeasons = useMemo(() => activeIgnores(ignoredSeasons, ignoreNow), [ignoredSeasons, ignoreNow]);
-  const ignoredIds = useMemo(() => new Set(activeIgnoredShows.map((show) => show.ids.trakt)), [activeIgnoredShows]);
-  const ignoredSeasonMap = useMemo(() => new Map(activeIgnoredSeasons.map((show) => [show.traktId, new Set(show.seasons)])), [activeIgnoredSeasons]);
-  const visibleMissing = useMemo(() => missing.filter((item) => !ignoredIds.has(item.show.ids.trakt) && !ignoredSeasonMap.get(item.show.ids.trakt)?.has(item.season)), [missing, ignoredIds, ignoredSeasonMap]);
+  const today = useLocalToday();
+  // The saved missing episodes by show, each with its air date as a local calendar date.
+  const missingByShow = useMemo(() => {
+    const map = new Map<number, { key: number; title: string; source: TraktShow; episodes: (MissingEpisode & { airDate?: string })[] }>();
+    for (const episode of missing) {
+      const key = episode.show.ids.trakt;
+      const entry = map.get(key) || { key, title: episode.show.title, source: episode.show, episodes: [] };
+      entry.episodes.push({ ...episode, airDate: traktLocalAirDate(episode.firstAired) });
+      map.set(key, entry);
+    }
+    return [...map.values()];
+  }, [missing]);
+  // Unaired episodes are hidden and undated ones shown, because Trakt counted them as aired.
+  const view = useMemo(() => resultsView({
+    shows: missingByShow,
+    ignoredShows: new Set(activeIgnoredShows.map((show) => show.ids.trakt)),
+    ignoredSeasons: new Map(activeIgnoredSeasons.map((show) => [show.traktId, new Set(show.seasons)])),
+    airedPolicy: "aired-or-undated",
+    airDateDelayDays: airingGraceDays,
+    today,
+    search: query,
+    sortField,
+    sortAscending,
+    percent: traktPercent,
+  }), [activeIgnoredSeasons, activeIgnoredShows, airingGraceDays, missingByShow, query, sortAscending, sortField, today]);
+  const grouped = useMemo(() => view.shows.map((show) => ({ show: show.source, episodes: show.episodes })), [view]);
+  const missingCount = view.totals.missingEpisodes;
   const activelyRateLimitPaused = isActiveRateLimitPause(scanning, rateLimitPaused);
-
-  const grouped = useMemo(() => {
-    const map = new Map<number, { show: TraktShow; episodes: MissingEpisode[] }>();
-    visibleMissing.filter((item) => matchesSearch(item.show.title, query)).forEach((item) => {
-      const current = map.get(item.show.ids.trakt) || { show: item.show, episodes: [] };
-      current.episodes.push(item);
-      map.set(item.show.ids.trakt, current);
-    });
-    return [...map.values()].sort((a, b) => {
-      if (sortField === "title") {
-        const result = a.show.title.localeCompare(b.show.title);
-        return sortAscending ? result : -result;
-      }
-      const aPercent = a.show.collection?.aired ? (a.show.collection.completed / a.show.collection.aired) * 100 : 0;
-      const bPercent = b.show.collection?.aired ? (b.show.collection.completed / b.show.collection.aired) * 100 : 0;
-      const result = aPercent - bPercent || a.show.title.localeCompare(b.show.title);
-      return sortAscending ? result : -result;
-    });
-  }, [visibleMissing, query, sortField, sortAscending]);
 
   function chooseSort(field: "title" | "percent") {
     if (field === sortField) setSortAscending((ascending) => !ascending);
@@ -410,19 +401,6 @@ export default function Home() {
     setIgnoredSeasons(sorted);
     saveIgnoreLists({ ignoredSeasons: sorted });
     setSeasonIgnoreShow(null);
-  }
-
-  async function clearShowCache(show: TraktShow) {
-    setOpenShowMenu(null); setCacheMessage("");
-    try {
-      const response = await fetch(`/api/scan?traktId=${show.ids.trakt}`, { method: "DELETE" });
-      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || `Shelfcheck could not clear ${show.title}'s cache.`);
-      const remaining = new Set(loadedCacheKeys.current);
-      remaining.delete(String(show.ids.trakt));
-      replaceReportCache(remaining);
-      setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
-    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : `Shelfcheck could not clear ${show.title}'s cache.`); }
   }
 
   function loginToTrakt() {
@@ -531,7 +509,7 @@ export default function Home() {
 
   async function forceCheckShow(show: TraktShow) {
     if (activity.isLocked()) return;
-    setOpenShowMenu(null); setCacheMessage("");
+    setOpenShowMenu(null); clearCacheMessage();
     await scanLibrary(false, show.ids.trakt);
   }
 
@@ -558,7 +536,7 @@ export default function Home() {
           <p className="intro">Shelfcheck compares every collected show against Trakt’s aired episode list, then gives you one clean report of what’s missing.</p>
         </div>
         <div className="scan-panel">
-          <div className="radar"><span>{scanning ? `${progress}%` : visibleMissing.length}</span><small>{activelyRateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
+          <div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
           <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
           <p>{lastScan ? `Last scan ${formatLastScan(lastScan)}` : "Only your collection metadata is read."}</p>
           {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning || activity.locked}>Run Deep Scan</button>}
@@ -569,8 +547,8 @@ export default function Home() {
       <div className="summary-wrap">
         <section className="summary scan-summary" aria-label="Scan summary">
           <div><span>SHOWS IN COLLECTION</span><strong>{shows.length || "—"}</strong></div>
-          <div><span>SHOWS WITH MISSING EPISODES</span><strong>{lastScan ? grouped.length : "—"}</strong></div>
-          <div><span>MISSING EPISODES</span><strong>{lastScan ? visibleMissing.length : "—"}</strong></div>
+          <div><span>SHOWS WITH MISSING EPISODES</span><strong>{lastScan ? view.totals.shows : "—"}</strong></div>
+          <div><span>MISSING EPISODES</span><strong>{lastScan ? missingCount : "—"}</strong></div>
           <div className="ignored-stat" data-menu-root="ignored"><button type="button" onClick={() => setIgnoredManagerOpen((open) => !open)} aria-expanded={ignoredManagerOpen}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div>
         </section>
         {ignoredManagerOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: ignoreManagerKey("show", show.ids.trakt), title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: ignoreManagerKey("seasons", show.traktId), title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredManagerOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={restoreManagerItem} showCount />}
@@ -579,10 +557,10 @@ export default function Home() {
       <section className="report">
         <div className="report-heading">
           <p className="eyebrow">TRAKT MISSING REPORT</p>
-          <div className="report-primary-row"><h2>{visibleMissing.length} missing episodes</h2>
-          {lastScan && visibleMissing.length > 0 && <ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} />}
+          <div className="report-primary-row"><h2>{missingCount} missing episodes</h2>
+          {lastScan && missingCount > 0 && <ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} />}
           </div>
-          {lastScan && visibleMissing.length > 0 && <div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllTraktShows(false)}>Expand all</button><button onClick={() => setAllTraktShows(true)}>Collapse all</button></div></div>}
+          {lastScan && missingCount > 0 && <div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllTraktShows(false)}>Expand all</button><button onClick={() => setAllTraktShows(true)}>Collapse all</button></div></div>}
         </div>
         {error && <div className="error"><span>!</span><p><strong>{errorContext === "auth" ? "Trakt login failed" : "Scan interrupted"}</strong>{error}</p></div>}
         {cacheMessage && !settingsOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
@@ -649,19 +627,18 @@ export default function Home() {
           <p className="eyebrow">SETTINGS</p><h2 id="settings-title">Shelfcheck preferences</h2>
           <div className="grace-period">
             <div>
-              <p className="grace-title">Airing grace period</p>
-              <p>Wait this many days after Trakt&apos;s aired date before reporting an episode as missing.</p>
+              <p className="grace-title">Air-date delay</p>
+              <p>Treat each episode’s air date as this many calendar days later before showing it as missing.</p>
             </div>
-            <div className="grace-input"><input type="number" min="0" max="30" step="1" value={airingGraceDays} onChange={(event) => setGracePeriod(event.target.value)} aria-label="Airing grace period in days" /><span>Days</span></div>
-            <small>Example: Trakt date Aug 4 → report starting {new Date(Date.UTC(2026, 7, 4 + airingGraceDays)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}</small>
+            <div className="grace-input"><input type="number" min="0" max="30" step="1" value={airingGraceDays} onChange={(event) => setGracePeriod(event.target.value)} aria-label="Air-date delay in days" /><span>Days</span></div>
           </div>
           <div className="diagnostics scan-cache-settings">
             <p className="diagnostics-toggle scan-cache-title">Scan cache</p>
             <p>Quick and Deep scans reuse cached collection fingerprints and Trakt update timestamps. Clear the cache to make the next scan rebuild every show&apos;s result.</p>
             <p className="scan-cache-status">Cached results for {scanCacheCount} {scanCacheCount === 1 ? "show" : "shows"}{lastScan ? ` · Latest scan ${formatLastScan(lastScan)}` : ""}</p>
-            {!cacheClearConfirmOpen ? <button type="button" onClick={() => { setCacheMessage(""); setCacheClearConfirmOpen(true); }} disabled={scanning || scanCacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
+            {!cacheClearConfirmOpen ? <button type="button" onClick={openCacheClearConfirm} disabled={scanning || scanCacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
               <p>This clears scan results only. Your credentials, settings, ignored shows, and logs will not change.</p>
-              <div><button type="button" onClick={() => setCacheClearConfirmOpen(false)} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
+              <div><button type="button" onClick={cancelCacheClear} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
             </div>}
             {cacheMessage && <p className="cache-message">{cacheMessage}</p>}
           </div>
@@ -677,7 +654,7 @@ export default function Home() {
         <section className="modal rescan-modal" role="dialog" aria-modal="true" aria-labelledby="rescan-title">
           <p className="eyebrow">DEEP LIBRARY CHECK</p>
           <h2 id="rescan-title">Run a Deep Scan?</h2>
-          <p className="modal-copy">Shelfcheck will compare the collection fingerprint, aired count, and Trakt update timestamp for all {shows.length} shows, then manually rescan only the shows that changed. It can exclude incomplete episodes whose confirmed Trakt air date has not arrived, so its total can differ from Quick Scan. Clear the scan cache in Settings to rebuild every show.</p>
+          <p className="modal-copy">Shelfcheck will compare the collection fingerprint, aired count, and Trakt update timestamp for all {shows.length} shows, then manually rescan only the shows that changed. Clear the scan cache in Settings to rebuild every show.</p>
           <div className="modal-actions">
             <button type="button" className="secondary" onClick={() => setFullRescanConfirmOpen(false)}>Cancel</button>
             <button type="button" className="primary" onClick={() => scanLibrary(true)} disabled={activity.locked}>Run Deep Scan <b>→</b></button>

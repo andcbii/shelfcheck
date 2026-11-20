@@ -12,6 +12,7 @@ const migrations: ((db: DatabaseSync) => void)[] = [
   baselineSchema,
   plexSavedScanState,
   traktSavedScanState,
+  clearTraktResultsBeforeAirDates,
 ];
 
 export const SCHEMA_VERSION = migrations.length;
@@ -282,4 +283,16 @@ function traktSavedScanState(db: DatabaseSync) {
   }
   db.exec("DROP TABLE shelfcheck_states");
   db.exec("DROP TABLE shelfcheck_scan_status");
+}
+
+/**
+ * Migration 4: clear the Trakt report and Resume point saved before Trakt kept every
+ * missing episode with its air date. Those reports already left out episodes inside the
+ * Air-date delay, so none of their results or scan cache can be reused; the next Trakt
+ * scan is a full scan. Trakt options and scan status, and the Plex row, are kept, and a
+ * database with no Trakt row stays without one.
+ */
+function clearTraktResultsBeforeAirDates(db: DatabaseSync) {
+  db.exec(`UPDATE shelfcheck_scan_state SET report = NULL, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP
+    WHERE mode = 'trakt' AND (report IS NOT NULL OR resume_point IS NOT NULL)`);
 }

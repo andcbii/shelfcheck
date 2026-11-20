@@ -2,7 +2,7 @@ import "server-only";
 
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { createScanLogger } from "@/lib/scan-log";
-import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
+import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
 import { savedScanState, trackScanIgnores } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
@@ -21,7 +21,7 @@ type ShowScanState = {
   lastCheckedAt: string;
 };
 type ScanCache = Record<string, ShowScanState>;
-type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
+type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache };
 /** A full-run Resume point: the report so far, plus when it was saved and its format version. */
 export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
 
@@ -43,7 +43,7 @@ const traktScanMode: ScanRunMode<ScanRunStatus, TraktResumePoint> = {
   resumePoint: {
     ...traktSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
-    discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, airingGraceDays: checkpoint.airingGraceDays, reason: "expired-or-incompatible" }),
+    discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, reason: "expired-or-incompatible" }),
     // checkpoint.saved keeps its pre-lifecycle reasons: every save names one, and a failure save is "error".
     savedReason: (reason) => (reason === "failure" ? "error" : reason),
   },
@@ -59,28 +59,6 @@ function compactCache(cache: ScanCache | undefined): ScanCache {
       lastCheckedAt: legacy.lastCheckedAt,
     }];
   }));
-}
-
-function localDate(value: Date): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: process.env.TZ || "UTC",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(value);
-  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${fields.year}-${fields.month}-${fields.day}`;
-}
-
-function addCalendarDays(date: string, days: number): string {
-  const [year, month, day] = date.split("-").map(Number);
-  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
-}
-
-function hasAired(firstAired: string | null | undefined, today: string, graceDays: number): boolean {
-  if (!firstAired) return false;
-  const airedAt = new Date(firstAired);
-  return !Number.isNaN(airedAt.getTime()) && addCalendarDays(localDate(airedAt), graceDays) <= today;
 }
 
 function hasUsableAirDate(firstAired: string | null | undefined): firstAired is string {
@@ -162,9 +140,8 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     },
   }, async (run) => {
     const { startedAt, logger, activeWork } = run;
-    const airingGraceDays = gracePeriod(state.airingGraceDays);
     // An unusable Resume point is discarded and cleared; the saved report and its scan cache are the fallback.
-    const { usable: checkpoint } = run.resumePoint.load((point) => traktResumePointIsUsable(point, airingGraceDays, Date.now()));
+    const { usable: checkpoint } = run.resumePoint.load((point) => traktResumePointIsUsable(point, Date.now()));
     // The run's Trakt login: read once after the Resume point is judged, refreshed before use when it is about to expire.
     const trakt = await TraktRunCredentials.open();
     if (!trakt) throw new Error("Trakt is not configured.");
@@ -172,7 +149,6 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
-    const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
     const downloadedAll = await traktAll<CollectionShow>(trakt, "/sync/collection/shows?extended=full,images");
     const ignoredIds = ignoredTraktIds(state.ignoredShows, Date.parse(startedAt));
     const downloaded = downloadedAll.filter((item) => !ignoredIds.has(item.show.ids.trakt));
@@ -215,7 +191,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
       const collectionChanged = freshFingerprints[id] !== cached?.collectionFingerprint;
       const airedChanged = freshAiredEpisodes[id] !== cached?.airedEpisodes;
       const traktUpdated = freshTraktUpdatedAt[id] !== (cached?.traktUpdatedAt || "");
-      const reason = targetTraktId ? "forced-show-check" : scanReason({ deep: force, gracePeriodChanged, cached: Boolean(cached), collectionChanged, airedChanged, traktUpdated });
+      const reason = targetTraktId ? "forced-show-check" : scanReason({ deep: force, cached: Boolean(cached), collectionChanged, airedChanged, traktUpdated });
       if (reason) queue.push({ item, reason });
       else {
         results[id] = previousResults.get(item.show.ids.trakt) || [];
@@ -232,13 +208,12 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
       collectionChanged: queue.filter((entry) => entry.reason === "collection-changed").length,
       airedChanged: queue.filter((entry) => entry.reason === "aired-changed").length,
       traktUpdated: queue.filter((entry) => entry.reason === "trakt-updated").length,
-      settingsChanged: queue.filter((entry) => entry.reason === "settings-changed").length,
     });
     run.progress(processed, candidates.length);
     run.resumePoint.startIntervals();
     // The Resume point holds the completed shows' results and cache entries.
     run.resumePoint.provideSnapshot((savedAt) => ({
-      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, airingGraceDays, savedAt, resumePointVersion: TRAKT_RESUME_POINT_VERSION },
+      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, savedAt, resumePointVersion: TRAKT_RESUME_POINT_VERSION },
       details: {},
     }));
     await runTrackedWorkerPool(queue, 6, activeWork, ({ item }) => ({ key: String(item.show.ids.trakt), show: item.show.title }), async ({ item, reason }) => {
@@ -260,7 +235,9 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
             ? (season.episodes || []).filter((episode) => !episode.completed).map((episode) => ({ season: season.number, episode: episode.number }))
             : []);
         }
-        const requiresAirDates = Boolean(incomplete.length && (force || Boolean(targetTraktId) || airingGraceDays > 0));
+        // Every re-checked show with missing episodes reads its air dates, on every scan kind;
+        // the page decides from them which episodes have aired.
+        const requiresAirDates = incomplete.length > 0;
         let airDateRequestSucceeded = true;
         if (requiresAirDates) activeWork.update(id, item.show.title, "air-dates");
         const episodeDates = requiresAirDates
@@ -274,16 +251,14 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         for (const season of episodeDates) for (const episode of season.episodes || []) {
           firstAiredByEpisode.set(`${episode.season ?? season.number}:${episode.number}`, episode.first_aired);
         }
-        const today = localDate(new Date());
+        // Trakt's progress decides which episodes are missing; the seasons list only dates them.
         const missing: MissingEpisode[] = [];
         let unknownAirDates = 0;
         for (const episode of incomplete) {
           const firstAired = firstAiredByEpisode.get(`${episode.season}:${episode.episode}`);
-          const airDateKnown = hasUsableAirDate(firstAired);
-          if (requiresAirDates && !airDateKnown) unknownAirDates += 1;
-          if (shouldReportIncompleteEpisode(force || Boolean(targetTraktId), airingGraceDays, hasAired(firstAired, today, airingGraceDays), !requiresAirDates || airDateKnown)) {
-            missing.push({ show: item.show, season: episode.season, episode: episode.episode });
-          }
+          const dated = hasUsableAirDate(firstAired);
+          if (!dated) unknownAirDates += 1;
+          missing.push({ show: item.show, season: episode.season, episode: episode.episode, ...(dated ? { firstAired } : {}) });
         }
         const cacheable = canCacheAirDateResult(requiresAirDates, airDateRequestSucceeded, unknownAirDates);
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });
@@ -309,7 +284,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         run.resumePoint.checkpoint();
     });
     const missing = Object.values(results).flat().sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
-    const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache, airingGraceDays };
+    const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache };
     const finishedAt = new Date().toISOString();
     run.complete({
       // The report and the cleared Resume point are written together.

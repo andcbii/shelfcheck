@@ -132,9 +132,11 @@ episode count, and Trakt update timestamp are unchanged. A Deep Scan checks the
 same change signals and refreshes shows that need new results. Clearing the scan
 cache forces the next scan to rebuild all show results.
 
-The airing grace period delays when an episode is considered missing. Ignored
-shows are removed immediately after the collection is loaded, so Shelfcheck
-does not make per-show API requests for them on future scans.
+The Air-date delay sets how many days after its air date an episode is first
+shown as missing. The page applies it as it draws, so changing it takes effect
+at once without a scan and keeps the scan cache and any saved scan progress.
+Ignored shows are removed immediately after the collection is loaded, so
+Shelfcheck does not make per-show API requests for them on future scans.
 
 ### Plex
 

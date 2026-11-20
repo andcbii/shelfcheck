@@ -37,6 +37,15 @@
   to run a scan, and the next Trakt scan and the next Plex scan are full scans.
   Settings, Ignore lists, Manual Matches, catalogue choices, Report Missing
   flags and downloaded provider catalogues are kept.
+- The Trakt "Airing grace period" setting is now called Air-date delay, as on
+  the Plex page. A Trakt scan saves every missing episode with its air date,
+  and the Trakt page decides which have aired as it draws, from the browser's
+  local date: an episode appears on the day its delay ends with no new scan,
+  and changing the delay redraws the page at once without re-checking shows or
+  discarding a Resume point. Trakt results saved before this left out episodes
+  still inside the delay, so the saved Trakt results and Trakt Resume point are
+  cleared once, and the next Trakt scan is a full scan. Trakt Settings and
+  Ignore lists are kept.
 
 ## 2.6.2 - 2026-11-18
 

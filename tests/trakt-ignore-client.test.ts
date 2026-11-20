@@ -42,7 +42,7 @@ function fakeServer(initial: Partial<TraktState> = {}) {
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
     if (url === "/api/state" && !init?.method) stateReads.push(init);
-    if (url === "/api/state" && init?.method === "PATCH") saves.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+    if ((url === "/api/state" || url === "/api/plex/state") && init?.method === "PATCH") saves.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
     const intercepted = server.intercept?.(url, init);
     if (intercepted) return intercepted;
     if (url === "/api/scan-runs") return Response.json({ activeScanRun: null });
@@ -50,7 +50,6 @@ function fakeServer(initial: Partial<TraktState> = {}) {
     if (url === "/api/state" && !init?.method) return Response.json({ state: structuredClone(trakt) });
     if ((url === "/api/state" || url === "/api/plex/state") && init?.method === "PATCH") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-      if (url !== "/api/state") saves.push({ url, body });
       if (server.failSaves) return Response.json({ error: "failed" }, { status: 500 });
       Object.assign(url === "/api/state" ? trakt : plex.settings, body);
       return Response.json({ ok: true });
@@ -58,6 +57,13 @@ function fakeServer(initial: Partial<TraktState> = {}) {
     throw new Error(`Unexpected request: ${init?.method || "GET"} ${url}`);
   };
   return { server, fetcher };
+}
+
+// Matches the page's nth Trakt state read from now on (1 = the next one), so a
+// test names the read it answers instead of counting reads since start-up.
+function upcomingStateRead(server: ReturnType<typeof fakeServer>["server"], nth = 1) {
+  const readNumber = server.stateReads.length + nth;
+  return (url: string, init?: RequestInit) => url === "/api/state" && !init?.method && server.stateReads.length === readNumber;
 }
 
 async function renderTrakt(t: test.TestContext, initial: Partial<TraktState> = {}, prepare?: (server: ReturnType<typeof fakeServer>["server"]) => void) {
@@ -465,8 +471,9 @@ test("Trakt restored episodes stay filtered by a separate season Ignore", async 
 // Holds the failed Ignore's re-read open; it later confirms no Ignore was saved.
 function holdReread(page: Awaited<ReturnType<typeof renderTrakt>>) {
   const reread = deferred<Response>();
+  const isFailedSaveReread = upcomingStateRead(page.server);
   page.server.failSaves = true;
-  page.server.intercept = (url, init) => url === "/api/state" && !init?.method && page.server.stateReads.length === 2 ? reread.promise : undefined;
+  page.server.intercept = (url, init) => isFailedSaveReread(url, init) ? reread.promise : undefined;
   return async () => { await act(async () => { reread.resolve(Response.json({ state: { ignoredShows: [], ignoredSeasons: [], report } })); }); };
 }
 
@@ -508,6 +515,26 @@ test("Trakt does not bring back results or the cache key after the cache was cle
   assert.equal(await page.cacheStatus(), "Cached results for 0 shows", "the cleared key is not added back");
 });
 
+test("Trakt does not bring back results after another show's cache was cleared before the late rollback", async (t) => {
+  const page = await renderTrakt(t);
+  const resolveReread = holdReread(page);
+  const intercept = page.server.intercept;
+  page.server.intercept = (url, init) => url === "/api/scan?traktId=202" && init?.method === "DELETE" ? Promise.resolve(Response.json({ cleared: 1 })) : intercept?.(url, init);
+  await page.click("Alpha Show");
+  await page.click("Ignore this show");
+  await page.click("Forever");
+  await page.click("Bravo Show");
+  await page.click("Clear show's cache");
+  assert.equal(await page.cacheStatus(), "Cached results for 0 shows");
+  await resolveReread();
+
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.equal(page.ignoredCount(), "0");
+  assert.deepEqual(page.shownTitles(), ["Bravo Show"], "the captured Alpha rows do not come back");
+  assert.deepEqual(page.episodeCodes(), ["S01E03"]);
+  assert.equal(await page.cacheStatus(), "Cached results for 0 shows", "Bravo's cleared key stays cleared and Alpha's is not added back");
+});
+
 const charlie = { title: "Charlie Show", year: 2022, ids: { trakt: 303, slug: "charlie-show" } };
 const newerReport = {
   shows: [{ show: alpha }, { show: bravo }, { show: charlie }],
@@ -526,14 +553,16 @@ test("Trakt keeps a newer report loaded before the late rollback instead of the 
   const scanStatus = deferred<Response>();
   // A scan is already running at load; its status poll is held until the test completes it.
   const page = await renderTrakt(t, { scan: { status: "running", processed: 1, total: 2 } }, (server) => {
-    server.intercept = (url, init) => {
-      if (url === "/api/scan" && !init?.method) return scanStatus.promise;
-      if (url !== "/api/state" || init?.method) return undefined;
-      if (server.stateReads.length === 2) return reread.promise;
-      if (server.stateReads.length === 3) return Promise.resolve(Response.json({ state: { ignoredShows: [], ignoredSeasons: [], report: newerReport } }));
-      return undefined;
-    };
+    server.intercept = (url, init) => url === "/api/scan" && !init?.method ? scanStatus.promise : undefined;
   });
+  const isFailedSaveReread = upcomingStateRead(page.server);
+  const isCompletedScanReport = upcomingStateRead(page.server, 2);
+  const pollScan = page.server.intercept;
+  page.server.intercept = (url, init) => {
+    if (isFailedSaveReread(url, init)) return reread.promise;
+    if (isCompletedScanReport(url, init)) return Promise.resolve(Response.json({ state: { ignoredShows: [], ignoredSeasons: [], report: newerReport } }));
+    return pollScan?.(url, init);
+  };
   page.server.failSaves = true;
   await page.click("Alpha Show");
   await page.click("Ignore this show");

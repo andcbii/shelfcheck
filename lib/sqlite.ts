@@ -271,9 +271,13 @@ export function savedScanState<
  */
 function patchOptions(mode: ScanMode, patch: Record<string, unknown>) {
   const options = { ...savedOptions(mode), ...patch };
+  const ignoring = Object.prototype.hasOwnProperty.call(patch, "ignoredShows");
+  // The running scan is marked before the save, as before: a save that then fails
+  // still leaves the guard marked. This known guard-before-save gap is kept
+  // deliberately until SHELFCHECK-42 decides that policy.
+  if (ignoring) recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
   database().prepare(SAVED_STATE_SQL.writeOptions).run(mode, JSON.stringify(options));
-  if (!Object.prototype.hasOwnProperty.call(patch, "ignoredShows")) return;
-  recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
+  if (!ignoring) return;
   const row = savedRow(mode);
   if (row) pruneSavedResults(database(), mode, row, blockedShowKeys(mode, options.ignoredShows));
 }

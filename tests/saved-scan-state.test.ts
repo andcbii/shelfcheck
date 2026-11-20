@@ -168,6 +168,28 @@ test("an Ignore change prunes the saved report and Resume point, and Restore doe
   assert.deepEqual((trakt.report.read() as Results).shows.map(row => row.show!.ids.trakt), [2], "The Trakt row prunes by its own Ignores");
 });
 
+test("an Ignore save the store rejects still marks the running scan, as before (the guard-before-save gap stays for SHELFCHECK-42)", (t) => {
+  freshDatabase(t);
+  const cases = [
+    { mode: "plex" as const, ignore: { ratingKey: "one", title: "one" }, results: plexResults, key: (row: Row) => row.ratingKey, kept: "two" },
+    { mode: "trakt" as const, ignore: { title: "Show 1", ids: { trakt: 1 } }, results: traktResults, key: (row: Row) => String(row.show!.ids.trakt), kept: "2" },
+  ];
+  for (const { mode, ignore, results, key, kept } of cases) {
+    const store = sqlite.savedScanState(mode);
+    store.options.patch({ ignoredShows: [], diagnosticsEnabled: true });
+    const finish = sqlite.trackScanIgnores(mode);
+    try {
+      rejectUpdates("OF options");
+      assert.throws(() => store.options.patch({ ignoredShows: [ignore] }), /saved state unavailable/, `${mode}: the save fails`);
+      allowUpdates();
+      assert.deepEqual(store.options.read(), { ignoredShows: [], diagnosticsEnabled: true }, `${mode}: the options are unchanged`);
+      // The running scan's guard still holds the newly supplied Ignore, so its pending results for that show are dropped.
+      store.report.write(results());
+      assert.deepEqual((store.report.read() as Results).shows.map(key), [kept], `${mode}: the guard holds the Ignore`);
+    } finally { finish(); }
+  }
+});
+
 test("store operations join a transaction already open, so its rollback undoes them", (t) => {
   freshDatabase(t);
   const plex = sqlite.savedScanState("plex");

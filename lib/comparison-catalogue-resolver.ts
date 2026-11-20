@@ -84,12 +84,19 @@ export type CatalogueUseProposal = { action: "set"; use: CatalogueUse } | { acti
 /** A catalogue Coverage Issue (catalogue-refresh or catalogue-fallback-refresh) and what to do with it. */
 export type CatalogueIssueAction = { action: "set"; issue: CoverageIssue } | { action: "resolve"; id: string } | { action: "preserve"; id: string };
 
+/**
+ * The provider's refresh obligation change, relative to the obligation in the request. A preferred
+ * failure sets it; only a downloaded preferred catalogue clears it; reuse and fallback downloads never do.
+ */
+export type RefreshObligationChange = "set" | "clear" | "unchanged";
+
 export type ProviderResolution<T> = {
   /** The provider's series identity after resolution: the series compared, else the one that is unavailable. */
   identity?: number;
   /** Absent when no catalogue is usable. */
   catalogue?: ComparedCatalogue<T>;
   use: CatalogueUseProposal;
+  obligation: RefreshObligationChange;
   issues: CatalogueIssueAction[];
   /** The Coverage Issue ID that explains a missing catalogue, for the comparison-inputs issue's causes. */
   unavailableCause?: string;
@@ -102,8 +109,18 @@ export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
   outcome: "comparable" | "pending";
 } & { [K in CatalogueProvider]: ProviderResolution<P[K]> };
 
+/** One provider's progress, final once its candidate choice is: a provider-scoped patch to persist. */
+export type ProviderProgress = { provider: CatalogueProvider; obligation: RefreshObligationChange };
+
 export type ResolverDependencies<P extends CataloguePayloads> = {
   source: ComparisonCatalogueSource<P>;
+  /**
+   * The progress sink: persists one provider's obligation change before the other provider's work
+   * starts, so an interruption between them loses no progress. Awaited; a rejection propagates as a
+   * persistence failure, never as a provider failure. An acknowledged patch is final: the caller does
+   * not reapply or roll it back, even when the overall outcome is pending.
+   */
+  onProviderResolved?: (progress: ProviderProgress) => Promise<void>;
 };
 
 /** The impact a Coverage Issue states when the preferred series could not be loaded. */
@@ -118,6 +135,7 @@ export async function resolveComparisonCatalogues<P extends CataloguePayloads>(r
   for (const provider of PROVIDERS) {
     const resolution = await resolveProvider(provider, request, identities, dependencies.source);
     identities[provider] = resolution.identity;
+    await dependencies.onProviderResolved?.({ provider, obligation: resolution.obligation });
     (resolved as Record<CatalogueProvider, ProviderResolution<unknown>>)[provider] = resolution;
   }
   const { tmdb, tvdb } = resolved as { [K in CatalogueProvider]: ProviderResolution<P[K]> };
@@ -189,5 +207,9 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
     const failure = failureOf(choice.fallbackError);
     issues.push({ action: "set", issue: issue(fallbackIssueId, failure, choice.usingId, catalogueUseExplanation(provider, use)!) });
   } else issues.push({ action: "resolve", id: fallbackIssueId });
-  return { identity, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}) };
+  // Decided only now that candidate choice is final, so every load above used the obligation as it was.
+  const obligation: RefreshObligationChange = choice.preferredError
+    ? (providerRequest.refreshObligation ? "unchanged" : "set")
+    : choice.state === "preferred" && catalogue?.origin === "downloaded" && providerRequest.refreshObligation ? "clear" : "unchanged";
+  return { identity, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, obligation, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}) };
 }

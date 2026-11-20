@@ -62,8 +62,7 @@ test("each mode saves its report, Resume point, scan status and options, read ba
   assert.equal(trakt.resumePoint.read(), null);
   assert.equal(trakt.status.read(), null);
   assert.deepEqual(trakt.options.read(), {});
-  plex.report.clear();
-  plex.resumePoint.clear();
+  plex.clearReportAndResumePoint();
   assert.equal(plex.report.read(), null);
   assert.equal(plex.resumePoint.read(), null);
   assert.deepEqual(trakt.report.read(), traktResults(), "Clearing Plex leaves Trakt");

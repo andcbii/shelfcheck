@@ -12,17 +12,42 @@ type DatabaseCache = typeof globalThis & {
   __shelfcheckScanIgnoreGuards?: Partial<Record<ScanMode, Set<string>>>;
 };
 
+// Every saved scan state statement names its columns here; callers never supply column names.
+const SAVED_STATE_SQL = {
+  allRows: "SELECT mode, report, resume_point, options FROM shelfcheck_scan_state",
+  row: "SELECT report, resume_point, status, options, state_updated_at FROM shelfcheck_scan_state WHERE mode = ?",
+  options: "SELECT options FROM shelfcheck_scan_state WHERE mode = ?",
+  /** Parameters: report, Resume point, mode. Leaves the state timestamp alone. */
+  savedResults: "UPDATE shelfcheck_scan_state SET report = ?, resume_point = ? WHERE mode = ?",
+  writeReport: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET report = excluded.report, state_updated_at = CURRENT_TIMESTAMP`,
+  writeResumePoint: `INSERT INTO shelfcheck_scan_state(mode, resume_point, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET resume_point = excluded.resume_point, state_updated_at = CURRENT_TIMESTAMP`,
+  commitReport: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET report = excluded.report, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP`,
+  writeStatus: `INSERT INTO shelfcheck_scan_state(mode, status) VALUES(?, ?)
+    ON CONFLICT(mode) DO UPDATE SET status = excluded.status`,
+  writeOptions: `INSERT INTO shelfcheck_scan_state(mode, options, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET options = excluded.options, state_updated_at = CURRENT_TIMESTAMP`,
+  clearResumePoint: "UPDATE shelfcheck_scan_state SET resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
+  clearReportAndResumePoint: "UPDATE shelfcheck_scan_state SET report = NULL, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
+} as const;
+
 function scanIgnoreGuards() {
   const cache = globalThis as DatabaseCache;
   return cache.__shelfcheckScanIgnoreGuards ||= {};
 }
 
+/** Each mode's actively ignored show keys, as the strings its saved results are keyed by. */
+const activeIgnoreKeys: Record<ScanMode, (ignoredShows: unknown, now?: number) => string[]> = {
+  trakt: (ignoredShows, now) => [...ignoredTraktIds(ignoredShows, now)].map(String),
+  plex: (ignoredShows, now) => [...ignoredPlexKeys(ignoredShows, now)],
+};
+
 // An ignore applied during a scan invalidates that scan's result even if the
 // user restores the show before its pending provider requests finish.
 export function trackScanIgnores(mode: ScanMode, now = Date.now()): () => void {
-  const saved = savedOptions(mode).ignoredShows;
-  const ignored = mode === "trakt" ? [...ignoredTraktIds(saved, now)].map(String) : [...ignoredPlexKeys(saved, now)];
-  const guard = new Set(ignored);
+  const guard = new Set(activeIgnoreKeys[mode](savedOptions(mode).ignoredShows, now));
   scanIgnoreGuards()[mode] = guard;
   return () => {
     if (scanIgnoreGuards()[mode] === guard) delete scanIgnoreGuards()[mode];
@@ -35,8 +60,7 @@ function recordScanIgnores(mode: ScanMode, ignored: Iterable<string>) {
 }
 
 function blockedShowKeys(mode: ScanMode, ignoredShows: unknown) {
-  const active = mode === "trakt" ? [...ignoredTraktIds(ignoredShows)].map(String) : [...ignoredPlexKeys(ignoredShows)];
-  return new Set([...active, ...(scanIgnoreGuards()[mode] || [])]);
+  return new Set([...activeIgnoreKeys[mode](ignoredShows), ...(scanIgnoreGuards()[mode] || [])]);
 }
 
 function pruneIgnoredResults<T>(value: T, mode: ScanMode, blocked: Set<string>): T {
@@ -68,24 +92,34 @@ function parseStoredJson<T>(payload: string | null | undefined, fallback: T): T 
   }
 }
 
+type SavedResultsRow = { report: string | null; resume_point: string | null };
+
+/**
+ * Remove blocked shows from a mode's saved report and Resume point, writing back
+ * only when something changed. It uses only the handle it is given.
+ */
+function pruneSavedResults(db: DatabaseSync, mode: ScanMode, row: SavedResultsRow, blocked: Set<string>) {
+  const report = parseStoredJson<Record<string, unknown> | null>(row.report, null);
+  const point = parseStoredJson<Record<string, unknown> | null>(row.resume_point, null);
+  const prunedReport = pruneIgnoredResults(report, mode, blocked);
+  const prunedPoint = pruneIgnoredResults(point, mode, blocked);
+  if (JSON.stringify(prunedReport) === JSON.stringify(report) && JSON.stringify(prunedPoint) === JSON.stringify(point)) return;
+  db.prepare(SAVED_STATE_SQL.savedResults).run(
+    prunedReport === null ? row.report : JSON.stringify(prunedReport),
+    prunedPoint === null ? row.resume_point : JSON.stringify(prunedPoint),
+    mode,
+  );
+}
+
 // Runs once per opened handle, after migrations, because whether an Ignore is
 // active depends on the current time. It uses only the handle it is given.
 function normalizeStoredIgnores(db: DatabaseSync) {
   // Older versions retained results when Ignore was applied. Remove those
   // results before any read or Restore can expose them.
-  const savedRows = db.prepare("SELECT mode, report, resume_point, options FROM shelfcheck_scan_state")
-    .all() as { mode: ScanMode; report: string | null; resume_point: string | null; options: string | null }[];
+  const savedRows = db.prepare(SAVED_STATE_SQL.allRows).all() as (SavedResultsRow & { mode: ScanMode; options: string | null })[];
   for (const row of savedRows) {
     const options = parseStoredJson<Record<string, unknown>>(row.options, {});
-    const blocked = blockedShowKeys(row.mode, options.ignoredShows);
-    const report = parseStoredJson<Record<string, unknown> | null>(row.report, null);
-    const point = parseStoredJson<Record<string, unknown> | null>(row.resume_point, null);
-    const prunedReport = pruneIgnoredResults(report, row.mode, blocked);
-    const prunedPoint = pruneIgnoredResults(point, row.mode, blocked);
-    if (JSON.stringify(prunedReport) !== JSON.stringify(report) || JSON.stringify(prunedPoint) !== JSON.stringify(point)) {
-      db.prepare("UPDATE shelfcheck_scan_state SET report = ?, resume_point = ? WHERE mode = ?")
-        .run(prunedReport === null ? row.report : JSON.stringify(prunedReport), prunedPoint === null ? row.resume_point : JSON.stringify(prunedPoint), row.mode);
-    }
+    pruneSavedResults(db, row.mode, row, blockedShowKeys(row.mode, options.ignoredShows));
   }
 }
 
@@ -143,7 +177,7 @@ export type SavedScanStateSnapshot<R, P, S, O> = {
  * Operations join a transaction already open on the database instead of nesting one.
  */
 export type SavedScanState<R, P, S, O> = {
-  report: { read(): R | null; write(report: R): void; clear(): void };
+  report: { read(): R | null; write(report: R): void };
   resumePoint: { read(): P | null; write(point: P): void; clear(): void };
   status: { read(): S | null; write(status: S): void };
   options: { read(): O; patch(patch: Partial<O>): void };
@@ -173,12 +207,11 @@ function inTransaction<T>(work: () => T): T {
 }
 
 function savedRow(mode: ScanMode) {
-  return database().prepare("SELECT report, resume_point, status, options, state_updated_at FROM shelfcheck_scan_state WHERE mode = ?")
-    .get(mode) as SavedStateRow | undefined;
+  return database().prepare(SAVED_STATE_SQL.row).get(mode) as SavedStateRow | undefined;
 }
 
 function savedOptions(mode: ScanMode): Record<string, unknown> {
-  const row = database().prepare("SELECT options FROM shelfcheck_scan_state WHERE mode = ?").get(mode) as { options: string | null } | undefined;
+  const row = database().prepare(SAVED_STATE_SQL.options).get(mode) as { options: string | null } | undefined;
   return parseStoredJson<Record<string, unknown>>(row?.options, {});
 }
 
@@ -186,28 +219,14 @@ function prunedForSave(mode: ScanMode, value: unknown) {
   return JSON.stringify(pruneIgnoredResults(value, mode, blockedShowKeys(mode, savedOptions(mode).ignoredShows)));
 }
 
-// Every statement names its columns here; callers never supply column names.
-const SAVED_STATE_SQL = {
-  report: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(mode) DO UPDATE SET report = excluded.report, state_updated_at = CURRENT_TIMESTAMP`,
-  resumePoint: `INSERT INTO shelfcheck_scan_state(mode, resume_point, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(mode) DO UPDATE SET resume_point = excluded.resume_point, state_updated_at = CURRENT_TIMESTAMP`,
-  commitReport: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(mode) DO UPDATE SET report = excluded.report, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP`,
-  status: `INSERT INTO shelfcheck_scan_state(mode, status) VALUES(?, ?)
-    ON CONFLICT(mode) DO UPDATE SET status = excluded.status`,
-  options: `INSERT INTO shelfcheck_scan_state(mode, options, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(mode) DO UPDATE SET options = excluded.options, state_updated_at = CURRENT_TIMESTAMP`,
-  clearReport: "UPDATE shelfcheck_scan_state SET report = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
-  clearResumePoint: "UPDATE shelfcheck_scan_state SET resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
-  clearBoth: "UPDATE shelfcheck_scan_state SET report = NULL, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
-} as const;
+/** The statements a mode's store runs with (mode) or (mode, value). */
+type ModeWrite = "writeReport" | "writeResumePoint" | "commitReport" | "writeStatus" | "writeOptions" | "clearResumePoint" | "clearReportAndResumePoint";
 
 /** The saved scan state store bound to one mode; the caller supplies the mode's own part types. */
 export function savedScanState<
   R = Record<string, unknown>, P = Record<string, unknown>, S = Record<string, unknown>, O extends Record<string, unknown> = Record<string, unknown>,
 >(mode: ScanMode): SavedScanState<R, P, S, O> {
-  const run = (sql: keyof typeof SAVED_STATE_SQL, value?: string) => {
+  const run = (sql: ModeWrite, value?: string) => {
     const statement = database().prepare(SAVED_STATE_SQL[sql]);
     if (value === undefined) statement.run(mode);
     else statement.run(mode, value);
@@ -215,17 +234,16 @@ export function savedScanState<
   return {
     report: {
       read: () => parseStoredJson<R | null>(savedRow(mode)?.report, null),
-      write: (report) => run("report", prunedForSave(mode, report)),
-      clear: () => run("clearReport"),
+      write: (report) => run("writeReport", prunedForSave(mode, report)),
     },
     resumePoint: {
       read: () => parseStoredJson<P | null>(savedRow(mode)?.resume_point, null),
-      write: (point) => run("resumePoint", prunedForSave(mode, point)),
+      write: (point) => run("writeResumePoint", prunedForSave(mode, point)),
       clear: () => run("clearResumePoint"),
     },
     status: {
       read: () => parseStoredJson<S | null>(savedRow(mode)?.status, null),
-      write: (status) => run("status", JSON.stringify(status)),
+      write: (status) => run("writeStatus", JSON.stringify(status)),
     },
     options: {
       read: () => savedOptions(mode) as O,
@@ -242,7 +260,7 @@ export function savedScanState<
       } : null;
     },
     commitReport: (report) => run("commitReport", prunedForSave(mode, report)),
-    clearReportAndResumePoint: () => run("clearBoth"),
+    clearReportAndResumePoint: () => run("clearReportAndResumePoint"),
   };
 }
 
@@ -253,16 +271,11 @@ export function savedScanState<
  */
 function patchOptions(mode: ScanMode, patch: Record<string, unknown>) {
   const options = { ...savedOptions(mode), ...patch };
-  database().prepare(SAVED_STATE_SQL.options).run(mode, JSON.stringify(options));
+  database().prepare(SAVED_STATE_SQL.writeOptions).run(mode, JSON.stringify(options));
   if (!Object.prototype.hasOwnProperty.call(patch, "ignoredShows")) return;
-  recordScanIgnores(mode, mode === "trakt" ? [...ignoredTraktIds(patch.ignoredShows)].map(String) : ignoredPlexKeys(patch.ignoredShows));
-  const blocked = blockedShowKeys(mode, options.ignoredShows);
-  if (!blocked.size) return;
+  recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
   const row = savedRow(mode);
-  const report = parseStoredJson<Record<string, unknown> | null>(row?.report, null);
-  const point = parseStoredJson<Record<string, unknown> | null>(row?.resume_point, null);
-  if (report) database().prepare("UPDATE shelfcheck_scan_state SET report = ? WHERE mode = ?").run(JSON.stringify(pruneIgnoredResults(report, mode, blocked)), mode);
-  if (point) database().prepare("UPDATE shelfcheck_scan_state SET resume_point = ? WHERE mode = ?").run(JSON.stringify(pruneIgnoredResults(point, mode, blocked)), mode);
+  if (row) pruneSavedResults(database(), mode, row, blockedShowKeys(mode, options.ignoredShows));
 }
 
 export function readPlexGeneratedInputs<T>(key: string): T | null {

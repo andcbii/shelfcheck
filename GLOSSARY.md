@@ -134,6 +134,10 @@ _Avoid_: Temporary deletion, timed dismissal
 The instant at which a temporary ignore ends.
 _Avoid_: Renewal date
 
+**Active ignore**:
+An ignore with no expiry, or with an expiry strictly later than the evaluation time. An ignore whose expiry equals the evaluation time has ended.
+_Avoid_: Live ignore, current ignore
+
 **Season ignore**:
 An ignore covering a group of selected seasons of one show, all sharing one duration, rather than the entire show. It is independent of any whole-show ignore.
 

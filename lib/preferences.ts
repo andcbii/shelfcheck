@@ -1,5 +1,5 @@
 import type { TraktShow } from "@/lib/trakt-model";
-import { IGNORE_DURATIONS, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
+import { IGNORE_DURATIONS, normalizeIgnoredSeasons, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 export type IgnoredPlexShow = { ratingKey: string; title: string } & IgnoreTiming;
 export type IgnoredPlexSeasons = IgnoredPlexShow & { seasons: number[] };
@@ -38,7 +38,7 @@ export function parsePlexPreferences(value: unknown): PlexPreferences {
     const timing = parseIgnoreTiming(show);
     if (!timing) return [];
     if (typeof show.ratingKey !== "string" || typeof show.title !== "string" || !Array.isArray(show.seasons)) return [];
-    const seasons = [...new Set(show.seasons.filter((season): season is number => typeof season === "number" && Number.isFinite(season) && season >= 0).map(Math.trunc))].sort((a, b) => a - b);
+    const seasons = normalizeIgnoredSeasons(show.seasons);
     return seasons.length ? [{ ratingKey: show.ratingKey, title: show.title, seasons, ...timing }] : [];
   }) : [];
   const rawOffset = typeof source.airingOffsetDays === "number" && Number.isFinite(source.airingOffsetDays) ? source.airingOffsetDays : 0;
@@ -82,7 +82,7 @@ export function parseTraktPreferencesPatch(value: unknown): TraktPreferencesPatc
     const timing = parseIgnoreTiming(show);
     if (!timing) return [];
     if (typeof show.traktId !== "number" || !Number.isFinite(show.traktId) || typeof show.title !== "string" || !Array.isArray(show.seasons)) return [];
-    const seasons = [...new Set(show.seasons.filter((season): season is number => typeof season === "number" && Number.isFinite(season) && season >= 0).map(Math.trunc))].sort((a, b) => a - b);
+    const seasons = normalizeIgnoredSeasons(show.seasons);
     return seasons.length ? [{ traktId: show.traktId, title: show.title, seasons, ...timing }] : [];
   });
   if (typeof source.diagnosticsEnabled === "boolean") patch.diagnosticsEnabled = source.diagnosticsEnabled;

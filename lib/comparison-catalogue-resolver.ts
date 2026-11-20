@@ -218,7 +218,7 @@ export class ProgressPersistenceError extends Error {
 export const NO_PLEX_IDS_WARNING = "No TMDB or TVDB ID was exposed by Plex.";
 
 /** The Coverage Issue impact of an unavailable preferred series, from the shared description of the catalogue in use. */
-export function unavailablePreferredImpact(provider: CatalogueProvider, use: CatalogueUse) {
+function unavailablePreferredImpact(provider: CatalogueProvider, use: CatalogueUse) {
   return `${catalogueUseExplanation(provider, use)} ${PROVIDER_NAME[provider]} series ${use.preferredId} is retried every scan; the preference is kept.`;
 }
 
@@ -325,10 +325,10 @@ async function singleIdCatalogue<P extends CataloguePayloads, K extends Catalogu
   const { request, source, identities } = resolving;
   const providerRequest = request[provider];
   const load = await loadSingleCatalogue(source, provider, id, providerRequest.refreshObligation);
-  if (load.outcome === "no-series") return noSeries(provider, request, id, providerRequest.lookupSource, { action: "set", use: singleIdUse(id, true, undefined, undefined) });
+  if (load.outcome === "no-series") return noSeries(provider, request, id, providerRequest.lookupSource, { action: "set", use: singleIdUse(id, undefined) });
   if (load.outcome !== "failed") return {
     identity: load.id, lookupSource: load.lookupSource ?? providerRequest.lookupSource, catalogue: comparedFrom(load, load.outcome),
-    use: { action: "set", use: singleIdUse(load.id, true, undefined, load.downloadedAt) },
+    use: { action: "set", use: singleIdUse(load.id, load.downloadedAt) },
     obligation: loadedObligation(providerRequest, load.outcome), issues: resolvedIssues(provider, request),
   };
   // Shares the derived series' failure: the saved catalogue at any age, else unavailable.
@@ -469,7 +469,7 @@ const loadedObligation = (providerRequest: ProviderRequest, outcome: "downloaded
 /** A preferred catalogue that could not be loaded sets the obligation, unless one is already open. */
 const failedObligation = (providerRequest: ProviderRequest): RefreshObligationChange => providerRequest.refreshObligation ? "unchanged" : "set";
 
-/** The impact of a single catalogue that could not be loaded, as the scan's single-catalogue failure states it. */
+/** The impact of a single catalogue that could not be loaded. */
 function singleCatalogueFailureImpact(provider: CatalogueProvider, request: ComparisonCatalogueRequest, retained: boolean) {
   return `${PROVIDER_NAME[provider]} episode coverage could not be fully verified. ${retained ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${request.previousComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`;
 }
@@ -540,7 +540,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const obligation: RefreshObligationChange = preferredState === "failed-this-attempt"
     ? failedObligation(providerRequest)
     : catalogue?.origin === "downloaded" && providerRequest.refreshObligation ? "clear" : "unchanged";
-  // A fallback keeps the preference's provenance, as the scan does.
+  // A fallback keeps the preference's provenance.
   const lookupSource = (preferredState === "loaded" && preferredProvenance) || providerRequest.lookupSource;
   return { identity, lookupSource, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, obligation, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}) };
 }

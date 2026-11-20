@@ -54,7 +54,7 @@ export type DownloadCatalogueSourceOptions = {
 };
 
 /** The Coverage Issue causes of a catalogue load the scan's TVDB authentication failure prevented. */
-export const TVDB_AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
+const TVDB_AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
 
 type TmdbRecord = PlexGeneratedInputs["tmdb"][string];
 type TvdbRecord = PlexGeneratedInputs["tvdb"][string];

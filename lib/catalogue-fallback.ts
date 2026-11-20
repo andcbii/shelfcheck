@@ -65,11 +65,9 @@ export function multipleIdUse<T>(choice: CatalogueChoice<T>, preferredId: number
   };
 }
 
-/** The catalogue in use for a provider with one Plex ID (`reported`), or a series derived from the other provider's catalogue. */
-export function singleIdUse(usingId: number, reported: boolean, derivedFrom: number | undefined, downloadedAt: string | undefined): CatalogueUse {
-  return reported
-    ? { preferredId: usingId, usingId, state: "preferred", ...(downloadedAt ? { preferredDownloadedAt: downloadedAt, usingDownloadedAt: downloadedAt } : {}) }
-    : { usingId, state: "derived", ...(derivedFrom ? { derivedFrom } : {}), ...(downloadedAt ? { usingDownloadedAt: downloadedAt } : {}) };
+/** The catalogue in use for a provider with one Plex ID. */
+export function singleIdUse(usingId: number, downloadedAt: string | undefined): CatalogueUse {
+  return { preferredId: usingId, usingId, state: "preferred", ...(downloadedAt ? { preferredDownloadedAt: downloadedAt, usingDownloadedAt: downloadedAt } : {}) };
 }
 
 /** A single-ID provider whose series failed to load: its saved catalogue, at any age, stays in use (ADR-0003). */

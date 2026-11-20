@@ -1,6 +1,8 @@
 export const CATALOGUE_AGE_LIMIT = 60 * 86400_000;
 /** The in-use catalogue of a provider with several Plex IDs is downloaded again once older than this. */
 export const MULTIPLE_ID_REFRESH_AGE = 20 * 86400_000;
+/** A series ID is a Gone provider record once its series request has answered 404 on this many UTC days (ADR-0006). */
+export const GONE_RECORD_NOT_FOUND_DAYS = 15;
 
 /**
  * Whether a saved catalogue may still serve as current comparison input when its series could

@@ -15,6 +15,12 @@
 
 ### Changed
 
+- Scan Issues entries for a catalogue that could not be refreshed now show
+  how old the saved catalogue is, and when TMDB or TVDB answered "not found"
+  for the series itself, on how many UTC days it has, for example "404 on 7 of
+  15 days · catalogue 74 days old" or "404 on 3 days · never downloaded".
+  Shelfcheck keeps this count per provider series ID across restarts and Clear
+  cache; only a complete catalogue download resets it.
 - A show whose preferred catalogue cannot be loaded no longer downloads its
   fallback catalogue again on every Plex scan. The preferred catalogue is
   still retried on every full scan; the fallback is downloaded again only when

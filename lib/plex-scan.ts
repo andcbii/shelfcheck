@@ -28,8 +28,8 @@ import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFing
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { failedSingleIdUse, singleIdUse } from "@/lib/catalogue-fallback";
-import { ProgressPersistenceError, resolveComparisonCatalogues, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderRequest } from "@/lib/comparison-catalogue-resolver";
-import { downloadCatalogueSource, TmdbShowMissingError, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
+import { NO_PLEX_IDS_WARNING, ProgressPersistenceError, resolveComparisonCatalogues, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderRequest } from "@/lib/comparison-catalogue-resolver";
+import { downloadCatalogueSource, TVDB_AUTHENTICATION_CAUSE, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
@@ -238,7 +238,7 @@ async function requestTmdbShow(tmdbId: number, token: string): Promise<TmdbShow 
 }
 
 /** TMDB's first TV result for a TVDB series, if any. */
-async function tmdbShowForTvdb(tvdbId: number, token: string): Promise<TmdbShow | undefined> {
+async function requestTmdbShowForTvdb(tvdbId: number, token: string): Promise<TmdbShow | undefined> {
   return (await tmdbJson<{ tv_results?: TmdbShow[] }>(`/find/${tvdbId}?external_source=tvdb_id`, token)).tv_results?.[0];
 }
 
@@ -1102,7 +1102,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       inputs, now: startedAt, targeted: !!targetRatingKey, tmdbChanges: tmdbCatalogueChanges, tvdbChanges: tvdbCatalogueChanges, tvdbAuthenticationError,
       requests: {
         tmdbShow: id => requestTmdbShow(id, config.tmdbToken),
-        tmdbShowForTvdb: tvdbId => tmdbShowForTvdb(tvdbId, config.tmdbToken),
+        tmdbShowForTvdb: tvdbId => requestTmdbShowForTvdb(tvdbId, config.tmdbToken),
         tmdbEpisodes: show => tmdbEpisodes(show, config.tmdbToken),
         tvdbSeries: (id, showTitle) => tvdbSeries(id, token, undefined, showTitle),
         tvdbEnglishTitle: tvdbEpisodeId => scanProviderClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
@@ -1112,8 +1112,19 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       titles: { autoCompoundEpisodes, localEpisodes: localProviderEpisodes },
       logger,
     });
+    /**
+     * A single-ID or derived series' catalogue through the download source. Null when the provider has
+     * no such series, which is not a failed refresh; a failed load throws its error.
+     */
+    const loadSingleCatalogue = async <K extends CatalogueProvider>(provider: K, id: number, mandatory: boolean) => {
+      const load = await catalogueSource.loadCatalogue(provider, id, {mandatory});
+      if (load.outcome === "failed") throw load.error;
+      if (load.outcome === "no-series") return null;
+      return {...load.catalogue, reused: load.outcome === "reused", downloadedAt: load.downloadedAt};
+    };
     /** A single-ID show's TMDB catalogue; without an ID, the series TMDB associates with the TVDB series. Null when there is none. */
     const loadTmdb = async (id: number | undefined, mandatory: boolean) => {
+      tmdbCatalogueReused = false;
       if (id === undefined) {
         if (!tvdbId) return null;
         const association = await catalogueSource.tmdbSeriesForTvdb(tvdbId, {mandatory});
@@ -1122,12 +1133,9 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         tmdbSource = [...tmdbSource,{provider:"TMDB",kind:"resolved show",id:association.id,cached:association.cached}];
         id = tmdbId = association.id;
       }
-      const load = await catalogueSource.loadCatalogue("tmdb", id, {mandatory});
-      tmdbCatalogueReused = load.outcome === "reused";
-      // A single-ID show TMDB answers with no show has no catalogue, which is not a failed refresh.
-      if (load.outcome === "failed" && load.error instanceof TmdbShowMissingError) return null;
-      if (load.outcome === "failed") throw load.error;
-      return {...load.catalogue, reused: load.outcome === "reused", downloadedAt: load.downloadedAt};
+      const loaded = await loadSingleCatalogue("tmdb", id, mandatory);
+      tmdbCatalogueReused = !!loaded?.reused;
+      return loaded;
     };
     const adoptTmdbCatalogue = (loaded: NonNullable<Awaited<ReturnType<typeof loadTmdb>>>) => {
       tmdbShow = loaded.show;
@@ -1167,10 +1175,12 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const loadTvdb = async (id: number, mandatory: boolean) => {
       // A reused catalogue asks again for an English title only when the catalogues compared so far make it title-dependent.
       catalogueSource.compareTitlesWith(providerEpisodes);
-      const load = await catalogueSource.loadCatalogue("tvdb", id, {mandatory});
-      tvdbCatalogueReused = load.outcome === "reused";
-      if (load.outcome === "failed") throw load.error;
-      return {...load.catalogue, reused: load.outcome === "reused", downloadedAt: load.downloadedAt};
+      tvdbCatalogueReused = false;
+      const loaded = await loadSingleCatalogue("tvdb", id, mandatory);
+      // The download source never answers TVDB with no series.
+      if (!loaded) throw new Error(`TVDB returned no series ${id}.`);
+      tvdbCatalogueReused = loaded.reused;
+      return loaded;
     };
     const adoptTvdbCatalogue = (loaded: Awaited<ReturnType<typeof loadTvdb>>) => {
       tvdbResolved = true;
@@ -1197,7 +1207,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         if (!tmdbId && !tvdbId) addWarning("No TMDB or TVDB ID was exposed by Plex.");
       } catch (error) {
         refresh.tvdb = true;
-        setCoverageIssue({id:`catalogue-refresh:TVDB:${ratingKey}`,...(tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...providerLookupContext(error,{source:tvdbSource,requested:{provider:"TVDB",kind:"series",id:tvdbId},impact:`TVDB episode coverage could not be fully verified. ${usableProviderCatalogue(inputs.tvdb[String(tvdbId)]) ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${savedComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`})});
+        setCoverageIssue({id:`catalogue-refresh:TVDB:${ratingKey}`,...(tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:TVDB_AUTHENTICATION_CAUSE} : {}),operation:"catalogue-refresh",provider:"TVDB",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...providerLookupContext(error,{source:tvdbSource,requested:{provider:"TVDB",kind:"series",id:tvdbId},impact:`TVDB episode coverage could not be fully verified. ${usableProviderCatalogue(inputs.tvdb[String(tvdbId)]) ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${savedComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`})});
         const savedTvdb = inputs.tvdb[String(tvdbId)];
         if (usableProviderCatalogue(savedTvdb)) { tvdbResolved = true; tvdbSlug = savedTvdb.show.slug; providerEpisodes.push(...savedTvdb.episodes); malformedRecords.push(...savedTvdb.malformed || []); titleRecovery = {state: savedTvdb.titleRecovery || {}, carried: true}; }
         else unavailableCatalogueCauses.push(`catalogue-refresh:TVDB:${ratingKey}`);
@@ -1214,12 +1224,18 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
      * provider's obligation patch is saved before the other provider's work starts.
      */
     const resolveMultipleIdCatalogues = async () => {
-      const phase = {tmdb:"tmdb-show-and-seasons", tvdb:"tvdb-series-and-episodes"} as const;
+      // Each provider attempt reports its provider's phase first, TMDB's association request included.
+      const phase: Record<CatalogueProvider, string> = {tmdb:"tmdb-show-and-seasons", tvdb:"tvdb-series-and-episodes"};
+      const reportPhase = (provider: CatalogueProvider) => setHeartbeat(ratingKey, primary.title || "Unknown show", phase[provider]);
       const source: ComparisonCatalogueSource<DownloadCataloguePayloads> = {
         ...catalogueSource,
         loadCatalogue(provider, id, settings) {
-          setHeartbeat(ratingKey, primary.title || "Unknown show", phase[provider]);
+          reportPhase(provider);
           return catalogueSource.loadCatalogue(provider, id, settings);
+        },
+        tmdbSeriesForTvdb(tvdbId, settings) {
+          reportPhase("tmdb");
+          return catalogueSource.tmdbSeriesForTvdb(tvdbId, settings);
         },
       };
       phaseStarted = Date.now();
@@ -1240,23 +1256,27 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
           if (progress.provider === "tmdb") catalogueSource.compareTitlesWith(progress.catalogue?.catalogue.episodes ?? []);
         }});
       } catch (error) {
-        // Saved progress that cannot be written fails the show as it always has, not as a provider failure.
+        // Saved progress that cannot be written fails the show with the save's own error, not as a provider failure.
         throw error instanceof ProgressPersistenceError ? error.cause : error;
       }
       const {tmdb, tvdb, resolutionOrder} = resolution;
       for (const provider of resolutionOrder) {
-        for (const action of resolution[provider].issues) {
+        const {issues, use, warning: providerWarning} = resolution[provider];
+        for (const action of issues) {
           if (action.action === "set") setCoverageIssue(action.issue);
           else if (action.action === "resolve") resolveCoverageIssue(action.id);
         }
-        const {use} = resolution[provider];
         if (use.action === "set") catalogueUse[provider] = use.use;
+        if (!providerWarning) continue;
+        addWarning(providerWarning);
+        // A single-ID or derived TVDB series that could not be loaded logs the show's warnings so far, as the single-ID path does.
+        if (provider === "tvdb" && tvdbCandidates.length <= 1) logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       }
+      // The resolution's own warning, for a show Plex reports no ID for, follows the providers'.
+      if (resolution.warnings.at(-1) === NO_PLEX_IDS_WARNING) addWarning(NO_PLEX_IDS_WARNING);
       tmdbId = tmdb.identity; tvdbId = tvdb.identity;
       tmdbSource = tmdb.lookupSource; tvdbSource = tvdb.lookupSource;
       unavailableCatalogueCauses.push(...resolution.unavailableCauses);
-      for (const message of resolution.warnings) addWarning(message);
-      if (tvdbCandidates.length <= 1 && tvdb.warning) logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       // TVDB chosen before TMDB recovered its titles without TMDB's episodes: the preparation step asks again for those TMDB now makes title-dependent.
       const tmdbCatalogue = tmdb.catalogue;
       const tvdbCatalogue = tvdb.catalogue && resolutionOrder[0] === "tvdb"
@@ -1272,7 +1292,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       }
       // Comparison order is TMDB, then TVDB; unusable records are listed in the order the catalogues were chosen.
       providerEpisodes.push(...(tmdbCatalogue?.catalogue.episodes ?? []), ...(tvdbCatalogue?.catalogue.episodes ?? []));
-      for (const provider of resolutionOrder) malformedRecords.push(...((provider === "tmdb" ? tmdbCatalogue : tvdbCatalogue)?.catalogue.malformed ?? []));
+      const chosen: Record<CatalogueProvider, {catalogue: {malformed: MalformedCatalogueRecord[]}} | undefined> = {tmdb: tmdbCatalogue, tvdb: tvdbCatalogue};
+      for (const provider of resolutionOrder) malformedRecords.push(...(chosen[provider]?.catalogue.malformed ?? []));
     };
     if (tmdbCandidates.length > 1 || tvdbCandidates.length > 1) await resolveMultipleIdCatalogues();
     else {

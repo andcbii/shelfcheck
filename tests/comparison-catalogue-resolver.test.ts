@@ -352,6 +352,55 @@ test("a failed association is a catalogue-refresh Coverage Issue, and the TMDB s
   assert.deepEqual(issue.issue.lookup?.source, [{ provider: "Plex", kind: "TVDB series", id: 1 }]);
   assert.deepEqual(issue.issue.lookup?.requested, { provider: "TMDB", kind: "TVDB ID search", id: 1 });
   assert.equal(issue.issue.lookup?.impact, "TMDB episode coverage could not be fully verified. Last-good catalogue data was retained. Last-good comparison results remain available.");
+  assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }, { provider: "TMDB", kind: "resolved show", id: 40, cached: true }], "the kept series is the one resolved before, from saved evidence");
+});
+
+test("a single Plex ID the provider answers with no series for has no catalogue and no failed refresh: no issue, obligation change or warning, and the comparison is pending", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 11: before(DAY) }, tvdb: tvdbSaved }, noSeries: { tmdb: [11] } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11, refreshObligation: true }, { candidates: [1], preferredId: 1 }), { source });
+
+  assert.equal(resolved.outcome, "pending");
+  assert.equal(resolved.tmdb.identity, 11);
+  assert.equal(resolved.tmdb.catalogue, undefined, "the saved copy is not compared");
+  assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TMDB show", id: 11 }]);
+  assert.deepEqual(resolved.tmdb.use, { action: "set", use: { preferredId: 11, usingId: 11, state: "preferred" } });
+  assert.equal(resolved.tmdb.obligation, "unchanged");
+  assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
+  assert.deepEqual([resolved.unavailableCauses, resolved.warnings], [[], []]);
+});
+
+test("a derived TMDB series the provider answers with no series for has no catalogue: the series last compared is not kept, and nothing is a failed refresh", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 40: before(DAY) }, tvdb: tvdbSaved }, associations: { 1: { outcome: "found", id: 50, cached: false } }, noSeries: { tmdb: [50] } });
+  const resolved = await resolveComparisonCatalogues({ ...request(noTmdb, tvdbOnly), previousComparison: { tmdbId: 40, tvdbId: 1, complete: true } }, { source });
+
+  assert.equal(resolved.outcome, "pending");
+  assert.equal(resolved.tmdb.identity, 50);
+  assert.equal(resolved.tmdb.catalogue, undefined);
+  assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }, { provider: "TMDB", kind: "resolved show", id: 50, cached: false }]);
+  assert.deepEqual(resolved.tmdb.use, { action: "set", use: { usingId: 50, state: "derived", derivedFrom: 1 } });
+  assert.equal(resolved.tmdb.obligation, "unchanged");
+  assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
+  assert.deepEqual([resolved.unavailableCauses, resolved.warnings], [[], []]);
+});
+
+test("a candidate among several that the provider answers with no series for is unavailable, as a failed load is", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, noSeries: { tmdb: [11] } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source });
+
+  assert.equal(resolved.outcome, "comparable");
+  assert.equal(resolved.tmdb.catalogue?.id, 10);
+  assert.equal((resolved.tmdb.use as { use: { state: string } }).use.state, "fallback");
+  assert.equal(resolved.tmdb.obligation, "set");
+  const issue = resolved.tmdb.issues[0];
+  assert.equal(issue.action, "set");
+  if (issue.action !== "set") return;
+  assert.equal(issue.issue.id, "catalogue-refresh:TMDB:show-1");
+  assert.equal(issue.issue.lookup?.failureKind, "invalid-response");
+
+  const { source: noneLoad } = inMemoryCatalogueSource({ now: NOW, saved: { tvdb: tvdbSaved }, noSeries: { tmdb: [10, 11] } });
+  const unavailable = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source: noneLoad });
+  assert.equal(unavailable.outcome, "pending");
+  assert.deepEqual(unavailable.warnings, ["TMDB returned no show 11."]);
 });
 
 test("a TMDB series resolved before its download fails is kept, with its provenance, in the Coverage Issue", async () => {

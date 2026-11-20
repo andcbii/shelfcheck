@@ -23,6 +23,8 @@ export function inMemoryCatalogueSource(options: {
   saved?: Partial<Record<CatalogueProvider, Record<number, string>>>;
   /** Series whose download fails, with what the failure carries. */
   failing?: Partial<Record<CatalogueProvider, Record<number, Failure>>>;
+  /** Series the provider answers with no series for when downloaded. */
+  noSeries?: Partial<Record<CatalogueProvider, number[]>>;
   /** The TVDB series each TMDB catalogue names; a TMDB catalogue not listed names none. */
   tvdbOfTmdb?: Record<number, number>;
   /** TMDB's series association for each TVDB ID; an unlisted TVDB ID's association is missing. */
@@ -52,6 +54,7 @@ export function inMemoryCatalogueSource(options: {
       if (reuse) return { outcome: "reused", id, catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
       const failure = options.failing?.[provider]?.[id];
       if (failure) return { outcome: "failed", ...failure };
+      if (options.noSeries?.[provider]?.includes(id)) return { outcome: "no-series" };
       const at = options.downloadAt || options.now;
       saved[provider].set(id, at);
       return { outcome: "downloaded", id, catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };

@@ -9,14 +9,6 @@ import { saveDeferredTmdbChanges, savePendingTvdbChanges, savePlexCatalogue, usa
 import type { ScanLogger } from "@/lib/scan-log";
 import { recoverTvdbTitles, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 
-/**
- * The live Plex scan's catalogue source: it downloads or reuses each provider catalogue under the
- * scan's freshness policy and saves every successful download at once, so an interrupted scan does
- * not download it again. It keeps the scan's change bookkeeping (deferred TMDB changes, pending TVDB
- * changes), recovers unusable TVDB titles from English, and reports a TVDB authentication failure as
- * the cause of the loads it prevents. One source serves one show of one scan.
- */
-
 /** A TMDB catalogue as compared: the show record, its usable episodes and the records that could not be used. */
 export type TmdbCatalogue = { show: TmdbCatalogueShow; episodes: ProviderEpisode[]; malformed: MalformedCatalogueRecord[] };
 
@@ -30,6 +22,7 @@ export type DownloadCataloguePayloads = { tmdb: TmdbCatalogue; tvdb: TvdbCatalog
 
 /** The provider requests the source makes; each rejects with the request's failure. */
 export type CatalogueRequests = {
+  /** TMDB's show record; null when TMDB answers with no show. */
   tmdbShow(id: number): Promise<TmdbCatalogueShow | null>;
   /** TMDB's find answer for a TVDB series: its first TV result, if any. */
   tmdbShowForTvdb(tvdbId: number): Promise<TmdbCatalogueShow | undefined>;
@@ -60,21 +53,22 @@ export type DownloadCatalogueSourceOptions = {
   logger: ScanLogger;
 };
 
-/** TMDB answered a show request with no show. A load that meets it fails with this error. */
-export class TmdbShowMissingError extends Error {
-  constructor(readonly id: number) {
-    super(`TMDB returned no show ${id}.`);
-    this.name = "TmdbShowMissingError";
-  }
-}
+/** The Coverage Issue causes of a catalogue load the scan's TVDB authentication failure prevented. */
+export const TVDB_AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
 
-const AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
+type TmdbRecord = PlexGeneratedInputs["tmdb"][string];
+type TvdbRecord = PlexGeneratedInputs["tvdb"][string];
+const associated = (show: TmdbCatalogueShow) => show.external_ids?.tvdb_id ? { associatedTvdbId: show.external_ids.tvdb_id } : {};
+/** A saved TMDB record as compared, with the TVDB series it names. */
+const savedTmdbCatalogue = (record: TmdbRecord): SavedCatalogue<TmdbCatalogue> =>
+  ({ id: record.show.id, catalogue: { show: record.show, episodes: record.episodes, malformed: record.malformed || [] }, downloadedAt: record.downloadedAt, ...associated(record.show) });
 
 export type DownloadCatalogueSource = ComparisonCatalogueSource<DownloadCataloguePayloads> & {
   /**
-   * The episodes the comparison already runs against when TVDB loads (TMDB's, when it resolved first).
-   * A reused TVDB catalogue asks again for an English title TVDB had none of only when these make it
-   * title-dependent.
+   * Set the episodes the comparison already runs against, which every later TVDB load uses: a reused
+   * TVDB catalogue asks again for an English title TVDB had none of only when these make it
+   * title-dependent. The caller sets them before a TVDB load: the catalogues compared so far, or the
+   * TMDB catalogue chosen, which the resolver's progress sink receives before TVDB's work starts.
    */
   compareTitlesWith(comparisonEpisodes: readonly ProviderEpisode[]): void;
   /**
@@ -86,23 +80,39 @@ export type DownloadCatalogueSource = ComparisonCatalogueSource<DownloadCatalogu
   prepareTitlesNeeded(tvdb: ComparedCatalogue<TvdbCatalogue>, comparisonEpisodes: readonly ProviderEpisode[]): Promise<ComparedCatalogue<TvdbCatalogue>>;
 };
 
+/**
+ * The live Plex scan's catalogue source: it downloads or reuses each provider catalogue under the
+ * scan's freshness policy and saves every successful download at once, so an interrupted scan does
+ * not download it again. It keeps the scan's change bookkeeping (deferred TMDB changes, pending TVDB
+ * changes), recovers unusable TVDB titles from English, and reports a TVDB authentication failure as
+ * the cause of the loads it prevents. One source serves one show of one scan.
+ */
 export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions): DownloadCatalogueSource {
   const { inputs, requests, now, targeted, tmdbChanges, tvdbChanges, tvdbAuthenticationError, show, titles, logger } = options;
   let comparedEpisodes: readonly ProviderEpisode[] = [];
-  /** TMDB series this source found by a find request: today's scan downloads the series it finds. */
+  /** TMDB series this source found by a find request: the scan downloads the series it finds. */
   const foundByRequest = new Set<number>();
-  const authentication = (error: unknown) => tvdbAuthenticationError !== undefined && error === tvdbAuthenticationError ? { causedBy: AUTHENTICATION_CAUSE } : {};
+  const authentication = (error: unknown) => tvdbAuthenticationError !== undefined && error === tvdbAuthenticationError ? { causedBy: TVDB_AUTHENTICATION_CAUSE } : {};
+  /** Whether a provider's verified changes include a series' saved catalogue. */
+  const changed: Record<CatalogueProvider, (id: number) => boolean> = {
+    tmdb: id => { const saved = inputs.tmdb[String(id)]; return !!saved && tmdbChanges.has(saved.show.id); },
+    tvdb: id => tvdbChanges.has(id),
+  };
   const reuse = (provider: CatalogueProvider, id: number, settings: CatalogueLoadSettings) => {
     const saved = inputs[provider][String(id)];
-    const changed = provider === "tmdb" ? !!saved && tmdbChanges.has(saved.show.id) : tvdbChanges.has(id);
-    return reuseProviderCatalogue({ provider, now, downloadedAt: saved?.downloadedAt, usable: usableProviderCatalogue(saved), mandatory: settings.mandatory, targeted, changed, refreshAfter: settings.refreshAfter });
+    return reuseProviderCatalogue({ provider, now, downloadedAt: saved?.downloadedAt, usable: usableProviderCatalogue(saved), mandatory: settings.mandatory, targeted, changed: changed[provider](id), refreshAfter: settings.refreshAfter });
   };
   const logRecovery = (tvdbShowId: number, recovery: { recovered: number[]; unresolved: TitleRecoveryState }) => {
     for (const tvdbEpisodeId of recovery.recovered) logger.info("plex.show.episode-title-recovered", { ratingKey: show.ratingKey, tvdbShowId, tvdbEpisodeId, language: "eng" });
     for (const [tvdbEpisodeId, entry] of Object.entries(recovery.unresolved)) logger.warn("plex.show.episode-title-unrecovered", { ratingKey: show.ratingKey, tvdbShowId, tvdbEpisodeId: Number(tvdbEpisodeId), ...entry });
   };
   const requestEnglishTitle = (tvdbEpisodeId: number) => tvdbAuthenticationError !== undefined ? Promise.reject(tvdbAuthenticationError) : requests.tvdbEnglishTitle(tvdbEpisodeId);
-  const associated = (catalogue: TmdbCatalogueShow) => catalogue.external_ids?.tvdb_id ? { associatedTvdbId: catalogue.external_ids.tvdb_id } : {};
+  /** Recovered titles join a saved TVDB catalogue without changing its download time. */
+  const saveRecoveredTitles = (id: number, record: TvdbRecord, episodes: ProviderEpisode[], state: TitleRecoveryState) => {
+    inputs.tvdb[String(id)] = { ...record, episodes, titleRecovery: state };
+    if (!Object.keys(state).length) delete inputs.tvdb[String(id)].titleRecovery;
+    savePlexCatalogue("tvdb", id, inputs.tvdb[String(id)]);
+  };
 
   async function loadTmdb(id: number, settings: CatalogueLoadSettings): Promise<CatalogueLoad<TmdbCatalogue>> {
     const saved = inputs.tmdb[String(id)];
@@ -112,10 +122,10 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
         inputs.deferredTmdbChanges[String(saved.show.id)] = true;
         saveDeferredTmdbChanges(inputs.deferredTmdbChanges);
       }
-      return { outcome: "reused", id: saved.show.id, catalogue: { show: saved.show, episodes: saved.episodes, malformed: saved.malformed || [] }, downloadedAt: saved.downloadedAt, ...associated(saved.show) };
+      return { outcome: "reused", ...savedTmdbCatalogue(saved) };
     }
     const downloaded = await requests.tmdbShow(id);
-    if (!downloaded) throw new TmdbShowMissingError(id);
+    if (!downloaded) return { outcome: "no-series" };
     const { episodes, malformed = [] } = await requests.tmdbEpisodes(downloaded);
     const record = { version: 1 as const, downloadedAt: new Date().toISOString(), show: downloaded, episodes, ...(malformed.length ? { malformed } : {}) };
     inputs.tmdb[String(downloaded.id)] = record;
@@ -141,12 +151,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
     });
     logRecovery(id, recovery);
     const unresolved = Object.keys(recovery.unresolved).length ? { titleRecovery: recovery.unresolved } : {};
-    if (reused && recovery.attempted) {
-      // Recovered titles join the reusable catalogue without changing its download time.
-      inputs.tvdb[String(id)] = { ...saved, episodes: recovery.episodes, titleRecovery: recovery.unresolved };
-      if (!Object.keys(recovery.unresolved).length) delete inputs.tvdb[String(id)].titleRecovery;
-      savePlexCatalogue("tvdb", id, inputs.tvdb[String(id)]);
-    }
+    if (reused && recovery.attempted) saveRecoveredTitles(id, saved, recovery.episodes, recovery.unresolved);
     if (!reused) {
       inputs.tvdb[String(id)] = { version: 1, downloadedAt: new Date().toISOString(), show: { id, name: tvdb.name, slug: tvdb.slug }, episodes: recovery.episodes, ...(tvdb.malformed.length ? { malformed: tvdb.malformed } : {}), ...unresolved };
       if (inputs.pendingTvdbChanges[String(id)]) {
@@ -158,23 +163,26 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
     return { outcome: reused ? "reused" : "downloaded", id, catalogue: { episodes: recovery.episodes, malformed: tvdb.malformed, slug: tvdb.slug, titleRecovery: { state: recovery.unresolved, carried: false } }, downloadedAt: inputs.tvdb[String(id)].downloadedAt };
   }
 
+  const loaders: { [K in CatalogueProvider]: (id: number, settings: CatalogueLoadSettings) => Promise<CatalogueLoad<DownloadCataloguePayloads[K]>> } = { tmdb: loadTmdb, tvdb: loadTvdb };
+  const savedCatalogues: { [K in CatalogueProvider]: (id: number) => SavedCatalogue<DownloadCataloguePayloads[K]> | undefined } = {
+    tmdb: id => { const saved = inputs.tmdb[String(id)]; return usableProviderCatalogue(saved) ? savedTmdbCatalogue(saved) : undefined; },
+    tvdb: id => {
+      const saved = inputs.tvdb[String(id)];
+      if (!usableProviderCatalogue(saved)) return undefined;
+      return { id, catalogue: { episodes: saved.episodes, malformed: saved.malformed || [], slug: saved.show.slug, titleRecovery: { state: saved.titleRecovery || {}, carried: true } }, downloadedAt: saved.downloadedAt };
+    },
+  };
+
   return {
     async loadCatalogue(provider, id, settings) {
       try {
-        return (await (provider === "tmdb" ? loadTmdb(id, settings) : loadTvdb(id, settings))) as CatalogueLoad<DownloadCataloguePayloads[typeof provider]>;
+        return await loaders[provider](id, settings);
       } catch (error) {
-        return { outcome: "failed", error, ...(provider === "tvdb" ? authentication(error) : {}) };
+        return { outcome: "failed", error, ...authentication(error) };
       }
     },
-    savedCatalogue<K extends CatalogueProvider>(provider: K, id: number): SavedCatalogue<DownloadCataloguePayloads[K]> | undefined {
-      if (provider === "tmdb") {
-        const saved = inputs.tmdb[String(id)];
-        if (!usableProviderCatalogue(saved)) return undefined;
-        return { id: saved.show.id, catalogue: { show: saved.show, episodes: saved.episodes, malformed: saved.malformed || [] }, downloadedAt: saved.downloadedAt, ...associated(saved.show) } as SavedCatalogue<DownloadCataloguePayloads[K]>;
-      }
-      const saved = inputs.tvdb[String(id)];
-      if (!usableProviderCatalogue(saved)) return undefined;
-      return { id, catalogue: { episodes: saved.episodes, malformed: saved.malformed || [], slug: saved.show.slug, titleRecovery: { state: saved.titleRecovery || {}, carried: true } }, downloadedAt: saved.downloadedAt } as SavedCatalogue<DownloadCataloguePayloads[K]>;
+    savedCatalogue(provider, id) {
+      return savedCatalogues[provider](id);
     },
     savedRecordDownloadedAt(provider, id) {
       return inputs[provider][String(id)]?.downloadedAt;
@@ -212,9 +220,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
       const repaired = new Map(recovery.episodes.map(episode => [episode.providerEpisodeId, episode]));
       const repair = (episode: ProviderEpisode) => episode.source === "TVDB" && repaired.has(episode.providerEpisodeId) ? repaired.get(episode.providerEpisodeId)! : episode;
       const state = { ...Object.fromEntries(Object.entries(recorded).filter(([episodeId]) => !retry.has(Number(episodeId)))), ...recovery.unresolved };
-      inputs.tvdb[String(id)] = { ...saved, episodes: saved.episodes.map(repair), titleRecovery: state };
-      if (!Object.keys(state).length) delete inputs.tvdb[String(id)].titleRecovery;
-      savePlexCatalogue("tvdb", id, inputs.tvdb[String(id)]);
+      saveRecoveredTitles(id, saved, saved.episodes.map(repair), state);
       return { ...tvdb, catalogue: { ...tvdb.catalogue, episodes: tvdb.catalogue.episodes.map(repair), titleRecovery: { state, carried: false } } };
     },
   };

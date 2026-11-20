@@ -45,6 +45,38 @@ test("Trakt preference patches normalize ignored seasons", () => {
   ] }), { ignoredSeasons: [{ traktId: 12, title: "One", seasons: [1, 3] }] });
 });
 
+const messySeasons = [3, 0, 1.8, 3, -1, -0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "2", null, 1];
+
+test("Plex preferences clean up season 0, fractional, duplicate, negative, NaN, Infinity and non-number seasons", () => {
+  assert.deepEqual(parsePlexPreferences({ ignoredSeasons: [{ ratingKey: "plex://show/one", title: "One", seasons: messySeasons }] }).ignoredSeasons, [
+    { ratingKey: "plex://show/one", title: "One", seasons: [0, 1, 3] },
+  ]);
+});
+
+test("Plex preferences drop a season rule whose only seasons are negative fractions or invalid", () => {
+  assert.deepEqual(parsePlexPreferences({ ignoredSeasons: [{ ratingKey: "plex://show/one", title: "One", seasons: [-0.5, Number.NaN, "1"] }] }).ignoredSeasons, []);
+});
+
+test("Trakt preference patches clean up season 0, fractional, duplicate, negative, NaN, Infinity and non-number seasons", () => {
+  assert.deepEqual(parseTraktPreferencesPatch({ ignoredSeasons: [{ traktId: 12, title: "One", seasons: messySeasons }] }), {
+    ignoredSeasons: [{ traktId: 12, title: "One", seasons: [0, 1, 3] }],
+  });
+});
+
+test("Trakt preference patches drop a season rule whose only seasons are negative fractions or invalid", () => {
+  assert.deepEqual(parseTraktPreferencesPatch({ ignoredSeasons: [{ traktId: 12, title: "One", seasons: [-0.5, Number.POSITIVE_INFINITY, null] }] }), { ignoredSeasons: [] });
+});
+
+test("parsing keeps expired season ignores", () => {
+  const expiresAt = "2000-01-01T00:00:00.000Z";
+  assert.deepEqual(parsePlexPreferences({ ignoredSeasons: [{ ratingKey: "k", title: "One", seasons: [1], expiresAt, duration: "30d" }] }).ignoredSeasons, [
+    { ratingKey: "k", title: "One", seasons: [1], expiresAt, duration: "30d" },
+  ]);
+  assert.deepEqual(parseTraktPreferencesPatch({ ignoredSeasons: [{ traktId: 12, title: "One", seasons: [1], expiresAt, duration: "30d" }] }).ignoredSeasons, [
+    { traktId: 12, title: "One", seasons: [1], expiresAt, duration: "30d" },
+  ]);
+});
+
 test("Plex ignore timing survives JSON serialization and repeated preference reads without renewal", () => {
   const expiresAt = "2027-02-28T18:23:45.678Z";
   const preferences = { ignoredShows: [

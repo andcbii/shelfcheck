@@ -25,7 +25,7 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
-import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, createIgnoreTiming, decodePlexManagerKey, ignoreManagerKey, isIgnoreActive, restoreIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
+import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodePlexManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
@@ -309,23 +309,16 @@ export default function PlexPage() {
   function openSeasonIgnore(show: Show) {
     const fullShow = report?.shows.find((item) => item.ratingKey === show.ratingKey) || show;
     setSeasonIgnoreShow(fullShow);
-    const existing = activeIgnores(settings.ignoredSeasons).find((item) => item.ratingKey === show.ratingKey);
-    setSeasonIgnoreDraft(existing?.seasons || []);
-    setSeasonIgnoreOptions([...new Set([...(existing?.seasons || []), ...fullShow.missing.map((episode) => episode.season)])].sort((a, b) => a - b));
-    setSeasonIgnoreDuration(existing?.duration || "forever");
-    setSeasonIgnoreOriginalTiming(existing ? { expiresAt: existing.expiresAt, duration: existing.duration } : null);
+    const draft = openSeasonIgnoreRule(settings.ignoredSeasons, plexKey, show.ratingKey, fullShow.missing.map((episode) => episode.season), Date.now());
+    setSeasonIgnoreDraft(draft.selected);
+    setSeasonIgnoreOptions(draft.options);
+    setSeasonIgnoreDuration(draft.duration);
+    setSeasonIgnoreOriginalTiming(draft.originalTiming);
     setOpenShowMenu(null);
   }
   function saveIgnoredSeasons() {
     if (!seasonIgnoreShow) return;
-    const current = activeIgnores(settings.ignoredSeasons);
-    const existing = seasonIgnoreOriginalTiming;
-    const timing = existing && (existing.duration || "forever") === seasonIgnoreDuration
-      ? { expiresAt: existing.expiresAt, duration: existing.duration }
-      : createIgnoreTiming(seasonIgnoreDuration);
-    const next = current.filter((show) => show.ratingKey !== seasonIgnoreShow.ratingKey);
-    if (seasonIgnoreDraft.length && isIgnoreActive(timing)) next.push({ ratingKey: seasonIgnoreShow.ratingKey, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b), ...timing });
-    const ignoredSeasons = next.sort((a, b) => a.title.localeCompare(b.title));
+    const ignoredSeasons = saveSeasonIgnore(settings.ignoredSeasons, plexKey, { ratingKey: seasonIgnoreShow.ratingKey, title: seasonIgnoreShow.title }, { selected: seasonIgnoreDraft, duration: seasonIgnoreDuration, originalTiming: seasonIgnoreOriginalTiming }, Date.now());
     saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons });
     setSeasonIgnoreShow(null);
   }

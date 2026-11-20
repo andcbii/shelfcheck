@@ -81,6 +81,43 @@ export function changeIgnoreDuration<T extends IgnoreTiming, K extends IgnoreKey
   return activeIgnores(rules, now).map((rule) => keyOf(rule) === key ? { ...rule, expiresAt: undefined, ...timing } : rule);
 }
 
+// Season selections: the page supplies candidate season numbers from its own
+// report; no report shapes enter this module.
+
+type SeasonsRule = { seasons: number[] } & IgnoreTiming;
+export type SeasonIgnoreDraft = { selected: number[]; options: number[]; duration: IgnoreDuration; originalTiming: IgnoreTiming | null };
+
+function bySeason(a: number, b: number): number {
+  return a - b;
+}
+
+/** Opens a season selection from the active rule for the key: its seasons, their sorted union with the candidates, its duration (Forever when none) and a copy of its timing. */
+export function openSeasonIgnore<T extends SeasonsRule, K extends IgnoreKey>(rules: readonly T[], keyOf: (rule: T) => K, key: K, candidateSeasons: readonly number[], now: number): SeasonIgnoreDraft {
+  const existing = activeIgnores(rules, now).find((rule) => keyOf(rule) === key);
+  return {
+    selected: [...(existing?.seasons || [])],
+    options: [...new Set([...(existing?.seasons || []), ...candidateSeasons])].sort(bySeason),
+    duration: existing?.duration || "forever",
+    originalTiming: existing ? { expiresAt: existing.expiresAt, duration: existing.duration } : null,
+  };
+}
+
+/**
+ * Saves a season selection for the record's key. An unchanged duration keeps the original timing
+ * (including a legacy expiry with no duration); otherwise a new timing starts from the clock value.
+ * An empty selection, or one whose timing is no longer active, removes the rule. Sorts by title.
+ */
+export function saveSeasonIgnore<R extends TitledRule, K extends IgnoreKey>(rules: readonly (R & SeasonsRule)[], keyOf: (rule: R) => K, record: R, draft: Pick<SeasonIgnoreDraft, "selected" | "duration" | "originalTiming">, now: number): (R & SeasonsRule)[] {
+  const original = draft.originalTiming;
+  const timing: IgnoreTiming = original && (original.duration || "forever") === draft.duration
+    ? { expiresAt: original.expiresAt, duration: original.duration }
+    : createIgnoreTiming(draft.duration, new Date(now));
+  const key = keyOf(record);
+  const next = activeIgnores(rules, now).filter((rule) => keyOf(rule) !== key);
+  if (draft.selected.length && isIgnoreActive(timing, now)) next.push({ ...record, seasons: [...draft.selected].sort(bySeason), ...timing });
+  return next.sort(byTitle);
+}
+
 // Ignored Shows manager keys: "show|<key>" and "seasons|<key>". A UI transport
 // detail only; list operations take typed keys.
 

@@ -2,7 +2,7 @@ import { distinctSortedIds, type CatalogueUseState } from "@/lib/catalogue-selec
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { catalogueUsableUntil, withinCatalogueAgeLimit } from "@/lib/plex-catalogue-policy";
 
-export type LoadedCatalogue<T> = { value: T; downloadedAt: string };
+type LoadedCatalogue<T> = { value: T; downloadedAt: string };
 
 export type CatalogueChoice<T> = {
   state: Exclude<CatalogueUseState, "derived">;

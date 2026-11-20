@@ -166,6 +166,8 @@ export type ProviderResolution<T> = {
   warning?: string;
   /** Saved evidence cannot resolve this provider's series, so the comparison is pending. */
   incomplete?: true;
+  /** Plex reports at most one ID for this provider, so its series is the single Plex ID's or a derived one, under the single-catalogue policy. */
+  singleCatalogue?: true;
 };
 
 export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
@@ -215,7 +217,7 @@ export class ProgressPersistenceError extends Error {
 }
 
 /** The warning for a live-scanned show Plex reports no TMDB or TVDB ID for. */
-export const NO_PLEX_IDS_WARNING = "No TMDB or TVDB ID was exposed by Plex.";
+const NO_PLEX_IDS_WARNING = "No TMDB or TVDB ID was exposed by Plex.";
 
 /** The Coverage Issue impact of an unavailable preferred series, from the shared description of the catalogue in use. */
 function unavailablePreferredImpact(provider: CatalogueProvider, use: CatalogueUse) {
@@ -296,7 +298,7 @@ const severalCandidates = (providerRequest: ProviderRequest) => new Set(provider
 
 /**
  * A failed load, carried through the shared fallback policy as its error. A load that throws instead
- * is a failed load too, as in the scan; persistence the caller does after resolution is not a load.
+ * is a failed load too; persistence the caller does after resolution is not a load.
  */
 class FailedLoad {
   constructor(readonly failure: Failure) {}
@@ -306,6 +308,11 @@ const comparedFrom = <T>(load: SavedCatalogue<T>, origin: ComparedCatalogue<T>["
   ({ id: load.id, origin, downloadedAt: load.downloadedAt, catalogue: load.catalogue, ...(load.associatedTvdbId !== undefined ? { associatedTvdbId: load.associatedTvdbId } : {}) });
 
 async function resolveProvider<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K): Promise<ProviderResolution<P[K]>> {
+  const resolution = await chooseProviderCatalogue(resolving, provider);
+  return severalCandidates(resolving.request[provider]) ? resolution : { ...resolution, singleCatalogue: true };
+}
+
+async function chooseProviderCatalogue<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K): Promise<ProviderResolution<P[K]>> {
   const { request } = resolving;
   const providerRequest = request[provider];
   if (request.context.kind === "cached-recheck") return resolveCachedProvider(resolving, provider, request.context.history[provider]);

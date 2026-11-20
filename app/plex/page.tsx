@@ -12,7 +12,6 @@ import { CatalogueNotice } from "@/app/components/catalogue-notice";
 import { useMenuClosing } from "@/app/hooks/use-menu-closing";
 import type { ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { matchesSearch } from "@/lib/search";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { DiagnosticLogActions } from "@/app/components/diagnostic-log-actions";
 import { IgnoredShowsManager } from "@/app/components/ignored-shows-manager";
@@ -20,12 +19,13 @@ import { IgnoreDurationModal } from "@/app/components/ignore-duration-modal";
 import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
-import { shouldShowPlexMissingEpisode } from "@/lib/plex-airdate";
+import { resultsView } from "@/lib/results-view";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
+import { useLocalToday } from "@/app/hooks/use-local-today";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodePlexManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 
@@ -52,15 +52,15 @@ function pruneClientReport(report: Report, invalidated: Set<string>): Report {
   };
 }
 
-function localToday() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-}
-
-function episodeTileDate(airDate?: string) {
+function episodeTileDate(airDate: string | undefined, today: string) {
   if (!airDate) return "No Aired Date";
   const date = airDate.slice(0, 10);
-  return date >= localToday() ? date : null;
+  return date >= today ? date : null;
+}
+
+function plexPercent(show: Show, missing: readonly Missing[]) {
+  const total = show.plexEpisodes + missing.length;
+  return total ? show.plexEpisodes / total : 0;
 }
 
 export default function PlexPage() {
@@ -91,6 +91,7 @@ export default function PlexPage() {
   const settingsSaves = useRef(0);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const today = useLocalToday();
   const [query, setQuery] = useState("");
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);
@@ -162,29 +163,29 @@ export default function PlexPage() {
   const ignoreNow = useIgnoreClock(ignoreRules);
   const activeIgnoredShows = useMemo(() => activeIgnores(settings.ignoredShows, ignoreNow), [settings.ignoredShows, ignoreNow]);
   const activeIgnoredSeasons = useMemo(() => activeIgnores(settings.ignoredSeasons, ignoreNow), [settings.ignoredSeasons, ignoreNow]);
-  const ignoredIds = useMemo(() => new Set(activeIgnoredShows.map((show) => show.ratingKey)), [activeIgnoredShows]);
-  const ignoredSeasonMap = useMemo(() => new Map(activeIgnoredSeasons.map((show) => [show.ratingKey, new Set(show.seasons)])), [activeIgnoredSeasons]);
-  const resultShows = useMemo(() => {
-    const today = localToday();
-    return (report?.shows || []).map((show) => ({ ...show, missing: show.missing.filter((episode) => shouldShowPlexMissingEpisode(episode.airDate, settings.hideUnairedEpisodes, settings.airingOffsetDays, today) && !ignoredSeasonMap.get(show.ratingKey)?.has(episode.season)) }));
-  }, [ignoredSeasonMap, report, settings.hideUnairedEpisodes, settings.airingOffsetDays]);
-  const activeShows = useMemo(() => resultShows.filter((show) => !ignoredIds.has(show.ratingKey)), [resultShows, ignoredIds]);
-  const missingCount = activeShows.reduce((sum, show) => sum + show.missing.length, 0);
+  const view = useMemo(() => resultsView({
+    shows: (report?.shows || []).map((show) => ({ key: show.ratingKey, title: show.title, source: show, episodes: show.missing })),
+    ignoredShows: new Set(activeIgnoredShows.map((show) => show.ratingKey)),
+    ignoredSeasons: new Map(activeIgnoredSeasons.map((show) => [show.ratingKey, new Set(show.seasons)])),
+    airedPolicy: settings.hideUnairedEpisodes ? "aired-only" : "show-all",
+    airDateDelayDays: settings.airingOffsetDays,
+    today,
+    search: query,
+    sortField,
+    sortAscending,
+    percent: plexPercent,
+  }), [activeIgnoredSeasons, activeIgnoredShows, query, report, settings.airingOffsetDays, settings.hideUnairedEpisodes, sortAscending, sortField, today]);
+  const visible = useMemo(() => view.shows.map((show) => ({ ...show.source, missing: show.episodes, percent: show.percent })), [view]);
+  const missingCount = view.totals.missingEpisodes;
   const activelyRateLimitPaused = isActiveRateLimitPause(scanning && status.status === "running", status.rateLimitPaused);
   const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
-  const visible = useMemo(() => activeShows.filter((show) => show.missing.length && matchesSearch(show.title, query)).sort((a, b) => {
-    if (sortField === "title") { const result = a.title.localeCompare(b.title); return sortAscending ? result : -result; }
-    const aTotal = a.plexEpisodes + a.missing.length; const bTotal = b.plexEpisodes + b.missing.length;
-    const result = (aTotal ? a.plexEpisodes / aTotal : 0) - (bTotal ? b.plexEpisodes / bTotal : 0) || a.title.localeCompare(b.title);
-    return sortAscending ? result : -result;
-  }), [activeShows, query, sortAscending, sortField]);
 
-  const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => activeShows.some(show => show.ratingKey === member.showKey && matchesSearch(show.title, query) && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
+  const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => visible.some(show => show.ratingKey === member.showKey && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
   const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
     ...group,
-    // Every missing variant (missing, Reported missing, incomplete) obeys Ignore and aired-date
-    // visibility; hidden members stay as alternative context.
+    // Every missing variant (missing, Reported missing, incomplete) obeys Active ignores and the Aired rule
+    // (the results view); hidden members stay as alternative context.
     members: group.members.map(member => (member.status === "missing" || member.status === "reported-missing" || member.status === "incomplete") && !group.missing.some(missing => missing.provider === member.provider && missing.id === member.id && visibleCoverageMissing(missing)) ? { ...member, status: "alternative" as const } : member),
   }));
   const groupedIdentities = new Set(coverageGroups.flatMap(group => group.members.map(member => `${member.provider}:${member.id}`)));
@@ -409,7 +410,7 @@ export default function PlexPage() {
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
       <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
     </section>
-    <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{activeShows.filter((show) => show.missing.length).length}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
+    <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{view.totals.shows}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
       {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: ignoreManagerKey("show", show.ratingKey), title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: ignoreManagerKey("seasons", show.ratingKey), title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={restoreManagerItem} />}
     </div>
     <div className="episode-reports-nav"><Link className="episode-reports-link" href="/reports">Reports <span>→</span></Link></div>
@@ -426,10 +427,9 @@ export default function PlexPage() {
       {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);
         const showCollapsed = collapsedShows.has(show.ratingKey);
-        const totalEpisodes = show.plexEpisodes + show.missing.length;
-        const percentCollected = totalEpisodes ? Math.round((show.plexEpisodes / totalEpisodes) * 100) : null;
+        const percentCollected = Math.round(show.percent * 100);
         return <article key={show.ratingKey}>
-          <div className="collection-percent"><strong>{percentCollected === null ? "—" : `${percentCollected}%`}</strong><span>COLLECTED</span></div>
+          <div className="collection-percent"><strong>{`${percentCollected}%`}</strong><span>COLLECTED</span></div>
           <div className="show-index">{show.thumb ? <img src={`/api/plex/poster?thumb=${encodeURIComponent(show.thumb)}`} alt="" /> : String(index + 1).padStart(2, "0")}</div>
           <div className="show-info" data-show-menu-id={show.ratingKey}>
             <div className="show-title-line"><button className="show-name-button" onClick={() => setOpenShowMenu((current) => current === show.ratingKey ? null : show.ratingKey)}>{show.title}</button>{show.year && <small>{show.year}</small>}{show.tmdbId && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.tmdbId}`} target="_blank" rel="noreferrer" title="View show on TMDB"><img src="/tmdb-blue-square.svg" alt="TMDB" /></a>}{show.tvdbSlug && <a className="brand-link" href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}`} target="_blank" rel="noreferrer" title="View show on TVDB"><img src={TVDB_LOGO} alt="TVDB" /></a>}<button className="show-collapse-toggle" onClick={() => toggleShow(show.ratingKey)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button></div>
@@ -445,7 +445,7 @@ export default function PlexPage() {
                 <button className="plex-season-heading" onClick={() => toggleSeason(show, season)} aria-expanded={!collapsed}><span>Season {String(season).padStart(2, "0")}</span><small>{episodes.length} missing</small><b>{collapsed ? "+" : "−"}</b></button>
                 {!collapsed && <div className="plex-episode-grid">{episodes.map((episode) => {
                   const episodeKey = `${show.ratingKey}:${episode.season}:${episode.episode}`;
-                  const tileDate = episodeTileDate(episode.airDate);
+                  const tileDate = episodeTileDate(episode.airDate, today);
                   return <div className="plex-episode-item" key={episodeKey}>
                     <div className="episode-tile-row"><button className="episode-code-tile plex-episode-trigger" onClick={() => setOpenEpisodeMenu((current) => current === episodeKey ? null : episodeKey)} aria-expanded={openEpisodeMenu === episodeKey}><span>S{String(episode.season).padStart(2, "0")}E{String(episode.episode).padStart(2, "0")}</span>{tileDate && <small>{tileDate}</small>}</button><div className="episode-provider-links">{show.tmdbId && episode.sources.includes("TMDB") && <a href={`https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`} target="_blank" rel="noreferrer" title="View episode on TMDB" aria-label="View episode on TMDB"><img src="/tmdb-blue-square.svg" alt="" /></a>}{show.tvdbSlug && episode.tvdbEpisodeId && <a href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}/episodes/${episode.tvdbEpisodeId}`} target="_blank" rel="noreferrer" title="View episode on TVDB" aria-label="View episode on TVDB"><img src={TVDB_LOGO} alt="" /></a>}</div></div>
                     {openEpisodeMenu === episodeKey && <div className="plex-episode-menu"><button onClick={() => linkEpisode(show, episode)}>Matching Episodes</button><p><span>Aired</span><strong>{episode.airDate || "No Aired Date"}</strong></p><div>{show.tmdbId && episode.sources.includes("TMDB") && <a href={`https://www.themoviedb.org/tv/${show.tmdbId}/season/${episode.season}/episode/${episode.episode}`} target="_blank" rel="noreferrer"><img src="/tmdb-blue-square.svg" alt="" />View on TMDB</a>}{show.tvdbSlug && episode.tvdbEpisodeId && <a href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}/episodes/${episode.tvdbEpisodeId}`} target="_blank" rel="noreferrer"><img src={TVDB_LOGO} alt="" />View on TVDB</a>}</div></div>}
@@ -466,8 +466,8 @@ export default function PlexPage() {
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="plex-preferences-title">
         <button className="close" onClick={() => setPreferencesOpen(false)} aria-label="Close">×</button>
         <p className="eyebrow">SETTINGS</p><h2 id="plex-preferences-title">Shelfcheck preferences</h2>
-        <div className="plex-preference"><div><strong>Hide unaired episodes</strong><p>Hide episodes until their listed air date plus the offset below. Episodes without an air date are also hidden.</p></div><input type="checkbox" checked={settings.hideUnairedEpisodes} onChange={(event) => { const hideUnairedEpisodes = event.target.checked; saveSettings({ ...settings, hideUnairedEpisodes }, { hideUnairedEpisodes }); }} /></div>
-        <div className="grace-period"><div><p className="grace-title">Aired-date offset</p><p>Wait this many calendar days after an episode’s air date before showing it.</p></div><div className="grace-input"><input type="number" min="0" max="30" value={settings.airingOffsetDays} onChange={(event) => { const airingOffsetDays = Math.max(0, Math.min(30, Math.trunc(Number(event.target.value) || 0))); saveSettings({ ...settings, airingOffsetDays }, { airingOffsetDays }); }} /><span>Days</span></div></div>
+        <div className="plex-preference"><div><strong>Hide unaired episodes</strong><p>Hide episodes until their listed air date plus the Air-date delay below. Episodes without an air date are also hidden.</p></div><input type="checkbox" checked={settings.hideUnairedEpisodes} onChange={(event) => { const hideUnairedEpisodes = event.target.checked; saveSettings({ ...settings, hideUnairedEpisodes }, { hideUnairedEpisodes }); }} /></div>
+        <div className="grace-period"><div><p className="grace-title">Air-date delay</p><p>Treat each episode’s air date as this many calendar days later before showing it as missing.</p></div><div className="grace-input"><input type="number" min="0" max="30" value={settings.airingOffsetDays} onChange={(event) => { const airingOffsetDays = Math.max(0, Math.min(30, Math.trunc(Number(event.target.value) || 0))); saveSettings({ ...settings, airingOffsetDays }, { airingOffsetDays }); }} /><span>Days</span></div></div>
         <div className="plex-preference"><div><strong>Auto Compound Episodes</strong><p>As a final check, let one owned double-length TMDB episode satisfy matching split TVDB episodes.</p></div><input type="checkbox" checked={settings.autoCompoundEpisodes} onChange={(event) => { const autoCompoundEpisodes = event.target.checked; saveSettings({ ...settings, autoCompoundEpisodes }, { autoCompoundEpisodes }); }} /></div>
         <div className="diagnostics scan-cache-settings">
           <p className="diagnostics-toggle scan-cache-title">Scan cache</p>

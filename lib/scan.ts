@@ -2,7 +2,7 @@ import "server-only";
 
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { createScanLogger } from "@/lib/scan-log";
-import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
+import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
 import { savedScanState, trackScanIgnores } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
@@ -59,28 +59,6 @@ function compactCache(cache: ScanCache | undefined): ScanCache {
       lastCheckedAt: legacy.lastCheckedAt,
     }];
   }));
-}
-
-function localDate(value: Date): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: process.env.TZ || "UTC",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(value);
-  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${fields.year}-${fields.month}-${fields.day}`;
-}
-
-function addCalendarDays(date: string, days: number): string {
-  const [year, month, day] = date.split("-").map(Number);
-  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
-}
-
-function hasAired(firstAired: string | null | undefined, today: string, graceDays: number): boolean {
-  if (!firstAired) return false;
-  const airedAt = new Date(firstAired);
-  return !Number.isNaN(airedAt.getTime()) && addCalendarDays(localDate(airedAt), graceDays) <= today;
 }
 
 function hasUsableAirDate(firstAired: string | null | undefined): firstAired is string {
@@ -260,7 +238,9 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
             ? (season.episodes || []).filter((episode) => !episode.completed).map((episode) => ({ season: season.number, episode: episode.number }))
             : []);
         }
-        const requiresAirDates = Boolean(incomplete.length && (force || Boolean(targetTraktId) || airingGraceDays > 0));
+        // Every re-checked show with missing episodes reads its air dates, on every scan kind;
+        // the page decides from them which episodes have aired.
+        const requiresAirDates = incomplete.length > 0;
         let airDateRequestSucceeded = true;
         if (requiresAirDates) activeWork.update(id, item.show.title, "air-dates");
         const episodeDates = requiresAirDates
@@ -274,16 +254,14 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         for (const season of episodeDates) for (const episode of season.episodes || []) {
           firstAiredByEpisode.set(`${episode.season ?? season.number}:${episode.number}`, episode.first_aired);
         }
-        const today = localDate(new Date());
+        // Trakt's progress decides which episodes are missing; the seasons list only dates them.
         const missing: MissingEpisode[] = [];
         let unknownAirDates = 0;
         for (const episode of incomplete) {
           const firstAired = firstAiredByEpisode.get(`${episode.season}:${episode.episode}`);
-          const airDateKnown = hasUsableAirDate(firstAired);
-          if (requiresAirDates && !airDateKnown) unknownAirDates += 1;
-          if (shouldReportIncompleteEpisode(force || Boolean(targetTraktId), airingGraceDays, hasAired(firstAired, today, airingGraceDays), !requiresAirDates || airDateKnown)) {
-            missing.push({ show: item.show, season: episode.season, episode: episode.episode });
-          }
+          const dated = hasUsableAirDate(firstAired);
+          if (!dated) unknownAirDates += 1;
+          missing.push({ show: item.show, season: episode.season, episode: episode.episode, ...(dated ? { firstAired } : {}) });
         }
         const cacheable = canCacheAirDateResult(requiresAirDates, airDateRequestSucceeded, unknownAirDates);
         if (unknownAirDates) logger.warn("show.airdates-incomplete", { traktId: item.show.ids.trakt, title: item.show.title, unknownAirDates });

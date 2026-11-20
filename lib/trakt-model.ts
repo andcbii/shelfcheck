@@ -14,7 +14,12 @@ export type CollectionShow = {
   seasons?: { number: number; episodes?: { number: number; collected_at?: string }[] }[];
 };
 
-export type MissingEpisode = { show: TraktShow; season: number; episode: number };
+/**
+ * A missing episode Trakt's collection progress reported. `firstAired` is Trakt's
+ * original first_aired timestamp (UTC), when Trakt gave a usable one; the page
+ * converts it to the browser's local calendar date.
+ */
+export type MissingEpisode = { show: TraktShow; season: number; episode: number; firstAired?: string };
 
 export function compactTraktShow(show: TraktShow): TraktShow {
   return {

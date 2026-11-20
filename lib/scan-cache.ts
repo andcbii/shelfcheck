@@ -45,10 +45,7 @@ export function scanReason(inputs: ScanCacheInputs): ScanReason | null {
   return null;
 }
 
-export function shouldReportIncompleteEpisode(deep: boolean, graceDays: number, airedAfterGrace: boolean, airDateKnown = true): boolean {
-  return !airDateKnown || (!deep && graceDays === 0) || airedAfterGrace;
-}
-
+/** A re-checked show's result is cacheable only when every missing episode got a usable air date, so a later scan repairs any gap. */
 export function canCacheAirDateResult(requiresAirDates: boolean, requestSucceeded: boolean, unknownAirDates: number): boolean {
   return !requiresAirDates || (requestSucceeded && unknownAirDates === 0);
 }
@@ -57,8 +54,13 @@ export function shouldSaveCheckpoint(processed: number, lastProcessed: number, n
   return processed - lastProcessed >= 10 || now - lastSavedAt >= 5_000;
 }
 
-/** The Trakt Resume point format. A Resume point of any other version, or none (saved before 2.6.2), is discarded. */
-export const TRAKT_RESUME_POINT_VERSION = 1;
+/**
+ * The Trakt Resume point format. A Resume point of any other version, or none
+ * (saved before 2.6.2), is discarded. Version 2 saves every missing episode
+ * Trakt's progress reports, with its original first_aired timestamp when usable;
+ * version 1 points left out episodes inside the airing grace period.
+ */
+export const TRAKT_RESUME_POINT_VERSION = 2;
 
 /**
  * Whether a full Trakt Scan run may resume from a stored Resume point: its

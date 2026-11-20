@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, shouldSaveCheckpoint, traktResumePointIsUsable } from "../lib/scan-cache";
+import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldSaveCheckpoint, traktResumePointIsUsable } from "../lib/scan-cache";
 import type { TraktResumePoint } from "../lib/scan";
 
 const collection = {
@@ -46,15 +46,7 @@ test("collection, aired count, settings, and empty cache each force a refresh", 
   assert.equal(scanReason({ ...base, gracePeriodChanged: true }), "settings-changed");
 });
 
-test("deep scan applies air-date filtering even with a zero-day grace period", () => {
-  assert.equal(shouldReportIncompleteEpisode(true, 0, false), false);
-  assert.equal(shouldReportIncompleteEpisode(true, 0, true), true);
-  assert.equal(shouldReportIncompleteEpisode(false, 0, false), true);
-});
-
-test("unknown air dates fail open instead of hiding incomplete episodes", () => {
-  assert.equal(shouldReportIncompleteEpisode(true, 0, false, false), true);
-  assert.equal(shouldReportIncompleteEpisode(true, 7, false, false), true);
+test("a result with an unknown or failed air date is not cacheable", () => {
   assert.equal(canCacheAirDateResult(true, false, 3), false);
   assert.equal(canCacheAirDateResult(true, true, 1), false);
   assert.equal(canCacheAirDateResult(true, true, 0), true);
@@ -68,10 +60,10 @@ test("checkpoint policy saves every ten shows or five seconds", () => {
 
 test("a malformed stored Trakt Resume point is rejected, not trusted", () => {
   const now = Date.parse("2026-11-11T12:00:00.000Z");
-  const good = { shows: [], missing: [], lastScan: "", savedAt: "2026-11-11T11:00:00.000Z", resumePointVersion: 1, airingGraceDays: 0 };
+  const good = { shows: [], missing: [], lastScan: "", savedAt: "2026-11-11T11:00:00.000Z", resumePointVersion: 2, airingGraceDays: 0 };
   assert.equal(traktResumePointIsUsable(good, 0, now), true);
   // Stored values come from SQLite JSON, so their shape is not guaranteed.
-  for (const stored of ["a string", 42, [], { ...good, savedAt: Date.parse(good.savedAt) }, { ...good, resumePointVersion: "1" }, { ...good, airingGraceDays: null }]) {
+  for (const stored of ["a string", 42, [], { ...good, savedAt: Date.parse(good.savedAt) }, { ...good, resumePointVersion: "2" }, { ...good, resumePointVersion: 1 }, { ...good, airingGraceDays: null }]) {
     assert.equal(traktResumePointIsUsable(stored as unknown as TraktResumePoint, 0, now), false, JSON.stringify(stored));
   }
 });

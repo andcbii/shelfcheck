@@ -237,7 +237,7 @@ const status = async () => (await (await scan.GET()).json() as { scan: ScanStatu
 
 test("a Trakt scan run with no heartbeat for more than 90 seconds and no live owner is an Interrupted scan, written once", async (t) => {
   await fixture(t);
-  sqlite.writeSingleUserScanStatus({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
+  sqlite.savedScanState("trakt").status.write({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
   assert.equal((await status()).status, "running", "exactly 90 seconds without a heartbeat is still running");
   t.mock.timers.tick(1);
   const first = await status();
@@ -393,7 +393,7 @@ async function seedResumePoint(f: Awaited<ReturnType<typeof fixture>>, fields: (
   const now = Date.now();
   const point: Record<string, unknown> = { ...report, missing: report!.missing.filter((episode) => episode.show.title === "Bravo" && episode.episode === 2), savedAt: new Date(now - HOUR).toISOString(), resumePointVersion: 1, airingGraceDays: 0, ...fields(now) };
   for (const [key, value] of Object.entries(point)) if (value === undefined) delete point[key];
-  sqlite.patchSingleUserState({ checkpoint: point });
+  sqlite.savedScanState("trakt").resumePoint.write(point);
   return report!;
 }
 

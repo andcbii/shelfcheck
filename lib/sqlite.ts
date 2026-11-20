@@ -6,8 +6,6 @@ import { DatabaseSync } from "node:sqlite";
 import { ignoredPlexKeys, ignoredTraktIds } from "@/lib/ignored-shows";
 import { backupBeforeFirstMigration, migrateDatabase, refuseNewerDatabase } from "@/lib/sqlite-migrations";
 
-const SINGLE_USER_ID = "single-user";
-
 type ScanMode = "trakt" | "plex";
 type DatabaseCache = typeof globalThis & {
   __shelfcheckDatabase?: DatabaseSync;
@@ -22,9 +20,8 @@ function scanIgnoreGuards() {
 // An ignore applied during a scan invalidates that scan's result even if the
 // user restores the show before its pending provider requests finish.
 export function trackScanIgnores(mode: ScanMode, now = Date.now()): () => void {
-  const ignored = mode === "trakt"
-    ? [...ignoredTraktIds(readSingleUserState().state?.ignoredShows, now)].map(String)
-    : [...ignoredPlexKeys(savedOptions("plex").ignoredShows, now)];
+  const saved = savedOptions(mode).ignoredShows;
+  const ignored = mode === "trakt" ? [...ignoredTraktIds(saved, now)].map(String) : [...ignoredPlexKeys(saved, now)];
   const guard = new Set(ignored);
   scanIgnoreGuards()[mode] = guard;
   return () => {
@@ -75,23 +72,7 @@ function parseStoredJson<T>(payload: string | null | undefined, fallback: T): T 
 // active depends on the current time. It uses only the handle it is given.
 function normalizeStoredIgnores(db: DatabaseSync) {
   // Older versions retained results when Ignore was applied. Remove those
-  // results before any read or Restore can expose them after an upgrade.
-  const traktRow = db.prepare("SELECT payload FROM shelfcheck_states WHERE user_id = ?")
-    .get(SINGLE_USER_ID) as { payload: string } | undefined;
-  if (traktRow) {
-    const state = parseStoredJson<Record<string, unknown>>(traktRow.payload, {});
-    const blocked = blockedShowKeys("trakt", state.ignoredShows);
-    const pruned = {
-      ...state,
-      ...(state.report ? { report: pruneIgnoredResults(state.report, "trakt", blocked) } : {}),
-      ...(state.checkpoint ? { checkpoint: pruneIgnoredResults(state.checkpoint, "trakt", blocked) } : {}),
-    };
-    if (JSON.stringify(pruned) !== JSON.stringify(state)) {
-      db.prepare("UPDATE shelfcheck_states SET payload = ? WHERE user_id = ?").run(JSON.stringify(pruned), SINGLE_USER_ID);
-    }
-  }
-
-  // Every mode saved in the shared saved scan state; Trakt moves there in a later migration.
+  // results before any read or Restore can expose them.
   const savedRows = db.prepare("SELECT mode, report, resume_point, options FROM shelfcheck_scan_state")
     .all() as { mode: ScanMode; report: string | null; resume_point: string | null; options: string | null }[];
   for (const row of savedRows) {
@@ -140,59 +121,6 @@ export function database() {
   const db = openDatabase(path.join(directory, "shelfcheck.db"));
   cache.__shelfcheckDatabase = db;
   return db;
-}
-
-export function readSingleUserState<T extends Record<string, unknown> = Record<string, unknown>>() {
-  const row = database().prepare(
-    "SELECT payload, updated_at FROM shelfcheck_states WHERE user_id = ?",
-  ).get(SINGLE_USER_ID) as { payload: string; updated_at: string } | undefined;
-  return row
-    ? { state: parseStoredJson<T>(row.payload, {} as T), updatedAt: row.updated_at }
-    : { state: null, updatedAt: null };
-}
-
-function writeSingleUserState<T extends Record<string, unknown>>(state: T) {
-  const blocked = blockedShowKeys("trakt", state.ignoredShows);
-  const pruned = {
-    ...state,
-    ...(state.report ? { report: pruneIgnoredResults(state.report, "trakt", blocked) } : {}),
-    ...(state.checkpoint ? { checkpoint: pruneIgnoredResults(state.checkpoint, "trakt", blocked) } : {}),
-  };
-  database().prepare(`INSERT INTO shelfcheck_states (user_id, payload, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP`)
-    .run(SINGLE_USER_ID, JSON.stringify(pruned));
-}
-
-export function patchSingleUserState<T extends Record<string, unknown>>(patch: T) {
-  const current = readSingleUserState<Record<string, unknown>>();
-  if (Object.prototype.hasOwnProperty.call(patch, "ignoredShows")) {
-    recordScanIgnores("trakt", [...ignoredTraktIds(patch.ignoredShows)].map(String));
-  }
-  writeSingleUserState({ ...(current.state || {}), ...patch });
-}
-
-export function readSingleUserScanStatus<T extends Record<string, unknown> = Record<string, unknown>>(): T | null {
-  const row = database().prepare(
-    "SELECT payload FROM shelfcheck_scan_status WHERE user_id = ?",
-  ).get(SINGLE_USER_ID) as { payload: string } | undefined;
-  if (row) return parseStoredJson<T | null>(row.payload, null);
-
-  const current = readSingleUserState();
-  const legacy = current.state?.scan as Record<string, unknown> | undefined;
-  if (!legacy) return null;
-  writeSingleUserScanStatus(legacy);
-  const stateWithoutScan = { ...(current.state || {}) };
-  delete stateWithoutScan.scan;
-  writeSingleUserState(stateWithoutScan);
-  return legacy as T;
-}
-
-export function writeSingleUserScanStatus<T extends Record<string, unknown>>(scan: T) {
-  database().prepare(`INSERT INTO shelfcheck_scan_status (user_id, payload, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP`)
-    .run(SINGLE_USER_ID, JSON.stringify(scan));
 }
 
 /** A mode's four saved parts, read in one statement. */

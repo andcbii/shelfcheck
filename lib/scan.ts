@@ -3,7 +3,7 @@ import "server-only";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { createScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, shouldReportIncompleteEpisode, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
-import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState, trackScanIgnores, writeSingleUserScanStatus } from "@/lib/sqlite";
+import { savedScanState, trackScanIgnores } from "@/lib/sqlite";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
@@ -26,6 +26,8 @@ type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan
 export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
 
 const TRAKT = "https://api.trakt.tv";
+/** The Trakt saved scan state; its options are the Trakt Settings and Ignore Preferences. */
+const traktState = () => savedScanState<ScanReport, TraktResumePoint, ScanRunStatus>("trakt");
 /**
  * The Trakt scan mode's adapter to the scan run lifecycle: its status and
  * Resume point stores and Interrupted scan wording. Its lifecycle events keep
@@ -36,12 +38,12 @@ const traktScanMode: ScanRunMode<ScanRunStatus, TraktResumePoint> = {
   kind: "trakt",
   eventPrefix: "",
   failureMessage: "The scan failed.",
-  status: { read: () => readSingleUserScanStatus() as ScanRunStatus | null, write: writeSingleUserScanStatus },
+  status: { read: () => traktState().status.read(), write: (status) => traktState().status.write(status) },
   interruptedError: () => "The scan was interrupted by a server restart. Start it again to resume.",
   resumePoint: {
-    read: () => (readSingleUserState().state?.checkpoint as TraktResumePoint | undefined) || null,
-    write: (checkpoint) => { patchSingleUserState({ checkpoint }); },
-    clear: () => { patchSingleUserState({ checkpoint: null }); },
+    read: () => traktState().resumePoint.read(),
+    write: (checkpoint) => traktState().resumePoint.write(checkpoint),
+    clear: () => traktState().resumePoint.clear(),
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
     discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, airingGraceDays: checkpoint.airingGraceDays, reason: "expired-or-incompatible" }),
     // checkpoint.saved keeps its pre-lifecycle reasons: every save names one, and a failure save is "error".
@@ -143,7 +145,8 @@ async function traktAll<T>(trakt: ProviderAuth, path: string): Promise<T[]> {
  * Resume point, so the next full run rechecks it.
  */
 function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
-  const state = readSingleUserState().state || {};
+  const state = traktState().options.read();
+  const savedReport = traktState().report.read();
   let finishIgnoreTracking: (() => void) | undefined;
   return scanRuns.run(owner, traktScanMode, {
     fullRun: !targetTraktId,
@@ -167,7 +170,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     // The run's Trakt login: read once after the Resume point is judged, refreshed before use when it is about to expire.
     const trakt = await TraktRunCredentials.open();
     if (!trakt) throw new Error("Trakt is not configured.");
-    const prior: ScanReport | undefined = checkpoint || (state.report as ScanReport | undefined);
+    const prior: ScanReport | undefined = checkpoint || savedReport || undefined;
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
@@ -312,7 +315,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     const finishedAt = new Date().toISOString();
     run.complete({
       // The report and the cleared Resume point are written together.
-      commit: () => patchSingleUserState({ report, checkpoint: null }),
+      commit: () => traktState().commitReport(report),
       processed: candidates.length,
       total: candidates.length,
       finishedAt,
@@ -346,9 +349,9 @@ export function startScan(force = false, targetTraktId?: number): ScanRunStatus 
 export function clearScanCache(traktId?: number): { cleared: number } {
   if (traktId !== undefined && (!Number.isInteger(traktId) || traktId <= 0)) throw new Error("A positive Trakt show ID is required.");
   if (scanRuns.isActive("trakt")) throw new Error("Wait for the current scan to finish before clearing the cache.");
-  const state = readSingleUserState().state || {};
-  const report = state.report as ScanReport | undefined;
-  const checkpoint = state.checkpoint as TraktResumePoint | undefined;
+  const store = traktState();
+  const report = store.report.read();
+  const checkpoint = store.resumePoint.read();
   if (traktId !== undefined) {
     const key = String(traktId);
     const hadReportCache = Boolean(report?.scanCache?.[key]);
@@ -356,18 +359,17 @@ export function clearScanCache(traktId?: number): { cleared: number } {
     if (report) {
       const scanCache = { ...(report.scanCache || {}) };
       delete scanCache[key];
-      patchSingleUserState({ report: { ...report, scanCache } });
+      store.report.write({ ...report, scanCache });
     }
-    if (checkpoint) patchSingleUserState({ checkpoint: resumePointWithoutShow(checkpoint, traktId) });
+    if (checkpoint) store.resumePoint.write(resumePointWithoutShow(checkpoint, traktId));
     return { cleared: hadReportCache || hadCheckpointCache ? 1 : 0 };
   }
   const cleared = new Set([
     ...Object.keys(report?.scanCache || {}),
     ...Object.keys(checkpoint?.scanCache || {}),
   ]).size;
-  patchSingleUserState({
-    ...(report ? { report: { ...report, scanCache: {} } } : {}),
-    checkpoint: null,
-  });
+  // The emptied report cache and the cleared Resume point are written together.
+  if (report) store.commitReport({ ...report, scanCache: {} });
+  else store.resumePoint.clear();
   return { cleared };
 }

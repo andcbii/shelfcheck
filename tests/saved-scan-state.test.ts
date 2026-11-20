@@ -9,6 +9,8 @@ import test, { type TestContext } from "node:test";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const sqlite = await import("../lib/sqlite");
 const plexStateRoute = await import("../app/api/plex/state/route");
+const traktStateRoute = await import("../app/api/state/route");
+const traktScanRoute = await import("../app/api/scan/route");
 hook.deregister();
 
 const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync; __shelfcheckScanIgnoreGuards?: object };
@@ -197,4 +199,74 @@ test("the Plex state route answers as before, and a Settings save through it kee
   assert.deepEqual(await saved.json(), { saved: true });
   assert.deepEqual(plex.options.read(), { ignoredShows: [{ ratingKey: "one", title: "one" }], futureOption: 1, diagnosticsEnabled: false, airingOffsetDays: 2 });
   assert.deepEqual((await (await plexStateRoute.GET()).json()).settings, { ignoredShows: [{ ratingKey: "one", title: "one" }], ignoredSeasons: [], hideUnairedEpisodes: false, airingOffsetDays: 2, autoCompoundEpisodes: true, diagnosticsEnabled: false });
+});
+
+const traktState = async () => {
+  const response = await traktStateRoute.GET();
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+  return await response.json() as { state: Record<string, unknown> | null; updatedAt: string | null };
+};
+const patchTrakt = (body: unknown) => traktStateRoute.PATCH(new Request("http://localhost/api/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+
+test("the Trakt state route returns no state for an empty or status-only database, distinct from empty options", async (t) => {
+  freshDatabase(t);
+  assert.deepEqual(await traktState(), { state: null, updatedAt: null });
+  sqlite.savedScanState("trakt").status.write({ status: "completed", processed: 1, total: 1 });
+  assert.deepEqual(await traktState(), { state: null, updatedAt: null }, "A scan status alone is no saved state");
+
+  assert.deepEqual(await (await patchTrakt({ unknownField: 1 })).json(), { saved: true });
+  const saved = await traktState();
+  assert.deepEqual(saved.state, { scan: { status: "completed", processed: 1, total: 1 } }, "Empty options are a saved state, with the scan nested");
+  assert.equal(typeof saved.updatedAt, "string");
+});
+
+test("the Trakt state route nests the report, Resume point and scan in the saved options, as before", async (t) => {
+  freshDatabase(t);
+  const trakt = sqlite.savedScanState("trakt");
+  await patchTrakt({ diagnosticsEnabled: false, airingGraceDays: 4, ignoredShows: [], ignoredSeasons: [] });
+  trakt.report.write(traktResults());
+  trakt.resumePoint.write(traktResults("resume"));
+  const options = { diagnosticsEnabled: false, airingGraceDays: 4, ignoredShows: [], ignoredSeasons: [] };
+  assert.deepEqual((await traktState()).state, { ...options, report: traktResults(), checkpoint: traktResults("resume") }, "No scan key without a scan status");
+
+  trakt.status.write({ status: "running", processed: 1, total: 2 });
+  trakt.commitReport(traktResults("new"));
+  assert.deepEqual((await traktState()).state, { ...options, report: traktResults("new"), scan: { status: "running", processed: 1, total: 2 } });
+  assert.deepEqual(sqlite.savedScanState("plex").snapshot(), null, "Trakt saves nothing for Plex");
+});
+
+test("a Trakt scan heartbeat does not move the state route's updatedAt, while a real state write does", async (t) => {
+  freshDatabase(t);
+  const trakt = sqlite.savedScanState("trakt");
+  await patchTrakt({ diagnosticsEnabled: true });
+  cache.__shelfcheckDatabase!.exec("UPDATE shelfcheck_scan_state SET state_updated_at = '2020-01-01 00:00:00' WHERE mode = 'trakt'");
+  trakt.status.write({ status: "running", heartbeatAt: "now" });
+  assert.equal((await traktState()).updatedAt, "2020-01-01 00:00:00");
+  await patchTrakt({ diagnosticsEnabled: false });
+  assert.notEqual((await traktState()).updatedAt, "2020-01-01 00:00:00");
+});
+
+test("clearing the Trakt cache empties the report's cache and clears the Resume point in one write; one show's clear removes only that show", async (t) => {
+  freshDatabase(t);
+  const trakt = sqlite.savedScanState("trakt");
+  const clear = async (query = "") => (await traktScanRoute.DELETE(new Request(`http://localhost/api/scan${query}`, { method: "DELETE" }))).json();
+  trakt.options.patch({ diagnosticsEnabled: false });
+  trakt.report.write(traktResults());
+  trakt.resumePoint.write(traktResults("resume"));
+
+  assert.deepEqual(await clear("?traktId=1"), { cleared: 1 });
+  assert.deepEqual((trakt.report.read() as Results).scanCache, { "2": 2 }, "The report keeps its results and other cache entries");
+  assert.deepEqual(trakt.report.read()!.shows, traktResults().shows);
+  assert.deepEqual((trakt.resumePoint.read() as Results).shows.map(row => row.show!.ids.trakt), [2], "The Resume point drops the show, so the next full run rechecks it");
+
+  rejectUpdates("OF resume_point");
+  assert.match((await clear()).error, /saved state unavailable/);
+  allowUpdates();
+  assert.deepEqual((trakt.report.read() as Results).scanCache, { "2": 2 }, "A rejected clear keeps the report's cache");
+  assert.notEqual(trakt.resumePoint.read(), null, "and the Resume point");
+
+  assert.deepEqual(await clear(), { cleared: 1 });
+  assert.deepEqual(trakt.report.read(), { ...traktResults(), scanCache: {} });
+  assert.equal(trakt.resumePoint.read(), null);
+  assert.deepEqual(trakt.options.read(), { diagnosticsEnabled: false });
 });

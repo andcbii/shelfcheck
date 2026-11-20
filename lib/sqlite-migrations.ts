@@ -11,6 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 const migrations: ((db: DatabaseSync) => void)[] = [
   baselineSchema,
   plexSavedScanState,
+  traktSavedScanState,
 ];
 
 export const SCHEMA_VERSION = migrations.length;
@@ -260,4 +261,25 @@ function plexSavedScanState(db: DatabaseSync) {
       .run(JSON.stringify(legacyObject(legacy.settings)), legacy.updated_at);
   }
   db.exec("DROP TABLE shelfcheck_plex_state");
+}
+
+/**
+ * Migration 3: move Trakt to the saved scan state. Its saved record, less its report,
+ * Resume point (checkpoint) and legacy scan status, becomes its options, unknown fields
+ * included; the report, Resume point and scan status are discarded, so the next Trakt
+ * scan is a full scan. Both old Trakt tables are dropped.
+ */
+function traktSavedScanState(db: DatabaseSync) {
+  const legacy = db.prepare("SELECT payload, updated_at FROM shelfcheck_states WHERE user_id = 'single-user'")
+    .get() as { payload: string; updated_at: string } | undefined;
+  if (legacy) {
+    const options: Record<string, unknown> = { ...legacyObject(legacy.payload) };
+    delete options.report;
+    delete options.checkpoint;
+    delete options.scan;
+    db.prepare("INSERT INTO shelfcheck_scan_state(mode, options, state_updated_at) VALUES('trakt', ?, ?)")
+      .run(JSON.stringify(options), legacy.updated_at);
+  }
+  db.exec("DROP TABLE shelfcheck_states");
+  db.exec("DROP TABLE shelfcheck_scan_status");
 }

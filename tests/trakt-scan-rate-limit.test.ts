@@ -53,8 +53,8 @@ async function traktScanRateLimited(t: TestContext) {
   assert.equal(cache.__shelfcheckScanRun?.owner?.kind, "trakt");
   releaseProgress(new Response("{}", { status: 429, headers: { "Retry-After": "1" } }));
   await new Promise((resolve) => setTimeout(resolve, 50));
-  const status = sqlite.readSingleUserScanStatus() as { status: string; rateLimitPaused?: boolean };
-  const checkpoint = sqlite.readSingleUserState().state?.checkpoint;
+  const status = sqlite.savedScanState("trakt").status.read() as { status: string; rateLimitPaused?: boolean };
+  const checkpoint = sqlite.savedScanState("trakt").resumePoint.read();
   const logFile = path.join(dir, "logs", "shelfcheck.log");
   const log = existsSync(logFile) ? readFileSync(logFile, "utf8") : "";
   while (scanRuns.activeScanRun()) await new Promise((resolve) => setTimeout(resolve, 10));

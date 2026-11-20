@@ -46,8 +46,8 @@ test("the scan-runs route never reconciles a stale running status into an Interr
   });
   const stale = { status: "running", processed: 1, total: 4, startedAt: "2026-01-01T00:00:00.000Z", heartbeatAt: "2026-01-01T00:00:00.000Z" };
   sqlite.savedScanState("plex").status.write(stale);
-  sqlite.writeSingleUserScanStatus(stale);
+  sqlite.savedScanState("trakt").status.write(stale);
   assert.deepEqual(await (await route.GET()).json(), { activeScanRun: null });
   assert.deepEqual(sqlite.savedScanState("plex").status.read(), stale);
-  assert.deepEqual(sqlite.readSingleUserScanStatus(), stale);
+  assert.deepEqual(sqlite.savedScanState("trakt").status.read(), stale);
 });

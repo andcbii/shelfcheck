@@ -30,9 +30,6 @@ A scan run that stopped without completing or failing, such as through a server 
 The progress a full scan run saves part-way through, so the next scan run of the same kind can continue from it instead of starting over. It stops being usable once it is too old or was saved under different scan settings. Single-show scan runs never save one.
 _Avoid_: Checkpoint (in conversation; the code uses it)
 
-**Saved scan state**:
-What each scan mode keeps between scan runs, in four parts: its report, its Resume point, its scan status and its options. The options hold that mode's Settings and Ignore Preferences together.
-
 **Provider cooldown**:
 A time before which a provider has asked Shelfcheck not to contact it again, because of rate limiting or an outage. A cooldown longer than 15 minutes makes that provider unavailable for the scan run: a Trakt scan run fails and can resume afterwards, and a Plex scan run continues with its other providers where it can. A later scan run honours whatever remains of the cooldown until Shelfcheck restarts.
 _Avoid_: Rate-limit pause (a short wait within a scan run)

@@ -1,4 +1,4 @@
-import { MULTIPLE_ID_REFRESH_AGE, tmdbFeedCovers, tmdbVerificationPlan, tvdbVerificationFrom } from "@/lib/plex-catalogue-policy";
+import { tmdbFeedCovers, tmdbVerificationPlan, tvdbVerificationFrom } from "@/lib/plex-catalogue-policy";
 import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssueCause, providerLookupContext, type LookupSourceStep } from "@/lib/coverage-issues";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
@@ -27,10 +27,10 @@ import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
-import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
-import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
-import { unavailablePreferredImpact } from "@/lib/comparison-catalogue-resolver";
-import { downloadCatalogueSource, TmdbShowMissingError } from "@/lib/download-catalogue-source";
+import { chooseSavedCatalogue, failedSingleIdUse, savedCatalogueUse, singleIdUse } from "@/lib/catalogue-fallback";
+import { hasMultipleCandidates } from "@/lib/catalogue-description";
+import { ProgressPersistenceError, resolveComparisonCatalogues, type ComparisonCatalogueResolution, type ComparisonCatalogueSource } from "@/lib/comparison-catalogue-resolver";
+import { downloadCatalogueSource, TmdbShowMissingError, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
@@ -1094,9 +1094,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
     let tmdbCatalogueReused = false;
     const unavailableCatalogueCauses: string[] = [];
-    const tmdbSavedCatalogue = () => inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
-    let savedTmdb = tmdbSavedCatalogue();
-    // A provider with several Plex candidates chooses among them; single-ID shows keep the ADR-0003 behavior.
+    const savedTmdb = inputs.tmdb[String(tmdbId || (tvdbId === savedComparison?.tvdbId ? savedComparison?.tmdbId : undefined))];
+    // A show with several Plex candidates on either provider resolves through the comparison catalogue module; other shows keep the ADR-0003 branches below.
     const tmdbCandidates = plexSelection.tmdb.candidates, tvdbCandidates = plexSelection.tvdb.candidates;
     const catalogueUse: Partial<Record<"tmdb" | "tvdb", CatalogueUse>> = {};
     const catalogueSource = downloadCatalogueSource({
@@ -1113,8 +1112,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       titles: { autoCompoundEpisodes, localEpisodes: localProviderEpisodes },
       logger,
     });
-    /** Load a TMDB catalogue; without an ID, the series TMDB associates with the TVDB series. Null when there is none. */
-    const loadTmdb = async (id: number | undefined, mandatory: boolean, refreshAfter?: number) => {
+    /** A single-ID show's TMDB catalogue; without an ID, the series TMDB associates with the TVDB series. Null when there is none. */
+    const loadTmdb = async (id: number | undefined, mandatory: boolean) => {
       if (id === undefined) {
         if (!tvdbId) return null;
         const association = await catalogueSource.tmdbSeriesForTvdb(tvdbId, {mandatory});
@@ -1123,7 +1122,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         tmdbSource = [...tmdbSource,{provider:"TMDB",kind:"resolved show",id:association.id,cached:association.cached}];
         id = tmdbId = association.id;
       }
-      const load = await catalogueSource.loadCatalogue("tmdb", id, {mandatory, refreshAfter});
+      const load = await catalogueSource.loadCatalogue("tmdb", id, {mandatory});
       tmdbCatalogueReused = load.outcome === "reused";
       // A single-ID show TMDB answers with no show has no catalogue, which is not a failed refresh.
       if (load.outcome === "failed" && load.error instanceof TmdbShowMissingError) return null;
@@ -1136,57 +1135,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       providerEpisodes.push(...loaded.episodes);
       malformedRecords.push(...loaded.malformed);
     };
-    /**
-     * Choose and load the catalogue of a provider with several Plex candidates. An outstanding refresh
-     * obligation downloads whichever candidate supplies the comparison, and stays until the preferred
-     * series downloads successfully. Unavailable preferred and fallback series are Coverage Issues.
-     */
-    const chooseMultipleIdCatalogue = async <T extends {reused:boolean;downloadedAt:string}>(provider: CatalogueProvider, preferredId: number, candidates: number[], load: (id: number, mandatory: boolean, refreshAfter: number) => Promise<T>, saved: (id: number) => T | undefined, source: LookupSourceStep[]) => {
-      const name = PROVIDER_NAME[provider];
-      const loaded = (value: T): LoadedCatalogue<T> => ({value, downloadedAt: value.downloadedAt});
-      const choice = await chooseAvailableCatalogue({
-        preferredId, candidates, now: startedAt,
-        load: async id => loaded(await load(id, !!refresh[provider], MULTIPLE_ID_REFRESH_AGE)),
-        saved: id => { const value = saved(id); return value && loaded(value); },
-      });
-      if (choice.state === "preferred" && !choice.loaded?.value.reused) delete refresh[provider];
-      if (choice.preferredError) refresh[provider] = true;
-      const use = multipleIdUse(choice, preferredId, catalogueSource.savedRecordDownloadedAt(provider, preferredId), startedAt);
-      catalogueUse[provider] = use;
-      const showIds = (id: number) => ({ratingKey,title:primary.title,tmdbId:provider === "tmdb" ? id : tmdbId,tvdbId:provider === "tvdb" ? id : tvdbId});
-      const authentication = (error: unknown) => provider === "tvdb" && tvdbAuthenticationError && error === tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {};
-      const kind = provider === "tmdb" ? "show" : "series";
-      const issueId = `catalogue-refresh:${name}:${ratingKey}`, fallbackIssueId = `catalogue-fallback-refresh:${name}:${ratingKey}`;
-      if (choice.preferredError) {
-        setCoverageIssue({id:issueId,failedAt:startedAt,...authentication(choice.preferredError),operation:"catalogue-refresh",provider:name,scope:"show",show:showIds(preferredId),...providerLookupContext(choice.preferredError,{source,requested:{provider:name,kind,id:preferredId},impact:unavailablePreferredImpact(provider,use)})});
-        if (!choice.loaded) {
-          unavailableCatalogueCauses.push(issueId);
-          addWarning(choice.preferredError instanceof Error ? choice.preferredError.message : `${name} lookup failed.`);
-        }
-      } else resolveCoverageIssue(issueId);
-      // A fallback compared from saved data after its own failed refresh is unverified too.
-      if (choice.fallbackError && choice.usingId) setCoverageIssue({id:fallbackIssueId,...authentication(choice.fallbackError),operation:"catalogue-refresh",provider:name,scope:"show",show:showIds(choice.usingId),...providerLookupContext(choice.fallbackError,{source,requested:{provider:name,kind,id:choice.usingId},impact:catalogueUseExplanation(provider,use)!})});
-      else resolveCoverageIssue(fallbackIssueId);
-      savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
-      return choice;
-    };
     const compareTmdbCatalogue = async () => {
-      if (tmdbCandidates.length > 1 && tmdbId) {
-        const preferredId = tmdbId;
-        setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
-        phaseStarted = Date.now();
-        const choice = await chooseMultipleIdCatalogue("tmdb", preferredId, tmdbCandidates, async (id, mandatory, refreshAfter) => {
-          const loaded = await loadTmdb(id, mandatory, refreshAfter);
-          if (!loaded) throw new Error(`TMDB returned no show ${id}.`);
-          return loaded;
-        }, id => {
-          const saved = catalogueSource.savedCatalogue("tmdb", id);
-          return saved && {...saved.catalogue, reused: true, downloadedAt: saved.downloadedAt};
-        }, tmdbSource);
-        if (choice.loaded) adoptTmdbCatalogue(choice.loaded.value);
-        else { tmdbShow = null; tmdbId = preferredId; }
-        phaseTimings.tmdbMs = Date.now() - phaseStarted;
-      } else try {
+      try {
         setHeartbeat(ratingKey, primary.title || "Unknown show", "tmdb-show-and-seasons");
         phaseStarted = Date.now();
         const loaded = await loadTmdb(tmdbId, !!refresh.tmdb);
@@ -1214,37 +1164,23 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         addWarning(error instanceof Error ? error.message : "TMDB lookup failed.");
       }
     };
-    const loadTvdb = async (id: number, mandatory: boolean, refreshAfter?: number) => {
+    const loadTvdb = async (id: number, mandatory: boolean) => {
       // A reused catalogue asks again for an English title only when the catalogues compared so far make it title-dependent.
       catalogueSource.compareTitlesWith(providerEpisodes);
-      const load = await catalogueSource.loadCatalogue("tvdb", id, {mandatory, refreshAfter});
+      const load = await catalogueSource.loadCatalogue("tvdb", id, {mandatory});
       tvdbCatalogueReused = load.outcome === "reused";
       if (load.outcome === "failed") throw load.error;
       return {...load.catalogue, reused: load.outcome === "reused", downloadedAt: load.downloadedAt};
     };
-    // A reused catalogue whose English titles were recovered in this scan, not carried from a saved choice.
-    let tvdbTitlesRecoveredOnReuse = false;
-    let adoptedTvdb: Awaited<ReturnType<typeof loadTvdb>> | undefined;
     const adoptTvdbCatalogue = (loaded: Awaited<ReturnType<typeof loadTvdb>>) => {
-      adoptedTvdb = loaded;
       tvdbResolved = true;
-      tvdbTitlesRecoveredOnReuse = loaded.reused && !loaded.titleRecovery.carried;
       tvdbSlug = loaded.slug;
       titleRecovery = loaded.titleRecovery;
       providerEpisodes.push(...loaded.episodes);
       malformedRecords.push(...loaded.malformed);
     };
     const compareTvdbCatalogue = async () => {
-      if (tvdbCandidates.length > 1 && tvdbId) {
-        setHeartbeat(ratingKey, primary.title || "Unknown show", "tvdb-series-and-episodes");
-        phaseStarted = Date.now();
-        const choice = await chooseMultipleIdCatalogue("tvdb", tvdbId, tvdbCandidates, loadTvdb, id => {
-          const saved = catalogueSource.savedCatalogue("tvdb", id);
-          return saved && {...saved.catalogue, reused: true, downloadedAt: saved.downloadedAt};
-        }, tvdbSource);
-        if (choice.loaded) { adoptTvdbCatalogue(choice.loaded.value); tvdbId = choice.usingId; }
-        phaseTimings.tvdbMs = Date.now() - phaseStarted;
-      } else try {
+      try {
         if (tvdbId) {
           setHeartbeat(ratingKey, primary.title || "Unknown show", "tvdb-series-and-episodes");
           phaseStarted = Date.now();
@@ -1272,29 +1208,74 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
       }
     };
-    /** The preparation step: TVDB titles the TMDB catalogue now makes title-dependent, repaired in the comparison. */
-    const retryTitlesNeededWithTmdb = async () => {
-      if (!tvdbTitlesRecoveredOnReuse || !tvdbId || !adoptedTvdb) return;
-      const prepared = await catalogueSource.prepareTitlesNeeded({id:tvdbId, origin:"reused", downloadedAt:adoptedTvdb.downloadedAt, catalogue:adoptedTvdb}, providerEpisodes);
-      if (prepared.catalogue.titleRecovery === titleRecovery) return;
-      titleRecovery = prepared.catalogue.titleRecovery;
-      const repaired = prepared.catalogue.episodes;
-      let next = 0;
-      providerEpisodes.splice(0, providerEpisodes.length, ...providerEpisodes.map(episode => episode.source === "TVDB" ? repaired[next++] : episode));
-    };
-    if (!tmdbCandidates.length && tvdbCandidates.length > 1 && tvdbId) {
-      // Without a Plex TMDB ID, TMDB is resolved from the TVDB series compared, so that is chosen first.
-      const preferredTvdbId = tvdbId;
-      await compareTvdbCatalogue();
-      if (tvdbId !== preferredTvdbId) {
-        tmdbSource = [{provider:"Plex",kind:"TVDB series",id:tvdbId}];
-        savedTmdb = tmdbSavedCatalogue();
+    /**
+     * A show with several Plex candidates on either provider: the comparison catalogue module chooses
+     * both providers' catalogues through the download source, and the scan applies what follows. Each
+     * provider's obligation patch is saved before the other provider's work starts.
+     */
+    const resolveMultipleIdCatalogues = async () => {
+      const phase = {tmdb:"tmdb-show-and-seasons", tvdb:"tvdb-series-and-episodes"} as const;
+      const source: ComparisonCatalogueSource<DownloadCataloguePayloads> = {
+        ...catalogueSource,
+        loadCatalogue(provider, id, settings) {
+          setHeartbeat(ratingKey, primary.title || "Unknown show", phase[provider]);
+          return catalogueSource.loadCatalogue(provider, id, settings);
+        },
+      };
+      phaseStarted = Date.now();
+      let resolution: ComparisonCatalogueResolution<DownloadCataloguePayloads>;
+      try {
+        resolution = await resolveComparisonCatalogues<DownloadCataloguePayloads>({
+          context: {kind:"live-scan"}, show: {ratingKey, title: primary.title}, resolvedAt: startedAt,
+          ...(savedComparison ? {previousComparison: {tmdbId: savedComparison.tmdbId, tvdbId: savedComparison.tvdbId, complete: !!savedComparison.complete}} : {}),
+          tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: !!refresh.tmdb, lookupSource: tmdbSource},
+          tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: !!refresh.tvdb, lookupSource: tvdbSource},
+        }, {source, onProviderResolved: async progress => {
+          if (progress.obligation === "set") refresh[progress.provider] = true;
+          else if (progress.obligation === "clear") delete refresh[progress.provider];
+          savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
+          phaseTimings[`${progress.provider}Ms`] = Date.now() - phaseStarted;
+          phaseStarted = Date.now();
+          // A reused TVDB catalogue asks again for an English title only when the TMDB episodes chosen make it title-dependent.
+          if (progress.provider === "tmdb") catalogueSource.compareTitlesWith(progress.catalogue?.catalogue.episodes ?? []);
+        }});
+      } catch (error) {
+        // Saved progress that cannot be written fails the show as it always has, not as a provider failure.
+        throw error instanceof ProgressPersistenceError ? error.cause : error;
       }
-      await compareTmdbCatalogue();
-      await retryTitlesNeededWithTmdb();
-      // Comparison order stays TMDB, then TVDB.
-      providerEpisodes.sort((left, right) => Number(left.source === "TVDB") - Number(right.source === "TVDB"));
-    } else {
+      const {tmdb, tvdb, resolutionOrder} = resolution;
+      for (const provider of resolutionOrder) {
+        for (const action of resolution[provider].issues) {
+          if (action.action === "set") setCoverageIssue(action.issue);
+          else if (action.action === "resolve") resolveCoverageIssue(action.id);
+        }
+        const {use} = resolution[provider];
+        if (use.action === "set") catalogueUse[provider] = use.use;
+      }
+      tmdbId = tmdb.identity; tvdbId = tvdb.identity;
+      tmdbSource = tmdb.lookupSource; tvdbSource = tvdb.lookupSource;
+      unavailableCatalogueCauses.push(...resolution.unavailableCauses);
+      for (const message of resolution.warnings) addWarning(message);
+      if (tvdbCandidates.length <= 1 && tvdb.warning) logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
+      // TVDB chosen before TMDB recovered its titles without TMDB's episodes: the preparation step asks again for those TMDB now makes title-dependent.
+      const tmdbCatalogue = tmdb.catalogue;
+      const tvdbCatalogue = tvdb.catalogue && resolutionOrder[0] === "tvdb"
+        ? await catalogueSource.prepareTitlesNeeded(tvdb.catalogue, [...(tmdbCatalogue?.catalogue.episodes ?? []), ...tvdb.catalogue.catalogue.episodes])
+        : tvdb.catalogue;
+      tmdbShow = tmdbCatalogue?.catalogue.show ?? null;
+      tmdbCatalogueReused = tmdbCatalogue?.origin === "reused";
+      tvdbCatalogueReused = tvdbCatalogue?.origin === "reused";
+      if (tvdbCatalogue) {
+        tvdbResolved = true;
+        tvdbSlug = tvdbCatalogue.catalogue.slug;
+        titleRecovery = tvdbCatalogue.catalogue.titleRecovery;
+      }
+      // Comparison order is TMDB, then TVDB; unusable records are listed in the order the catalogues were chosen.
+      providerEpisodes.push(...(tmdbCatalogue?.catalogue.episodes ?? []), ...(tvdbCatalogue?.catalogue.episodes ?? []));
+      for (const provider of resolutionOrder) malformedRecords.push(...((provider === "tmdb" ? tmdbCatalogue : tvdbCatalogue)?.catalogue.malformed ?? []));
+    };
+    if (tmdbCandidates.length > 1 || tvdbCandidates.length > 1) await resolveMultipleIdCatalogues();
+    else {
       await compareTmdbCatalogue();
       await compareTvdbCatalogue();
     }

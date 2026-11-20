@@ -1,3 +1,5 @@
+import { localCalendarDate, type CalendarDate } from "./results-view";
+
 export type TraktShow = {
   title: string;
   year: number;
@@ -40,4 +42,16 @@ export function compactTraktLibrary(library: CollectionShow[]): CollectionShow[]
 
 export function compactMissingEpisodes(items: MissingEpisode[]): MissingEpisode[] {
   return items.map((item) => ({ ...item, show: compactTraktShow(item.show) }));
+}
+
+/**
+ * A Trakt first_aired timestamp as the runtime's local calendar date (the
+ * browser's, on the page). Trakt's timestamps are UTC instants, so a broadcast
+ * late in the UTC day can fall on another local date. Undefined when missing or
+ * unreadable.
+ */
+export function traktLocalAirDate(firstAired: string | undefined): CalendarDate | undefined {
+  if (!firstAired) return undefined;
+  const moment = new Date(firstAired);
+  return Number.isNaN(moment.getTime()) ? undefined : localCalendarDate(moment);
 }

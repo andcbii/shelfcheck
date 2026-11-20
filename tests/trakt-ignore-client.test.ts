@@ -387,7 +387,7 @@ test("Trakt reconciles a failed Ignore save without overwriting a newer diagnost
   assert.deepEqual(page.traktSaves(), [{ ignoredShows: [] }, { diagnosticsEnabled: false }]);
   assert.equal(page.ignoredCount(), "1", "the failed Restore reconciles to the saved Ignore");
   assert.equal(diagnostics.checked, false, "the newer diagnostics setting stays");
-  assert.equal(page.container.querySelector<HTMLInputElement>('input[aria-label="Airing grace period in days"]')?.value, "7", "the grace period is not replaced by the re-read");
+  assert.equal(page.container.querySelector<HTMLInputElement>('input[aria-label="Air-date delay in days"]')?.value, "7", "the Air-date delay is not replaced by the re-read");
 });
 
 test("Trakt Ignore edits save only to the Trakt state and leave the Plex Ignore list alone", async (t) => {

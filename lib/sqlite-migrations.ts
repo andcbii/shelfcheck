@@ -2,7 +2,7 @@ import "server-only";
 
 import { renameSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 
 // Every table is created and upgraded here, by numbered migrations tracked by the
 // database's user_version. Version 0 means unversioned, not empty: databases written
@@ -48,8 +48,13 @@ export function backupBeforeFirstMigration(db: DatabaseSync, file: string) {
   const partial = `${backup}.partial`;
   rmSync(partial, { force: true });
   // VACUUM INTO reads through this connection, so committed data still in the WAL is included.
-  db.prepare("VACUUM INTO ?").run(partial);
-  renameSync(partial, backup);
+  try {
+    db.prepare("VACUUM INTO ?").run(partial);
+    renameSync(partial, backup);
+  } catch (error) {
+    rmSync(partial, { force: true });
+    throw error;
+  }
 }
 
 /** Apply every pending migration in one write transaction, or none of them. */
@@ -138,24 +143,44 @@ function baselineSchema(db: DatabaseSync) {
   retireOwnershipCorrections(db);
 }
 
-/** An existing table this version cannot read must stop the upgrade, never be stamped current. */
+type ColumnInfo = { name: string; type: string; notnull: number; pk: number };
+
+function columnInfo(db: DatabaseSync, table: string) {
+  return new Map((db.prepare(`PRAGMA table_info(${table})`).all() as ColumnInfo[]).map(column => [column.name, column]));
+}
+
+/**
+ * An existing table this version cannot read must stop the upgrade, never be stamped
+ * current. Each of today's columns must exist with the same declared type, NOT NULL and
+ * primary-key position; extra columns are allowed.
+ */
 function refuseIncompatibleTables(db: DatabaseSync, names: string[]) {
   for (const name of names) {
-    const expected = expectedColumns(db, name);
-    const found = columnsOf(db, name);
-    const missing = [...expected].filter(column => !found.has(column));
-    if (missing.length) throw new Error(`Shelfcheck cannot upgrade this database: table ${name} has no ${missing.join(", ")} column${missing.length > 1 ? "s" : ""}. Restore a backup or use a new data directory.`);
+    const found = columnInfo(db, name);
+    const expected = [...expectedColumns(name).values()];
+    const missing = expected.filter(column => !found.has(column.name)).map(column => column.name);
+    if (missing.length) throw incompatibleTableError(`table ${name} has no ${missing.join(", ")} column${missing.length > 1 ? "s" : ""}`);
+    const changed = expected.filter(({ name: column, type, notnull, pk }) => {
+      const actual = found.get(column)!;
+      return actual.type.toUpperCase() !== type.toUpperCase() || actual.notnull !== notnull || actual.pk !== pk;
+    }).map(column => column.name);
+    if (changed.length) throw incompatibleTableError(`table ${name} has an incompatible ${changed.join(", ")} column${changed.length > 1 ? "s" : ""}`);
   }
 }
 
-/** Columns of today's definition, read from a temporary table built from it. */
-function expectedColumns(db: DatabaseSync, name: string) {
+function incompatibleTableError(reason: string) {
+  return new Error(`Shelfcheck cannot upgrade this database: ${reason}. Restore a backup or use a new data directory.`);
+}
+
+/** Columns of today's definition, read from the table built in a private in-memory database. */
+function expectedColumns(name: string) {
   const table = BASELINE_TABLES.find(candidate => candidate.name === name)!;
-  db.exec(table.sql.replace(`CREATE TABLE ${name}(`, "CREATE TEMP TABLE shelfcheck_expected_columns("));
+  const scratch = new DatabaseSync(":memory:");
   try {
-    return new Set((db.prepare("PRAGMA temp.table_info(shelfcheck_expected_columns)").all() as { name: string }[]).map(column => column.name));
+    scratch.exec(table.sql);
+    return columnInfo(scratch, name);
   } finally {
-    db.exec("DROP TABLE temp.shelfcheck_expected_columns");
+    scratch.close();
   }
 }
 

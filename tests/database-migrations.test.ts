@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -199,6 +199,27 @@ test("an incompatible unversioned schema is refused clearly and left unchanged",
   });
 });
 
+test("a table with today's column names but a different type, NOT NULL or key is refused and left unchanged", (t) => {
+  const file = dataDirectory(t);
+  // user_id is no longer the key and expires is text: the names alone match today's layout.
+  fixture(file, `
+    CREATE TABLE shelfcheck_states (user_id TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE shelfcheck_coverage_previews(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires TEXT);
+    INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user','{}');`);
+  const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+  assert.throws(() => sqlite.readSingleUserState(), /cannot upgrade this database: table shelfcheck_states has an incompatible user_id column/);
+  assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+  inspect(file, db => {
+    assert.equal(version(db), 0);
+    assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before);
+  });
+
+  inspect(file, db => db.exec("DROP TABLE shelfcheck_states"));
+  assert.throws(() => sqlite.readSingleUserState(), /table shelfcheck_coverage_previews has an incompatible expires column/);
+  inspect(file, db => assert.equal(version(db), 0));
+});
+
 test("a migration failing after a real schema change rolls back everything, and a retry succeeds once", (t) => {
   const file = dataDirectory(t);
   // The trigger fires on the coverage state update that follows dropping the corrections table.
@@ -290,6 +311,7 @@ test("when the backup cannot be written, no migration runs and the open fails", 
 
   assert.throws(() => sqlite.readSingleUserState());
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+  assert.equal(existsSync(`${backupOf(file)}.partial`), false, "The incomplete backup is removed");
   inspect(file, db => {
     assert.equal(version(db), 0, "No migration ran");
     assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before);

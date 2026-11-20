@@ -19,6 +19,7 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
+import { useClearCache } from "@/app/hooks/use-clear-cache";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodeTraktManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
@@ -117,9 +118,6 @@ export default function Home() {
   const [fullRescanConfirmOpen, setFullRescanConfirmOpen] = useState(false);
   const [rateLimitPaused, setRateLimitPaused] = useState(false);
   const [scanCacheCount, setScanCacheCount] = useState(0);
-  const [cacheClearConfirmOpen, setCacheClearConfirmOpen] = useState(false);
-  const [clearingCache, setClearingCache] = useState(false);
-  const [cacheMessage, setCacheMessage] = useState("");
   // Restoring a show does not make responses from this scan safe to reuse.
   const reportInvalidations = useRef(new Set<number>());
   const loadedCacheKeys = useRef(new Set<string>());
@@ -271,19 +269,21 @@ export default function Home() {
     syncServerState({ airingGraceDays: days });
   }
 
-  async function clearCache() {
-    setClearingCache(true);
-    setCacheMessage("");
-    try {
-      const response = await fetch("/api/scan", { method: "DELETE" });
-      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || "Shelfcheck could not clear the scan cache.");
-      replaceReportCache(new Set());
-      setCacheClearConfirmOpen(false);
-      setCacheMessage(`${body.cleared || 0} cached show results cleared. The next scan will rebuild them.`);
-    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : "Shelfcheck could not clear the scan cache."); }
-    finally { setClearingCache(false); }
-  }
+  // Trakt's whole clear keeps its results and empties their cache keys; a show's
+  // clear removes only its cache key.
+  const { confirmOpen: cacheClearConfirmOpen, clearing: clearingCache, message: cacheMessage, clearMessage: clearCacheMessage, openConfirm: openCacheClearConfirm, cancelConfirm: cancelCacheClear, clearCache, clearShowCache } = useClearCache<TraktShow>({
+    cacheAddress: "/api/scan",
+    showAddress: (show) => `/api/scan?traktId=${show.ids.trakt}`,
+    showTitle: (show) => show.title,
+    onCacheCleared: () => replaceReportCache(new Set()),
+    onShowCleared: (show) => {
+      const remaining = new Set(loadedCacheKeys.current);
+      remaining.delete(String(show.ids.trakt));
+      replaceReportCache(remaining);
+    },
+    closeShowMenu: () => setOpenShowMenu(null),
+    onError: setError,
+  });
 
   const ignoreRules = useMemo(() => [...ignoredShows, ...ignoredSeasons], [ignoredShows, ignoredSeasons]);
   const ignoreNow = useIgnoreClock(ignoreRules);
@@ -412,19 +412,6 @@ export default function Home() {
     setSeasonIgnoreShow(null);
   }
 
-  async function clearShowCache(show: TraktShow) {
-    setOpenShowMenu(null); setCacheMessage("");
-    try {
-      const response = await fetch(`/api/scan?traktId=${show.ids.trakt}`, { method: "DELETE" });
-      const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
-      if (!response.ok) throw new Error(body.error || `Shelfcheck could not clear ${show.title}'s cache.`);
-      const remaining = new Set(loadedCacheKeys.current);
-      remaining.delete(String(show.ids.trakt));
-      replaceReportCache(remaining);
-      setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
-    } catch (clearError) { setError(clearError instanceof Error ? clearError.message : `Shelfcheck could not clear ${show.title}'s cache.`); }
-  }
-
   function loginToTrakt() {
     setError("");
     setErrorContext("auth");
@@ -531,7 +518,7 @@ export default function Home() {
 
   async function forceCheckShow(show: TraktShow) {
     if (activity.isLocked()) return;
-    setOpenShowMenu(null); setCacheMessage("");
+    setOpenShowMenu(null); clearCacheMessage();
     await scanLibrary(false, show.ids.trakt);
   }
 
@@ -659,9 +646,9 @@ export default function Home() {
             <p className="diagnostics-toggle scan-cache-title">Scan cache</p>
             <p>Quick and Deep scans reuse cached collection fingerprints and Trakt update timestamps. Clear the cache to make the next scan rebuild every show&apos;s result.</p>
             <p className="scan-cache-status">Cached results for {scanCacheCount} {scanCacheCount === 1 ? "show" : "shows"}{lastScan ? ` · Latest scan ${formatLastScan(lastScan)}` : ""}</p>
-            {!cacheClearConfirmOpen ? <button type="button" onClick={() => { setCacheMessage(""); setCacheClearConfirmOpen(true); }} disabled={scanning || scanCacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
+            {!cacheClearConfirmOpen ? <button type="button" onClick={openCacheClearConfirm} disabled={scanning || scanCacheCount === 0}>Clear scan cache</button> : <div className="cache-confirm">
               <p>This clears scan results only. Your credentials, settings, ignored shows, and logs will not change.</p>
-              <div><button type="button" onClick={() => setCacheClearConfirmOpen(false)} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
+              <div><button type="button" onClick={cancelCacheClear} disabled={clearingCache}>Cancel</button><button type="button" className="cache-clear-confirm" onClick={clearCache} disabled={clearingCache}>{clearingCache ? "Clearing…" : "Clear cache"}</button></div>
             </div>}
             {cacheMessage && <p className="cache-message">{cacheMessage}</p>}
           </div>

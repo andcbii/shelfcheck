@@ -49,9 +49,7 @@ export type CoverageIssue = {
   mappingId?: string;
 };
 function store() {
-  const db = coverageDatabase();
-  db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_coverage_issues(id TEXT PRIMARY KEY,payload TEXT NOT NULL)");
-  return db;
+  return coverageDatabase();
 }
 export function listCoverageIssues(): CoverageIssue[] {
   const issues: CoverageIssue[] = (store().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));

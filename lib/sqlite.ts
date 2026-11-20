@@ -4,9 +4,9 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ignoredPlexKeys, ignoredTraktIds } from "@/lib/ignored-shows";
+import { migrateDatabase, refuseNewerDatabase } from "@/lib/sqlite-migrations";
 
 const SINGLE_USER_ID = "single-user";
-const normalizedIgnoreDatabases = new WeakSet<DatabaseSync>();
 
 type ScanMode = "trakt" | "plex";
 type DatabaseCache = typeof globalThis & {
@@ -71,15 +71,9 @@ function parseStoredJson<T>(payload: string | null | undefined, fallback: T): T 
   }
 }
 
-function ensurePlexSettingsColumn(db: DatabaseSync) {
-  const columns = db.prepare("PRAGMA table_info(shelfcheck_plex_state)").all() as { name: string }[];
-  if (!columns.some((column) => column.name === "settings")) db.exec("ALTER TABLE shelfcheck_plex_state ADD COLUMN settings TEXT NOT NULL DEFAULT '{}'");
-  if (!columns.some((column) => column.name === "checkpoint")) db.exec("ALTER TABLE shelfcheck_plex_state ADD COLUMN checkpoint TEXT");
-}
-
+// Runs once per opened handle, after migrations, because whether an Ignore is
+// active depends on the current time. It uses only the handle it is given.
 function normalizeStoredIgnores(db: DatabaseSync) {
-  if (normalizedIgnoreDatabases.has(db)) return;
-
   // Older versions retained results when Ignore was applied. Remove those
   // results before any read or Restore can expose them after an upgrade.
   const traktRow = db.prepare("SELECT payload FROM shelfcheck_states WHERE user_id = ?")
@@ -111,46 +105,37 @@ function normalizeStoredIgnores(db: DatabaseSync) {
         .run(prunedReport === null ? plexRow.report : JSON.stringify(prunedReport), prunedCheckpoint === null ? plexRow.checkpoint : JSON.stringify(prunedCheckpoint), SINGLE_USER_ID);
     }
   }
-  normalizedIgnoreDatabases.add(db);
 }
 
 export function dataDirectory() {
   return process.env.SHELFCHECK_DATA_DIR || path.join(process.cwd(), ".runtime", "data");
 }
 
+/** Open, upgrade and prepare the database; nothing is cached unless every step succeeds. */
+function openDatabase(file: string) {
+  const db = new DatabaseSync(file);
+  try {
+    refuseNewerDatabase(db);
+    // Connection settings cannot change inside the migration transaction.
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec("PRAGMA foreign_keys = ON");
+    // A pre-migration step (such as a backup of an existing database) belongs here.
+    migrateDatabase(db);
+    normalizeStoredIgnores(db);
+    db.exec("PRAGMA optimize");
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
 function database() {
   const cache = globalThis as DatabaseCache;
-  if (cache.__shelfcheckDatabase) {
-    normalizeStoredIgnores(cache.__shelfcheckDatabase);
-    return cache.__shelfcheckDatabase;
-  }
-
+  if (cache.__shelfcheckDatabase) return cache.__shelfcheckDatabase;
   const directory = dataDirectory();
   mkdirSync(directory, { recursive: true });
-  const db = new DatabaseSync(path.join(directory, "shelfcheck.db"));
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_states (
-    user_id TEXT PRIMARY KEY NOT NULL,
-    payload TEXT NOT NULL DEFAULT '{}',
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`);
-  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_scan_status (
-    user_id TEXT PRIMARY KEY NOT NULL,
-    payload TEXT NOT NULL DEFAULT '{}',
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`);
-  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_plex_state (
-    user_id TEXT PRIMARY KEY NOT NULL,
-    report TEXT,
-    checkpoint TEXT,
-    scan_status TEXT NOT NULL DEFAULT '{}',
-    settings TEXT NOT NULL DEFAULT '{}',
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-  )`);
-  ensurePlexSettingsColumn(db);
-  normalizeStoredIgnores(db);
-  db.exec("PRAGMA optimize");
+  const db = openDatabase(path.join(directory, "shelfcheck.db"));
   cache.__shelfcheckDatabase = db;
   return db;
 }
@@ -281,45 +266,7 @@ export function writePlexSettings<T extends Record<string, unknown>>(settings: T
 
 // Manual rules are durable instance data, independent of generated scan state.
 export function coverageDatabase() {
-  const db = database();
-  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_coverage_state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0);
-    INSERT OR IGNORE INTO shelfcheck_coverage_state(id) VALUES(1);
-    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_members(provider TEXT NOT NULL, episode_id INTEGER NOT NULL, mapping_id TEXT NOT NULL REFERENCES shelfcheck_coverage_mappings(id) ON DELETE CASCADE, report_missing INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(provider, episode_id));
-    CREATE TABLE IF NOT EXISTS shelfcheck_coverage_evidence(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL);`);
-  addReportMissingColumn(db);
-  retireOwnershipCorrections(db);
-  return db;
-}
-
-// Report Missing is mapping-member state keyed by provider episode, so it
-// follows membership and is deleted with its mapping. Existing members start off.
-const reportMissingDatabases = new WeakSet<DatabaseSync>();
-function addReportMissingColumn(db: DatabaseSync) {
-  if (reportMissingDatabases.has(db)) return;
-  const columns = db.prepare("PRAGMA table_info(shelfcheck_coverage_members)").all() as { name: string }[];
-  if (!columns.some(column => column.name === "report_missing")) db.exec("ALTER TABLE shelfcheck_coverage_members ADD COLUMN report_missing INTEGER NOT NULL DEFAULT 0");
-  reportMissingDatabases.add(db);
-}
-
-// Ownership corrections were retired: complete-set Manual Matches stand alone.
-// Discard saved corrections without converting them into any other decision, and
-// ask for a comparison when they may have shaped the cached results.
-const retiredCorrectionDatabases = new WeakSet<DatabaseSync>();
-function retireOwnershipCorrections(db: DatabaseSync) {
-  if (retiredCorrectionDatabases.has(db)) return;
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shelfcheck_coverage_corrections'").get()) { retiredCorrectionDatabases.add(db); return; }
-  const saved = db.prepare("SELECT COUNT(*) AS count FROM shelfcheck_coverage_corrections").get() as { count: number };
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec("DROP TABLE shelfcheck_coverage_corrections");
-    if (saved.count) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
-    db.exec("COMMIT");
-    retiredCorrectionDatabases.add(db);
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
-  }
+  return database();
 }
 
 // Catalogue selection for shows with several Plex provider IDs. Overrides are user
@@ -328,19 +275,12 @@ function retireOwnershipCorrections(db: DatabaseSync) {
 // Candidates are the last completely observed set; selections record the catalogue
 // a scan chose to use, kept apart so a temporary fallback cannot erase a preference.
 export function catalogueSelectionDatabase() {
-  const db = database();
-  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_candidates(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), series_id INTEGER NOT NULL, name TEXT, PRIMARY KEY(identity, provider, series_id));
-    CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_overrides(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), series_id INTEGER NOT NULL, saved_at TEXT NOT NULL, PRIMARY KEY(identity, provider));
-    CREATE TABLE IF NOT EXISTS shelfcheck_catalogue_selections(identity TEXT NOT NULL, provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')), preferred_id INTEGER, using_id INTEGER, state TEXT NOT NULL, selected_at TEXT NOT NULL,
-      preferred_downloaded_at TEXT, preferred_usable_until TEXT, preferred_failed_at TEXT, using_downloaded_at TEXT, using_failed_at TEXT, derived_from INTEGER, PRIMARY KEY(identity, provider));`);
-  return db;
+  return database();
 }
 
 // Generated provider catalogues and inputs do not pass through report ignore pruning.
 function plexInputsDatabase() {
-  const db = database();
-  db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_plex_generated_inputs (cache_key TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)");
-  return db;
+  return database();
 }
 export function readPlexGeneratedInputs<T>(key: string): T | null {
   const row = plexInputsDatabase().prepare("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").get(key) as {payload:string}|undefined;

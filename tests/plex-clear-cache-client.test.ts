@@ -10,9 +10,8 @@ import { mountDom } from "./dom-environment";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
-  return { promise, resolve, reject };
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 const report = {
@@ -61,7 +60,7 @@ async function renderPlex(t: test.TestContext, clearReply: ClearReply) {
   const messages = () => Array.from(container.querySelectorAll(".cache-message")).map((element) => element.textContent);
   const cacheStatus = () => container.querySelector(".scan-cache-status")?.textContent?.split(" · ")[0];
   const showMenuOpen = () => container.querySelector(".show-action-menu") !== null;
-  return { container, clears, click, confirmClear, confirmButton, shownTitles, errorText, messages, cacheStatus, showMenuOpen };
+  return { clears, click, confirmClear, confirmButton, shownTitles, errorText, messages, cacheStatus, showMenuOpen };
 }
 
 const cleared = (count: number) => () => Promise.resolve(Response.json({ cleared: count }));
@@ -93,6 +92,7 @@ for (const failure of [
   { name: "a refused clear shows the server's error", reply: () => Promise.resolve(Response.json({ error: "Plex scan is running." }, { status: 409 })), error: "Plex scan is running." },
   { name: "a refused clear without an error shows the fallback", reply: () => Promise.resolve(new Response("nope", { status: 500 })), error: "Shelfcheck could not clear the Plex scan cache." },
   { name: "a clear that never reaches the server shows its error", reply: () => Promise.reject(new Error("Failed to fetch")), error: "Failed to fetch" },
+  { name: "a rejected request that is not an Error shows the fallback", reply: () => Promise.reject("offline"), error: "Shelfcheck could not clear the Plex scan cache." },
 ]) {
   test(`Plex whole Clear cache: ${failure.name} and keeps the report`, async (t) => {
     const page = await renderPlex(t, failure.reply);
@@ -104,7 +104,7 @@ for (const failure of [
     assert.equal(page.confirmButton()?.disabled, false, "the confirmation stays open and usable");
     assert.equal(page.confirmButton()?.textContent, "Clear cache");
     await page.click("Close");
-    assert.match(page.errorText(), new RegExp(failure.error));
+    assert.ok(page.errorText().includes(failure.error), page.errorText());
     assert.deepEqual(page.shownTitles(), ["Example Show", "Other Show"]);
   });
 }
@@ -134,6 +134,11 @@ test("Plex show Clear cache clears only that show's cache key and closes the sho
   assert.deepEqual(page.shownTitles(), ["Example Show", "Other Show"], "the report stays");
   await page.click("Plex preferences");
   assert.equal(page.cacheStatus(), "Cached results for 1 show");
+  await page.click("Close");
+  await page.click("Other Show");
+  await page.click("Clear show's cache");
+  await page.click("Plex preferences");
+  assert.equal(page.cacheStatus(), "Cached results for 1 show", "Example Show's cache key survives");
 });
 
 test("Plex show Clear cache says when the show was not cached", async (t) => {
@@ -147,6 +152,7 @@ for (const failure of [
   { name: "a refused clear shows the server's error", reply: () => Promise.resolve(Response.json({ error: "Plex scan is running." }, { status: 409 })), error: "Plex scan is running." },
   { name: "a refused clear without an error shows the fallback", reply: () => Promise.resolve(new Response("nope", { status: 500 })), error: "Shelfcheck could not clear Example Show's cache." },
   { name: "a clear that never reaches the server shows its error", reply: () => Promise.reject(new Error("Failed to fetch")), error: "Failed to fetch" },
+  { name: "a rejected request that is not an Error shows the fallback", reply: () => Promise.reject("offline"), error: "Shelfcheck could not clear Example Show's cache." },
 ]) {
   test(`Plex show Clear cache: ${failure.name} and keeps the cache`, async (t) => {
     const page = await renderPlex(t, failure.reply);
@@ -154,25 +160,9 @@ for (const failure of [
     await page.click("Clear show's cache");
     assert.equal(page.showMenuOpen(), false);
     assert.deepEqual(page.messages(), []);
-    assert.match(page.errorText(), new RegExp(failure.error));
+    assert.ok(page.errorText().includes(failure.error), page.errorText());
     assert.deepEqual(page.shownTitles(), ["Example Show", "Other Show"]);
     await page.click("Plex preferences");
     assert.equal(page.cacheStatus(), "Cached results for 2 shows");
   });
 }
-
-test("Plex show Clear cache reports a rejected request that is not an Error with the fallback", async (t) => {
-  const page = await renderPlex(t, () => Promise.reject("offline"));
-  await page.click("Example Show");
-  await page.click("Clear show's cache");
-  assert.match(page.errorText(), /Shelfcheck could not clear Example Show's cache\./);
-});
-
-test("Plex whole Clear cache reports a rejected request that is not an Error with the fallback", async (t) => {
-  const page = await renderPlex(t, () => Promise.reject("offline"));
-  await page.click("Plex preferences");
-  await page.click("Clear scan cache");
-  await page.confirmClear();
-  await page.click("Close");
-  assert.match(page.errorText(), /Shelfcheck could not clear the Plex scan cache\./);
-});

@@ -136,6 +136,11 @@ test("Trakt show Clear cache clears only that show's cache key and closes the sh
   assert.deepEqual(page.shownTitles(), ["Alpha Show", "Bravo Show"], "the results stay");
   await page.click("Trakt settings");
   assert.equal(page.cacheStatus(), "Cached results for 1 show");
+  await page.click("Close");
+  await page.click("Bravo Show");
+  await page.click("Clear show's cache");
+  await page.click("Trakt settings");
+  assert.equal(page.cacheStatus(), "Cached results for 1 show", "Alpha Show's cache key survives");
 });
 
 test("Trakt show Clear cache says when the show was not cached", async (t) => {

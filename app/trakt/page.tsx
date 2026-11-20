@@ -19,6 +19,7 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
+import { useMenuClosing } from "@/app/hooks/use-menu-closing";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodeTraktManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
@@ -196,32 +197,11 @@ export default function Home() {
     };
   }, [abortScanPoll, pollServerScan]);
 
-  useEffect(() => {
-    if (!sortMenuOpen && openShowMenu === null && !ignoredManagerOpen) return;
-
-    const closeMenusOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-
-      if (sortMenuOpen && !target.closest('[data-menu-root="sort"]')) setSortMenuOpen(false);
-      if (openShowMenu !== null && !target.closest(`[data-show-menu-id="${openShowMenu}"]`)) setOpenShowMenu(null);
-      if (ignoredManagerOpen && !target.closest('[data-menu-root="ignored"]')) setIgnoredManagerOpen(false);
-    };
-    const closeMenusOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setSortMenuOpen(false);
-      setOpenShowMenu(null);
-      setSeasonIgnoreShow(null);
-      setIgnoredManagerOpen(false);
-    };
-
-    document.addEventListener("pointerdown", closeMenusOnOutsidePointer);
-    document.addEventListener("keydown", closeMenusOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeMenusOnOutsidePointer);
-      document.removeEventListener("keydown", closeMenusOnEscape);
-    };
-  }, [ignoredManagerOpen, openShowMenu, sortMenuOpen]);
+  useMenuClosing([
+    { open: sortMenuOpen, isInside: (target) => target.closest('[data-menu-root="sort"]') !== null, close: () => setSortMenuOpen(false) },
+    { open: openShowMenu !== null, isInside: (target) => target.closest(`[data-show-menu-id="${openShowMenu}"]`) !== null, close: () => setOpenShowMenu(null) },
+    { open: ignoredManagerOpen, isInside: (target) => target.closest('[data-menu-root="ignored"]') !== null, close: () => setIgnoredManagerOpen(false) },
+  ], [() => setSeasonIgnoreShow(null)]);
 
   // Saves a settings patch. On a rejected save, onRejected runs before the error shows.
   function syncServerState(patch: Partial<ServerState>, onRejected?: () => Promise<void>) {

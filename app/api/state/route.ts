@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
  * report, Resume point or options are first saved there is no state, even when a
  * scan status is.
  */
-function traktState() {
+function stateResponse() {
   const saved = savedScanState("trakt").snapshot();
   if (!saved?.updatedAt) return { state: null, updatedAt: null };
   return {
@@ -27,7 +27,7 @@ function traktState() {
 
 export async function GET() {
   try {
-    return Response.json(traktState(), { headers: { "Cache-Control": "private, no-store" } });
+    return Response.json(stateResponse(), { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Shelfcheck state could not be loaded." }, { status: 500, headers: { "Cache-Control": "private, no-store" } });
   }

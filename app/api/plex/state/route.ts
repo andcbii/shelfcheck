@@ -1,6 +1,6 @@
 import { parsePlexPreferences, parsePlexPreferencesPatch, type PlexPreferences } from "@/lib/preferences";
 import { activeIgnores } from "@/lib/ignored-shows";
-import { applyIgnoreReportMissingCleanup, plexSavedState, type IgnoreScope } from "@/lib/plex-scan";
+import { applyIgnoreReportMissingCleanup, plexSavedState, readPlexPreferences, type IgnoreScope } from "@/lib/plex-scan";
 import { CoverageError } from "@/lib/manual-coverage";
 
 export const runtime = "nodejs";
@@ -10,7 +10,7 @@ const headers = { "Cache-Control": "private, no-store" };
 
 export async function GET() {
   try {
-    return Response.json({ settings: parsePlexPreferences(plexSavedState.options.read()) }, { headers });
+    return Response.json({ settings: readPlexPreferences() }, { headers });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Plex preferences could not be loaded." }, { status: 500, headers });
   }

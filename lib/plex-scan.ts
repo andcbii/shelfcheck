@@ -65,9 +65,14 @@ const CACHE_VERSION = PLEX_CACHE_VERSION;
 
 /**
  * The Plex saved scan state. Its options are the Plex Settings and Ignore
- * Preferences together, stored unparsed; callers parse them with parsePlexPreferences.
+ * Preferences together, stored unparsed; readPlexPreferences reads them parsed.
  */
 export const plexSavedState = savedScanState<PlexReport, PlexCheckpoint, PlexScanStatus, Record<string, unknown>>("plex");
+
+/** The saved Plex Settings and Ignore Preferences, parsed. */
+export function readPlexPreferences() {
+  return parsePlexPreferences(plexSavedState.options.read());
+}
 
 /**
  * The Plex scan mode's adapter to the scan run lifecycle: its status and
@@ -845,7 +850,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
 function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   let coverageRevision = coverageState().revision;
   let mappings = listCoverageMappings();
-  const settings = parsePlexPreferences(plexSavedState.options.read());
+  const settings = readPlexPreferences();
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
   let finishIgnoreTracking: (() => void) | undefined;
   return scanRuns.run(owner, plexScanMode, {
@@ -1473,7 +1478,7 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
 export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
   const { owner } = scanRuns.start("plex", (runOwner) => {
     if (targetRatingKey) {
-      const settings = parsePlexPreferences(plexSavedState.options.read());
+      const settings = readPlexPreferences();
       if (!plexReportCacheIsUsable(getPlexReport(), CACHE_VERSION, settings.autoCompoundEpisodes !== false)) {
         throw new Error("Run a full Plex search before force-checking one show because the scan settings or cache format changed.");
       }
@@ -1579,7 +1584,7 @@ export function requestCatalogueRecheck(identity: string, provider: CataloguePro
 }
 async function recheckCatalogueSelection(identity: string, provider: CatalogueProvider) {
   const inputs=readPlexInputs(), prior=getPlexReport();
-  const settings=parsePlexPreferences(plexSavedState.options.read());
+  const settings=readPlexPreferences();
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const saved=inputs.comparisons[identity];
   // Persist the obligation first: the next scan downloads the newly preferred series.
@@ -1601,7 +1606,7 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
 }
 async function recheckCoverage(impact: CoverageImpact) {
   const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
-  const settings=parsePlexPreferences(plexSavedState.options.read());
+  const settings=readPlexPreferences();
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {

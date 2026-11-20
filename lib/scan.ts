@@ -27,7 +27,7 @@ export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersi
 
 const TRAKT = "https://api.trakt.tv";
 /** The Trakt saved scan state; its options are the Trakt Settings and Ignore Preferences. */
-const traktState = () => savedScanState<ScanReport, TraktResumePoint, ScanRunStatus>("trakt");
+const traktSavedState = savedScanState<ScanReport, TraktResumePoint, ScanRunStatus>("trakt");
 /**
  * The Trakt scan mode's adapter to the scan run lifecycle: its status and
  * Resume point stores and Interrupted scan wording. Its lifecycle events keep
@@ -38,12 +38,10 @@ const traktScanMode: ScanRunMode<ScanRunStatus, TraktResumePoint> = {
   kind: "trakt",
   eventPrefix: "",
   failureMessage: "The scan failed.",
-  status: { read: () => traktState().status.read(), write: (status) => traktState().status.write(status) },
+  status: traktSavedState.status,
   interruptedError: () => "The scan was interrupted by a server restart. Start it again to resume.",
   resumePoint: {
-    read: () => traktState().resumePoint.read(),
-    write: (checkpoint) => traktState().resumePoint.write(checkpoint),
-    clear: () => traktState().resumePoint.clear(),
+    ...traktSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
     discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, airingGraceDays: checkpoint.airingGraceDays, reason: "expired-or-incompatible" }),
     // checkpoint.saved keeps its pre-lifecycle reasons: every save names one, and a failure save is "error".
@@ -145,8 +143,8 @@ async function traktAll<T>(trakt: ProviderAuth, path: string): Promise<T[]> {
  * Resume point, so the next full run rechecks it.
  */
 function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
-  const state = traktState().options.read();
-  const savedReport = traktState().report.read();
+  const state = traktSavedState.options.read();
+  const savedReport = traktSavedState.report.read();
   let finishIgnoreTracking: (() => void) | undefined;
   return scanRuns.run(owner, traktScanMode, {
     fullRun: !targetTraktId,
@@ -315,7 +313,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     const finishedAt = new Date().toISOString();
     run.complete({
       // The report and the cleared Resume point are written together.
-      commit: () => traktState().commitReport(report),
+      commit: () => traktSavedState.commitReport(report),
       processed: candidates.length,
       total: candidates.length,
       finishedAt,
@@ -349,7 +347,7 @@ export function startScan(force = false, targetTraktId?: number): ScanRunStatus 
 export function clearScanCache(traktId?: number): { cleared: number } {
   if (traktId !== undefined && (!Number.isInteger(traktId) || traktId <= 0)) throw new Error("A positive Trakt show ID is required.");
   if (scanRuns.isActive("trakt")) throw new Error("Wait for the current scan to finish before clearing the cache.");
-  const store = traktState();
+  const store = traktSavedState;
   const report = store.report.read();
   const checkpoint = store.resumePoint.read();
   if (traktId !== undefined) {

@@ -1,5 +1,5 @@
 import { catalogueUseExplanation } from "@/lib/catalogue-description";
-import { chooseAvailableCatalogue, chooseSavedCatalogue, multipleIdUse, savedCatalogueUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
+import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
@@ -221,9 +221,29 @@ async function resolveProvider<P extends CataloguePayloads, K extends CatalogueP
   // A Plex-reported ID always wins: a series is derived only for a provider Plex reports none for.
   if (!providerRequest.candidates.length)
     return (provider === "tvdb" ? deriveTvdb(request, resolved.tmdb, source) : deriveTmdb(request, identities.tvdb, source)) as Promise<ProviderResolution<P[K]>>;
-  if (!severalCandidates(providerRequest) || preferredId === undefined)
-    throw new Error(`The comparison catalogue resolver does not yet resolve a ${PROVIDER_NAME[provider]} provider with one Plex candidate.`);
-  return chooseAmongCandidates(provider, preferredId, request, identities, source);
+  const preferred = preferredId ?? Math.min(...providerRequest.candidates);
+  return severalCandidates(providerRequest)
+    ? chooseAmongCandidates(provider, preferred, request, identities, source)
+    : singleIdCatalogue(provider, preferred, request, identities, source);
+}
+
+/**
+ * A provider with one Plex ID (ADR-0003): its catalogue loads under the single-catalogue reuse policy,
+ * and after a failed lookup its saved catalogue stays in use at any age. Any successful download
+ * clears an open obligation, since the one ID is the preferred catalogue.
+ */
+async function singleIdCatalogue<P extends CataloguePayloads, K extends CatalogueProvider>(provider: K, id: number, request: ComparisonCatalogueRequest, identities: Record<CatalogueProvider, number | undefined>, source: ComparisonCatalogueSource<P>): Promise<ProviderResolution<P[K]>> {
+  const providerRequest = request[provider];
+  const load = await loadDerived(source, provider, id, providerRequest.refreshObligation);
+  if (load.outcome !== "failed") return {
+    identity: load.id, lookupSource: providerRequest.lookupSource, catalogue: comparedFrom(load, load.outcome),
+    use: { action: "set", use: singleIdUse(load.id, true, undefined, load.downloadedAt) },
+    obligation: loadedObligation(providerRequest, load.outcome), issues: catalogueIssues(provider, request, identities).resolvedIssues,
+  };
+  // Shares the derived series' failure: the saved catalogue at any age, else unavailable.
+  const saved = source.savedCatalogue(provider, id);
+  const use: CatalogueUseProposal = { action: "set", use: failedSingleIdUse(id, saved?.downloadedAt, request.resolvedAt) };
+  return derivedFailure(provider, request, { ...identities, [provider]: id }, load, { kind: provider === "tmdb" ? "show" : "series", id }, providerRequest.lookupSource, saved, use);
 }
 
 /** A provider's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs, and their values in today's shape. */

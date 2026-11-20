@@ -42,6 +42,8 @@ async function fixture(t: TestContext) {
   const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
   const tvdb: Record<number,{episodes:number;fail?:boolean}> = {1:{episodes:1},2:{episodes:1},3:{episodes:1}};
   let tmdbChanges: number[] = [];
+  /** When set, TVDB sign-in is refused. */
+  let tvdbLoginFails = false;
   const requests: string[] = [];
   /** TMDB's find answer for each TVDB series: the TMDB series it names, or a failed request. Unlisted series name none. */
   const find: Record<number,{tmdb?:number;fail?:boolean}> = {};
@@ -62,7 +64,7 @@ async function fixture(t: TestContext) {
       const key = u.pathname.match(/^\/library\/metadata\/(\d+)$/)?.[1];
       return Response.json({MediaContainer:{Metadata:shows.filter(show=>show.ratingKey === key)}});
     }
-    if(u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
+    if(u.pathname === "/v4/login") return tvdbLoginFails ? Response.json({},{status:401}) : Response.json({data:{token:"test"}});
     if(u.pathname === "/3/tv/changes") return Response.json({results:tmdbChanges.map(id=>({id})),total_pages:1});
     if(u.pathname === "/v4/updates") return Response.json({data:[]});
     const tmdbShow = u.pathname.match(/^\/3\/tv\/(\d+)(\/season\/1)?$/);
@@ -92,6 +94,7 @@ async function fixture(t: TestContext) {
   return {
     plex, tmdb, tvdb, find, timeline, identity, requests, heldTvdb,
     setSecond(value: typeof second) { second = value; },
+    failTvdbLogin(value: boolean) { tvdbLoginFails = value; },
     changes(ids: number[]) { tmdbChanges = ids; },
     at(value: string) { t.mock.timers.setTime(Date.parse(value)); },
     restart() { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase; },
@@ -735,6 +738,25 @@ test("a show whose TMDB record 404s and whose TVDB catalogue works leaves Unmatc
   const issues = await f.issues();
   assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"TMDB keeps its Scan Issues entry");
   assert.ok(!issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison ran");
+});
+
+test("an Unmatched show's own entries are hidden from Scan Issues while a TVDB sign-in failure it shares with a Partially matched show stays visible with both impacts", async t => {
+  const f = await fixture(t);
+  f.setSecond({tmdb:12,tvdb:2});
+  f.tmdb[10].fail = true; f.failTvdbLogin(true);
+  await f.run();
+  const unmatched = f.identity, partial = "ratingKey:2";
+  assert.deepEqual(unmatchedKeys(),[unmatched],"Scooby has no usable catalogue; Other compares TMDB");
+  assert.ok((await f.issues()).some(issue=>issue.id === `catalogue-refresh:TMDB:${unmatched}`),"hiding deletes no Coverage Issue");
+
+  const { issues, counts } = reportData.getReportData();
+  const shown = issues.map(issue=>issue.id);
+  for (const id of shown) assert.ok(!id.endsWith(`:${unmatched}`),`${id} is the Unmatched show's own entry`);
+  const signIn = issues.find(issue=>issue.id === "provider-authentication:TVDB");
+  assert.ok(signIn,"the shared sign-in failure stays visible");
+  assert.ok(signIn.impacts?.some(impact=>impact.startsWith("Scooby: ")),"with the Unmatched show's impact");
+  assert.ok(signIn.impacts?.some(impact=>impact.startsWith("Other: ")),"and the Partially matched show's impact");
+  assert.equal(counts.issueCount,issues.length,"the Scan Issues count matches what is shown");
 });
 
 test("a scan never republishes an earlier result's provider status", async t => {

@@ -32,6 +32,11 @@
   including for each ID listed in a several-ID entry. Shelfcheck keeps this
   count per provider series ID across restarts and Clear cache; only a
   complete catalogue download resets it.
+- Scan Issues no longer repeats a show listed in Unmatched Shows: its own
+  catalogue refresh and comparison entries are hidden there, since its
+  Unmatched Shows row gives each provider's cause, and the Scan Issues count
+  matches the entries shown. Library-wide causes it shares with other shows,
+  such as a TVDB sign-in failure, stay listed with every show they affect.
 - A show whose preferred catalogue cannot be loaded no longer downloads its
   fallback catalogue again on every Plex scan. The preferred catalogue is
   still retried on every full scan; the fallback is downloaded again only when

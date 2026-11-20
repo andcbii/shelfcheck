@@ -3,14 +3,13 @@ import type { TraktResumePoint } from "@/lib/scan";
 
 export type ScanCacheInputs = {
   deep: boolean;
-  gracePeriodChanged: boolean;
   cached: boolean;
   collectionChanged: boolean;
   airedChanged: boolean;
   traktUpdated: boolean;
 };
 
-export type ScanReason = "new" | "collection-changed" | "aired-changed" | "trakt-updated" | "settings-changed" | "forced-show-check";
+export type ScanReason = "new" | "collection-changed" | "aired-changed" | "trakt-updated" | "forced-show-check";
 
 type CollectedShow = {
   show: { aired_episodes?: number };
@@ -37,7 +36,6 @@ export function collectedEpisodeCount(item: CollectedShow): number {
 }
 
 export function scanReason(inputs: ScanCacheInputs): ScanReason | null {
-  if (inputs.gracePeriodChanged) return "settings-changed";
   if (!inputs.cached) return "new";
   if (inputs.collectionChanged) return "collection-changed";
   if (inputs.airedChanged) return "aired-changed";
@@ -64,12 +62,13 @@ export const TRAKT_RESUME_POINT_VERSION = 2;
 
 /**
  * Whether a full Trakt Scan run may resume from a stored Resume point: its
- * format version and normalized airing grace period match this run's, and its
- * `savedAt` parses, is not in the future and is under 6 hours old. Exactly 6
- * hours old is unusable. The stored value is checked field by field, so a
- * malformed one is rejected rather than trusted.
+ * format version matches this run's, and its `savedAt` parses, is not in the
+ * future and is under 6 hours old. Exactly 6 hours old is unusable. The
+ * Air-date delay plays no part: the page applies it as it draws. The stored
+ * value is checked field by field, so a malformed one is rejected rather than
+ * trusted.
  */
-export function traktResumePointIsUsable(point: TraktResumePoint | null | undefined, airingGraceDays: number, now: number): boolean {
-  if (point?.resumePointVersion !== TRAKT_RESUME_POINT_VERSION || point.airingGraceDays !== airingGraceDays) return false;
+export function traktResumePointIsUsable(point: TraktResumePoint | null | undefined, now: number): boolean {
+  if (point?.resumePointVersion !== TRAKT_RESUME_POINT_VERSION) return false;
   return resumePointIsFresh(point.savedAt, now, { rejectFuture: true });
 }

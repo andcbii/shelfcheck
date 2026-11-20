@@ -21,7 +21,7 @@ type ShowScanState = {
   lastCheckedAt: string;
 };
 type ScanCache = Record<string, ShowScanState>;
-type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache; airingGraceDays?: number };
+type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; activity?: string; scanCache?: ScanCache };
 /** A full-run Resume point: the report so far, plus when it was saved and its format version. */
 export type TraktResumePoint = ScanReport & { savedAt?: string; resumePointVersion?: number };
 
@@ -43,7 +43,7 @@ const traktScanMode: ScanRunMode<ScanRunStatus, TraktResumePoint> = {
   resumePoint: {
     ...traktSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ shows: checkpoint.shows?.length || 0, cacheEntries: Object.keys(checkpoint.scanCache || {}).length }),
-    discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, airingGraceDays: checkpoint.airingGraceDays, reason: "expired-or-incompatible" }),
+    discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, resumePointVersion: checkpoint.resumePointVersion, reason: "expired-or-incompatible" }),
     // checkpoint.saved keeps its pre-lifecycle reasons: every save names one, and a failure save is "error".
     savedReason: (reason) => (reason === "failure" ? "error" : reason),
   },
@@ -140,9 +140,8 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     },
   }, async (run) => {
     const { startedAt, logger, activeWork } = run;
-    const airingGraceDays = gracePeriod(state.airingGraceDays);
     // An unusable Resume point is discarded and cleared; the saved report and its scan cache are the fallback.
-    const { usable: checkpoint } = run.resumePoint.load((point) => traktResumePointIsUsable(point, airingGraceDays, Date.now()));
+    const { usable: checkpoint } = run.resumePoint.load((point) => traktResumePointIsUsable(point, Date.now()));
     // The run's Trakt login: read once after the Resume point is judged, refreshed before use when it is about to expire.
     const trakt = await TraktRunCredentials.open();
     if (!trakt) throw new Error("Trakt is not configured.");
@@ -150,7 +149,6 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
     const priorShows = prior?.shows || [];
     const priorMissing = prior?.missing || [];
     const priorCache = compactCache(prior?.scanCache);
-    const gracePeriodChanged = airingGraceDays !== gracePeriod(prior?.airingGraceDays);
     const downloadedAll = await traktAll<CollectionShow>(trakt, "/sync/collection/shows?extended=full,images");
     const ignoredIds = ignoredTraktIds(state.ignoredShows, Date.parse(startedAt));
     const downloaded = downloadedAll.filter((item) => !ignoredIds.has(item.show.ids.trakt));
@@ -193,7 +191,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
       const collectionChanged = freshFingerprints[id] !== cached?.collectionFingerprint;
       const airedChanged = freshAiredEpisodes[id] !== cached?.airedEpisodes;
       const traktUpdated = freshTraktUpdatedAt[id] !== (cached?.traktUpdatedAt || "");
-      const reason = targetTraktId ? "forced-show-check" : scanReason({ deep: force, gracePeriodChanged, cached: Boolean(cached), collectionChanged, airedChanged, traktUpdated });
+      const reason = targetTraktId ? "forced-show-check" : scanReason({ deep: force, cached: Boolean(cached), collectionChanged, airedChanged, traktUpdated });
       if (reason) queue.push({ item, reason });
       else {
         results[id] = previousResults.get(item.show.ids.trakt) || [];
@@ -210,13 +208,12 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
       collectionChanged: queue.filter((entry) => entry.reason === "collection-changed").length,
       airedChanged: queue.filter((entry) => entry.reason === "aired-changed").length,
       traktUpdated: queue.filter((entry) => entry.reason === "trakt-updated").length,
-      settingsChanged: queue.filter((entry) => entry.reason === "settings-changed").length,
     });
     run.progress(processed, candidates.length);
     run.resumePoint.startIntervals();
     // The Resume point holds the completed shows' results and cache entries.
     run.resumePoint.provideSnapshot((savedAt) => ({
-      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, airingGraceDays, savedAt, resumePointVersion: TRAKT_RESUME_POINT_VERSION },
+      point: { shows: library, missing: Object.values(results).flat(), lastScan: prior?.lastScan || "", scanCache, savedAt, resumePointVersion: TRAKT_RESUME_POINT_VERSION },
       details: {},
     }));
     await runTrackedWorkerPool(queue, 6, activeWork, ({ item }) => ({ key: String(item.show.ids.trakt), show: item.show.title }), async ({ item, reason }) => {
@@ -287,7 +284,7 @@ function runScan(owner: ScanRunOwner, force = false, targetTraktId?: number) {
         run.resumePoint.checkpoint();
     });
     const missing = Object.values(results).flat().sort((a, b) => a.show.title.localeCompare(b.show.title) || a.season - b.season || a.episode - b.episode);
-    const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache, airingGraceDays };
+    const report: ScanReport = { shows: library, missing, lastScan: new Date().toISOString(), scanCache };
     const finishedAt = new Date().toISOString();
     run.complete({
       // The report and the cleared Resume point are written together.

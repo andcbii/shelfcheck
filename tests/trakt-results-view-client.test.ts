@@ -28,7 +28,7 @@ const report = {
   scanCache: { "101": {}, "202": {} },
 };
 
-async function mountTrakt(t: test.TestContext, { airingGraceDays = 0 } = {}) {
+async function mountTrakt(t: test.TestContext, { airingGraceDays = 0, savedReport = report as Record<string, unknown> } = {}) {
   const requests: string[] = [];
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -36,7 +36,7 @@ async function mountTrakt(t: test.TestContext, { airingGraceDays = 0 } = {}) {
     if (url === "/api/scan-runs") return Response.json({ activeScanRun: null });
     if (url === "/api/config") return Response.json({ connected: true, applicationConfigured: true });
     if (url === "/api/state" && init?.method === "PATCH") return Response.json({});
-    if (url === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays, report: structuredClone(report) } });
+    if (url === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays, report: structuredClone(savedReport) } });
     throw new Error(`Unexpected request: ${init?.method || "GET"} ${url}`);
   };
   const { browser, container, root } = mountDom(t, { self: undefined, navigator: undefined, Element: undefined, fetch: fetcher });
@@ -89,6 +89,12 @@ test("changing the Air-date delay on the Trakt page redraws both ways with no sc
   await page.type(delay, "0");
   assert.equal(page.heading(), "4 missing episodes");
   assert.equal(scans(), before);
+});
+
+test("the Trakt page draws with the saved Air-date delay, never one an older report recorded", async (t) => {
+  const page = await mountTrakt(t, { airingGraceDays: 0, savedReport: { ...report, airingGraceDays: 30 } });
+  await page.run(() => page.clock.advanceTo(new Date(2026, 10, 21, 12)));
+  assert.equal(page.heading(), "4 missing episodes");
 });
 
 test("percent sort uses Trakt's collection count even when filtering removes episodes", async (t) => {

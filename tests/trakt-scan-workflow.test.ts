@@ -223,6 +223,15 @@ test("a Quick scan with a delay above 0 saves the same dated candidates; the ser
   assert.deepEqual(dated(await f.report()), ALL_DATED);
 });
 
+test("changing the Air-date delay does not queue cached shows for a re-check", async (t) => {
+  const f = await fixture(t);
+  assert.equal((await f.run()).status, "completed");
+  await f.settings({ airingGraceDays: 3 });
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(perShow(f.requests), [], "every cached show is reused after a delay change");
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
+});
+
 test("saved air dates survive closing and reopening the database", async (t) => {
   const f = await fixture(t);
   assert.equal((await f.run()).status, "completed");
@@ -447,12 +456,22 @@ async function seedResumePoint(f: Awaited<ReturnType<typeof fixture>>, fields: (
   return report!;
 }
 
-test("a full Trakt scan run resumes from a Resume point under 6 hours old with the current format and grace period", async (t) => {
+test("a full Trakt scan run resumes from a Resume point under 6 hours old with the current format", async (t) => {
   const f = await fixture(t);
   await seedResumePoint(f, (now) => ({ savedAt: new Date(now - 6 * HOUR + 1).toISOString() }));
   assert.equal((await f.run()).status, "completed");
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2"], "the run resumed from the Resume point");
   assert.equal(await storedResumePoint(), null, "a completed run clears its Resume point");
+});
+
+test("a current Resume point is still used after the Air-date delay changes", async (t) => {
+  const f = await fixture(t);
+  await seedResumePoint(f);
+  await f.settings({ airingGraceDays: 3 });
+  assert.equal((await f.run()).status, "completed");
+  assert.deepEqual(perShow(f.requests), [], "no show is rechecked");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2"], "the run resumed from the Resume point");
+  assert.equal(await storedResumePoint(), null);
 });
 
 for (const [name, fields] of [
@@ -462,7 +481,6 @@ for (const [name, fields] of [
   ["a Resume point whose savedAt does not parse", () => ({ savedAt: "not a date" })],
   ["a Resume point of the format before air dates were saved", () => ({ resumePointVersion: 1 })],
   ["a Resume point of another format version", () => ({ resumePointVersion: 3 })],
-  ["a Resume point of another airing grace period", () => ({ airingGraceDays: 3 })],
 ] as const) {
   test(`${name} is discarded and cleared, and the run falls back to the saved report and scan cache`, async (t) => {
     const f = await fixture(t);
@@ -521,7 +539,7 @@ test("a failed full scan run saves a Resume point of its completed shows, and th
   assert.equal((await f.run()).status, "error");
   const saved = await storedResumePoint();
   assert.equal(saved?.resumePointVersion, 2, "the format version went up when missing episodes gained air dates");
-  assert.equal(saved?.airingGraceDays, 0);
+  assert.equal("airingGraceDays" in (saved || {}), false, "the Air-date delay is not saved with it");
   assert.ok(Date.parse(saved?.savedAt || "") >= Date.parse(NOW), "it records when it was saved");
   assert.deepEqual(Object.keys(saved?.scanCache || {}).sort(), ["1", "2"], "only completed shows are saved");
   assert.deepEqual(dated(saved!), ALL_DATED.slice(0, 2));

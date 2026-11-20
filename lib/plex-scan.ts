@@ -3,7 +3,7 @@ import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssue
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
 import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
-import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, invalidateSharedTmdbCrosswalk, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { usableProviderCatalogue, readPlexInputs, savePlexCatalogue, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, invalidateSharedTmdbCrosswalk, tmdbFindRelationshipKey, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
@@ -26,9 +26,9 @@ import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
-import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, failedSingleIdUse, multipleIdUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
-import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
+import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { resolveComparisonCatalogues, unavailablePreferredImpact, type PriorSelection, type ProviderRequest } from "@/lib/comparison-catalogue-resolver";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
@@ -273,7 +273,7 @@ function responseRecords<T>(provider: ProviderName, body: unknown, field: string
 const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
 /** The saved relationship key of one TVDB episode's crosswalk request. */
 function crosswalkRelationshipKey(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
-  return crosswalk === "IMDb" ? relationshipKey("TVDB", `${TVDB}/episodes/${tvdbEpisodeId}/extended`) : crosswalk === "Trakt" ? relationshipKey("Trakt", `${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`) : relationshipKey("TMDB", `${TMDB}/find/${tvdbEpisodeId}?external_source=tvdb_id`);
+  return crosswalk === "IMDb" ? relationshipKey("TVDB", `${TVDB}/episodes/${tvdbEpisodeId}/extended`) : crosswalk === "Trakt" ? relationshipKey("Trakt", `${TRAKT}/search/tvdb/${tvdbEpisodeId}?type=episode`) : tmdbFindRelationshipKey(tvdbEpisodeId);
 }
 function readableTmdbCrosswalk(value: unknown) {
   try { responseRecords("TMDB", value, "tv_episode_results"); return true; } catch { return false; }
@@ -1363,7 +1363,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const reuseTvdbRelationships = !targetRatingKey && !stale?.tvdb && (tvdbVerifiedChanges === null || !tvdbAliases.some(id => tvdbVerifiedChanges.has(id)));
     const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
     // Another TVDB candidate's saved TMDB association is kept for an offline recheck that switches to it; this scan never reads it.
-    const otherTvdbAssociations = new Set(tvdbCandidates.filter(id => id !== tvdbId).map(id => relationshipKey("TMDB", `${TMDB}/find/${id}?external_source=tvdb_id`)));
+    const otherTvdbAssociations = new Set(tvdbCandidates.filter(id => id !== tvdbId).map(id => tmdbFindRelationshipKey(id)));
     const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([key,value]) => otherTvdbAssociations.has(key) || (value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships)));
     const checkedTmdbCrosswalks = new Set<string>();
     const retainedComparison = (saved: SavedPlexComparison) => ({...withLiveCrosswalkOutcomes(saved,relationships,checkedTmdbCrosswalks),refresh});
@@ -1594,7 +1594,7 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
   }
   if (ignored.has(identity)) return;
   try {
-    const compared=await compareAssembledShow(identity,saved,savedComparisonContext(inputs,settings,ignored),new Date().toISOString());
+    const compared=await recheckSavedShow(identity,saved,savedComparisonContext(inputs,settings,ignored),new Date().toISOString());
     const results=prior.shows.map(show=>show.ratingKey === identity ? compared.result : show);
     if (!results.some(show=>show.ratingKey === identity)) results.push(compared.result);
     plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:coverageState().revision});
@@ -1631,7 +1631,7 @@ async function recheckCoverage(impact: CoverageImpact) {
     const input=inputs.comparisons[key];
     try {
       if (!input?.complete) throw new Error("Saved show comparison inputs are missing or incomplete. Run a Plex scan to rebuild this show’s saved comparison.");
-      const compared=await compareAssembledShow(key,input,context,now);
+      const compared=await recheckSavedShow(key,input,context,now);
       const index=results.findIndex(show=>show.ratingKey===key);
       if (index>=0) results[index]=compared.result; else results.push(compared.result);
     } catch (error) {
@@ -1662,7 +1662,7 @@ function savedComparisonContext(inputs: PlexGeneratedInputs, settings: ReturnTyp
 class PendingSavedComparison extends Error {}
 
 /**
- * Choose the catalogues an offline recheck compares for one show through the comparison catalogue
+ * Choose the catalogues a cached recheck compares for one show through the comparison catalogue
  * resolver, from saved inputs only: the saved catalogue source never requests, and the recheck's
  * prior-selection history (each provider's recorded catalogue use and unresolved catalogue-refresh
  * issue) decides whether a preference has been tried. Throws `PendingSavedComparison` when saved
@@ -1671,7 +1671,7 @@ class PendingSavedComparison extends Error {}
 async function resolveSavedComparison(identity: string, saved: SavedPlexComparison, inputs: PlexGeneratedInputs, selection: ShowCatalogueSelection | undefined, now: string) {
   const history=(provider: CatalogueProvider): PriorSelection => {
     const issue=getCoverageIssue(`catalogue-refresh:${PROVIDER_NAME[provider]}:${identity}`);
-    return {recordedUse:selection?.[provider].current,...(issue ? {refreshIssue:{seriesId:issue.show?.[provider === "tmdb" ? "tmdbId" : "tvdbId"],failedAt:issue.failedAt}} : {})};
+    return {recordedUse:selection?.[provider].current,...(issue ? {refreshIssue:{seriesId:issue.show?.[PROVIDER_ID_FIELD[provider]],failedAt:issue.failedAt}} : {})};
   };
   const providerRequest=(provider: CatalogueProvider): ProviderRequest => ({
     candidates:selection?.[provider].candidates.map(candidate=>candidate.id) || [],preferredId:selection?.[provider].preferredId,
@@ -1683,19 +1683,16 @@ async function resolveSavedComparison(identity: string, saved: SavedPlexComparis
     previousComparison:{tmdbId:saved.tmdbId,tvdbId:saved.tvdbId,complete:!!saved.complete},
     tmdb:providerRequest("tmdb"),tvdb:providerRequest("tvdb"),
   },{source:savedCatalogueSource(inputs,saved)});
-  // Today's recheck reports a multiple-ID choice's problem before any other, then the rest in provider order.
-  const multipleIds=(provider: CatalogueProvider) => !!selection && hasMultipleCandidates(selection[provider]) && selection[provider].preferredId !== undefined;
-  const pending=[...PROVIDERS].sort((a,b)=>Number(multipleIds(b))-Number(multipleIds(a))).find(provider=>resolution[provider].incomplete);
-  if (pending) throw new PendingSavedComparison(resolution[pending].warning);
+  if (resolution.pendingWarning !== undefined) throw new PendingSavedComparison(resolution.pendingWarning);
   return {input:{...saved,tmdbId:resolution.tmdb.identity,tvdbId:resolution.tvdb.identity},resolution};
 }
 
 /**
- * Compare one show offline from the saved inputs `resolveSavedComparison` selects, then publish the
+ * Compare one show in a cached recheck from the saved inputs `resolveSavedComparison` selects, then publish the
  * catalogues it compared with the saved comparison and the catalogue uses, so reports and notices
  * never describe another catalogue. No request is made and no time or obligation is consumed.
  */
-async function compareAssembledShow(identity: string, saved: SavedPlexComparison, context: SavedComparisonContext, now: string) {
+async function recheckSavedShow(identity: string, saved: SavedPlexComparison, context: SavedComparisonContext, now: string) {
   const selection=readShowCatalogueSelection(identity);
   const {input,resolution}=await resolveSavedComparison(identity,saved,context.inputs,selection,now);
   const compared=await compareSavedShow(identity,input,context);

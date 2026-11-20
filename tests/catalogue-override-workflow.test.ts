@@ -294,7 +294,7 @@ test("a cached recheck reports a several-ID provider's untried preference before
   const f = await fixture(t);
   f.plex.tvdb = [1,3];
   await f.run();
-  // TMDB's one saved catalogue becomes unusable, so both providers block the offline comparison.
+  // TMDB's one saved catalogue becomes unusable, so both providers block the cached recheck.
   const tmdb = catalogues.readPlexInputs().tmdb["10"]!;
   catalogues.savePlexCatalogue("tmdb",10,{...tmdb,episodes:undefined as unknown as typeof tmdb.episodes});
 

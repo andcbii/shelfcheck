@@ -1,6 +1,6 @@
-import type { CatalogueProvider } from "@/lib/catalogue-selection";
+import { PROVIDER_NAME, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueLoad, ComparisonCatalogueSource, SavedCatalogue, SeriesAssociation } from "@/lib/comparison-catalogue-resolver";
-import { usableProviderCatalogue, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { tmdbFindRelationshipKey, usableProviderCatalogue, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 
 /** The saved catalogue records a cached recheck compares, per provider. */
 export type SavedCataloguePayloads = { tmdb: PlexGeneratedInputs["tmdb"][string]; tvdb: PlexGeneratedInputs["tvdb"][string] };
@@ -28,13 +28,13 @@ export function savedCatalogueSource(
     async loadCatalogue(provider, id) {
       const saved = savedCatalogue(provider, id);
       if (saved) return { outcome: "reused", ...saved };
-      return { outcome: "failed", error: new Error(`Saved ${provider === "tmdb" ? "TMDB" : "TVDB"} catalogue ${id} is missing or incomplete.`) } satisfies CatalogueLoad<never>;
+      return { outcome: "failed", error: new Error(`Saved ${PROVIDER_NAME[provider]} catalogue ${id} is missing or incomplete.`) } satisfies CatalogueLoad<never>;
     },
     savedCatalogue,
     savedRecordDownloadedAt: (provider, id) => record(provider, id)?.downloadedAt,
     /** From saved evidence only: a mandatory association cannot be requested, so it is missing. */
     async tmdbSeriesForTvdb(tvdbId, { mandatory }): Promise<SeriesAssociation> {
-      const saved = mandatory ? undefined : comparison.relationships[tmdbFindRelationship(tvdbId)];
+      const saved = mandatory ? undefined : comparison.relationships[tmdbFindRelationshipKey(tvdbId)];
       if (!saved) return { outcome: "missing" };
       // As the scan reads it: TMDB's first TV result, and a saved answer naming none is a valid empty one.
       const id = (saved.value as { tv_results?: { id?: unknown }[] } | null)?.tv_results?.[0]?.id;
@@ -42,6 +42,3 @@ export function savedCatalogueSource(
     },
   };
 }
-
-/** The relationship record key a scan saves TMDB's TVDB ID lookup under. */
-const tmdbFindRelationship = (tvdbId: number) => `TMDB:https://api.themoviedb.org/3/find/${tvdbId}?external_source=tvdb_id`;

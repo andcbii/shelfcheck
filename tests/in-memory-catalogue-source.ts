@@ -27,14 +27,18 @@ export function inMemoryCatalogueSource(options: {
   tvdbOfTmdb?: Record<number, number>;
   /** TMDB's series association for each TVDB ID; an unlisted TVDB ID's association is missing. */
   associations?: Record<number, SeriesAssociation>;
+  /** Saved association evidence, TVDB ID to TMDB series, answered without a request unless the request is mandatory. */
+  savedAssociations?: Record<number, number>;
+  /** Saved records too incomplete to compare: series ID to original download time. */
+  unusable?: Partial<Record<CatalogueProvider, Record<number, string>>>;
 }) {
   const saved: Record<CatalogueProvider, Map<number, string>> = {
     tmdb: new Map(Object.entries(options.saved?.tmdb || {}).map(([id, at]) => [Number(id), at])),
     tvdb: new Map(Object.entries(options.saved?.tvdb || {}).map(([id, at]) => [Number(id), at])),
   };
   const requests: CatalogueRequest[] = [];
-  /** The TVDB IDs whose TMDB series association was asked for, in order. */
-  const associationRequests: number[] = [];
+  /** Each TVDB ID whose TMDB series association was asked for, with whether the request was mandatory, in order. */
+  const associationRequests: { tvdbId: number; mandatory: boolean }[] = [];
   const catalogue = (provider: CatalogueProvider, id: number, downloadedAt: string): FixtureCatalogue => ({ provider, id, downloadedAt });
   const association = (provider: CatalogueProvider, id: number) => {
     const tvdbId = provider === "tmdb" ? options.tvdbOfTmdb?.[id] : undefined;
@@ -56,8 +60,13 @@ export function inMemoryCatalogueSource(options: {
       const downloadedAt = saved[provider].get(id);
       return downloadedAt === undefined ? undefined : { id, catalogue: catalogue(provider, id, downloadedAt), downloadedAt, ...association(provider, id) };
     },
-    async tmdbSeriesForTvdb(tvdbId) {
-      associationRequests.push(tvdbId);
+    savedRecordDownloadedAt(provider, id) {
+      return saved[provider].get(id) ?? options.unusable?.[provider]?.[id];
+    },
+    async tmdbSeriesForTvdb(tvdbId, settings) {
+      associationRequests.push({ tvdbId, mandatory: settings.mandatory });
+      const evidence = options.savedAssociations?.[tvdbId];
+      if (evidence !== undefined && !settings.mandatory) return { outcome: "found", id: evidence, cached: true };
       return options.associations?.[tvdbId] || { outcome: "missing" };
     },
   };

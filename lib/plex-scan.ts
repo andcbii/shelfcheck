@@ -232,7 +232,6 @@ async function traktJson<T>(path: string, traktAuth: ProviderAuth): Promise<T> {
   return checkedJson<T>(`${TRAKT}${path}`, { headers: { Accept: "application/json" } }, "Trakt", undefined, traktAuth);
 }
 
-/** The Coverage Issue impact of an unavailable preferred series, from the shared description of the catalogue in use. */
 async function getTmdbShow(tmdbId: number | undefined, tvdbId: number | undefined, token: string, resolved?: (id:number)=>void): Promise<TmdbShow | null> {
   if (tmdbId) return tmdbJson<TmdbShow>(`/tv/${tmdbId}?append_to_response=external_ids`, token);
   if (!tvdbId) return null;

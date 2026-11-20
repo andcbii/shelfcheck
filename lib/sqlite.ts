@@ -356,7 +356,9 @@ export function listPlexGeneratedInputs<T>(prefix: string): Record<string, T> {
 export function writePlexGeneratedInputs<T>(key: string, inputs: T) {
   plexInputsDatabase().prepare("INSERT INTO shelfcheck_plex_generated_inputs(cache_key,payload) VALUES(?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload").run(key, JSON.stringify(inputs));
 }
-export function deletePlexGeneratedInputs() {
-  // Scan accounting and provider verification positions survive explicit catalogue/report clearing.
-  plexInputsDatabase().exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key NOT IN ('full-scan','completed-full-scan','provider-verification','pending-safeguards')");
+/** Deletes every generated input whose key is not exactly one of `keep`; an empty `keep` deletes them all. */
+export function deletePlexGeneratedInputsExcept(keep: readonly string[]) {
+  const db = plexInputsDatabase();
+  if (!keep.length) { db.exec("DELETE FROM shelfcheck_plex_generated_inputs"); return; }
+  db.prepare(`DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key NOT IN (${keep.map(() => "?").join(",")})`).run(...keep);
 }

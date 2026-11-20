@@ -192,6 +192,11 @@ export default function Home() {
       .catch((syncError) => setError(syncError instanceof Error ? syncError.message : "Shelfcheck could not save the settings."));
   }
 
+  // Every Ignore edit (Ignore, Restore, Change duration, season save) saves through here.
+  function saveIgnoreLists(patch: Pick<ServerState, "ignoredShows" | "ignoredSeasons">) {
+    syncServerState(patch);
+  }
+
   function setDiagnostics(enabled: boolean) {
     setDebugEnabled(enabled);
     syncServerState({ diagnosticsEnabled: enabled });
@@ -261,7 +266,7 @@ export default function Home() {
     setScanCacheCount(loadedCacheKeys.current.size);
     const next = [...activeIgnores(ignoredShows).filter((item) => item.ids.trakt !== show.ids.trakt), { ...compactTraktShow(show), ...createIgnoreTiming(duration) }].sort((a, b) => a.title.localeCompare(b.title));
     setIgnoredShows(next);
-    syncServerState({ ignoredShows: next });
+    saveIgnoreLists({ ignoredShows: next });
     setShows((current) => current.filter((item) => item.show.ids.trakt !== show.ids.trakt));
     setMissing((current) => current.filter((episode) => episode.show.ids.trakt !== show.ids.trakt));
     setShowToIgnore(null);
@@ -271,13 +276,13 @@ export default function Home() {
   function restoreShow(traktId: number) {
     const next = activeIgnores(ignoredShows).filter((show) => show.ids.trakt !== traktId);
     setIgnoredShows(next);
-    syncServerState({ ignoredShows: next });
+    saveIgnoreLists({ ignoredShows: next });
   }
 
   function restoreSeasons(traktId: number) {
     const next = activeIgnores(ignoredSeasons).filter((show) => show.traktId !== traktId);
     setIgnoredSeasons(next);
-    syncServerState({ ignoredSeasons: next });
+    saveIgnoreLists({ ignoredSeasons: next });
   }
 
   function changeIgnoreDuration(key: string | number, duration: IgnoreDuration) {
@@ -287,12 +292,12 @@ export default function Home() {
       const traktId = Number(value.slice(5));
       const next = activeIgnores(ignoredShows).map((show) => show.ids.trakt === traktId ? { ...show, expiresAt: undefined, ...timing } : show);
       setIgnoredShows(next);
-      syncServerState({ ignoredShows: next });
+      saveIgnoreLists({ ignoredShows: next });
     } else if (value.startsWith("seasons|")) {
       const traktId = Number(value.slice(8));
       const next = activeIgnores(ignoredSeasons).map((show) => show.traktId === traktId ? { ...show, expiresAt: undefined, ...timing } : show);
       setIgnoredSeasons(next);
-      syncServerState({ ignoredSeasons: next });
+      saveIgnoreLists({ ignoredSeasons: next });
     }
   }
 
@@ -317,7 +322,7 @@ export default function Home() {
     if (seasonIgnoreDraft.length && isIgnoreActive(timing)) next.push({ traktId: seasonIgnoreShow.ids.trakt, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b), ...timing });
     const sorted = next.sort((a, b) => a.title.localeCompare(b.title));
     setIgnoredSeasons(sorted);
-    syncServerState({ ignoredSeasons: sorted });
+    saveIgnoreLists({ ignoredSeasons: sorted });
     setSeasonIgnoreShow(null);
   }
 

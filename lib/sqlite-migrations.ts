@@ -175,7 +175,8 @@ function columnInfo(db: DatabaseSync, table: string) {
 /**
  * An existing table this version cannot read must stop the upgrade, never be stamped
  * current. Each of today's columns must exist with the same declared type, NOT NULL and
- * primary-key position; extra columns are allowed.
+ * primary-key position. No release ever created a column today's layout lacks, and
+ * some saves insert by position, so any extra column is refused too.
  */
 function refuseIncompatibleTables(db: DatabaseSync, names: string[]) {
   for (const name of names) {
@@ -188,6 +189,8 @@ function refuseIncompatibleTables(db: DatabaseSync, names: string[]) {
       return actual.type.toUpperCase() !== type.toUpperCase() || actual.notnull !== notnull || actual.pk !== pk;
     }).map(column => column.name);
     if (changed.length) throw incompatibleTableError(`table ${name} has an incompatible ${changed.join(", ")} column${changed.length > 1 ? "s" : ""}`);
+    const extra = [...found.keys()].filter(column => !expected.some(candidate => candidate.name === column));
+    if (extra.length) throw incompatibleTableError(`table ${name} has an unexpected ${extra.join(", ")} column${extra.length > 1 ? "s" : ""}`);
   }
 }
 

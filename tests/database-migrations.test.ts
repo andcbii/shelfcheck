@@ -222,6 +222,22 @@ test("a table with today's column names but a different type, NOT NULL or key is
   inspect(file, db => assert.equal(version(db), 0));
 });
 
+test("a table with a column no Shelfcheck release created is refused and left unchanged", (t) => {
+  const file = freshDatabaseFile(t);
+  // Normal saves insert by position, so even a nullable extra column would make them fail once stamped current.
+  fixture(file, `
+    CREATE TABLE shelfcheck_coverage_evidence(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL, unexpected TEXT);
+    INSERT INTO shelfcheck_coverage_evidence VALUES(1,'{"e":1}',NULL);`);
+  const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+  assert.throws(() => sqlite.readSingleUserState(), /cannot upgrade this database: table shelfcheck_coverage_evidence has an unexpected unexpected column/);
+  assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+  inspect(file, db => {
+    assert.equal(version(db), 0);
+    assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before);
+  });
+});
+
 test("a migration failing after a real schema change rolls back everything, and a retry succeeds once", (t) => {
   const file = freshDatabaseFile(t);
   // The trigger fires on the coverage state update that follows dropping the corrections table.

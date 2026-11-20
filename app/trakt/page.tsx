@@ -100,6 +100,9 @@ export default function Home() {
   // Restoring a show does not make responses from this scan safe to reuse.
   const reportInvalidations = useRef(new Set<number>());
   const loadedCacheKeys = useRef(new Set<string>());
+  // Counts same-scan report replacements and cache clears; a new scan replaces
+  // reportInvalidations instead. Either one makes a captured report snapshot stale.
+  const reportRevision = useRef(0);
   // One generation for both Ignore lists; diagnostics and grace-period saves take none.
   const ignoreSaves = useRef(0);
   const scanRequestPending = useRef(false);
@@ -158,6 +161,7 @@ export default function Home() {
       if (state.report?.shows && state.report?.missing && state.report.lastScan && initialInvalidations === reportInvalidations.current) {
         const remoteReport = pruneClientReport(state.report, initialInvalidations);
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
+        reportRevision.current++;
         loadedCacheKeys.current = new Set(Object.keys(remoteReport.scanCache || {}));
         setScanCacheCount(loadedCacheKeys.current.size);
       }
@@ -205,8 +209,9 @@ export default function Home() {
 
   // Every Ignore edit (Ignore, Restore, Change duration, season save) saves through here.
   // A rejected save shows the Ignore lists the server saved, unless a newer Ignore
-  // edit of either list has started: that edit owns both displayed lists.
-  function saveIgnoreLists(patch: Pick<ServerState, "ignoredShows" | "ignoredSeasons">) {
+  // edit of either list has started: that edit owns both displayed lists. onRejected
+  // then sees the saved state, under the same ownership check.
+  function saveIgnoreLists(patch: Pick<ServerState, "ignoredShows" | "ignoredSeasons">, onRejected?: (saved: ServerState) => void) {
     const save = ++ignoreSaves.current;
     void fetch("/api/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
       .then(async (response) => {
@@ -217,6 +222,7 @@ export default function Home() {
         if (save === ignoreSaves.current && saved?.state && typeof saved.state === "object") {
           setIgnoredShows(savedIgnoredShows(saved.state));
           setIgnoredSeasons(Array.isArray(saved.state.ignoredSeasons) ? saved.state.ignoredSeasons : []);
+          onRejected?.(saved.state);
         }
         throw new Error("Shelfcheck could not save the settings.");
       })
@@ -242,6 +248,7 @@ export default function Home() {
       const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
       if (!response.ok) throw new Error(body.error || "Shelfcheck could not clear the scan cache.");
       loadedCacheKeys.current.clear();
+      reportRevision.current++;
       setScanCacheCount(0);
       setCacheClearConfirmOpen(false);
       setCacheMessage(`${body.cleared || 0} cached show results cleared. The next scan will rebuild them.`);
@@ -287,14 +294,33 @@ export default function Home() {
   }
 
   function ignoreShow(show: TraktShow, duration: IgnoreDuration) {
-    reportInvalidations.current.add(show.ids.trakt);
-    loadedCacheKeys.current.delete(String(show.ids.trakt));
+    const traktId = show.ids.trakt;
+    // What this apply changes, so a rejected save can undo only that.
+    const invalidations = reportInvalidations.current;
+    const revision = reportRevision.current;
+    const wasInvalidated = invalidations.has(traktId);
+    const removedShows = shows.filter((item) => item.show.ids.trakt === traktId);
+    const removedMissing = missing.filter((episode) => episode.show.ids.trakt === traktId);
+    invalidations.add(traktId);
+    const removedCacheKey = loadedCacheKeys.current.delete(String(traktId));
     setScanCacheCount(loadedCacheKeys.current.size);
     const next = applyIgnore(ignoredShows, traktShowKey, compactTraktShow(show), duration, Date.now());
     setIgnoredShows(next);
-    saveIgnoreLists({ ignoredShows: next });
-    setShows((current) => current.filter((item) => item.show.ids.trakt !== show.ids.trakt));
-    setMissing((current) => current.filter((episode) => episode.show.ids.trakt !== show.ids.trakt));
+    saveIgnoreLists({ ignoredShows: next }, (saved) => {
+      // A new scan, report reload or cache clear since the apply owns the report now.
+      if (invalidations !== reportInvalidations.current || revision !== reportRevision.current) return;
+      // The Ignore was saved despite the error: its results stay removed.
+      if (activeIgnores(savedIgnoredShows(saved)).some((rule) => rule.ids.trakt === traktId)) return;
+      if (!wasInvalidated) invalidations.delete(traktId);
+      if (removedCacheKey) {
+        loadedCacheKeys.current.add(String(traktId));
+        setScanCacheCount(loadedCacheKeys.current.size);
+      }
+      setShows((current) => current.some((item) => item.show.ids.trakt === traktId) ? current : [...current, ...removedShows]);
+      setMissing((current) => [...current, ...removedMissing.filter((episode) => !current.some((present) => present.show.ids.trakt === traktId && present.season === episode.season && present.episode === episode.episode))]);
+    });
+    setShows((current) => current.filter((item) => item.show.ids.trakt !== traktId));
+    setMissing((current) => current.filter((episode) => episode.show.ids.trakt !== traktId));
     setShowToIgnore(null);
     setOpenShowMenu(null);
   }
@@ -356,6 +382,7 @@ export default function Home() {
       const body = await response.json().catch(() => ({})) as { cleared?: number; error?: string };
       if (!response.ok) throw new Error(body.error || `Shelfcheck could not clear ${show.title}'s cache.`);
       loadedCacheKeys.current.delete(String(show.ids.trakt));
+      reportRevision.current++;
       setScanCacheCount(loadedCacheKeys.current.size);
       setCacheMessage(body.cleared ? `${show.title} will be rebuilt during the next scan.` : `${show.title} was not cached.`);
     } catch (clearError) { setError(clearError instanceof Error ? clearError.message : `Shelfcheck could not clear ${show.title}'s cache.`); }
@@ -435,6 +462,7 @@ export default function Home() {
     setShows(report.shows);
     setMissing(report.missing);
     setLastScan(report.lastScan);
+    reportRevision.current++;
     loadedCacheKeys.current = new Set(Object.keys(report.scanCache || {}));
     setScanCacheCount(loadedCacheKeys.current.size);
   }

@@ -29,6 +29,7 @@ import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelecti
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
+import { unavailablePreferredImpact } from "@/lib/comparison-catalogue-resolver";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
@@ -229,11 +230,6 @@ const savedRelationshipsOnly: ProviderAuth = {
 /** A Trakt request with the run's Trakt login, which the client refreshes once if Trakt rejects it. */
 async function traktJson<T>(path: string, traktAuth: ProviderAuth): Promise<T> {
   return checkedJson<T>(`${TRAKT}${path}`, { headers: { Accept: "application/json" } }, "Trakt", undefined, traktAuth);
-}
-
-/** The Coverage Issue impact of an unavailable preferred series, from the shared description of the catalogue in use. */
-function unavailablePreferredImpact(provider: CatalogueProvider, use: CatalogueUse) {
-  return `${catalogueUseExplanation(provider, use)} ${PROVIDER_NAME[provider]} series ${use.preferredId} is retried every scan; the preference is kept.`;
 }
 
 async function getTmdbShow(tmdbId: number | undefined, tvdbId: number | undefined, token: string, resolved?: (id:number)=>void): Promise<TmdbShow | null> {

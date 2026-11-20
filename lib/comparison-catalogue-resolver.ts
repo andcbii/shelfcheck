@@ -175,8 +175,13 @@ export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
   warnings: string[];
 } & { [K in CatalogueProvider]: ProviderResolution<P[K]> };
 
-/** One provider's progress, final once its candidate choice is: a provider-scoped patch to persist. */
-export type ProviderProgress = { provider: CatalogueProvider; obligation: RefreshObligationChange };
+/**
+ * One provider's progress, final once its candidate choice is: a provider-scoped obligation patch to
+ * persist, and the catalogue chosen for comparison, if any, which the other provider's loads may depend on.
+ */
+export type ProviderProgress<P extends CataloguePayloads = CataloguePayloads> = {
+  [K in CatalogueProvider]: { provider: K; obligation: RefreshObligationChange; catalogue?: ComparedCatalogue<P[K]> };
+}[CatalogueProvider];
 
 export type ResolverDependencies<P extends CataloguePayloads> = {
   source: ComparisonCatalogueSource<P>;
@@ -186,7 +191,7 @@ export type ResolverDependencies<P extends CataloguePayloads> = {
    * `ProgressPersistenceError`, never as a provider failure. An acknowledged patch is final: the caller
    * does not reapply or roll it back, even when the overall outcome is pending.
    */
-  onProviderResolved?: (progress: ProviderProgress) => Promise<void>;
+  onProviderResolved?: (progress: ProviderProgress<P>) => Promise<void>;
 };
 
 /** The progress sink could not persist a provider's obligation change; `cause` is the sink's rejection. */
@@ -214,7 +219,7 @@ export async function resolveComparisonCatalogues<P extends CataloguePayloads>(r
     const resolution = await resolveProvider(resolving, provider);
     resolving.identities[provider] = resolution.identity;
     try {
-      await dependencies.onProviderResolved?.({ provider, obligation: resolution.obligation });
+      await dependencies.onProviderResolved?.({ provider, obligation: resolution.obligation, ...(resolution.catalogue ? { catalogue: resolution.catalogue } : {}) } as ProviderProgress<P>);
     } catch (error) {
       throw new ProgressPersistenceError(provider, error);
     }

@@ -246,7 +246,7 @@ test("a rejecting progress sink fails the resolution as a persistence failure, n
 test("a pending outcome leaves acknowledged obligation changes as they were sent, once each", async () => {
   const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(61 * DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 10: notFound(10), 11: notFound(11) } } });
   const patches: unknown[] = [];
-  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source, onProviderResolved: async progress => { patches.push(progress); } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source, onProviderResolved: async ({ provider, obligation }) => { patches.push({ provider, obligation }); } });
 
   assert.equal(resolved.outcome, "pending");
   assert.deepEqual(patches, [{ provider: "tmdb", obligation: "set" }, { provider: "tvdb", obligation: "unchanged" }]);
@@ -440,6 +440,21 @@ test("in the TVDB-first case, TVDB's patch is acknowledged by the progress sink 
   assert.deepEqual(events, ["load tvdb 1", "load tvdb 3", "patch tvdb set", "acknowledged tvdb", "association 3", "load tmdb 50", "patch tmdb unchanged", "acknowledged tmdb"]);
 });
 
+test("the progress sink receives each provider's chosen catalogue before the other provider loads, so the second load can depend on it", async () => {
+  const { source: inner } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
+  const events: string[] = [];
+  const source: typeof inner = { ...inner, loadCatalogue: async (provider, id, settings) => { events.push(`load ${provider} ${id}`); return inner.loadCatalogue(provider, id, settings); } };
+  await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), {
+    source, onProviderResolved: async ({ provider, catalogue }) => { events.push(`${provider} chose ${catalogue ? `${catalogue.id} ${catalogue.origin}` : "nothing"}`); },
+  });
+  assert.deepEqual(events, ["load tmdb 11", "load tmdb 10", "tmdb chose 10 reused", "load tvdb 1", "tvdb chose 1 reused"]);
+
+  const unavailable = inMemoryCatalogueSource({ now: NOW, saved: { tvdb: { 1: before(30 * DAY) } }, failing: { tvdb: { 1: notFound(1), 3: notFound(3) } }, associations: { 1: { outcome: "known-empty" } } });
+  const chosen: unknown[] = [];
+  await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source: unavailable.source, onProviderResolved: async ({ provider, catalogue }) => { chosen.push([provider, catalogue?.id, catalogue?.origin]); } });
+  assert.deepEqual(chosen, [["tvdb", 1, "saved"], ["tmdb", undefined, undefined]], "TVDB first: its saved copy, then TMDB with no series");
+});
+
 test("each provider reports the provenance of its identity: Plex for a reported ID, the derivation chain for a derived one", async () => {
   const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: { 7: before(DAY) } }, failing: { tmdb: { 11: notFound(11) } }, tvdbOfTmdb: { 10: 7 } });
   const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, noTvdb), { source });
@@ -464,7 +479,7 @@ test("with TVDB chosen first and unavailable, TMDB is still derived from the pre
     failing: { tvdb: { 1: notFound(1), 3: notFound(3) } }, associations: { 1: { outcome: "found", id: 50, cached: false } },
   });
   const patches: unknown[] = [];
-  const resolved = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source, onProviderResolved: async progress => { patches.push(progress); } });
+  const resolved = await resolveComparisonCatalogues(request(noTmdb, tvdbOnly), { source, onProviderResolved: async ({ provider, obligation }) => { patches.push({ provider, obligation }); } });
 
   assert.equal(resolved.outcome, "pending");
   assert.deepEqual(associationRequests, [{ tvdbId: 1, mandatory: false }]);
@@ -659,7 +674,7 @@ test("a cached recheck derives TMDB again only for a changed TVDB series: a miss
 test("a cached recheck reports no obligation change to the progress sink, even with refresh obligations open", async () => {
   const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: tmdbSaved, tvdb: tvdbSaved } });
   const progress: unknown[] = [];
-  const resolved = await resolveComparisonCatalogues(cachedRequest({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, { ...tvdbOnly, refreshObligation: true }, {}, { tmdbId: 10, tvdbId: 1 }), { source, onProviderResolved: async patch => { progress.push(patch); } });
+  const resolved = await resolveComparisonCatalogues(cachedRequest({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, { ...tvdbOnly, refreshObligation: true }, {}, { tmdbId: 10, tvdbId: 1 }), { source, onProviderResolved: async ({ provider, obligation }) => { progress.push({ provider, obligation }); } });
   assert.equal(resolved.outcome, "comparable");
   assert.deepEqual(progress, [{ provider: "tmdb", obligation: "unchanged" }, { provider: "tvdb", obligation: "unchanged" }]);
 });

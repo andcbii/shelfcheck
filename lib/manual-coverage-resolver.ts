@@ -2,7 +2,7 @@ import { authenticateTvdb } from "@/lib/tvdb-auth";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { readPlexProviders } from "@/lib/server-config";
-import { coverageDatabase } from "@/lib/sqlite";
+import { database } from "@/lib/sqlite";
 import { CoverageError } from "@/lib/manual-coverage";
 import { ProviderClient } from "@/lib/provider-client";
 import type { CoverageMember } from "@/lib/manual-coverage-model";
@@ -105,8 +105,7 @@ async function resolveCoverageInputs(urls: unknown) {
   }
   if (new Set(members.map(m => m.provider)).size !== 2)
     throw new CoverageError("Review at least one episode from each provider.");
-  const db = coverageDatabase();
-  db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_coverage_previews(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires INTEGER NOT NULL)");
+  const db = database();
   db.prepare("DELETE FROM shelfcheck_coverage_previews WHERE expires<?").run(Date.now());
   const preview = randomUUID();
   db.prepare("INSERT INTO shelfcheck_coverage_previews VALUES(?,?,?)").run(preview, JSON.stringify(members), Date.now() + 30 * 60000);
@@ -116,8 +115,7 @@ async function resolveCoverageInputs(urls: unknown) {
 export function reviewedCoverageMembers(preview: unknown): CoverageMember[] {
   if (typeof preview !== "string")
     throw new CoverageError("Resolve and review both episode records before saving.");
-  const db = coverageDatabase();
-  db.exec("CREATE TABLE IF NOT EXISTS shelfcheck_coverage_previews(id TEXT PRIMARY KEY,payload TEXT NOT NULL,expires INTEGER NOT NULL)");
+  const db = database();
   const row = db.prepare("SELECT payload FROM shelfcheck_coverage_previews WHERE id=? AND expires>?").get(preview, Date.now()) as {
     payload: string;
   } | undefined;

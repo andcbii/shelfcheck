@@ -118,6 +118,14 @@ _Avoid_: Derived flag, inferred missing
 A Manual Match whose TMDB and TVDB sides each list two or more episodes, so neither side is a single combined episode. Shelfcheck never guesses which opposite-side episode contains a reported-missing episode, so no status is derived: each Report Missing flag affects only its own episode. A manual save must leave either no flags or at least one explicit flag on each provider side (the **both-sides-or-none rule**); derived status never satisfies it. The rule checks manual saves, including membership edits that change the mapping into this shape, and never rejects reading or comparing saved flags, so a one-sided state left by automatic cleanup stays active until the next manual save repairs or clears it.
 _Avoid_: Partial selection, guessed correspondence
 
+**Settings**:
+The choices that control how Shelfcheck runs, made in the gear menu (such as diagnostics, the airing grace period and hiding unaired episodes), and the connections to the Trakt, Plex and provider APIs.
+_Avoid_: Preferences (for these choices)
+
+**Preferences**:
+The user's own decisions about particular shows and episodes: Ignores, Manual Matches and other user-chosen matching, such as catalogue overrides.
+_Avoid_: Settings (for these decisions)
+
 **Ignore**:
 An exclusion of a show or selected seasons from missing-episode results in one search mode, either temporarily or permanently.
 _Avoid_: Dismiss, snooze

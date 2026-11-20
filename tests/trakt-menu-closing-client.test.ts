@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, createElement, StrictMode } from "react";
+import { act } from "react";
 import TraktPage from "../app/trakt/page";
-import { mountDom } from "./dom-environment";
-import { pressEscape, pressOn, watchDocumentPointerListeners } from "./menu-closing-support";
+import { pressEscape, pressOn, renderPage } from "./menu-closing-support";
 
 // These tests pin how the Trakt page closes its menus on an outside press or Escape.
 
@@ -28,31 +27,14 @@ const fetcher: typeof fetch = async (input, init) => {
 };
 
 async function renderTrakt(t: test.TestContext, strictMode = false) {
-  const { browser, container, root } = mountDom(t, { fetch: fetcher });
-  for (const [key, value] of Object.entries({ self: browser, navigator: browser.navigator, Element: browser.Element })) {
-    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-    t.after(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
-  }
-  const pointerListeners = watchDocumentPointerListeners(t);
-  await act(async () => { root.render(strictMode ? createElement(StrictMode, null, createElement(TraktPage)) : createElement(TraktPage)); });
-  async function click(label: string) {
-    const button = Array.from(container.querySelectorAll("button")).find((element) => (element.getAttribute("aria-label") || element.textContent || "").includes(label));
-    assert.ok(button, `Expected button: ${label}`);
-    await act(async () => { button.click(); });
-  }
-  const find = (selector: string) => {
-    const element = container.querySelector(selector);
-    assert.ok(element, `Expected element: ${selector}`);
-    return element;
-  };
+  const page = await renderPage(t, TraktPage, fetcher, strictMode);
   const isOpen = {
-    sort: () => container.querySelector(".sort-menu") !== null,
-    show: () => container.querySelector(".show-action-menu") !== null,
-    ignored: () => container.querySelector(".ignored-manager") !== null,
-    seasons: () => container.querySelector(".season-ignore-modal") !== null,
+    sort: page.has(".sort-menu"),
+    show: page.has(".show-action-menu"),
+    ignored: page.has(".ignored-manager"),
+    seasons: page.has(".season-ignore-modal"),
   };
-  return { container, root, click, find, isOpen, pointerListeners };
+  return { ...page, isOpen };
 }
 
 const menus = [
@@ -88,22 +70,22 @@ test("Trakt Escape closes every open menu and the season Ignore dialog", async (
   assert.deepEqual([page.isOpen.sort(), page.isOpen.show(), page.isOpen.ignored(), page.isOpen.seasons()], [false, false, false, false]);
 });
 
-test("Trakt with no menu open listens for no presses, and a press changes nothing", async (t) => {
+test("Trakt with no menu open listens for no presses or keys, and a press changes nothing", async (t) => {
   const page = await renderTrakt(t);
   const before = page.container.innerHTML;
-  assert.equal(page.pointerListeners(), 0);
+  assert.deepEqual(page.listeners(), { pointerdown: 0, keydown: 0 });
   await pressOn(page.find("footer"));
   await pressEscape();
   assert.equal(page.container.innerHTML, before);
 });
 
-test("Trakt keeps one press listener under StrictMode and none after unmounting with a menu open", async (t) => {
+test("Trakt keeps one press and one key listener under StrictMode and none after unmounting with a menu open", async (t) => {
   const page = await renderTrakt(t, true);
   await page.click("By title");
-  assert.equal(page.pointerListeners(), 1);
+  assert.deepEqual(page.listeners(), { pointerdown: 1, keydown: 1 });
   await page.click("Alpha Show");
-  assert.equal(page.pointerListeners(), 1);
+  assert.deepEqual(page.listeners(), { pointerdown: 1, keydown: 1 });
 
   await act(async () => { page.root.unmount(); });
-  assert.equal(page.pointerListeners(), 0);
+  assert.deepEqual(page.listeners(), { pointerdown: 0, keydown: 0 });
 });

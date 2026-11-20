@@ -18,12 +18,13 @@ import { IgnoreDurationModal } from "@/app/components/ignore-duration-modal";
 import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
-import { localCalendarDate, resultsView } from "@/lib/results-view";
+import { resultsView } from "@/lib/results-view";
 import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
+import { useLocalToday } from "@/app/hooks/use-local-today";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodePlexManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 
@@ -89,8 +90,7 @@ export default function PlexPage() {
   const settingsSaves = useRef(0);
   const [settings, setSettings] = useState<PlexSettings>(EMPTY_SETTINGS);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
-  // The browser's local calendar date, read once when the page opens.
-  const [today] = useState(() => localCalendarDate(new Date()));
+  const today = useLocalToday();
   const [query, setQuery] = useState("");
   const [sortField, setSortField] = useState<"title" | "percent">("title");
   const [sortAscending, setSortAscending] = useState(true);

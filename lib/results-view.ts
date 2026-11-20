@@ -79,6 +79,15 @@ export function localCalendarDate(moment: Date): CalendarDate {
   return formatCalendarDate({ year: moment.getFullYear(), month: moment.getMonth() + 1, day: moment.getDate() });
 }
 
+/**
+ * The next local calendar midnight after the moment, in the runtime's local time zone.
+ * Built from the calendar date, not by adding 24 hours, so days that daylight saving
+ * time makes 23 or 25 hours long still end at midnight.
+ */
+export function nextLocalMidnight(moment: Date): Date {
+  return new Date(moment.getFullYear(), moment.getMonth(), moment.getDate() + 1);
+}
+
 /** Returns the value when it is a real YYYY-MM-DD calendar date, otherwise undefined. */
 export function parseCalendarDate(value: unknown): CalendarDate | undefined {
   if (typeof value !== "string") return undefined;

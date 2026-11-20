@@ -593,6 +593,23 @@ test("a cached recheck keeps a single Plex ID's series last compared, pending wh
   assert.deepEqual(missing.warnings, ["Saved TMDB catalogue 12 is missing or incomplete. Run a Plex scan to download the TMDB catalogue."]);
 });
 
+test("a pending cached recheck reports a several-ID provider's warning first, then TMDB's before TVDB's", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: {}, tvdb: { 1: before(DAY) } } });
+  const severalTvdb = await resolveComparisonCatalogues(cachedRequest({ candidates: [10], preferredId: 10 }, { candidates: [1, 3], preferredId: 3 }, { tvdb: { recordedUse: { preferredId: 1, usingId: 1, state: "preferred" } } }, { tmdbId: 10, tvdbId: 1 }), { source });
+  assert.equal(severalTvdb.outcome, "pending");
+  assert.deepEqual(severalTvdb.warnings, [
+    "Saved TMDB catalogue 10 is missing or incomplete. Run a Plex scan to download the TMDB catalogue.",
+    "TVDB series 3 has no saved catalogue from the last 60 days, so it could not be compared yet. Results from the previously compared catalogue were kept.",
+  ]);
+  assert.equal(severalTvdb.pendingWarning, severalTvdb.warnings[1]);
+
+  const singleIds = await resolveComparisonCatalogues(cachedRequest({ candidates: [10], preferredId: 10 }, { candidates: [4], preferredId: 4 }, {}, { tmdbId: 10, tvdbId: 4 }), { source });
+  assert.equal(singleIds.pendingWarning, "Saved TMDB catalogue 10 is missing or incomplete. Run a Plex scan to download the TMDB catalogue.");
+
+  const comparable = await resolveComparisonCatalogues(cachedRequest({ candidates: [] }, { candidates: [1], preferredId: 1 }, {}, { tvdbId: 1 }), { source });
+  assert.equal(comparable.pendingWarning, undefined);
+});
+
 test("a cached recheck keeps a derived TVDB series while the TMDB series compared is unchanged, and derives it again from saved data when it changes", async () => {
   const saved = { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: { 7: before(DAY), 8: before(DAY) } };
   const recordedUse = { preferredId: 10, usingId: 10, state: "preferred" as const };

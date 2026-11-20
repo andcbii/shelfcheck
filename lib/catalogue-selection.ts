@@ -1,6 +1,8 @@
 export type CatalogueProvider = "tmdb" | "tvdb";
 export const PROVIDERS: readonly CatalogueProvider[] = ["tmdb", "tvdb"];
 export const PROVIDER_NAME: Record<CatalogueProvider, "TMDB" | "TVDB"> = { tmdb: "TMDB", tvdb: "TVDB" };
+/** The field a show's series ID is kept under for each provider, in saved comparisons and Coverage Issues. */
+export const PROVIDER_ID_FIELD: Record<CatalogueProvider, "tmdbId" | "tvdbId"> = { tmdb: "tmdbId", tvdb: "tvdbId" };
 
 /** Distinct series IDs in ascending numeric order. */
 export function distinctSortedIds(ids: Iterable<number>): number[] {

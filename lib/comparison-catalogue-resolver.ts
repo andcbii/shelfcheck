@@ -173,6 +173,12 @@ export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
   unavailableCauses: string[];
   /** The show's result warnings: the providers' in resolution order, then a live scan's warning that Plex reports no ID at all. */
   warnings: string[];
+  /**
+   * A pending cached recheck's one warning to report, as its comparison-inputs cause: the first
+   * provider whose series saved evidence cannot resolve, a provider choosing among several Plex IDs
+   * before the other, else TMDB before TVDB. Absent in a live scan and when nothing is pending.
+   */
+  pendingWarning?: string;
 } & { [K in CatalogueProvider]: ProviderResolution<P[K]> };
 
 /** One provider's progress, final once its candidate choice is: a provider-scoped patch to persist. */
@@ -226,12 +232,20 @@ export async function resolveComparisonCatalogues<P extends CataloguePayloads>(r
   const pending = missing(tmdb) || missing(tvdb) || noIdentity;
   const inOrder = order.map(provider => (resolving.resolved as Resolved<P>)[provider] as ProviderResolution<unknown>);
   const noPlexIds = request.context.kind === "live-scan" && noIdentity && !request.tmdb.candidates.length && !request.tvdb.candidates.length;
+  const pendingWarning = request.context.kind === "cached-recheck" ? cachedPendingWarning(request, resolving.resolved as Resolved<P>) : undefined;
   return {
     outcome: pending ? "pending" : "comparable", resolutionOrder: order, comparisonOrder: PROVIDERS,
     unavailableCauses: inOrder.flatMap(resolution => resolution.unavailableCause ? [resolution.unavailableCause] : []),
     warnings: [...inOrder.flatMap(resolution => resolution.warning ? [resolution.warning] : []), ...(noPlexIds ? [NO_PLEX_IDS_WARNING] : [])],
-    tmdb, tvdb,
+    tmdb, tvdb, ...(pendingWarning !== undefined ? { pendingWarning } : {}),
   };
+}
+
+/** A cached recheck reports a several-ID provider's problem before any other, then the rest in provider order. */
+function cachedPendingWarning(request: ComparisonCatalogueRequest, resolved: Resolved<CataloguePayloads>) {
+  const choosesAmongSeveral = (provider: CatalogueProvider) => severalCandidates(request[provider]) && request[provider].preferredId !== undefined;
+  const pending = [...PROVIDERS].sort((a, b) => Number(choosesAmongSeveral(b)) - Number(choosesAmongSeveral(a))).find(provider => resolved[provider].incomplete);
+  return pending && resolved[pending].warning;
 }
 
 type Resolved<P extends CataloguePayloads> = { [K in CatalogueProvider]: ProviderResolution<P[K]> };

@@ -289,3 +289,20 @@ test("a scan falling back to another TVDB series resolves the TMDB series of the
   assert.equal(selection.tmdb.current?.usingId,10);
   assert.equal(selection.tmdb.current?.derivedFrom,1);
 });
+
+test("a cached recheck reports a several-ID provider's untried preference before another provider's missing saved catalogue", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = [1,3];
+  await f.run();
+  // TMDB's one saved catalogue becomes unusable, so both providers block the cached recheck.
+  const tmdb = catalogues.readPlexInputs().tmdb["10"]!;
+  catalogues.savePlexCatalogue("tmdb",10,{...tmdb,episodes:undefined as unknown as typeof tmdb.episodes});
+
+  f.requests.length = 0;
+  const saved = await f.select({identity:f.identity,provider:"tvdb",seriesId:3});
+  assert.equal(saved.status,200,JSON.stringify(saved.body));
+  assert.deepEqual(f.requests,[]);
+  const show = await f.show();
+  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1],"last-good results are kept");
+  assert.match((await f.issues()).find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.cause || "",/^TVDB series 3 has no saved catalogue from the last 60 days/);
+});

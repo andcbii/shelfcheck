@@ -12,7 +12,7 @@ import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
-import { clearPlexCheckpoint, clearPlexReport, readPlexCheckpoint, readPlexReport, readPlexScanStatus, readPlexSettings, trackScanIgnores, writePlexCheckpoint, writePlexReport, writePlexScanStatus } from "@/lib/sqlite";
+import { savedScanState, trackScanIgnores } from "@/lib/sqlite";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, titleDependentTvdbEpisodeIds, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
@@ -64,6 +64,12 @@ const TRAKT = "https://api.trakt.tv";
 const CACHE_VERSION = PLEX_CACHE_VERSION;
 
 /**
+ * The Plex saved scan state. Its options are the Plex Settings and Ignore
+ * Preferences together, stored unparsed; callers parse them with parsePlexPreferences.
+ */
+export const plexSavedState = savedScanState<PlexReport, PlexCheckpoint, PlexScanStatus, Record<string, unknown>>("plex");
+
+/**
  * The Plex scan mode's adapter to the scan run lifecycle: its status and
  * Resume point stores, log event prefix and Interrupted scan wording. The
  * scan-failure Coverage Issue is raised once when an Interrupted scan is recorded.
@@ -73,13 +79,11 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   eventPrefix: "plex",
   failureMessage: "The Plex scan failed.",
   vetoedError: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.",
-  status: { read: () => readPlexScanStatus() as PlexScanStatus | null, write: writePlexScanStatus },
+  status: plexSavedState.status,
   interruptedError: (status) => `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
   onInterrupted: (status) => setCoverageIssue({id:"scan-failure",operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
   resumePoint: {
-    read: () => readPlexCheckpoint() as PlexCheckpoint | null,
-    write: writePlexCheckpoint,
-    clear: clearPlexCheckpoint,
+    ...plexSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length }),
     discardDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, cacheVersion: checkpoint.cacheVersion, reason: "expired-or-incompatible" }),
   },
@@ -841,7 +845,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
 function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   let coverageRevision = coverageState().revision;
   let mappings = listCoverageMappings();
-  const settings = parsePlexPreferences(readPlexSettings());
+  const settings = parsePlexPreferences(plexSavedState.options.read());
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
   let finishIgnoreTracking: (() => void) | undefined;
   return scanRuns.run(owner, plexScanMode, {
@@ -1399,7 +1403,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // A coverage-revision veto commits nothing and ends the run with an error status.
   run.complete({
     commit: () => {
-      writePlexReport(report);
+      plexSavedState.report.write(report);
       const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
       if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
       if (!targetRatingKey) {
@@ -1427,13 +1431,12 @@ export function getPlexScanStatus(): PlexScanStatus {
 }
 
 export function getPlexReport(): PlexReport | null {
-  const report = readPlexReport() as PlexReport | null;
-  return report;
+  return plexSavedState.report.read();
 }
 
 export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
   if (isPlexScanActive()) throw new Error("Wait for the current Plex scan to finish before clearing the cache.");
-  const report = readPlexReport() as PlexReport | null;
+  const report = plexSavedState.report.read();
   // Clearing one show marks the usable shared crosswalk evidence it saved not current, so its next lookup is
   // requested again; offline rechecks still replay it and rejections stay, so no older copy is revived.
   for (const relationship of clearPlexInputs(ratingKey)) {
@@ -1445,19 +1448,19 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
     if (report?.scanCache) {
       const remainingCache = { ...report.scanCache };
       delete remainingCache[ratingKey];
-      writePlexReport({ ...report, scanCache: remainingCache });
+      plexSavedState.report.write({ ...report, scanCache: remainingCache });
     }
-    const checkpoint = readPlexCheckpoint() as PlexCheckpoint | null;
+    const checkpoint = plexSavedState.resumePoint.read();
     const hadCheckpointCache = Boolean(checkpoint?.scanCache?.[ratingKey]);
     if (checkpoint?.scanCache) {
       const remainingCache = { ...checkpoint.scanCache };
       delete remainingCache[ratingKey];
-      writePlexCheckpoint({ ...checkpoint, scanCache: remainingCache, shows: checkpoint.shows.filter((show) => show.ratingKey !== ratingKey) });
+      plexSavedState.resumePoint.write({ ...checkpoint, scanCache: remainingCache, shows: checkpoint.shows.filter((show) => show.ratingKey !== ratingKey) });
     }
     return { cleared: hadReportCache || hadCheckpointCache ? 1 : 0 };
   }
   const cleared = Object.keys(report?.scanCache || {}).length;
-  clearPlexReport();
+  plexSavedState.clearReportAndResumePoint();
   return { cleared };
 }
 
@@ -1470,7 +1473,7 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
 export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
   const { owner } = scanRuns.start("plex", (runOwner) => {
     if (targetRatingKey) {
-      const settings = parsePlexPreferences(readPlexSettings());
+      const settings = parsePlexPreferences(plexSavedState.options.read());
       if (!plexReportCacheIsUsable(getPlexReport(), CACHE_VERSION, settings.autoCompoundEpisodes !== false)) {
         throw new Error("Run a full Plex search before force-checking one show because the scan settings or cache format changed.");
       }
@@ -1576,7 +1579,7 @@ export function requestCatalogueRecheck(identity: string, provider: CataloguePro
 }
 async function recheckCatalogueSelection(identity: string, provider: CatalogueProvider) {
   const inputs=readPlexInputs(), prior=getPlexReport();
-  const settings=parsePlexPreferences(readPlexSettings());
+  const settings=parsePlexPreferences(plexSavedState.options.read());
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const saved=inputs.comparisons[identity];
   // Persist the obligation first: the next scan downloads the newly preferred series.
@@ -1591,14 +1594,14 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
     const compared=await compareAssembledShow(identity,saved,savedComparisonContext(inputs,settings,ignored),new Date().toISOString());
     const results=prior.shows.map(show=>show.ratingKey === identity ? compared.result : show);
     if (!results.some(show=>show.ratingKey === identity)) results.push(compared.result);
-    writePlexReport({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:coverageState().revision});
+    plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:coverageState().revision});
   } catch (error) {
     pending(error instanceof PendingSavedComparison ? error.message : `The new catalogue selection could not be compared from saved inputs: ${coverageIssueCause(error)} Last-good results were kept.`);
   }
 }
 async function recheckCoverage(impact: CoverageImpact) {
   const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
-  const settings=parsePlexPreferences(readPlexSettings());
+  const settings=parsePlexPreferences(plexSavedState.options.read());
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {
@@ -1612,7 +1615,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   if (!prior || !inputs.inventory?.complete) {
     const keys=targets.size ? [...targets] : [undefined];
     for (const key of keys) setCoverageIssue({id:key ? `comparison-inputs:${key}` : "comparison-inputs:initial",operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
-    if (prior) writePlexReport({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
+    if (prior) plexSavedState.report.write({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
     completeCoverageRecheck(revision);
     return;
   }
@@ -1637,7 +1640,7 @@ async function recheckCoverage(impact: CoverageImpact) {
     }
   }
   resolveCoverageIssue("comparison-inputs:initial");
-  writePlexReport({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
+  plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
   completeCoverageRecheck(revision);
 }
 

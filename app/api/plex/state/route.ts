@@ -1,7 +1,6 @@
-import { readPlexSettings, writePlexSettings } from "@/lib/sqlite";
 import { parsePlexPreferences, parsePlexPreferencesPatch, type PlexPreferences } from "@/lib/preferences";
 import { activeIgnores } from "@/lib/ignored-shows";
-import { applyIgnoreReportMissingCleanup, type IgnoreScope } from "@/lib/plex-scan";
+import { applyIgnoreReportMissingCleanup, plexSavedState, type IgnoreScope } from "@/lib/plex-scan";
 import { CoverageError } from "@/lib/manual-coverage";
 
 export const runtime = "nodejs";
@@ -11,7 +10,7 @@ const headers = { "Cache-Control": "private, no-store" };
 
 export async function GET() {
   try {
-    return Response.json({ settings: parsePlexPreferences(readPlexSettings()) }, { headers });
+    return Response.json({ settings: parsePlexPreferences(plexSavedState.options.read()) }, { headers });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Plex preferences could not be loaded." }, { status: 500, headers });
   }
@@ -37,11 +36,13 @@ function appliedIgnoreScopes(before: PlexPreferences, after: PlexPreferences): I
 export async function PATCH(request: Request) {
   try {
     const patch = parsePlexPreferencesPatch(await request.json().catch(() => ({})));
-    const before = parsePlexPreferences(readPlexSettings());
-    const next = parsePlexPreferences({ ...readPlexSettings(), ...patch });
+    const saved = plexSavedState.options.read();
+    const before = parsePlexPreferences(saved);
+    const next = parsePlexPreferences({ ...saved, ...patch });
     // Ignore is authoritative over Report Missing: applying it deletes flags in its
-    // scope in the same transaction that saves the rule.
-    const revision = await applyIgnoreReportMissingCleanup(appliedIgnoreScopes(before, next), () => writePlexSettings(next));
+    // scope in the same transaction that saves the rule. Only the supplied fields
+    // are saved, so a Settings change leaves the saved report alone.
+    const revision = await applyIgnoreReportMissingCleanup(appliedIgnoreScopes(before, next), () => plexSavedState.options.patch(patch));
     // When cleanup changed flags, the revision tells the page to reload rechecked results.
     return Response.json({ saved: true, ...(revision === undefined ? {} : { coverageRevision: revision }) }, { headers });
   } catch (error) {

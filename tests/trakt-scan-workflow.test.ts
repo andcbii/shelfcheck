@@ -311,7 +311,7 @@ const rateLimitedResponse = (scope: AsyncResource) => scope.runInAsyncScope(() =
 const observe = async () => ({
   lock: ((await (await scanRuns.GET()).json()) as { activeScanRun: unknown }).activeScanRun,
   trakt: { status: await status(), log: await (await logs.GET()).text(), resumePoint: await storedResumePoint() },
-  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: sqlite.readPlexCheckpoint() },
+  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: sqlite.savedScanState("plex").resumePoint.read() },
 });
 
 test("a late 429 for a request of a settled Trakt scan run changes nothing in a following Trakt or Plex scan run", async (t) => {

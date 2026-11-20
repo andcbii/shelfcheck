@@ -22,7 +22,7 @@ async function fixture(t: test.TestContext) {
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   const state = {feedFailure:false,downloadFailure:false,inventoryFailure:false, ownsTvdb:false, advanceClock:0, today:[10,999], older:[] as number[],
     tvdbFeedFailure:false, failedTvdb:new Set<number>(), failedTmdb:new Set<number>(), failedInventory:new Set<string>(), failedFind:new Set<number>(),
@@ -137,7 +137,7 @@ test("a failed fifth-scan feed counts the completed scan and leaves a pending sa
   assert.equal((await f.run()).scan.status,"error");
   f.state.inventoryFailure = false;
   // Model a process ending before completion: only persisted running status remains.
-  sqlite.writePlexScanStatus({status:"running",processed:0,total:2,startedAt:"2026-11-11T11:00:00.000Z"});
+  sqlite.savedScanState("plex").status.write({status:"running",processed:0,total:2,startedAt:"2026-11-11T11:00:00.000Z"});
   const interrupted = await (await scan.GET()).json();
   assert.equal(interrupted.scan.status,"error");
   assert.ok(hasIssue(interrupted,"scan-failure"));

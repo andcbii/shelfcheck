@@ -24,7 +24,7 @@ function scanIgnoreGuards() {
 export function trackScanIgnores(mode: ScanMode, now = Date.now()): () => void {
   const ignored = mode === "trakt"
     ? [...ignoredTraktIds(readSingleUserState().state?.ignoredShows, now)].map(String)
-    : [...ignoredPlexKeys(readPlexSettings().ignoredShows, now)];
+    : [...ignoredPlexKeys(savedOptions("plex").ignoredShows, now)];
   const guard = new Set(ignored);
   scanIgnoreGuards()[mode] = guard;
   return () => {
@@ -91,18 +91,19 @@ function normalizeStoredIgnores(db: DatabaseSync) {
     }
   }
 
-  const plexRow = db.prepare("SELECT settings, report, checkpoint FROM shelfcheck_plex_state WHERE user_id = ?")
-    .get(SINGLE_USER_ID) as { settings: string; report: string | null; checkpoint: string | null } | undefined;
-  if (plexRow) {
-    const settings = parseStoredJson<Record<string, unknown>>(plexRow.settings, {});
-    const blocked = blockedShowKeys("plex", settings.ignoredShows);
-    const report = parseStoredJson<Record<string, unknown> | null>(plexRow.report, null);
-    const checkpoint = parseStoredJson<Record<string, unknown> | null>(plexRow.checkpoint, null);
-    const prunedReport = pruneIgnoredResults(report, "plex", blocked);
-    const prunedCheckpoint = pruneIgnoredResults(checkpoint, "plex", blocked);
-    if (JSON.stringify(prunedReport) !== JSON.stringify(report) || JSON.stringify(prunedCheckpoint) !== JSON.stringify(checkpoint)) {
-      db.prepare("UPDATE shelfcheck_plex_state SET report = ?, checkpoint = ? WHERE user_id = ?")
-        .run(prunedReport === null ? plexRow.report : JSON.stringify(prunedReport), prunedCheckpoint === null ? plexRow.checkpoint : JSON.stringify(prunedCheckpoint), SINGLE_USER_ID);
+  // Every mode saved in the shared saved scan state; Trakt moves there in a later migration.
+  const savedRows = db.prepare("SELECT mode, report, resume_point, options FROM shelfcheck_scan_state")
+    .all() as { mode: ScanMode; report: string | null; resume_point: string | null; options: string | null }[];
+  for (const row of savedRows) {
+    const options = parseStoredJson<Record<string, unknown>>(row.options, {});
+    const blocked = blockedShowKeys(row.mode, options.ignoredShows);
+    const report = parseStoredJson<Record<string, unknown> | null>(row.report, null);
+    const point = parseStoredJson<Record<string, unknown> | null>(row.resume_point, null);
+    const prunedReport = pruneIgnoredResults(report, row.mode, blocked);
+    const prunedPoint = pruneIgnoredResults(point, row.mode, blocked);
+    if (JSON.stringify(prunedReport) !== JSON.stringify(report) || JSON.stringify(prunedPoint) !== JSON.stringify(point)) {
+      db.prepare("UPDATE shelfcheck_scan_state SET report = ?, resume_point = ? WHERE mode = ?")
+        .run(prunedReport === null ? row.report : JSON.stringify(prunedReport), prunedPoint === null ? row.resume_point : JSON.stringify(prunedPoint), row.mode);
     }
   }
 }
@@ -194,75 +195,146 @@ export function writeSingleUserScanStatus<T extends Record<string, unknown>>(sca
     .run(SINGLE_USER_ID, JSON.stringify(scan));
 }
 
-export function readPlexScanStatus<T extends Record<string, unknown> = Record<string, unknown>>(): T | null {
-  const row = database().prepare("SELECT scan_status FROM shelfcheck_plex_state WHERE user_id = ?")
-    .get(SINGLE_USER_ID) as { scan_status: string } | undefined;
-  return row ? parseStoredJson<T | null>(row.scan_status, null) : null;
-}
+/** A mode's four saved parts, read in one statement. */
+export type SavedScanStateSnapshot<R, P, S, O> = {
+  report: R | null;
+  resumePoint: P | null;
+  status: S | null;
+  /** Null until the mode first saves its report, Resume point or options. */
+  options: O | null;
+  /** When the report, Resume point or options last changed; status writes do not move it. */
+  updatedAt: string | null;
+};
 
-export function writePlexScanStatus<T extends Record<string, unknown>>(scan: T) {
-  database().prepare(`INSERT INTO shelfcheck_plex_state (user_id, scan_status, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET scan_status = excluded.scan_status, updated_at = CURRENT_TIMESTAMP`)
-    .run(SINGLE_USER_ID, JSON.stringify(scan));
-}
+/**
+ * The saved scan state of one scan mode: its report, Resume point, scan status and
+ * options. Options are the mode's Settings and Ignore Preferences, kept together in one
+ * JSON object. Each write changes only its own part. Report and Resume point writes
+ * remove actively ignored results first; an options patch that sets ignoredShows
+ * records them for a running scan and prunes the saved report and Resume point.
+ * Operations join a transaction already open on the database instead of nesting one.
+ */
+export type SavedScanState<R, P, S, O> = {
+  report: { read(): R | null; write(report: R): void; clear(): void };
+  resumePoint: { read(): P | null; write(point: P): void; clear(): void };
+  status: { read(): S | null; write(status: S): void };
+  options: { read(): O; patch(patch: Partial<O>): void };
+  /** All four parts and the state timestamp in one statement; null when the mode has no row. */
+  snapshot(): SavedScanStateSnapshot<R, P, S, O> | null;
+  /** Saves a finished report and clears its Resume point, as one write. */
+  commitReport(report: R): void;
+  /** Clears the report and its Resume point, as one write. */
+  clearReportAndResumePoint(): void;
+};
 
-export function readPlexReport<T extends Record<string, unknown> = Record<string, unknown>>(): T | null {
-  const row = database().prepare("SELECT report FROM shelfcheck_plex_state WHERE user_id = ?")
-    .get(SINGLE_USER_ID) as { report: string | null } | undefined;
-  return parseStoredJson<T | null>(row?.report, null);
-}
+type SavedStateRow = { report: string | null; resume_point: string | null; status: string | null; options: string | null; state_updated_at: string | null };
 
-export function writePlexReport<T extends Record<string, unknown>>(report: T) {
-  const pruned = pruneIgnoredResults(report, "plex", blockedShowKeys("plex", readPlexSettings().ignoredShows));
-  database().prepare(`INSERT INTO shelfcheck_plex_state (user_id, report, scan_status, updated_at)
-    VALUES (?, ?, '{}', CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET report = excluded.report, updated_at = CURRENT_TIMESTAMP`)
-    .run(SINGLE_USER_ID, JSON.stringify(pruned));
-}
-
-export function clearPlexReport() {
-  database().prepare("UPDATE shelfcheck_plex_state SET report = NULL, checkpoint = NULL, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?")
-    .run(SINGLE_USER_ID);
-}
-
-export function readPlexCheckpoint<T extends Record<string, unknown> = Record<string, unknown>>(): T | null {
-  const row = database().prepare("SELECT checkpoint FROM shelfcheck_plex_state WHERE user_id = ?")
-    .get(SINGLE_USER_ID) as { checkpoint: string | null } | undefined;
-  return parseStoredJson<T | null>(row?.checkpoint, null);
-}
-
-export function writePlexCheckpoint<T extends Record<string, unknown>>(checkpoint: T) {
-  const pruned = pruneIgnoredResults(checkpoint, "plex", blockedShowKeys("plex", readPlexSettings().ignoredShows));
-  database().prepare(`INSERT INTO shelfcheck_plex_state (user_id, checkpoint, scan_status, updated_at)
-    VALUES (?, ?, '{}', CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET checkpoint = excluded.checkpoint, updated_at = CURRENT_TIMESTAMP`)
-    .run(SINGLE_USER_ID, JSON.stringify(pruned));
-}
-
-export function clearPlexCheckpoint() {
-  database().prepare("UPDATE shelfcheck_plex_state SET checkpoint = NULL, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?").run(SINGLE_USER_ID);
-}
-
-export function readPlexSettings<T extends Record<string, unknown> = Record<string, unknown>>(): T {
-  const row = database().prepare("SELECT settings FROM shelfcheck_plex_state WHERE user_id = ?")
-    .get(SINGLE_USER_ID) as { settings: string } | undefined;
-  return row ? parseStoredJson<T>(row.settings, {} as T) : {} as T;
-}
-
-export function writePlexSettings<T extends Record<string, unknown>>(settings: T) {
-  const ignored = ignoredPlexKeys(settings.ignoredShows);
-  recordScanIgnores("plex", ignored);
-  database().prepare(`INSERT INTO shelfcheck_plex_state (user_id, settings, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(user_id) DO UPDATE SET settings = excluded.settings, updated_at = CURRENT_TIMESTAMP`)
-    .run(SINGLE_USER_ID, JSON.stringify(settings));
-  if (blockedShowKeys("plex", settings.ignoredShows).size) {
-    const report = readPlexReport();
-    if (report) writePlexReport(report);
-    const checkpoint = readPlexCheckpoint();
-    if (checkpoint) writePlexCheckpoint(checkpoint);
+/** Run `work` inside the transaction already open, or in a new one when none is. */
+function inTransaction<T>(work: () => T): T {
+  const db = database();
+  if (db.isTransaction) return work();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = work();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    throw error;
   }
+}
+
+function savedRow(mode: ScanMode) {
+  return database().prepare("SELECT report, resume_point, status, options, state_updated_at FROM shelfcheck_scan_state WHERE mode = ?")
+    .get(mode) as SavedStateRow | undefined;
+}
+
+function savedOptions(mode: ScanMode): Record<string, unknown> {
+  const row = database().prepare("SELECT options FROM shelfcheck_scan_state WHERE mode = ?").get(mode) as { options: string | null } | undefined;
+  return parseStoredJson<Record<string, unknown>>(row?.options, {});
+}
+
+function prunedForSave(mode: ScanMode, value: unknown) {
+  return JSON.stringify(pruneIgnoredResults(value, mode, blockedShowKeys(mode, savedOptions(mode).ignoredShows)));
+}
+
+// Every statement names its columns here; callers never supply column names.
+const SAVED_STATE_SQL = {
+  report: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET report = excluded.report, state_updated_at = CURRENT_TIMESTAMP`,
+  resumePoint: `INSERT INTO shelfcheck_scan_state(mode, resume_point, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET resume_point = excluded.resume_point, state_updated_at = CURRENT_TIMESTAMP`,
+  commitReport: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET report = excluded.report, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP`,
+  status: `INSERT INTO shelfcheck_scan_state(mode, status) VALUES(?, ?)
+    ON CONFLICT(mode) DO UPDATE SET status = excluded.status`,
+  options: `INSERT INTO shelfcheck_scan_state(mode, options, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(mode) DO UPDATE SET options = excluded.options, state_updated_at = CURRENT_TIMESTAMP`,
+  clearReport: "UPDATE shelfcheck_scan_state SET report = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
+  clearResumePoint: "UPDATE shelfcheck_scan_state SET resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
+  clearBoth: "UPDATE shelfcheck_scan_state SET report = NULL, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
+} as const;
+
+/** The saved scan state store bound to one mode; the caller supplies the mode's own part types. */
+export function savedScanState<
+  R = Record<string, unknown>, P = Record<string, unknown>, S = Record<string, unknown>, O extends Record<string, unknown> = Record<string, unknown>,
+>(mode: ScanMode): SavedScanState<R, P, S, O> {
+  const run = (sql: keyof typeof SAVED_STATE_SQL, value?: string) => {
+    const statement = database().prepare(SAVED_STATE_SQL[sql]);
+    if (value === undefined) statement.run(mode);
+    else statement.run(mode, value);
+  };
+  return {
+    report: {
+      read: () => parseStoredJson<R | null>(savedRow(mode)?.report, null),
+      write: (report) => run("report", prunedForSave(mode, report)),
+      clear: () => run("clearReport"),
+    },
+    resumePoint: {
+      read: () => parseStoredJson<P | null>(savedRow(mode)?.resume_point, null),
+      write: (point) => run("resumePoint", prunedForSave(mode, point)),
+      clear: () => run("clearResumePoint"),
+    },
+    status: {
+      read: () => parseStoredJson<S | null>(savedRow(mode)?.status, null),
+      write: (status) => run("status", JSON.stringify(status)),
+    },
+    options: {
+      read: () => savedOptions(mode) as O,
+      patch: (patch) => inTransaction(() => patchOptions(mode, patch)),
+    },
+    snapshot: () => {
+      const row = savedRow(mode);
+      return row ? {
+        report: parseStoredJson<R | null>(row.report, null),
+        resumePoint: parseStoredJson<P | null>(row.resume_point, null),
+        status: parseStoredJson<S | null>(row.status, null),
+        options: row.options === null ? null : parseStoredJson<O>(row.options, {} as O),
+        updatedAt: row.state_updated_at,
+      } : null;
+    },
+    commitReport: (report) => run("commitReport", prunedForSave(mode, report)),
+    clearReportAndResumePoint: () => run("clearBoth"),
+  };
+}
+
+/**
+ * Merge the supplied option fields over the saved ones. Only a patch that sets
+ * ignoredShows touches the report and Resume point: it records the Ignores for a
+ * running scan and, while any show is blocked, removes that show's saved results.
+ */
+function patchOptions(mode: ScanMode, patch: Record<string, unknown>) {
+  const options = { ...savedOptions(mode), ...patch };
+  database().prepare(SAVED_STATE_SQL.options).run(mode, JSON.stringify(options));
+  if (!Object.prototype.hasOwnProperty.call(patch, "ignoredShows")) return;
+  recordScanIgnores(mode, mode === "trakt" ? [...ignoredTraktIds(patch.ignoredShows)].map(String) : ignoredPlexKeys(patch.ignoredShows));
+  const blocked = blockedShowKeys(mode, options.ignoredShows);
+  if (!blocked.size) return;
+  const row = savedRow(mode);
+  const report = parseStoredJson<Record<string, unknown> | null>(row?.report, null);
+  const point = parseStoredJson<Record<string, unknown> | null>(row?.resume_point, null);
+  if (report) database().prepare("UPDATE shelfcheck_scan_state SET report = ? WHERE mode = ?").run(JSON.stringify(pruneIgnoredResults(report, mode, blocked)), mode);
+  if (point) database().prepare("UPDATE shelfcheck_scan_state SET resume_point = ? WHERE mode = ?").run(JSON.stringify(pruneIgnoredResults(point, mode, blocked)), mode);
 }
 
 export function readPlexGeneratedInputs<T>(key: string): T | null {

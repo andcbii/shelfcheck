@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 // never edit one that has shipped.
 const migrations: ((db: DatabaseSync) => void)[] = [
   baselineSchema,
+  plexSavedScanState,
 ];
 
 export const SCHEMA_VERSION = migrations.length;
@@ -218,4 +219,45 @@ function retireOwnershipCorrections(db: DatabaseSync) {
   const saved = db.prepare("SELECT COUNT(*) AS count FROM shelfcheck_coverage_corrections").get() as { count: number };
   db.exec("DROP TABLE shelfcheck_coverage_corrections");
   if (saved.count) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+}
+
+// The saved scan state of every scan mode: one row per mode, created on its first save.
+// report, resume_point and status are nullable JSON. options is the mode's JSON object of
+// Settings and Ignore Preferences together, NULL until the mode first saves state.
+// state_updated_at moves with report, Resume point and options writes, never with status
+// writes, so a scan heartbeat does not change when the saved state last changed.
+const SAVED_SCAN_STATE_TABLE = `CREATE TABLE shelfcheck_scan_state(
+  mode TEXT PRIMARY KEY NOT NULL CHECK(mode IN ('trakt','plex')),
+  report TEXT,
+  resume_point TEXT,
+  status TEXT,
+  options TEXT,
+  state_updated_at TEXT
+)`;
+
+/** A legacy JSON object, or the fallback when it is missing, invalid or not an object, as its reads always did. */
+function legacyObject(payload: string | null | undefined) {
+  if (!payload) return {};
+  try {
+    const value: unknown = JSON.parse(payload);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Migration 2: move Plex to the saved scan state. Its settings become its options; its
+ * report, Resume point and scan status are discarded, so the next Plex scan is a full
+ * scan. The old Plex table is dropped. The Trakt row is created by its first save.
+ */
+function plexSavedScanState(db: DatabaseSync) {
+  db.exec(SAVED_SCAN_STATE_TABLE);
+  const legacy = db.prepare("SELECT settings, updated_at FROM shelfcheck_plex_state WHERE user_id = 'single-user'")
+    .get() as { settings: string; updated_at: string } | undefined;
+  if (legacy) {
+    db.prepare("INSERT INTO shelfcheck_scan_state(mode, options, state_updated_at) VALUES('plex', ?, ?)")
+      .run(JSON.stringify(legacyObject(legacy.settings)), legacy.updated_at);
+  }
+  db.exec("DROP TABLE shelfcheck_plex_state");
 }

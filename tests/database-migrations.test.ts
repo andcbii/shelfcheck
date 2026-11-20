@@ -17,7 +17,7 @@ const closeCached = () => { cache.__shelfcheckDatabase?.close(); delete cache.__
 const EVERY_TABLE = [
   "shelfcheck_catalogue_candidates", "shelfcheck_catalogue_overrides", "shelfcheck_catalogue_selections",
   "shelfcheck_coverage_evidence", "shelfcheck_coverage_issues", "shelfcheck_coverage_mappings", "shelfcheck_coverage_members",
-  "shelfcheck_coverage_previews", "shelfcheck_coverage_state", "shelfcheck_plex_generated_inputs", "shelfcheck_plex_state",
+  "shelfcheck_coverage_previews", "shelfcheck_coverage_state", "shelfcheck_plex_generated_inputs", "shelfcheck_scan_state",
   "shelfcheck_scan_status", "shelfcheck_states",
 ];
 
@@ -51,7 +51,7 @@ test("opening an empty data directory creates every table at the current version
   assert.equal(sqlite.readSingleUserState().state, null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 1);
+    assert.equal(version(db), 2);
     assert.deepEqual(tables(db), EVERY_TABLE);
   });
 });
@@ -90,7 +90,7 @@ function everyRow(db: DatabaseSync) {
 /** Table and trigger definitions: the logical schema. */
 const schema = (db: DatabaseSync) => db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => ({ ...row }));
 
-test("opening today's unversioned layout keeps every table and row and stamps the current version", (t) => {
+test("opening today's unversioned layout keeps every other table and row, keeps Plex Settings, and stamps the current version", (t) => {
   const file = freshDatabaseFile(t);
   fixture(file, TODAY_LAYOUT, db => {
     db.prepare("INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user',?)").run(JSON.stringify({ ignoredShows: [], diagnostics: true, report: { shows: [] } }));
@@ -108,11 +108,15 @@ test("opening today's unversioned layout keeps every table and row and stamps th
   });
   const before = inspect(file, everyRow);
 
-  assert.deepEqual(sqlite.readPlexSettings(), { libraries: ["1"] });
+  assert.deepEqual(sqlite.savedScanState("plex").options.read(), { libraries: ["1"] });
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 1);
-    assert.deepEqual(everyRow(db), before, "Every table and row is kept, including every generated input and Report Missing flag");
+    assert.equal(version(db), 2);
+    const { shelfcheck_scan_state: saved, ...rest } = everyRow(db);
+    const { shelfcheck_plex_state: legacyPlex, ...kept } = before;
+    assert.deepEqual(rest, kept, "Every other table and row is kept, including every generated input and Report Missing flag");
+    assert.deepEqual(saved, [{ mode: "plex", report: null, resume_point: null, status: null, options: "{\"libraries\":[\"1\"]}", state_updated_at: (legacyPlex[0] as { updated_at: string }).updated_at }],
+      "Plex keeps its Settings and its state timestamp; its report, Resume point and status are discarded");
   });
 });
 
@@ -131,14 +135,13 @@ test("opening an older sparse layout adds missing tables and columns without era
     INSERT INTO shelfcheck_plex_state(user_id,report,scan_status) VALUES('single-user','{"shows":[]}','{"status":"completed"}');
   `);
 
-  assert.deepEqual(sqlite.readPlexReport(), { shows: [] });
-  assert.deepEqual(sqlite.readPlexSettings(), {}, "The Plex table gains Settings with its default");
-  assert.equal(sqlite.readPlexCheckpoint(), null, "The Plex table gains a Resume point column");
+  assert.deepEqual(sqlite.savedScanState("plex").snapshot(), { report: null, resumePoint: null, status: null, options: {}, updatedAt: sqlite.savedScanState("plex").snapshot()!.updatedAt },
+    "Plex Settings missing from an older table start empty; its report and status are discarded");
   assert.deepEqual(sqlite.readSingleUserState().state, { diagnostics: true });
   assert.equal(sqlite.readSingleUserScanStatus(), null, "A missing Trakt status table is created empty");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 1);
+    assert.equal(version(db), 2);
     assert.deepEqual(tables(db), EVERY_TABLE);
     assert.deepEqual(db.prepare("SELECT provider,episode_id,mapping_id,report_missing FROM shelfcheck_coverage_members").all().map(row => ({ ...row })), [{ provider: "TMDB", episode_id: 1, mapping_id: "m", report_missing: 0 }], "Older members gain Report Missing off");
     assert.deepEqual({ ...db.prepare("SELECT revision,pending FROM shelfcheck_coverage_state").get() }, { revision: 3, pending: 0 });
@@ -162,7 +165,7 @@ test("ownership-correction retirement runs once, with today's revision and pendi
   const file = freshDatabaseFile(t);
   fixture(file, CORRECTIONS_LAYOUT);
 
-  sqlite.readPlexSettings();
+  sqlite.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
     assert.deepEqual(coverageState(db), { revision: 5, pending: 1 });
@@ -170,20 +173,20 @@ test("ownership-correction retirement runs once, with today's revision and pendi
     db.exec("UPDATE shelfcheck_coverage_state SET pending=0");
   });
 
-  sqlite.readPlexSettings();
+  sqlite.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => assert.deepEqual(coverageState(db), { revision: 5, pending: 0 }, "A later open does not retire again"));
 });
 
 test("a database from a newer Shelfcheck is refused and left untouched", (t) => {
   const file = freshDatabaseFile(t);
-  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 2;");
+  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 3;");
   const before = inspect(file, db => ({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }));
 
-  assert.throws(() => sqlite.readSingleUserState(), /schema version 2, newer than this Shelfcheck supports \(1\)/);
+  assert.throws(() => sqlite.readSingleUserState(), /schema version 3, newer than this Shelfcheck supports \(2\)/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
-    assert.equal(version(db), 2);
+    assert.equal(version(db), 3);
     assert.deepEqual({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }, before);
   });
 });
@@ -245,7 +248,7 @@ test("a migration failing after a real schema change rolls back everything, and 
     CREATE TRIGGER forced_failure BEFORE UPDATE ON shelfcheck_coverage_state BEGIN SELECT RAISE(ABORT, 'forced migration failure'); END;`);
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.readPlexSettings(), /forced migration failure/);
+  assert.throws(() => sqlite.savedScanState("plex").options.read(), /forced migration failure/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 0);
@@ -253,12 +256,12 @@ test("a migration failing after a real schema change rolls back everything, and 
     db.exec("DROP TRIGGER forced_failure");
   });
 
-  sqlite.readPlexSettings();
+  sqlite.savedScanState("plex").options.read();
   closeCached();
-  sqlite.readPlexSettings();
+  sqlite.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 1);
+    assert.equal(version(db), 2);
     assert.deepEqual(coverageState(db), { revision: 5, pending: 1 }, "The retry retires corrections exactly once");
   });
 });
@@ -305,7 +308,7 @@ test("upgrading an unversioned database first writes a complete backup, includin
     const before = { schema: schema(legacy), rows: everyRow(legacy) };
     assert.equal(before.rows.shelfcheck_states.length, 1, "The fixture's writes are committed, but only in the WAL");
 
-    sqlite.readPlexSettings();
+    sqlite.savedScanState("plex").options.read();
     closeCached();
     inspectBackup(file, db => {
       assert.equal(version(db), 0, "The backup holds the old, unversioned database");
@@ -357,12 +360,12 @@ test("a retry after a failed migration keeps the original backup, and a partial 
   writeFileSync(`${backupOf(file)}.partial`, "incomplete");
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.readPlexSettings(), /forced migration failure/);
+  assert.throws(() => sqlite.savedScanState("plex").options.read(), /forced migration failure/);
   inspectBackup(file, db => assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before, "The backup is the complete original, not the partial file"));
   const original = readFileSync(backupOf(file));
   inspect(file, db => db.exec("DROP TRIGGER forced_failure"));
 
-  sqlite.readPlexSettings();
+  sqlite.savedScanState("plex").options.read();
   closeCached();
   assert.deepEqual(readFileSync(backupOf(file)), original, "The retry keeps the original backup");
   assert.deepEqual(readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db")), [path.basename(backupOf(file))], "No second backup and no partial file");
@@ -381,7 +384,66 @@ test("no backup is written for a new database, on a later open, or beside a refu
   closeCached();
   assert.deepEqual(directoryEntries(), [], "A later open with no pending migration writes no backup");
 
-  inspect(file, db => db.exec("PRAGMA user_version = 2"));
+  inspect(file, db => db.exec("PRAGMA user_version = 3"));
   assert.throws(() => sqlite.readSingleUserState(), /newer than this Shelfcheck supports/);
   assert.deepEqual(directoryEntries(), [], "A refused newer database gets no backup");
+});
+
+// Migration 2: Plex moves to the saved scan state.
+function versionOneWithPlex(file: string, settings: string) {
+  fixture(file, `${TODAY_LAYOUT} PRAGMA user_version = 1;`, db => {
+    db.prepare("INSERT INTO shelfcheck_plex_state(user_id,report,checkpoint,scan_status,settings,updated_at) VALUES('single-user',?,?,?,?,'2026-01-02 03:04:05')")
+      .run(JSON.stringify({ shows: [{ ratingKey: "one" }] }), JSON.stringify({ shows: [], savedAt: "x" }), JSON.stringify({ status: "running", processed: 1, total: 2 }), settings);
+    db.prepare("INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user',?)").run(JSON.stringify({ diagnostics: true, report: { shows: [] } }));
+  });
+}
+
+test("upgrading Plex keeps its Settings, including unknown fields, and discards its report, Resume point and scan status", (t) => {
+  const file = freshDatabaseFile(t);
+  const settings = { ignoredShows: [{ ratingKey: "one", title: "One" }], diagnosticsEnabled: false, futureSetting: { kept: 3 } };
+  versionOneWithPlex(file, JSON.stringify(settings));
+  const traktBefore = inspect(file, db => ({ states: everyRow(db).shelfcheck_states, status: everyRow(db).shelfcheck_scan_status }));
+
+  assert.deepEqual(sqlite.savedScanState("plex").snapshot(), { report: null, resumePoint: null, status: null, options: settings, updatedAt: "2026-01-02 03:04:05" });
+  assert.equal(sqlite.savedScanState("trakt").snapshot(), null, "Trakt is not moved yet");
+  closeCached();
+  inspect(file, db => {
+    assert.equal(version(db), 2);
+    assert.equal(tables(db).includes("shelfcheck_plex_state"), false, "The old Plex table is dropped");
+    assert.deepEqual({ states: everyRow(db).shelfcheck_states, status: everyRow(db).shelfcheck_scan_status }, traktBefore, "Trakt's tables are untouched");
+  });
+});
+
+test("upgrading Plex Settings that are not a JSON object starts its options empty, as reading them always did", (t) => {
+  for (const invalid of ["not json", "[1,2]", "7"]) {
+    const file = freshDatabaseFile(t);
+    versionOneWithPlex(file, invalid);
+    assert.deepEqual(sqlite.savedScanState("plex").snapshot()?.options, {}, invalid);
+    closeCached();
+  }
+});
+
+test("after the upgrade, new Plex state survives a close and reopen, so the wipe happens once", (t) => {
+  const file = freshDatabaseFile(t);
+  versionOneWithPlex(file, "{}");
+  const plex = sqlite.savedScanState("plex");
+  plex.report.write({ shows: [{ ratingKey: "new" }] });
+  plex.resumePoint.write({ savedAt: "later" });
+  plex.status.write({ status: "completed" });
+  closeCached();
+  assert.deepEqual(plex.snapshot(), { report: { shows: [{ ratingKey: "new" }] }, resumePoint: { savedAt: "later" }, status: { status: "completed" }, options: {}, updatedAt: plex.snapshot()!.updatedAt });
+});
+
+test("a failing Plex migration also rolls back the baseline migration before it", (t) => {
+  const file = freshDatabaseFile(t);
+  // A stray table under the new name makes migration 2 fail after migration 1 retired the corrections.
+  fixture(file, `${CORRECTIONS_LAYOUT} CREATE TABLE shelfcheck_scan_state(mode TEXT, note TEXT);`);
+  const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+  assert.throws(() => sqlite.savedScanState("plex").options.read(), /shelfcheck_scan_state already exists/);
+  assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+  inspect(file, db => {
+    assert.equal(version(db), 0);
+    assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before, "The corrections table and coverage state are as they were");
+  });
 });

@@ -185,3 +185,26 @@ test("the Ignore response carries the rechecked coverage revision only when clea
   assert.equal(typeof body.coverageRevision, "number");
   assert.equal(body.coverageRevision, (await h.status() as unknown as { coverage: { revision: number } }).coverage.revision, "The revision matches the rechecked report");
 });
+
+test("a saved-state failure during Ignore cleanup rolls back both the rule and the flag deletion; a later success commits both", async t => {
+  const h = await harness(t);
+  const { crossShow } = await setup(h);
+  const { preferences } = await import("./report-missing-harness");
+  const db = (globalThis as typeof globalThis & { __shelfcheckDatabase?: import("node:sqlite").DatabaseSync }).__shelfcheckDatabase!;
+  const coverageRevision = () => (db.prepare("SELECT revision FROM shelfcheck_coverage_state").get() as { revision: number }).revision;
+  const settings = async () => (await (await preferences.GET()).json()).settings;
+  const before = { settings: await settings(), revision: coverageRevision() };
+
+  // The options write fails after cleanup has already deleted the flag inside the transaction.
+  db.exec("CREATE TRIGGER reject_options BEFORE UPDATE OF options ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'saved state unavailable'); END;");
+  const failed = await h.patchSettings({ ignoredShows: [forever("ratingKey:other", "Other")] });
+  assert.equal(failed.status, 500);
+  assert.deepEqual(await failed.json(), { error: "saved state unavailable" });
+  assert.deepEqual(await h.flags(crossShow.id), [key(c)], "The flag deletion is rolled back");
+  assert.deepEqual({ settings: await settings(), revision: coverageRevision() }, before, "The rule and coverage revision are rolled back");
+
+  db.exec("DROP TRIGGER reject_options");
+  await ignore(h, { ignoredShows: [forever("ratingKey:other", "Other")] });
+  assert.deepEqual(await h.flags(crossShow.id), [], "The flag deletion is committed");
+  assert.deepEqual((await settings()).ignoredShows.map((show: { ratingKey: string }) => show.ratingKey), ["ratingKey:other"], "The rule is committed");
+});

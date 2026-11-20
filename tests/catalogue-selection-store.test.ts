@@ -32,7 +32,7 @@ test("an override is saved only for a currently reported candidate and survives 
   store.saveCatalogueOverride(show,"tmdb",337142);
   restart();
   clearPlexInputs();
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   const saved = store.readCatalogueSelections()[show];
   assert.deepEqual(saved.tmdb.candidates.map(candidate => candidate.id),[2150,337142]);
   assert.equal(saved.tmdb.automaticId,2150);

@@ -33,7 +33,7 @@ async function fixture(t: TestContext) {
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date(day(1))});
   const plex = {tmdb:[10] as number[], tvdb:[1] as number[]};
   /** A second, single-ID show, when set. */

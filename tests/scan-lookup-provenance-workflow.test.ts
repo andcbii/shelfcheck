@@ -22,7 +22,7 @@ test("show lookup failures preserve selected fresh and cached identity sources t
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   const show = {ratingKey:"1",title:"Is It Cake? Halloween",Guid:[{id:"tmdb://300594"}]};
   const independent = {ratingKey:"2",title:"Independent saved inputs",Guid:[] as {id:string}[]};
   let includeIndependent = false;
@@ -133,7 +133,7 @@ test("episode failures explain catalogue identity sources and persist safe parse
   const closeDatabase=()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;};
   t.after(()=>{closeDatabase();for(const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()){if(previous[i]===undefined)delete process.env[key];else process.env[key]=previous[i];}rmSync(dir,{recursive:true,force:true});});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   let failure=true;
   let traktFailure=false;
   let loginFailure=false;

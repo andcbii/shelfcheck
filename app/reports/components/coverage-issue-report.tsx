@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { catalogueRefreshProgress } from "@/lib/catalogue-refresh-progress";
 import type { CoverageIssue } from "@/lib/coverage-issues";
 
 export function CoverageWarning({ issues }: { issues: CoverageIssue[] }) {
@@ -18,7 +19,8 @@ function Issue({ issue }: { issue: CoverageIssue }) {
     {issue.category !== "Episode Matching" && issue.category !== "Provider Catalogue" && <p><strong>ID source: </strong>{issue.lookup?.source.length ? issue.lookup.source.map(step=>`${step.kind.startsWith(step.provider) ? "" : `${step.provider} `}${step.kind}${step.id !== undefined ? ` ${step.id}` : ""}${step.cached ? " (cached)" : ""}`).join(" → ") : "Source unknown"}</p>}
     {issue.lookup?.requested && <p><strong>Failed lookup: </strong>{issue.lookup.requested.provider} {issue.lookup.requested.kind}{issue.lookup.requested.id !== undefined ? ` ${issue.lookup.requested.id}` : ""}</p>}
     <p>{issue.category === "Provider Lookup" && <strong>Response: </strong>}{issue.cause}</p>
-    {!!issue.candidates?.length && <p><strong>Candidates tried: </strong>{issue.candidates.map(candidate=>`${issue.provider ? `${issue.provider} ` : ""}${candidate.id}: ${candidate.cause}`).join(" · ")}</p>}
+    {issue.catalogueRefresh && <p><strong>Catalogue: </strong>{catalogueRefreshProgress(issue.catalogueRefresh)}</p>}
+    {!!issue.candidates?.length && <p><strong>Candidates tried: </strong>{issue.candidates.map(candidate=>`${issue.provider ? `${issue.provider} ` : ""}${candidate.id}: ${candidate.cause}${candidate.catalogueRefresh ? ` (${catalogueRefreshProgress(candidate.catalogueRefresh)})` : ""}`).join(" · ")}</p>}
     {issue.lookup && <p><strong>Impact: </strong>{issue.lookup.impact}</p>}
     {issue.impacts?.map(impact=><p key={impact}><strong>Impact: </strong>{impact}</p>)}
     <p className="coverage-issue-action"><strong>Next step: </strong>{issue.action}</p>

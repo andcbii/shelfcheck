@@ -40,8 +40,8 @@ export type CoverageIssue = {
   lookup?: ProviderLookup;
   /** Provider Lookup: when this request last failed (ISO time). Absent on causes recorded before it was kept. */
   failedAt?: string;
-  /** A provider choosing among several Plex series that has no catalogue from a working one: each candidate tried and why it failed, in the order tried. */
-  candidates?: { id: number; cause: string }[];
+  /** A provider choosing among several Plex series that has no catalogue from a working one: each candidate tried, why it failed and its catalogue age and 404 progress, in the order tried. */
+  candidates?: { id: number; cause: string; catalogueRefresh?: CatalogueRefreshState }[];
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];
   /** Dependent impacts projected from the same durable current issue state. */
@@ -49,6 +49,17 @@ export type CoverageIssue = {
   show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number };
   episode?: { provider?: "TMDB" | "TVDB"; id?: number; showId?: number; season?: number; episode?: number; title?: string };
   mappingId?: string;
+  /** Catalogue-refresh issues: the failed series' catalogue age and 404 progress (ADR-0006). */
+  catalogueRefresh?: CatalogueRefreshState;
+};
+/** A failed catalogue refresh's state as of the resolution that recorded it. Times are ISO strings. */
+export type CatalogueRefreshState = {
+  /** When the refresh was attempted: the resolution time (a scan's start). */
+  checkedAt: string;
+  /** The series' last complete catalogue download; absent when it was never downloaded. */
+  downloadedAt?: string;
+  /** Only when the series request itself answered 404: its counted 404 days, this one included. */
+  seriesNotFoundDays?: number;
 };
 export function listCoverageIssues(): CoverageIssue[] {
   const issues: CoverageIssue[] = (database().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));

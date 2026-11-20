@@ -29,12 +29,12 @@ test("an Unmatched Shows row gives each provider's cause", () => {
   assert.match(tmdbOnly, /TVDB lookup No TVDB series ID from Plex or TMDB/);
 });
 
-test("a failing multi-ID provider's Scan Issues entry lists each candidate's ID and cause", () => {
+test("a failing multi-ID provider's Scan Issues entry lists each candidate's ID, cause, catalogue age and 404 progress", () => {
   const issue: CoverageIssue = {
     id: "catalogue-refresh:TMDB:ratingKey:1", scope: "show", provider: "TMDB", operation: "catalogue-refresh", category: "Provider Lookup", show: { title: "Example", tmdbId: 100 },
     cause: "404 — record not found", action: "Check the Plex provider ID reference.",
-    candidates: [{ id: 100, cause: "404 — record not found" }, { id: 20, cause: "TMDB network request failed" }],
+    candidates: [{ id: 100, cause: "404 — record not found", catalogueRefresh: { checkedAt: "2026-06-01T12:00:00.000Z", seriesNotFoundDays: 3 } }, { id: 20, cause: "TMDB network request failed", catalogueRefresh: { checkedAt: "2026-06-01T12:00:00.000Z", downloadedAt: "2026-03-19T12:00:00.000Z" } }],
   };
   const entry = text(renderToStaticMarkup(createElement(CoverageIssueReport, { issues: [issue] })));
-  assert.match(entry, /Candidates tried: TMDB 100: 404 — record not found · TMDB 20: TMDB network request failed/);
+  assert.match(entry, /Candidates tried: TMDB 100: 404 — record not found \(404 on 3 days · never downloaded\) · TMDB 20: TMDB network request failed \(Catalogue 74 days old\)/);
 });

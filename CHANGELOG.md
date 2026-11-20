@@ -15,6 +15,23 @@
 
 ### Changed
 
+- TMDB and TVDB are judged separately for each show. A show is compared with
+  whichever provider has a usable catalogue, so one provider failing, even with
+  no saved data, no longer hides the other provider's missing episodes or keeps
+  the show's old results and status from an earlier scan. Unmatched Shows now
+  lists only shows that no provider can describe, each row giving every
+  provider's cause, and a show leaves it after the next successful download.
+  A show compared with one provider while the other fails keeps a Scan Issues
+  entry for the failing provider; a provider with several Plex IDs has one
+  entry listing each ID tried and why it failed. Rechecks from saved data keep
+  each provider's status from the last scan.
+- Scan Issues entries for a catalogue that could not be refreshed now show
+  how old the saved catalogue is, and when TMDB or TVDB answered "not found"
+  for the series itself, on how many UTC days it has, for example "404 on 7 of
+  15 days · catalogue 74 days old" or "404 on 3 days · never downloaded",
+  including for each ID listed in a several-ID entry. Shelfcheck keeps this
+  count per provider series ID across restarts and Clear cache; only a
+  complete catalogue download resets it.
 - A show whose preferred catalogue cannot be loaded no longer downloads its
   fallback catalogue again on every Plex scan. The preferred catalogue is
   still retried on every full scan; the fallback is downloaded again only when

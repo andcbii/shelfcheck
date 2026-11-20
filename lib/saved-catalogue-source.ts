@@ -1,5 +1,6 @@
 import { PROVIDER_NAME, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueLoad, ComparisonCatalogueSource, SavedCatalogue, SeriesAssociation } from "@/lib/comparison-catalogue-resolver";
+import type { SeriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { tmdbFindRelationshipKey, usableProviderCatalogue, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 
 /** The saved catalogue records a cached recheck compares, per provider. */
@@ -14,6 +15,8 @@ export type SavedCataloguePayloads = { tmdb: PlexGeneratedInputs["tmdb"][string]
 export function savedCatalogueSource(
   catalogues: Pick<PlexGeneratedInputs, "tmdb" | "tvdb">,
   comparison: Pick<SavedPlexComparison, "relationships">,
+  /** The shared 404 history of series requests, read only: a cached recheck never counts. */
+  seriesNotFound: Pick<SeriesNotFoundHistory, "countedDays">,
 ): ComparisonCatalogueSource<SavedCataloguePayloads> {
   const record = <K extends CatalogueProvider>(provider: K, id: number) => catalogues[provider][String(id)] as SavedCataloguePayloads[K] | undefined;
   const savedCatalogue = <K extends CatalogueProvider>(provider: K, id: number): SavedCatalogue<SavedCataloguePayloads[K]> | undefined => {
@@ -32,6 +35,7 @@ export function savedCatalogueSource(
     },
     savedCatalogue,
     savedRecordDownloadedAt: (provider, id) => record(provider, id)?.downloadedAt,
+    seriesNotFoundDays: (provider, id) => seriesNotFound.countedDays(provider, id),
     /** From saved evidence only: a mandatory association cannot be requested, so it is missing. */
     async tmdbSeriesForTvdb(tvdbId, { mandatory }): Promise<SeriesAssociation> {
       const saved = mandatory ? undefined : comparison.relationships[tmdbFindRelationshipKey(tvdbId)];

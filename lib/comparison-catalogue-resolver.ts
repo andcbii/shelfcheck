@@ -2,7 +2,7 @@ import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
 import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
-import { providerLookupContext, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
+import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
 import { combinePatches, effectivePatch, PREFERRED_REQUIRED, requiresDownload, satisfiedByDownload, type AttemptedCatalogue, type RefreshObligation, type RefreshObligationPatch } from "@/lib/refresh-obligation";
 
@@ -63,6 +63,13 @@ export type CatalogueLoad<T> =
       causedBy?: string[];
       /** The lookup provenance at the failure, when the attempt extended it. */
       lookupSource?: LookupSourceStep[];
+      /**
+       * `series-not-found`: the series request itself (TMDB `/tv/{id}`, TVDB `/series/{id}`) answered
+       * 404. A 404 on a season, episode page or any other request is an ordinary failure.
+       */
+      kind?: "series-not-found";
+      /** With `series-not-found`: the series' counted 404 days, this one included (ADR-0006). */
+      seriesNotFoundDays?: number;
     };
 
 /** A saved catalogue, whatever its age. */
@@ -91,6 +98,11 @@ export type ComparisonCatalogueSource<P extends CataloguePayloads> = {
    * scan's catalogue use for several Plex IDs reports it as the preferred series' download time.
    */
   savedRecordDownloadedAt(provider: CatalogueProvider, id: number): string | undefined;
+  /**
+   * The series' counted 404 days since its last complete catalogue download (ADR-0006), 0 with no
+   * history. A live source records them as it loads; a cached recheck's source only reads them.
+   */
+  seriesNotFoundDays(provider: CatalogueProvider, id: number): number;
   /** The TMDB series associated with a TVDB series. A rejection is a failed association. A cached recheck asks with `mandatory: false` only. */
   tmdbSeriesForTvdb(tvdbId: number, settings: SeriesAssociationSettings): Promise<SeriesAssociation>;
 };
@@ -404,7 +416,7 @@ async function singleIdCatalogue<P extends CataloguePayloads, K extends Catalogu
   // Shares the derived series' failure: the saved catalogue at any age, else unavailable.
   const saved = source.savedCatalogue(provider, id);
   const use: CatalogueUseProposal = { action: "set", use: failedSingleIdUse(id, saved?.downloadedAt, request.resolvedAt) };
-  return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, load, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, saved, use });
+  return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, load, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, saved, use, downloadedAt: source.savedRecordDownloadedAt(provider, id) });
 }
 
 /** A provider's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs. */
@@ -426,16 +438,25 @@ function preservedIssues(provider: CatalogueProvider, request: ComparisonCatalog
 }
 
 /** A provider's catalogue-refresh Coverage Issue value, in the shape the scan sets it. */
-function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"] }): CoverageIssue {
+function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; downloadedAt?: string }): CoverageIssue {
   const name = PROVIDER_NAME[provider];
   const ids = { ...identities, [provider]: input.seriesId };
   return {
     id: input.id, ...(input.failedAt ? { failedAt: input.failedAt } : {}), ...(input.failure.causedBy?.length ? { causedBy: input.failure.causedBy } : {}),
     operation: "catalogue-refresh", provider: name, scope: "show",
     show: { ...request.show, tmdbId: ids.tmdb, tvdbId: ids.tvdb },
+    ...(input.seriesId !== undefined ? { catalogueRefresh: catalogueRefreshState(request, input.failure, input.downloadedAt) } : {}),
     ...providerLookupContext(input.failure.error, { source: input.failure.lookupSource || input.source, requested: { provider: name, ...input.requested }, impact: input.impact }),
     ...(input.candidates ? { candidates: input.candidates } : {}),
   } as CoverageIssue;
+}
+
+/** The failed series' catalogue age and 404 progress, as of this resolution. */
+function catalogueRefreshState(request: ComparisonCatalogueRequest, failure: Failure, downloadedAt: string | undefined): CatalogueRefreshState {
+  return {
+    checkedAt: request.resolvedAt, ...(downloadedAt ? { downloadedAt } : {}),
+    ...(failure.kind === "series-not-found" && failure.seriesNotFoundDays !== undefined ? { seriesNotFoundDays: failure.seriesNotFoundDays } : {}),
+  };
 }
 
 const failureWarning = (failure: Failure, fallback: string) => failure.error instanceof Error ? failure.error.message : fallback;
@@ -461,7 +482,7 @@ async function deriveTvdb<P extends CataloguePayloads>(resolving: Resolving<P>):
     return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, load.outcome), issues: loadedIssues("tvdb", request) };
   // A derived series whose load fails keeps its saved catalogue at any age, as a single Plex ID does.
   const saved = source.savedCatalogue("tvdb", tvdbId);
-  return singleCatalogueFailure("tvdb", request, identities, load, { kind: "series", id: tvdbId }, { lookupSource, saved, use: derivedUse(saved?.downloadedAt) });
+  return singleCatalogueFailure("tvdb", request, identities, load, { kind: "series", id: tvdbId }, { lookupSource, saved, use: derivedUse(saved?.downloadedAt), downloadedAt: source.savedRecordDownloadedAt("tvdb", tvdbId) });
 }
 
 /**
@@ -513,7 +534,7 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
   };
   // The series resolved before the failure is the one its Coverage Issue names, with its provenance.
   const resolvedId = load.resolvedId ?? association.id;
-  return singleCatalogueFailure("tmdb", request, { tmdb: resolvedId, tvdb: tvdbId }, load, { kind: "show", id: resolvedId }, { lookupSource, saved, use: { action: "clear" } });
+  return singleCatalogueFailure("tmdb", request, { tmdb: resolvedId, tvdb: tvdbId }, load, { kind: "show", id: resolvedId }, { lookupSource, saved, use: { action: "clear" }, downloadedAt: source.savedRecordDownloadedAt("tmdb", resolvedId) });
 }
 
 /**
@@ -553,11 +574,11 @@ function singleCatalogueFailureImpact(provider: CatalogueProvider, request: Comp
  * A single Plex ID or derived series that could not be resolved or loaded: its catalogue-refresh issue,
  * and the saved catalogue kept (any age), if any.
  */
-function singleCatalogueFailure<T>(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, failure: Failure, requested: { kind: RequestedKind; id: number }, kept: { lookupSource: LookupSourceStep[]; saved: SavedCatalogue<T> | undefined; use: CatalogueUseProposal }): ProviderChoice<T> {
+function singleCatalogueFailure<T>(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, failure: Failure, requested: { kind: RequestedKind; id: number }, kept: { lookupSource: LookupSourceStep[]; saved: SavedCatalogue<T> | undefined; use: CatalogueUseProposal; downloadedAt?: string }): ProviderChoice<T> {
   const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
-  const { lookupSource, saved, use } = kept;
+  const { lookupSource, saved, use, downloadedAt } = kept;
   const issues: CatalogueIssueAction[] = [
-    { action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: identities[provider], requested, source: lookupSource, impact: singleCatalogueFailureImpact(provider, request, !!saved) }) },
+    { action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: identities[provider], requested, source: lookupSource, impact: singleCatalogueFailureImpact(provider, request, !!saved), downloadedAt }) },
     { action: "resolve", id: fallbackId },
   ];
   const warning = failureWarning(failure, PROVIDER_TERMS[provider].lookupFailed);
@@ -604,8 +625,11 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const failing = !catalogue || catalogue.origin === "saved";
   if (preferredState === "failed-this-attempt") {
     const failure = failureOf(choice.preferredError);
-    const candidates = failing ? choice.failures.map(({ id, error }) => ({ id, cause: providerLookupContext(failureOf(error).error, { source: [], requested: { provider: PROVIDER_NAME[provider], kind, id }, impact: "" }).cause })) : undefined;
-    issues.push({ action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: preferredId, requested: { kind, id: preferredId }, source: providerRequest.lookupSource, impact: unavailablePreferredImpact(provider, use), failedAt: now, candidates }) });
+    const candidates = failing ? choice.failures.map(({ id, error }) => {
+      const candidateFailure = failureOf(error);
+      return { id, cause: providerLookupContext(candidateFailure.error, { source: [], requested: { provider: PROVIDER_NAME[provider], kind, id }, impact: "" }).cause, catalogueRefresh: catalogueRefreshState(request, candidateFailure, source.savedRecordDownloadedAt(provider, id)) };
+    }) : undefined;
+    issues.push({ action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: preferredId, requested: { kind, id: preferredId }, source: providerRequest.lookupSource, impact: unavailablePreferredImpact(provider, use), failedAt: now, downloadedAt: source.savedRecordDownloadedAt(provider, preferredId), candidates }) });
     if (!catalogue) {
       unavailableCause = refreshId;
       warning = failureWarning(failure, `${PROVIDER_NAME[provider]} lookup failed.`);

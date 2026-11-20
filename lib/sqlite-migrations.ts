@@ -13,6 +13,7 @@ const migrations: ((db: DatabaseSync) => void)[] = [
   plexSavedScanState,
   traktSavedScanState,
   clearTraktResultsBeforeAirDates,
+  seriesNotFoundHistory,
 ];
 
 export const SCHEMA_VERSION = migrations.length;
@@ -295,4 +296,21 @@ function traktSavedScanState(db: DatabaseSync) {
 function clearTraktResultsBeforeAirDates(db: DatabaseSync) {
   db.exec(`UPDATE shelfcheck_scan_state SET report = NULL, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP
     WHERE mode = 'trakt' AND (report IS NOT NULL OR resume_point IS NOT NULL)`);
+}
+
+/**
+ * Migration 5: the 404 history of provider series requests (ADR-0006). One row per provider and
+ * series ID with at least one counted 404 day since its last complete catalogue download; a missing
+ * row counts 0. It is provider state shared by every show reporting the ID, not a generated input,
+ * so clearing the cache leaves it in place. `last_counted_day` is the UTC date (YYYY-MM-DD) of the
+ * latest counted 404, so later 404s that day do not count again.
+ */
+function seriesNotFoundHistory(db: DatabaseSync) {
+  db.exec(`CREATE TABLE shelfcheck_series_not_found(
+    provider TEXT NOT NULL CHECK(provider IN ('tmdb','tvdb')),
+    series_id INTEGER NOT NULL,
+    counted_days INTEGER NOT NULL,
+    last_counted_day TEXT NOT NULL,
+    PRIMARY KEY(provider, series_id)
+  )`);
 }

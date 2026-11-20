@@ -6,7 +6,9 @@ import type { MalformedCatalogueRecord, NormalisedCatalogue } from "@/lib/catalo
 import type { ProviderEpisode } from "@/lib/plex-comparison";
 import { reuseProviderCatalogue } from "@/lib/plex-catalogue-policy";
 import { saveDeferredTmdbChanges, savePendingTvdbChanges, savePlexCatalogue, usableProviderCatalogue, type PlexGeneratedInputs, type TmdbCatalogueShow } from "@/lib/plex-catalogues";
+import { ProviderHttpError } from "@/lib/provider-client";
 import type { ScanLogger } from "@/lib/scan-log";
+import type { SeriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { recoverTvdbTitles, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 
 /** A TMDB catalogue as compared: the show record, its usable episodes and the records that could not be used. */
@@ -51,10 +53,20 @@ export type DownloadCatalogueSourceOptions = {
   /** Title context for TVDB English-title recovery: whether combined/split checks run, and the library's episodes of this show. */
   titles: { autoCompoundEpisodes: boolean; localEpisodes: LocalCompoundEpisode[] };
   logger: ScanLogger;
+  /** The shared 404 history of series requests: this source counts series-request 404s and resets it on complete downloads. */
+  seriesNotFound: SeriesNotFoundHistory;
 };
 
 /** The Coverage Issue causes of a catalogue load the scan's TVDB authentication failure prevented. */
 const TVDB_AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
+
+/** What each provider's series request (TMDB `/tv/{id}`, TVDB `/series/{id}`) is called in a request identity. */
+const SERIES_REQUEST_KIND: Record<CatalogueProvider, string> = { tmdb: "show", tvdb: "series" };
+
+/** A load whose series request answered 404, after that 404 was counted. */
+class SeriesNotFound {
+  constructor(readonly error: unknown, readonly countedDays: number) {}
+}
 
 type TmdbRecord = PlexGeneratedInputs["tmdb"][string];
 type TvdbRecord = PlexGeneratedInputs["tvdb"][string];
@@ -88,7 +100,7 @@ export type DownloadCatalogueSource = ComparisonCatalogueSource<DownloadCatalogu
  * the cause of the loads it prevents. One source serves one show of one scan.
  */
 export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions): DownloadCatalogueSource {
-  const { inputs, requests, now, targeted, tmdbChanges, tvdbChanges, tvdbAuthenticationError, show, titles, logger } = options;
+  const { inputs, requests, now, targeted, tmdbChanges, tvdbChanges, tvdbAuthenticationError, show, titles, logger, seriesNotFound } = options;
   let comparedEpisodes: readonly ProviderEpisode[] = [];
   /** TMDB series this source found by a find request: the scan downloads the series it finds. */
   const foundByRequest = new Set<number>();
@@ -105,6 +117,20 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
   const logRecovery = (tvdbShowId: number, recovery: { recovered: number[]; unresolved: TitleRecoveryState }) => {
     for (const tvdbEpisodeId of recovery.recovered) logger.info("plex.show.episode-title-recovered", { ratingKey: show.ratingKey, tvdbShowId, tvdbEpisodeId, language: "eng" });
     for (const [tvdbEpisodeId, entry] of Object.entries(recovery.unresolved)) logger.warn("plex.show.episode-title-unrecovered", { ratingKey: show.ratingKey, tvdbShowId, tvdbEpisodeId: Number(tvdbEpisodeId), ...entry });
+  };
+  /**
+   * Run a load's provider requests. Only a 404 on the series request itself counts toward the
+   * series' 404 days (once per UTC day of the request); seasons, episode pages and every other
+   * failure neither count nor reset.
+   */
+  const requestingSeries = async <T>(provider: CatalogueProvider, id: number, request: () => Promise<T>): Promise<T> => {
+    try {
+      return await request();
+    } catch (error) {
+      const requested = error instanceof ProviderHttpError && error.status === 404 ? error.requested : undefined;
+      if (requested?.kind !== SERIES_REQUEST_KIND[provider] || requested.id !== id) throw error;
+      throw new SeriesNotFound(error, seriesNotFound.recordNotFound(provider, id, new Date().toISOString()));
+    }
   };
   const requestEnglishTitle = (tvdbEpisodeId: number) => tvdbAuthenticationError !== undefined ? Promise.reject(tvdbAuthenticationError) : requests.tvdbEnglishTitle(tvdbEpisodeId);
   /** Recovered titles join a saved TVDB catalogue without changing its download time. */
@@ -124,12 +150,13 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
       }
       return { outcome: "reused", ...savedTmdbCatalogue(saved) };
     }
-    const downloaded = await requests.tmdbShow(id);
+    const downloaded = await requestingSeries("tmdb", id, () => requests.tmdbShow(id));
     if (!downloaded) return { outcome: "no-series" };
     const { episodes, malformed = [] } = await requests.tmdbEpisodes(downloaded);
     const record = { version: 1 as const, downloadedAt: new Date().toISOString(), show: downloaded, episodes, ...(malformed.length ? { malformed } : {}) };
     inputs.tmdb[String(downloaded.id)] = record;
     savePlexCatalogue("tmdb", downloaded.id, record);
+    seriesNotFound.resetAfterCompleteDownload("tmdb", id);
     delete inputs.deferredTmdbChanges[String(downloaded.id)];
     saveDeferredTmdbChanges(inputs.deferredTmdbChanges);
     return { outcome: "downloaded", id: downloaded.id, catalogue: { show: downloaded, episodes, malformed }, downloadedAt: record.downloadedAt, ...associated(downloaded) };
@@ -139,7 +166,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
     const saved = inputs.tvdb[String(id)];
     const reused = reuse("tvdb", id, settings);
     if (!reused && tvdbAuthenticationError !== undefined) throw tvdbAuthenticationError;
-    const tvdb = reused ? { episodes: saved.episodes, malformed: saved.malformed || [], slug: saved.show.slug, name: saved.show.name } : await requests.tvdbSeries(id, show.title || "Unknown show");
+    const tvdb = reused ? { episodes: saved.episodes, malformed: saved.malformed || [], slug: saved.show.slug, name: saved.show.name } : await requestingSeries("tvdb", id, () => requests.tvdbSeries(id, show.title || "Unknown show"));
     // Default catalogue first; only unusable titles are recovered, per TVDB episode, from English.
     const titleDependent = titles.autoCompoundEpisodes ? titleDependentTvdbEpisodeIds([...comparedEpisodes, ...tvdb.episodes], titles.localEpisodes) : new Set<number>();
     const recovery = await recoverTvdbTitles({
@@ -159,6 +186,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
         savePendingTvdbChanges(inputs.pendingTvdbChanges);
       }
       savePlexCatalogue("tvdb", id, inputs.tvdb[String(id)]);
+      seriesNotFound.resetAfterCompleteDownload("tvdb", id);
     }
     return { outcome: reused ? "reused" : "downloaded", id, catalogue: { episodes: recovery.episodes, malformed: tvdb.malformed, slug: tvdb.slug, titleRecovery: { state: recovery.unresolved, carried: false } }, downloadedAt: inputs.tvdb[String(id)].downloadedAt };
   }
@@ -178,6 +206,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
       try {
         return await loaders[provider](id, settings);
       } catch (error) {
+        if (error instanceof SeriesNotFound) return { outcome: "failed", error: error.error, kind: "series-not-found", seriesNotFoundDays: error.countedDays };
         return { outcome: "failed", error, ...authentication(error) };
       }
     },
@@ -186,6 +215,9 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
     },
     savedRecordDownloadedAt(provider, id) {
       return inputs[provider][String(id)]?.downloadedAt;
+    },
+    seriesNotFoundDays(provider, id) {
+      return seriesNotFound.countedDays(provider, id);
     },
     async tmdbSeriesForTvdb(tvdbId, settings): Promise<SeriesAssociation> {
       // The TMDB series last compared for this TVDB series answers without a request while the scan would reuse it.

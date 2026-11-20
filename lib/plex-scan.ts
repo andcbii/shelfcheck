@@ -3,6 +3,7 @@ import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssue
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
 import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
+import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, readSharedTmdbCrosswalk, saveSharedTmdbCrosswalk, invalidateSharedTmdbCrosswalk, tmdbFindRelationshipKey, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
@@ -1111,6 +1112,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       previousComparison: savedComparison,
       titles: { autoCompoundEpisodes, localEpisodes: localProviderEpisodes },
       logger,
+      seriesNotFound: seriesNotFoundHistory(),
     });
     // The comparison catalogue module chooses both providers' catalogues through the download source,
     // and the scan applies what follows. Each provider's obligation patch is saved before the other
@@ -1535,7 +1537,7 @@ async function resolveSavedComparison(identity: string, saved: SavedPlexComparis
     show:{ratingKey:identity,title:saved.group.records[0]?.title},resolvedAt:now,
     previousComparison:{tmdbId:saved.tmdbId,tvdbId:saved.tvdbId,complete:!!saved.complete,...(status ? {status} : {})},
     tmdb:providerRequest("tmdb"),tvdb:providerRequest("tvdb"),
-  },{source:savedCatalogueSource(inputs,saved)});
+  },{source:savedCatalogueSource(inputs,saved,seriesNotFoundHistory())});
   if (resolution.pendingWarning !== undefined) throw new PendingSavedComparison(resolution.pendingWarning);
   if (resolution.outcome === "unmatched") throw new PendingSavedComparison("No provider has a usable saved catalogue for this show, so it could not be rechecked from saved inputs. Last-good results were kept.");
   return {input:{...saved,tmdbId:resolution.tmdb.identity,tvdbId:resolution.tvdb.identity},resolution};

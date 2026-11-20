@@ -60,6 +60,14 @@ export type DownloadCatalogueSourceOptions = {
   logger: ScanLogger;
 };
 
+/** TMDB answered a show request with no show. A load that meets it fails with this error. */
+export class TmdbShowMissingError extends Error {
+  constructor(readonly id: number) {
+    super(`TMDB returned no show ${id}.`);
+    this.name = "TmdbShowMissingError";
+  }
+}
+
 const AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
 
 export type DownloadCatalogueSource = ComparisonCatalogueSource<DownloadCataloguePayloads> & {
@@ -107,7 +115,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
       return { outcome: "reused", id: saved.show.id, catalogue: { show: saved.show, episodes: saved.episodes, malformed: saved.malformed || [] }, downloadedAt: saved.downloadedAt, ...associated(saved.show) };
     }
     const downloaded = await requests.tmdbShow(id);
-    if (!downloaded) throw new Error(`TMDB returned no show ${id}.`);
+    if (!downloaded) throw new TmdbShowMissingError(id);
     const { episodes, malformed = [] } = await requests.tmdbEpisodes(downloaded);
     const record = { version: 1 as const, downloadedAt: new Date().toISOString(), show: downloaded, episodes, ...(malformed.length ? { malformed } : {}) };
     inputs.tmdb[String(downloaded.id)] = record;

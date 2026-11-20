@@ -30,7 +30,7 @@ import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogu
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type LoadedCatalogue } from "@/lib/catalogue-fallback";
 import { catalogueUseExplanation, hasMultipleCandidates } from "@/lib/catalogue-description";
 import { unavailablePreferredImpact } from "@/lib/comparison-catalogue-resolver";
-import { downloadCatalogueSource } from "@/lib/download-catalogue-source";
+import { downloadCatalogueSource, TmdbShowMissingError } from "@/lib/download-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
@@ -1125,6 +1125,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       }
       const load = await catalogueSource.loadCatalogue("tmdb", id, {mandatory, refreshAfter});
       tmdbCatalogueReused = load.outcome === "reused";
+      // A single-ID show TMDB answers with no show has no catalogue, which is not a failed refresh.
+      if (load.outcome === "failed" && load.error instanceof TmdbShowMissingError) return null;
       if (load.outcome === "failed") throw load.error;
       return {...load.catalogue, reused: load.outcome === "reused", downloadedAt: load.downloadedAt};
     };

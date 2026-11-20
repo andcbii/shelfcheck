@@ -38,7 +38,7 @@ async function fixture(t: TestContext) {
   const plex = {tmdb:[10] as number[], tvdb:[1] as number[]};
   /** A second, single-ID show, when set. */
   let second: {tmdb:number;tvdb:number} | undefined;
-  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
+  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
   const tvdb: Record<number,{episodes:number;fail?:boolean}> = {1:{episodes:1},2:{episodes:1},3:{episodes:1}};
   let tmdbChanges: number[] = [];
   const requests: string[] = [];
@@ -60,6 +60,7 @@ async function fixture(t: TestContext) {
     if(tmdbShow && tmdb[Number(tmdbShow[1])]) {
       const id = Number(tmdbShow[1]), series = tmdb[id];
       if(series.fail) return Response.json({status_message:"not found"},{status:404});
+      if(series.noShow && !tmdbShow[2]) return Response.json(null);
       if(!tmdbShow[2]) return Response.json({id,name:`TMDB ${id}`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
       return Response.json({episodes:Array.from({length:series.episodes},(_,n)=>({id:id*100+n+1,season_number:1,episode_number:n+1,name:`Episode ${n+1}`,air_date:"2020-01-01"}))});
     }
@@ -323,6 +324,23 @@ test("a single-ID show keeps comparing its old saved catalogue, unverified, afte
   const current = f.selection().tmdb.current!;
   assert.equal(current.state,"saved-unavailable");
   assert.equal(current.preferredUsableUntil,undefined,"no 60-day deadline applies to a single ID");
+});
+
+test("a single-ID show whose TMDB show request answers with no show stays pending without a catalogue Coverage Issue", async t => {
+  const f = await fixture(t);
+  await f.run();
+  f.tmdb[10].noShow = true; f.changes([10]);
+  f.at(day(2));
+  const show = await f.run();
+  assert.ok(f.requests.includes("/3/tv/10"),"the changed show was requested");
+  assert.equal(show.tmdbId,10);
+  assert.deepEqual(missingTmdb(show),[1002],"last-good results are kept");
+  assert.match(show.warning || "",/Episode comparison could not be checked/);
+  const issues = await f.issues() as {id:string;causedBy?:string[]}[];
+  assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"no show is not a failed catalogue refresh");
+  assert.equal(issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.causedBy,undefined);
+  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,undefined,"no refresh obligation is set");
+  assert.equal(f.selection().tmdb.current?.state,"preferred","the last comparison's catalogue use is kept");
 });
 
 test("TVDB applies the same saved-catalogue limit and fallback independently of TMDB", async t => {

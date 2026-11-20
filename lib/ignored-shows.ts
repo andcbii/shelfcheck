@@ -20,6 +20,12 @@ export function createIgnoreTiming(duration: IgnoreDuration, now = new Date()): 
   return { duration, expiresAt: expires.toISOString() };
 }
 
+/** Keeps finite, non-negative season numbers, truncated, de-duplicated and sorted; season 0 is kept. */
+export function normalizeIgnoredSeasons(seasons: unknown): number[] {
+  if (!Array.isArray(seasons)) return [];
+  return [...new Set(seasons.filter((season): season is number => typeof season === "number" && Number.isFinite(season) && season >= 0).map(Math.trunc))].sort((a, b) => a - b);
+}
+
 export function isIgnoreActive(rule: IgnoreTiming, now = Date.now()): boolean {
   if (rule.expiresAt === undefined) return true;
   return typeof rule.expiresAt === "string" && Date.parse(rule.expiresAt) > now;

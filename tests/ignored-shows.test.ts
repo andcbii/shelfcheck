@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { activeIgnores, createIgnoreTiming, ignoredPlexKeys, ignoredTraktIds, isIgnoreActive, type IgnoreTiming } from "../lib/ignored-shows";
+import { readFileSync } from "node:fs";
+import { activeIgnores, createIgnoreTiming, ignoredPlexKeys, ignoredTraktIds, isIgnoreActive, normalizeIgnoredSeasons, type IgnoreTiming } from "../lib/ignored-shows";
 
 test("extracts valid ignored Trakt IDs and skips malformed settings", () => {
   assert.deepEqual([...ignoredTraktIds([{ ids: { trakt: 12 } }, null, { ids: { trakt: "13" } }, { ids: { trakt: 14 } }])], [12, 14]);
@@ -84,4 +85,23 @@ test("scanner identity sets use the captured scan time even if an ignore later e
   assert.deepEqual([...ignoredPlexKeys(plex, scanStarted)], ["plex://show/one", "ratingKey:2"]);
   assert.deepEqual([...ignoredTraktIds(trakt, scanStarted + 1)], [13]);
   assert.deepEqual([...ignoredPlexKeys(plex, scanStarted + 1)], ["ratingKey:2"]);
+});
+
+test("ignored season numbers keep season 0, truncate fractions, drop invalid values, dedupe and sort", () => {
+  assert.deepEqual(normalizeIgnoredSeasons([3, 0, 1.8, 3, -1, -0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "2", null, undefined, {}, 10, 1]), [0, 1, 3, 10]);
+});
+
+test("a negative fractional season never becomes season 0", () => {
+  assert.deepEqual(normalizeIgnoredSeasons([-0.5, -0.99]), []);
+});
+
+test("ignored season numbers from a non-list are empty", () => {
+  assert.deepEqual(normalizeIgnoredSeasons(undefined), []);
+  assert.deepEqual(normalizeIgnoredSeasons("1,2"), []);
+});
+
+test("the Ignore module does not depend on preferences, React, reports or storage", () => {
+  const source = readFileSync(new URL("../lib/ignored-shows.ts", import.meta.url), "utf8");
+  const imports = [...source.matchAll(/(?:import|export)[^;]*?from\s+["']([^"']+)["']|import\(\s*["']([^"']+)["']/g)].map((match) => match[1] ?? match[2]);
+  for (const specifier of imports) assert.doesNotMatch(specifier, /preferences|react|report|storage|store/i, specifier);
 });

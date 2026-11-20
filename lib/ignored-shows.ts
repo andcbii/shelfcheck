@@ -54,10 +54,10 @@ export function ignoredPlexKeys(value: unknown, now = Date.now()): Set<string> {
 }
 
 // Ignore list rules shared by the Trakt and Plex pages. Each operation takes one
-// clock value, never changes its inputs and returns a new list. Keys are compared
-// exactly: Trakt reads numbers, Plex reads strings.
+// evaluation time, never changes its inputs and returns a new list. Keys are
+// compared exactly: Trakt reads numbers, Plex reads strings.
 
-export type IgnoreKey = string | number;
+type IgnoreKey = string | number;
 type TitledRule = { title: string };
 
 function byTitle(a: TitledRule, b: TitledRule): number {
@@ -75,23 +75,23 @@ export function restoreIgnore<T extends IgnoreTiming, K extends IgnoreKey>(rules
   return activeIgnores(rules, now).filter((rule) => keyOf(rule) !== key);
 }
 
-/** Gives one rule a new timing from the clock value; Forever clears any expiry. Keeps other active rules. */
+/** Gives one rule a new timing from the evaluation time; Forever clears any expiry. Keeps other active rules. */
 export function changeIgnoreDuration<T extends IgnoreTiming, K extends IgnoreKey>(rules: readonly T[], keyOf: (rule: T) => K, key: K, duration: IgnoreDuration, now: number): T[] {
   const timing = createIgnoreTiming(duration, new Date(now));
   return activeIgnores(rules, now).map((rule) => keyOf(rule) === key ? { ...rule, expiresAt: undefined, ...timing } : rule);
 }
 
-// Season selections: the page supplies candidate season numbers from its own
+// Season ignores: the page supplies candidate season numbers from its own
 // report; no report shapes enter this module.
 
 type SeasonsRule = { seasons: number[] } & IgnoreTiming;
-export type SeasonIgnoreDraft = { selected: number[]; options: number[]; duration: IgnoreDuration; originalTiming: IgnoreTiming | null };
+type SeasonIgnoreDraft = { selected: number[]; options: number[]; duration: IgnoreDuration; originalTiming: IgnoreTiming | null };
 
 function bySeason(a: number, b: number): number {
   return a - b;
 }
 
-/** Opens a season selection from the active rule for the key: its seasons, their sorted union with the candidates, its duration (Forever when none) and a copy of its timing. */
+/** Opens a season ignore from the active rule for the key: its seasons, their sorted union with the candidates, its duration (Forever when none) and a copy of its timing. */
 export function openSeasonIgnore<T extends SeasonsRule, K extends IgnoreKey>(rules: readonly T[], keyOf: (rule: T) => K, key: K, candidateSeasons: readonly number[], now: number): SeasonIgnoreDraft {
   const existing = activeIgnores(rules, now).find((rule) => keyOf(rule) === key);
   return {
@@ -103,9 +103,10 @@ export function openSeasonIgnore<T extends SeasonsRule, K extends IgnoreKey>(rul
 }
 
 /**
- * Saves a season selection for the record's key. An unchanged duration keeps the original timing
- * (including a legacy expiry with no duration); otherwise a new timing starts from the clock value.
- * An empty selection, or one whose timing is no longer active, removes the rule. Sorts by title.
+ * Saves the selected seasons as a season ignore for the record's key. An unchanged duration keeps
+ * the original timing (including a legacy expiry with no duration); otherwise a new timing starts
+ * from the evaluation time.
+ * No selected seasons, or a timing that is no longer active, removes the rule. Sorts by title.
  */
 export function saveSeasonIgnore<R extends TitledRule, K extends IgnoreKey>(rules: readonly (R & SeasonsRule)[], keyOf: (rule: R) => K, record: R, draft: Pick<SeasonIgnoreDraft, "selected" | "duration" | "originalTiming">, now: number): (R & SeasonsRule)[] {
   const original = draft.originalTiming;
@@ -121,15 +122,15 @@ export function saveSeasonIgnore<R extends TitledRule, K extends IgnoreKey>(rule
 // Ignored Shows manager keys: "show|<key>" and "seasons|<key>". A UI transport
 // detail only; list operations take typed keys.
 
-export type IgnoreKind = "show" | "seasons";
-export type IgnoreManagerTarget<K extends IgnoreKey> = { kind: IgnoreKind; key: K };
+type IgnoreKind = "show" | "seasons";
+type IgnoreManagerTarget<K extends IgnoreKey> = { kind: IgnoreKind; key: K };
 
 export function ignoreManagerKey(kind: IgnoreKind, key: IgnoreKey): string {
   return `${kind}|${key}`;
 }
 
 /** Decodes a manager key, keeping the full text after the known prefix; an unknown prefix gives null. */
-export function decodeIgnoreManagerKey<K extends IgnoreKey>(value: string | number, parseKey: (text: string) => K): IgnoreManagerTarget<K> | null {
+function decodeIgnoreManagerKey<K extends IgnoreKey>(value: string | number, parseKey: (text: string) => K): IgnoreManagerTarget<K> | null {
   const text = String(value);
   for (const kind of ["show", "seasons"] as const) {
     if (text.startsWith(`${kind}|`)) return { kind, key: parseKey(text.slice(kind.length + 1)) };

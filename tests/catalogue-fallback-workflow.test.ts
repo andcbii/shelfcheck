@@ -13,6 +13,7 @@ const selections = await import("../lib/catalogue-selection-store");
 const plexScan = await import("../lib/plex-scan");
 const catalogues = await import("../lib/plex-catalogues");
 const reportData = await import("../app/reports/report-data");
+const { ActiveScanTracker } = await import("../lib/scan-concurrency");
 hook.deregister();
 
 const DAY = 86400_000;
@@ -38,13 +39,21 @@ async function fixture(t: TestContext) {
   const plex = {tmdb:[10] as number[], tvdb:[1] as number[]};
   /** A second, single-ID show, when set. */
   let second: {tmdb:number;tvdb:number} | undefined;
-  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
+  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
   const tvdb: Record<number,{episodes:number;fail?:boolean}> = {1:{episodes:1},2:{episodes:1},3:{episodes:1}};
   let tmdbChanges: number[] = [];
   const requests: string[] = [];
+  /** TMDB's find answer for each TVDB series: the TMDB series it names, or a failed request. Unlisted series name none. */
+  const find: Record<number,{tmdb?:number;fail?:boolean}> = {};
+  /** Every provider request path and every reported scan phase, in order. */
+  const timeline: string[] = [];
+  const reportPhase = ActiveScanTracker.prototype.update;
+  t.mock.method(ActiveScanTracker.prototype,"update",function(this: InstanceType<typeof ActiveScanTracker>, key: string, show: string, phase: string) { timeline.push(`phase ${phase}`); return reportPhase.call(this,key,show,phase); });
+  /** TVDB series whose requests are held until released; a released request fails. */
+  const heldTvdb = new Map<number,{started:boolean;release:()=>void}>();
   const guids = (ids: {tmdb:number[];tvdb:number[]}) => [...ids.tmdb.map(id=>({id:`tmdb://${id}`})),...ids.tvdb.map(id=>({id:`tvdb://${id}`}))];
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
-    const u = new URL(String(input)); requests.push(u.pathname);
+    const u = new URL(String(input)); requests.push(u.pathname); timeline.push(u.pathname);
     const shows = [{ratingKey:"1",title:"Scooby",Guid:guids(plex),updatedAt:1},...(second ? [{ratingKey:"2",title:"Other",Guid:guids({tmdb:[second.tmdb],tvdb:[second.tvdb]}),updatedAt:1}] : [])];
     if(u.hostname === "plex") {
       if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
@@ -60,22 +69,28 @@ async function fixture(t: TestContext) {
     if(tmdbShow && tmdb[Number(tmdbShow[1])]) {
       const id = Number(tmdbShow[1]), series = tmdb[id];
       if(series.fail) return Response.json({status_message:"not found"},{status:404});
+      if(series.noShow && !tmdbShow[2]) return Response.json(null);
       if(!tmdbShow[2]) return Response.json({id,name:`TMDB ${id}`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
       return Response.json({episodes:Array.from({length:series.episodes},(_,n)=>({id:id*100+n+1,season_number:1,episode_number:n+1,name:`Episode ${n+1}`,air_date:"2020-01-01"}))});
     }
     const tvdbSeries = u.pathname.match(/^\/v4\/series\/(\d+)(\/episodes\/default)?$/);
     if(tvdbSeries && tvdb[Number(tvdbSeries[1])]) {
       const id = Number(tvdbSeries[1]), series = tvdb[id];
+      const held = heldTvdb.get(id);
+      if(held) { held.started = true; await new Promise<void>(release=>{ held.release = release; }); return Response.json({},{status:404}); }
       if(series.fail) return Response.json({},{status:404});
       if(!tvdbSeries[2]) return Response.json({data:{id,name:`TVDB ${id}`,slug:`tvdb-${id}`}});
       return Response.json({data:{episodes:Array.from({length:series.episodes},(_,n)=>({id:id*1000+n+1,seasonNumber:1,number:n+1,name:`Episode ${n+1}`,aired:"2020-01-01"}))}});
     }
+    const findAnswer = find[Number(u.pathname.match(/^\/3\/find\/(\d+)$/)?.[1])];
+    if(findAnswer?.fail) return Response.json({status_message:"unavailable"},{status:404});
+    if(findAnswer?.tmdb) return Response.json({tv_results:[{id:findAnswer.tmdb,name:`TMDB ${findAnswer.tmdb}`}],tv_episode_results:[]});
     if(u.pathname.includes("/find/")) return Response.json({tv_results:[],tv_episode_results:[]});
     throw new Error("Unexpected HTTP: "+u);
   });
   const identity = "ratingKey:1";
   return {
-    plex, tmdb, tvdb, identity, requests,
+    plex, tmdb, tvdb, find, timeline, identity, requests, heldTvdb,
     setSecond(value: typeof second) { second = value; },
     changes(ids: number[]) { tmdbChanges = ids; },
     at(value: string) { t.mock.timers.setTime(Date.parse(value)); },
@@ -92,6 +107,13 @@ async function fixture(t: TestContext) {
     tvdbDownloads(id: number) { return requests.filter(p=>p === `/v4/series/${id}/episodes/default`).length; },
     selection(key = identity) { return selections.readCatalogueSelections()[key]; },
   };
+}
+/** Simulates the process ending: the next process starts with an empty owner record, and the abandoned run settles later. */
+function abandonRunningScan(): Promise<void> {
+  const global = globalThis as typeof globalThis & {__shelfcheckScanRun?: {owner?: unknown}};
+  const abandoned = global.__shelfcheckScanRun!;
+  global.__shelfcheckScanRun = {};
+  return (async () => { while (abandoned.owner) await new Promise(r=>setTimeout(r,10)); })();
 }
 const missingTmdb = (show: Show) => show.missing.flatMap(episode => episode.tmdbEpisodeId ? [episode.tmdbEpisodeId] : []).sort((a,b)=>a-b);
 
@@ -325,6 +347,66 @@ test("a single-ID show keeps comparing its old saved catalogue, unverified, afte
   assert.equal(current.preferredUsableUntil,undefined,"no 60-day deadline applies to a single ID");
 });
 
+for (const [label,tvdbIds] of [["a single-ID show",[1]],["a show with one TMDB ID and several TVDB IDs",[1,3]]] as const) test(`${label} whose TMDB show request answers with no show stays pending without a catalogue Coverage Issue`, async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = [...tvdbIds];
+  await f.run();
+  f.tmdb[10].noShow = true; f.changes([10]);
+  f.at(day(2));
+  const show = await f.run();
+  assert.ok(f.requests.includes("/3/tv/10"),"the changed show was requested");
+  assert.equal(show.tmdbId,10);
+  assert.deepEqual(missingTmdb(show),[1002],"last-good results are kept");
+  assert.match(show.warning || "",/Episode comparison could not be checked/);
+  const issues = await f.issues() as {id:string;causedBy?:string[]}[];
+  assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"no show is not a failed catalogue refresh");
+  assert.equal(issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.causedBy,undefined);
+  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,undefined,"no refresh obligation is set");
+  assert.equal(f.selection().tmdb.current?.state,"preferred","the last comparison's catalogue use is kept");
+  assert.equal(f.tmdbDownloads(10),0);
+});
+
+/** No Plex TMDB ID and TVDB candidates 1 and 3: TMDB is derived from TVDB 1, whose find names TMDB 10. */
+async function derivedFromSeveralTvdbIds(f: Awaited<ReturnType<typeof fixture>>) {
+  f.plex.tmdb = []; f.plex.tvdb = [1,3]; f.find[1] = {tmdb:10};
+  const show = await f.run();
+  assert.equal(show.tmdbId,10); assert.deepEqual(missingTmdb(show),[1002]);
+}
+
+test("a derived TMDB series TMDB answers with no show leaves the show pending, without comparing the series last compared or a catalogue Coverage Issue", async t => {
+  const f = await fixture(t);
+  await derivedFromSeveralTvdbIds(f);
+  f.tmdb[10].noShow = true; f.changes([10]);
+  f.at(day(2));
+  const show = await f.run();
+  assert.ok(f.requests.includes("/3/find/1") && f.requests.includes("/3/tv/10"),"the association and the changed show were requested");
+  assert.equal(f.tmdbDownloads(10),0);
+  assert.equal(show.tmdbId,10);
+  assert.deepEqual(missingTmdb(show),[1002],"last-good results are kept");
+  assert.match(show.warning || "",/Episode comparison could not be checked/);
+  const issues = await f.issues() as {id:string;causedBy?:string[]}[];
+  assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"no show is not a failed catalogue refresh");
+  assert.ok(issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison is pending");
+  assert.equal(issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.causedBy,undefined);
+  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,undefined,"no refresh obligation is set");
+});
+
+test("a show with several TVDB IDs and no Plex TMDB ID reports the TMDB phase before TMDB's find request, also when the find names no series", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = []; f.plex.tvdb = [1,3];
+  const phaseBefore = (path: string) => { const at = f.timeline.indexOf(path); assert.ok(at >= 0,`${path} was requested`); return f.timeline.slice(0,at).filter(entry=>entry.startsWith("phase ")).at(-1); };
+  f.timeline.length = 0;
+  await f.run();
+  assert.equal(phaseBefore("/v4/series/1/episodes/default"),"phase tvdb-series-and-episodes");
+  assert.equal(phaseBefore("/3/find/1"),"phase tmdb-show-and-seasons","the find naming no series runs in the TMDB phase");
+
+  f.find[1] = {tmdb:10};
+  f.at(day(2)); f.timeline.length = 0;
+  await f.run();
+  assert.equal(phaseBefore("/3/find/1"),"phase tmdb-show-and-seasons");
+  assert.equal(phaseBefore("/3/tv/10"),"phase tmdb-show-and-seasons");
+});
+
 test("TVDB applies the same saved-catalogue limit and fallback independently of TMDB", async t => {
   const f = await fixture(t);
   f.plex.tvdb = [1,3];
@@ -406,6 +488,39 @@ test("an outstanding refresh obligation also downloads the fallback in use until
   issues = await f.issues() as Issue[];
   assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`));
   assert.equal(fallbackIssue(issues),undefined,"A's refresh failure no longer affects the comparison");
+});
+
+test("a scan interrupted after a show's preferred TMDB download keeps that progress, so the restarted scan does only the unfinished TVDB work", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.at(day(2)); await f.run();
+  const saved = () => catalogues.readPlexInputs();
+  catalogues.savePlexComparison(f.identity,{...saved().comparisons[f.identity],refresh:{tmdb:true,tvdb:true}});
+
+  f.at(day(3));
+  const held = {started:false,release:()=>{}};
+  f.heldTvdb.set(1,held);
+  t.after(() => held.release());
+  f.requests.length = 0;
+  await scan.POST(new Request("http://localhost/api/plex/scan",{method:"POST",body:"{}"}));
+  for (let i=0; i<500 && !held.started; i++) await new Promise(r=>setTimeout(r,10));
+  assert.ok(held.started,"the TVDB request is in flight");
+  assert.equal(f.tmdbDownloads(11),1,"the obligation downloads the preferred TMDB catalogue although it is young");
+  assert.deepEqual(saved().comparisons[f.identity].refresh,{tvdb:true},"TMDB's satisfied obligation is saved before TVDB's work finishes");
+  assert.equal(saved().tmdb["11"].downloadedAt,day(3),"the download is saved as soon as it succeeds");
+
+  const interrupted = abandonRunningScan();
+  f.heldTvdb.delete(1);
+  f.restart();
+  f.at(day(3).replace("12:00","13:00"));
+  const show = await f.run();
+  assert.deepEqual([f.tmdbDownloads(10),f.tmdbDownloads(11),f.tvdbDownloads(1)],[0,0,1],"only the unfinished mandatory TVDB download is repeated");
+  assert.equal(show.tmdbId,11); assert.deepEqual(missingTmdb(show),[1102,1103]);
+  assert.deepEqual(saved().comparisons[f.identity].refresh,{},"no obligation remains");
+  held.release();
+  await interrupted;
 });
 
 /**

@@ -1,15 +1,24 @@
 import { coverageState, listCoverageMappings } from "@/lib/manual-coverage";
-import { getPlexReport } from "@/lib/plex-scan";
+import { getPlexReport, type PlexShowResult } from "@/lib/plex-scan";
 import { readCatalogueSelections } from "@/lib/catalogue-selection-store";
 import { multipleProviderIdEntries } from "@/lib/multiple-provider-ids-report";
 import { hasMultipleProviderMatches } from "@/lib/plex-reporting";
+
+/**
+ * An Unmatched show: no provider has a usable catalogue (ADR-0006). A result from before scans judged
+ * each provider has no match status; it counts when neither provider was compared.
+ */
+function unmatchedShow(show: PlexShowResult) {
+  const resolution = show.providerResolution;
+  return resolution?.status ? resolution.status === "unmatched" : resolution?.tmdb === false && resolution.tvdb === false;
+}
 
 // Read the current shared backend state for this request; no report-specific cache.
 export function getReportData() {
   const shows = getPlexReport()?.shows || [];
   const issues = coverageState().issues;
   const autoMatches = shows.flatMap(show => show.autoMatches || []).sort((a, b) => a.tvdb.show.localeCompare(b.tvdb.show) || a.tvdb.season - b.tvdb.season || a.tvdb.episode - b.tvdb.episode);
-  const unmatchedShows = shows.filter(show => show.providerResolution?.tmdb === false && show.providerResolution.tvdb === false).sort((a, b) => a.title.localeCompare(b.title));
+  const unmatchedShows = shows.filter(unmatchedShow).sort((a, b) => a.title.localeCompare(b.title));
   const providerMatches = shows.filter(hasMultipleProviderMatches).sort((a, b) => a.title.localeCompare(b.title));
   const multipleIdShows = multipleProviderIdEntries({ selections: readCatalogueSelections(), shows, issues });
   return {

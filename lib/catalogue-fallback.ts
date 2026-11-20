@@ -12,6 +12,8 @@ export type CatalogueChoice<T> = {
   preferredError?: unknown;
   /** Why the fallback in use could not be loaded, when its saved catalogue is compared instead. */
   fallbackError?: unknown;
+  /** Every candidate whose load failed, in the order tried; candidates not tried are absent. */
+  failures: { id: number; error: unknown }[];
 };
 
 /**
@@ -35,23 +37,26 @@ export async function chooseAvailableCatalogue<T>(input: {
     return saved && withinCatalogueAgeLimit(saved.downloadedAt, input.now) ? saved : undefined;
   };
   let preferredError: unknown;
+  const failures: CatalogueChoice<T>["failures"] = [];
   try {
-    return { state: "preferred", usingId: input.preferredId, loaded: await input.load(input.preferredId) };
+    return { state: "preferred", usingId: input.preferredId, loaded: await input.load(input.preferredId), failures };
   } catch (error) {
     preferredError = error;
+    failures.push({ id: input.preferredId, error });
   }
   const saved = usableSaved(input.preferredId);
-  if (saved) return { state: "saved-unavailable", usingId: input.preferredId, loaded: saved, preferredError };
+  if (saved) return { state: "saved-unavailable", usingId: input.preferredId, loaded: saved, preferredError, failures };
   for (const id of distinctSortedIds(input.candidates)) {
     if (id === input.preferredId) continue;
     try {
-      return { state: "fallback", usingId: id, loaded: await input.load(id), preferredError };
+      return { state: "fallback", usingId: id, loaded: await input.load(id), preferredError, failures };
     } catch (fallbackError) {
+      failures.push({ id, error: fallbackError });
       const fallback = usableSaved(id);
-      if (fallback) return { state: "fallback", usingId: id, loaded: fallback, preferredError, fallbackError };
+      if (fallback) return { state: "fallback", usingId: id, loaded: fallback, preferredError, fallbackError, failures };
     }
   }
-  return { state: "unavailable", preferredError };
+  return { state: "unavailable", preferredError, failures };
 }
 
 /** The catalogue a provider with several Plex IDs is using, with the preferred series' 60-day deadline. */

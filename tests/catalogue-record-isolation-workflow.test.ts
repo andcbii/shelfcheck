@@ -13,7 +13,7 @@ hook.deregister();
 
 type Issue = { id: string; operation: string; scope: string; provider?: string; cause: string; action: string; impacts?: string[]; show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number }; episode?: { provider?: string; id?: number; showId?: number; season?: number; episode?: number; title?: string } };
 type Row = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: string[] };
-type Result = { coverage: { issues: Issue[] }; report: { shows: { ratingKey: string; missing: Row[]; providerResolution?: { tmdb: boolean; tvdb: boolean } }[] } };
+type Result = { coverage: { issues: Issue[] }; report: { shows: { ratingKey: string; missing: Row[]; providerResolution?: { tmdb: boolean; tvdb: boolean; status?: string } }[] } };
 const issuesOf = (result: unknown) => (result as Result).coverage.issues;
 const recordIssues = (result: unknown) => issuesOf(result).filter(issue => issue.operation === "catalogue-record");
 const sharedIssues = (result: unknown) => issuesOf(result).filter(issue => /^(catalogue-refresh|comparison-inputs|comparison-failure):/.test(issue.id));
@@ -41,7 +41,8 @@ test("malformed TVDB catalogue records keep usable siblings and are reported wit
   ];
   const result = await rerun();
   assert.deepEqual(sharedIssues(result), [], "a bad record is not an unreadable catalogue or a failed show comparison");
-  assert.deepEqual(target(result).providerResolution, { tmdb: true, tvdb: true }, "the show stays matched");
+  const { tmdb, tvdb, status } = target(result).providerResolution!;
+  assert.deepEqual({ tmdb, tvdb, status }, { tmdb: true, tvdb: true, status: "matched" }, "the show stays matched");
   // Usable siblings are compared normally; the numbered record without identity follows numbering-based decisions.
   assert.deepEqual(rows(result), ["TMDB:9002", "TVDB S1E5", "TVDB:102"]);
   const row = target(result).missing.find(item => item.episode === 5)!;
@@ -209,6 +210,7 @@ test("a saved catalogue whose records are all unusable keeps last-good results w
   const refresh = issuesOf(result).find(issue => issue.id === "catalogue-refresh:TVDB:ratingKey:target");
   assert.ok(refresh, "the failed refresh is reported");
   assert.match((refresh as Issue & { lookup?: { impact?: string } }).lookup?.impact || "", /No previous catalogue data is available/, "the unusable saved catalogue is not offered as last-good data");
-  assert.match(refresh.impacts!.join(" "), /comparison could not be checked.*Last-good comparison results were retained/);
-  assert.deepEqual(rows(result), ["TMDB:9002", "TVDB:102"], "last-good comparison results are retained");
+  // Deliberately changed (SHELFCHECK-27): TVDB's failure no longer blocks TMDB's comparison, so the show is compared with TMDB alone.
+  assert.equal(refresh.impacts, undefined, "no comparison is blocked");
+  assert.deepEqual(rows(result), ["TMDB:9002"], "the show is compared with TMDB, its usable catalogue");
 });

@@ -40,6 +40,8 @@ export type CoverageIssue = {
   lookup?: ProviderLookup;
   /** Provider Lookup: when this request last failed (ISO time). Absent on causes recorded before it was kept. */
   failedAt?: string;
+  /** A provider choosing among several Plex series that has no catalogue from a working one: each candidate tried and why it failed, in the order tried. */
+  candidates?: { id: number; cause: string }[];
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];
   /** Dependent impacts projected from the same durable current issue state. */

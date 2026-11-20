@@ -170,8 +170,9 @@ test("full scans reuse catalogues while comparing current holdings across databa
   malformedTmdb = true;
   await run();
   const blocked = (await (await scan.GET()).json()).coverage.issues;
-  assert.equal(blocked.length,1,"failed TMDB catalogue and its blocked comparison are one cause");
-  assert.match(blocked[0].impacts.join(" "),/comparison could not be checked/);
+  // Deliberately changed (SHELFCHECK-27): the failed TMDB catalogue no longer blocks TVDB's comparison.
+  assert.equal(blocked.length,1,"the failed TMDB catalogue is the one cause");
+  assert.equal(blocked[0].impacts,undefined,"no comparison is blocked: the show is compared with TVDB");
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2);
   malformedTmdb = false;
   requests.length = 0;

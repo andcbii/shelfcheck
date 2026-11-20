@@ -1,8 +1,20 @@
 "use client";
 
 import { useState } from "react";
+import type { CatalogueProvider } from "@/lib/catalogue-selection";
+import type { ProviderLookupStatus } from "@/lib/comparison-catalogue-resolver";
 import type { PlexShowResult } from "@/lib/plex-scan";
 import { ReportPagination } from "@/app/reports/report-pagination";
+
+const PROVIDER_LABEL: Record<CatalogueProvider, { name: string; other: string }> = { tmdb: { name: "TMDB", other: "TVDB" }, tvdb: { name: "TVDB", other: "TMDB" } };
+
+/** Why a provider has no usable catalogue for an Unmatched show. */
+function providerCause(provider: CatalogueProvider, status: ProviderLookupStatus) {
+  const { name, other } = PROVIDER_LABEL[provider];
+  if (status.state === "total-failure") return status.cause;
+  if (status.state === "no-series") return `No ${name} series ID from Plex or ${other}`;
+  return status.state === "pending" ? `${name} series not resolved yet` : `${name} catalogue in use`;
+}
 
 export function UnmatchedShowReport({ shows }: { shows: PlexShowResult[] }) {
   const [pageSize, setPageSize] = useState(10);
@@ -19,6 +31,10 @@ export function UnmatchedShowReport({ shows }: { shows: PlexShowResult[] }) {
           <div><dt>Plex rating keys</dt><dd>{show.plexRatingKeys?.join(", ") || show.ratingKey}</dd></div>
           <div><dt>TMDB ID from Plex</dt><dd>{show.tmdbId || "None"}</dd></div>
           <div><dt>TVDB ID from Plex</dt><dd>{show.tvdbId || "None"}</dd></div>
+          {(["tmdb", "tvdb"] as const).map(provider => {
+            const status = show.providerResolution?.providers?.[provider];
+            return status ? <div key={provider}><dt>{PROVIDER_LABEL[provider].name} lookup</dt><dd>{providerCause(provider, status)}</dd></div> : null;
+          })}
         </dl>
       </article>)}
     </div> : <div className="empty auto-match-empty"><div>✓</div><h3>No unmatched shows recorded</h3><p>{shows.length ? "There are no records on this page." : "Run a new Plex search to populate show-level resolution reporting."}</p></div>}

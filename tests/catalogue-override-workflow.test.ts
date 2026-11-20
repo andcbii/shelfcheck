@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { catalogueNotices } from "../lib/catalogue-notice";
 import test from "node:test";
 import { catalogues, fixture, missingTmdb, day, plexScan } from "./catalogue-override-harness";
 
@@ -255,7 +254,8 @@ test("a TVDB choice without saved TMDB association evidence keeps last-good resu
   assert.equal(f.selection().tvdb.current?.usingId,3);
 });
 
-test("when a dependent provider input fails, the persisted catalogues in use are those the kept results compared", async t => {
+// Deliberately changed (SHELFCHECK-27): a failing dependent provider used to keep last-good results; now it no longer blocks the other provider's comparison.
+test("when a dependent provider input fails, the show is compared with the other provider's catalogue in use", async t => {
   const f = await fixture(t);
   f.plex.tmdb = [10,11]; f.plex.tvdb = [];
   f.tmdb[11].tvdb = 3;
@@ -264,13 +264,12 @@ test("when a dependent provider input fails, the persisted catalogues in use are
   await f.select({identity:f.identity,provider:"tmdb",seriesId:11});
   f.tvdb[3].fail = true;
   f.at(day(2)); show = await f.run();
-  assert.deepEqual([show.tmdbId,show.tvdbId],[10,1],"last-good results are kept");
-  assert.deepEqual(missingTmdb(show),[1002]);
+  assert.deepEqual([show.tmdbId,show.tvdbId],[11,3],"the result names the series TVDB failed to load");
+  assert.deepEqual(missingTmdb(show),[1102,1103],"the new TMDB preference is compared");
   const selection = f.selection();
-  assert.equal(selection.tmdb.current?.usingId,show.tmdbId,"TMDB in use is the catalogue the results compared");
-  assert.equal(selection.tvdb.current?.usingId,show.tvdbId,"TVDB in use is the catalogue the results compared");
-  assert.equal(selection.tmdb.preferredId,11,"the new preference is kept");
-  assert.match(catalogueNotices(selection)[0]?.text || "",/Preferred TMDB 11 · Using .*10\)? until compared/,"the new preference shows as pending");
+  assert.equal(selection.tmdb.current?.usingId,11,"TMDB in use is the catalogue the results compared");
+  assert.equal(selection.tmdb.current?.state,"preferred");
+  assert.equal(selection.tvdb.current?.usingDownloadedAt,undefined,"no TVDB catalogue is in use");
 });
 
 test("a scan falling back to another TVDB series resolves the TMDB series of the one compared when Plex reports no TMDB ID", async t => {

@@ -160,7 +160,7 @@ test("a Plex scan run vetoed by a coverage-revision change ends at once with a c
     if (u.pathname === "/3/tv/12" && !changed) {
       // A Manual Match saved while the scan runs moves the coverage revision this run snapshotted.
       changed = true;
-      sqlite.coverageDatabase().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1");
+      sqlite.database().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1");
     }
     return undefined;
   });

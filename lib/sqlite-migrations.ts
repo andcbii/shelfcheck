@@ -102,6 +102,7 @@ const BASELINE_TABLES: { name: string; sql: string }[] = [
     settings TEXT NOT NULL DEFAULT '{}',
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   )` },
+  // Manual rules are durable instance data, independent of generated scan state.
   { name: "shelfcheck_coverage_state", sql: "CREATE TABLE shelfcheck_coverage_state(id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL DEFAULT 0, pending INTEGER NOT NULL DEFAULT 0)" },
   { name: "shelfcheck_coverage_mappings", sql: "CREATE TABLE shelfcheck_coverage_mappings(id TEXT PRIMARY KEY, payload TEXT NOT NULL)" },
   // Report Missing is mapping-member state keyed by provider episode, so it

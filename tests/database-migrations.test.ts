@@ -8,6 +8,7 @@ import test, { type TestContext } from "node:test";
 
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const sqlite = await import("../lib/sqlite");
+const { BACKUP_FILE_NAME } = await import("../lib/sqlite-migrations");
 hook.deregister();
 
 const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync; __shelfcheckScanIgnoreGuards?: object };
@@ -20,8 +21,8 @@ const EVERY_TABLE = [
   "shelfcheck_scan_status", "shelfcheck_states",
 ];
 
-/** A disposable data directory, opened fresh: no cached handle survives into or out of it. */
-function dataDirectory(t: TestContext) {
+/** The database file in a disposable data directory, opened fresh: no cached handle survives into or out of it. */
+function freshDatabaseFile(t: TestContext) {
   closeCached();
   const dir = mkdtempSync(path.join(tmpdir(), "shelfcheck-migrations-"));
   const previous = process.env.SHELFCHECK_DATA_DIR;
@@ -36,16 +37,17 @@ function dataDirectory(t: TestContext) {
   return path.join(dir, "shelfcheck.db");
 }
 
-/** Read the database file through its own connection, never the cached handle. */
-function inspect<T>(file: string, read: (db: DatabaseSync) => T): T {
-  const db = new DatabaseSync(file);
+/** Read a database file through its own connection, never the cached handle. Read-only fails on a missing file instead of creating it. */
+function inspect<T>(file: string, read: (db: DatabaseSync) => T, options: { readOnly?: boolean } = {}): T {
+  const db = new DatabaseSync(file, options);
   try { return read(db); } finally { db.close(); }
 }
+// A local reader, so the migration module need not export its private user_version helper.
 const version = (db: DatabaseSync) => (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
 const tables = (db: DatabaseSync) => (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'shelfcheck_%' ORDER BY name").all() as { name: string }[]).map(row => row.name);
 
 test("opening an empty data directory creates every table at the current version", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   assert.equal(sqlite.readSingleUserState().state, null);
   closeCached();
   inspect(file, db => {
@@ -89,7 +91,7 @@ function everyRow(db: DatabaseSync) {
 const schema = (db: DatabaseSync) => db.prepare("SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => ({ ...row }));
 
 test("opening today's unversioned layout keeps every table and row and stamps the current version", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, TODAY_LAYOUT, db => {
     db.prepare("INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user',?)").run(JSON.stringify({ ignoredShows: [], diagnostics: true, report: { shows: [] } }));
     db.prepare("INSERT INTO shelfcheck_scan_status(user_id,payload) VALUES('single-user',?)").run(JSON.stringify({ status: "completed" }));
@@ -115,7 +117,7 @@ test("opening today's unversioned layout keeps every table and row and stamps th
 });
 
 test("opening an older sparse layout adds missing tables and columns without erasing data", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, `
     CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE shelfcheck_plex_state (user_id TEXT PRIMARY KEY NOT NULL, report TEXT, scan_status TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -157,7 +159,7 @@ const CORRECTIONS_LAYOUT = `
 const coverageState = (db: DatabaseSync) => ({ ...db.prepare("SELECT revision,pending FROM shelfcheck_coverage_state").get() });
 
 test("ownership-correction retirement runs once, with today's revision and pending effect", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, CORRECTIONS_LAYOUT);
 
   sqlite.readPlexSettings();
@@ -174,7 +176,7 @@ test("ownership-correction retirement runs once, with today's revision and pendi
 });
 
 test("a database from a newer Shelfcheck is refused and left untouched", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 2;");
   const before = inspect(file, db => ({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }));
 
@@ -187,7 +189,7 @@ test("a database from a newer Shelfcheck is refused and left untouched", (t) => 
 });
 
 test("an incompatible unversioned schema is refused clearly and left unchanged", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, data TEXT); INSERT INTO shelfcheck_states VALUES('single-user','x');");
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
@@ -200,7 +202,7 @@ test("an incompatible unversioned schema is refused clearly and left unchanged",
 });
 
 test("a table with today's column names but a different type, NOT NULL or key is refused and left unchanged", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   // user_id is no longer the key and expires is text: the names alone match today's layout.
   fixture(file, `
     CREATE TABLE shelfcheck_states (user_id TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -221,7 +223,7 @@ test("a table with today's column names but a different type, NOT NULL or key is
 });
 
 test("a migration failing after a real schema change rolls back everything, and a retry succeeds once", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   // The trigger fires on the coverage state update that follows dropping the corrections table.
   fixture(file, `${CORRECTIONS_LAYOUT}
     CREATE TRIGGER forced_failure BEFORE UPDATE ON shelfcheck_coverage_state BEGIN SELECT RAISE(ABORT, 'forced migration failure'); END;`);
@@ -246,7 +248,7 @@ test("a migration failing after a real schema change rolls back everything, and 
 });
 
 test("a second open runs no migration but still removes ignored results at open", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   sqlite.readSingleUserState();
   closeCached();
   const show = (id: number) => ({ show: { title: `Show ${id}`, ids: { trakt: id } } });
@@ -266,17 +268,13 @@ test("a second open runs no migration but still removes ignored results at open"
   });
 });
 
-// Written next to the database before the first migration; see lib/sqlite-migrations.ts.
-const backupOf = (file: string) => path.join(path.dirname(file), "shelfcheck-pre-migration-backup.db");
-/** Open the backup on its own, read-only, so a missing file fails instead of being created. */
-function inspectBackup<T>(file: string, read: (db: DatabaseSync) => T): T {
-  const db = new DatabaseSync(backupOf(file), { readOnly: true });
-  try { return read(db); } finally { db.close(); }
-}
+const backupOf = (file: string) => path.join(path.dirname(file), BACKUP_FILE_NAME);
+/** Open the backup on its own, read-only, so a missing backup fails. */
+const inspectBackup = <T>(file: string, read: (db: DatabaseSync) => T) => inspect(backupOf(file), read, { readOnly: true });
 const legacyOptions = { ignoredShows: [], diagnostics: true, futureOption: { kept: true } };
 
 test("upgrading an unversioned database first writes a complete backup, including committed WAL data", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, TODAY_LAYOUT);
   // A legacy process left committed writes in the WAL: auto-checkpoint is off and its handle stays open.
   const legacy = new DatabaseSync(file);
@@ -303,7 +301,7 @@ test("upgrading an unversioned database first writes a complete backup, includin
 });
 
 test("when the backup cannot be written, no migration runs and the open fails", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, `${TODAY_LAYOUT} INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user','{"diagnostics":true}');`);
   // A directory where the backup belongs obstructs it the same way on every platform.
   mkdirSync(backupOf(file));
@@ -319,7 +317,7 @@ test("when the backup cannot be written, no migration runs and the open fails", 
 });
 
 test("a retry after a failed migration keeps the original backup, and a partial file never counts as one", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   fixture(file, `${CORRECTIONS_LAYOUT}
     CREATE TRIGGER forced_failure BEFORE UPDATE ON shelfcheck_coverage_state BEGIN SELECT RAISE(ABORT, 'forced migration failure'); END;`);
   // An interrupted earlier attempt left an incomplete file under the temporary name.
@@ -338,7 +336,7 @@ test("a retry after a failed migration keeps the original backup, and a partial 
 });
 
 test("no backup is written for a new database, on a later open, or beside a refused newer database", (t) => {
-  const file = dataDirectory(t);
+  const file = freshDatabaseFile(t);
   const directoryEntries = () => readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
   sqlite.readSingleUserState();
   closeCached();

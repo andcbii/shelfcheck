@@ -130,7 +130,8 @@ function openDatabase(file: string) {
   }
 }
 
-function database() {
+/** The one open database handle: opened, upgraded and cached on first use. */
+export function database() {
   const cache = globalThis as DatabaseCache;
   if (cache.__shelfcheckDatabase) return cache.__shelfcheckDatabase;
   const directory = dataDirectory();
@@ -264,41 +265,23 @@ export function writePlexSettings<T extends Record<string, unknown>>(settings: T
   }
 }
 
-// Manual rules are durable instance data, independent of generated scan state.
-export function coverageDatabase() {
-  return database();
-}
-
-// Catalogue selection for shows with several Plex provider IDs. Overrides are user
-// decisions and candidate sets are observed Plex state, so neither is a generated
-// input: clearing the cache or saving Plex settings leaves them in place.
-// Candidates are the last completely observed set; selections record the catalogue
-// a scan chose to use, kept apart so a temporary fallback cannot erase a preference.
-export function catalogueSelectionDatabase() {
-  return database();
-}
-
-// Generated provider catalogues and inputs do not pass through report ignore pruning.
-function plexInputsDatabase() {
-  return database();
-}
 export function readPlexGeneratedInputs<T>(key: string): T | null {
-  const row = plexInputsDatabase().prepare("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").get(key) as {payload:string}|undefined;
+  const row = database().prepare("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").get(key) as {payload:string}|undefined;
   return parseStoredJson<T|null>(row?.payload, null);
 }
 export function listPlexGeneratedInputs<T>(prefix: string): Record<string, T> {
-  const rows = plexInputsDatabase().prepare("SELECT cache_key,payload FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE ?").all(`${prefix}%`) as {cache_key:string;payload:string}[];
+  const rows = database().prepare("SELECT cache_key,payload FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE ?").all(`${prefix}%`) as {cache_key:string;payload:string}[];
   return Object.fromEntries(rows.flatMap(row => {
     const value = parseStoredJson<T|null>(row.payload, null);
     return value === null ? [] : [[row.cache_key.slice(prefix.length), value]];
   }));
 }
 export function writePlexGeneratedInputs<T>(key: string, inputs: T) {
-  plexInputsDatabase().prepare("INSERT INTO shelfcheck_plex_generated_inputs(cache_key,payload) VALUES(?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload").run(key, JSON.stringify(inputs));
+  database().prepare("INSERT INTO shelfcheck_plex_generated_inputs(cache_key,payload) VALUES(?,?) ON CONFLICT(cache_key) DO UPDATE SET payload=excluded.payload").run(key, JSON.stringify(inputs));
 }
 /** Deletes every generated input whose key is not exactly one of `keep`; an empty `keep` deletes them all. */
 export function deletePlexGeneratedInputsExcept(keep: readonly string[]) {
-  const db = plexInputsDatabase();
+  const db = database();
   if (!keep.length) { db.exec("DELETE FROM shelfcheck_plex_generated_inputs"); return; }
   db.prepare(`DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key NOT IN (${keep.map(() => "?").join(",")})`).run(...keep);
 }

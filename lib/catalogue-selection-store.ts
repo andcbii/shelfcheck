@@ -3,7 +3,7 @@ import { PROVIDER_NAME, PROVIDERS, selectComparisonCatalogue, type CatalogueProv
 export type { CatalogueUseState } from "@/lib/catalogue-selection";
 import type { ShowProviderIds } from "@/lib/plex-inventory";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
-import { catalogueSelectionDatabase } from "@/lib/sqlite";
+import { database } from "@/lib/sqlite";
 
 export class CatalogueSelectionError extends Error {
   constructor(message: string, public status = 400, public code = "validation") {
@@ -49,7 +49,7 @@ export type ProviderCatalogueSelection = {
 
 export type ShowCatalogueSelection = Record<CatalogueProvider, ProviderCatalogueSelection>;
 
-type Db = ReturnType<typeof catalogueSelectionDatabase>;
+type Db = ReturnType<typeof database>;
 type CandidateRow = { identity: string; provider: CatalogueProvider; series_id: number; name: string | null };
 type OverrideRow = { identity: string; provider: CatalogueProvider; series_id: number };
 type SelectionRow = { identity: string; provider: CatalogueProvider; preferred_id: number | null; using_id: number | null; state: CatalogueUseState; selected_at: string;
@@ -80,7 +80,7 @@ const savedOverride = (db: Db, identity: string, provider: CatalogueProvider) =>
  * returned usable metadata) replaces the candidates or clears an override.
  */
 export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection> {
-  const db = catalogueSelectionDatabase();
+  const db = database();
   return transaction(db, () => Object.fromEntries(PROVIDERS.map(provider => {
     const previous = candidateIds(db, identity, provider);
     const selection = selectComparisonCatalogue({
@@ -104,7 +104,7 @@ export function observeCatalogueCandidates(identity: string, observed: ShowProvi
  * candidates) is untouched, so a temporary fallback cannot erase it.
  */
 export function recordCatalogueUse(identity: string, provider: CatalogueProvider, use: CatalogueUse) {
-  const db = catalogueSelectionDatabase();
+  const db = database();
   transaction(db, () => db.prepare(`INSERT INTO shelfcheck_catalogue_selections(identity,provider,preferred_id,using_id,state,selected_at,preferred_downloaded_at,preferred_usable_until,preferred_failed_at,using_downloaded_at,using_failed_at,derived_from) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(identity,provider) DO UPDATE SET preferred_id=excluded.preferred_id,using_id=excluded.using_id,state=excluded.state,selected_at=excluded.selected_at,preferred_downloaded_at=excluded.preferred_downloaded_at,
       preferred_usable_until=excluded.preferred_usable_until,preferred_failed_at=excluded.preferred_failed_at,using_downloaded_at=excluded.using_downloaded_at,using_failed_at=excluded.using_failed_at,derived_from=excluded.derived_from`)
@@ -113,12 +113,12 @@ export function recordCatalogueUse(identity: string, provider: CatalogueProvider
 
 /** Forget the catalogue in use for a provider that has none this scan, such as a derived series no longer linked. */
 export function clearCatalogueUse(identity: string, provider: CatalogueProvider) {
-  catalogueSelectionDatabase().prepare("DELETE FROM shelfcheck_catalogue_selections WHERE identity=? AND provider=?").run(identity, provider);
+  database().prepare("DELETE FROM shelfcheck_catalogue_selections WHERE identity=? AND provider=?").run(identity, provider);
 }
 
 /** Save names for known candidates; names never affect the candidate set or an override. */
 export function recordCatalogueCandidateNames(identity: string, provider: CatalogueProvider, names: { id: number; name?: string }[]) {
-  const db = catalogueSelectionDatabase();
+  const db = database();
   transaction(db, () => {
     for (const { id, name } of names) if (name) db.prepare("UPDATE shelfcheck_catalogue_candidates SET name=? WHERE identity=? AND provider=? AND series_id=?").run(name, identity, provider, id);
   });
@@ -130,7 +130,7 @@ export function recordCatalogueCandidateNames(identity: string, provider: Catalo
  * reported Plex candidates, of which there must be several.
  */
 export function saveCatalogueOverride(identity: unknown, provider: unknown, seriesId: unknown) {
-  const db = catalogueSelectionDatabase();
+  const db = database();
   transaction(db, () => {
     if (isPlexScanActive()) throw new CatalogueSelectionError("Wait for the current Plex scan to finish before changing the comparison catalogue.", 409, "scan-active");
     if (typeof identity !== "string" || !identity) throw new CatalogueSelectionError("Supply the Plex show identity.");
@@ -157,7 +157,7 @@ export function readShowCatalogueSelection(identity: string): ShowCatalogueSelec
   return readSelections(identity)[identity];
 }
 function readSelections(identity?: string): Record<string, ShowCatalogueSelection> {
-  const db = catalogueSelectionDatabase();
+  const db = database();
   const shows: Record<string, ShowCatalogueSelection> = {};
   const where = identity === undefined ? "" : " WHERE identity=?";
   const rows = <T,>(sql: string) => (identity === undefined ? db.prepare(sql).all() : db.prepare(sql).all(identity)) as T[];

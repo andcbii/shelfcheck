@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyIgnore, changeIgnoreDuration, decodePlexManagerKey, decodeTraktManagerKey, ignoreManagerKey, restoreIgnore, type IgnoreTiming } from "../lib/ignored-shows";
+import { applyIgnore, changeIgnoreDuration, decodePlexManagerKey, decodeTraktManagerKey, ignoreManagerKey, openSeasonIgnore, restoreIgnore, saveSeasonIgnore, type IgnoreTiming } from "../lib/ignored-shows";
 
 const NOW = Date.parse("2026-03-07T18:00:00.000Z");
 const PAST = "2026-03-07T17:59:59.999Z";
@@ -125,4 +125,94 @@ test("an unknown manager key prefix decodes to nothing", () => {
     assert.equal(decodeTraktManagerKey(key), null);
     assert.equal(decodePlexManagerKey(key), null);
   }
+});
+
+test("opening a Trakt season selection reads the active rule and unions its seasons with the page's candidates", () => {
+  const rules: TraktSeasons[] = [
+    { traktId: 1, title: "Alpha", seasons: [4, 1], duration: "90d", expiresAt: FUTURE },
+    { traktId: 2, title: "Beta", seasons: [7], duration: "forever" },
+  ];
+  const before = frozen(rules);
+  const candidates = [3, 1, 3, 0];
+  const draft = openSeasonIgnore(rules, traktSeasonsKey, 1, candidates, NOW);
+  assert.deepEqual(draft, { selected: [4, 1], options: [0, 1, 3, 4], duration: "90d", originalTiming: { expiresAt: FUTURE, duration: "90d" } });
+  draft.selected.push(9);
+  draft.originalTiming!.expiresAt = PAST;
+  assert.deepEqual(rules, before);
+  assert.deepEqual(candidates, [3, 1, 3, 0]);
+});
+
+test("opening a Plex season selection with no active rule selects nothing, chooses Forever and has no original timing", () => {
+  const rules: PlexSeasons[] = [{ ratingKey: "12", title: "Alpha", seasons: [2], duration: "30d", expiresAt: PAST }];
+  assert.deepEqual(openSeasonIgnore(rules, plexKey, "12", [5, 2], NOW), { selected: [], options: [2, 5], duration: "forever", originalTiming: null });
+  assert.deepEqual(openSeasonIgnore(rules, plexKey, "13", [], NOW), { selected: [], options: [], duration: "forever", originalTiming: null });
+});
+
+test("opening a legacy season rule without a duration chooses Forever and keeps its expiry as the original timing", () => {
+  const rules: PlexSeasons[] = [{ ratingKey: "12", title: "Alpha", seasons: [2], expiresAt: FUTURE }];
+  assert.deepEqual(openSeasonIgnore(rules, plexKey, "12", [], NOW), { selected: [2], options: [2], duration: "forever", originalTiming: { expiresAt: FUTURE, duration: undefined } });
+});
+
+const traktSeasonsRecordKey = (rule: { traktId: number }) => rule.traktId;
+const LATER = NOW + 86_400_000;
+
+test("saving a Trakt season selection with an unchanged duration keeps the original deadline, sorts seasons and titles, and drops expired rules", () => {
+  const rules: TraktSeasons[] = [
+    { traktId: 9, title: "Zeta", seasons: [1], duration: "forever" },
+    { traktId: 3, title: "Expired", seasons: [1], duration: "30d", expiresAt: PAST },
+    { traktId: 1, title: "Old Name", seasons: [4], duration: "90d", expiresAt: FUTURE },
+  ];
+  const before = frozen(rules);
+  const selected = [5, 2];
+  const originalTiming = { expiresAt: FUTURE, duration: "90d" as const };
+  const saved = saveSeasonIgnore(rules, traktSeasonsRecordKey, { traktId: 1, title: "Alpha" }, { selected, duration: "90d", originalTiming }, LATER);
+  assert.deepEqual(saved, [
+    { traktId: 1, title: "Alpha", seasons: [2, 5], expiresAt: FUTURE, duration: "90d" },
+    { traktId: 9, title: "Zeta", seasons: [1], duration: "forever" },
+  ]);
+  assert.deepEqual(rules, before);
+  assert.deepEqual(selected, [5, 2]);
+  assert.deepEqual(originalTiming, { expiresAt: FUTURE, duration: "90d" });
+});
+
+test("saving a Plex season selection with a changed duration starts a new deadline from the supplied clock", () => {
+  const rules: PlexSeasons[] = [{ ratingKey: "12", title: "Alpha", seasons: [2], duration: "90d", expiresAt: FUTURE }];
+  assert.deepEqual(saveSeasonIgnore(rules, plexKey, { ratingKey: "12", title: "Alpha" }, { selected: [2], duration: "30d", originalTiming: { expiresAt: FUTURE, duration: "90d" } }, NOW), [
+    { ratingKey: "12", title: "Alpha", seasons: [2], duration: "30d", expiresAt: "2026-04-06T18:00:00.000Z" },
+  ]);
+});
+
+test("switching a season selection to Forever clears its expiry; a new selection gets a new timing", () => {
+  const rules: PlexSeasons[] = [{ ratingKey: "12", title: "Alpha", seasons: [2], duration: "90d", expiresAt: FUTURE }];
+  const [forever] = saveSeasonIgnore(rules, plexKey, { ratingKey: "12", title: "Alpha" }, { selected: [2], duration: "forever", originalTiming: { expiresAt: FUTURE, duration: "90d" } }, NOW);
+  assert.equal(forever.expiresAt, undefined);
+  assert.equal(forever.duration, "forever");
+  assert.deepEqual(saveSeasonIgnore([], plexKey, { ratingKey: "7", title: "New" }, { selected: [1], duration: "30d", originalTiming: null }, NOW), [
+    { ratingKey: "7", title: "New", seasons: [1], duration: "30d", expiresAt: "2026-04-06T18:00:00.000Z" },
+  ]);
+});
+
+test("saving a legacy season rule as Forever keeps its expiry without adding a duration", () => {
+  const rules: PlexSeasons[] = [{ ratingKey: "12", title: "Alpha", seasons: [2], expiresAt: FUTURE }];
+  const saved = saveSeasonIgnore(rules, plexKey, { ratingKey: "12", title: "Alpha" }, { selected: [2, 3], duration: "forever", originalTiming: { expiresAt: FUTURE, duration: undefined } }, NOW);
+  assert.deepEqual(JSON.parse(JSON.stringify(saved)), [{ ratingKey: "12", title: "Alpha", seasons: [2, 3], expiresAt: FUTURE }]);
+});
+
+test("a season selection whose deadline passed while the dialog was open is not saved", () => {
+  const deadline = new Date(NOW).toISOString();
+  const rules: TraktSeasons[] = [{ traktId: 1, title: "Alpha", seasons: [2], duration: "30d", expiresAt: deadline }];
+  assert.deepEqual(saveSeasonIgnore(rules, traktSeasonsRecordKey, { traktId: 1, title: "Alpha" }, { selected: [2], duration: "30d", originalTiming: { expiresAt: deadline, duration: "30d" } }, NOW), []);
+});
+
+test("an empty season selection removes the season ignore and leaves the whole-show list alone", () => {
+  const seasons: PlexSeasons[] = [
+    { ratingKey: "12", title: "Alpha", seasons: [2], duration: "forever" },
+    { ratingKey: "13", title: "Beta", seasons: [1], duration: "forever" },
+  ];
+  const shows: PlexShow[] = [{ ratingKey: "12", title: "Alpha", duration: "forever" }];
+  const showsBefore = frozen(shows);
+  assert.deepEqual(saveSeasonIgnore(seasons, plexKey, { ratingKey: "12", title: "Alpha" }, { selected: [], duration: "forever", originalTiming: { duration: "forever" } }, NOW), [
+    { ratingKey: "13", title: "Beta", seasons: [1], duration: "forever" },
+  ]);
+  assert.deepEqual(shows, showsBefore);
 });

@@ -19,14 +19,14 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
-import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, createIgnoreTiming, decodeTraktManagerKey, ignoreManagerKey, isIgnoreActive, restoreIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
+import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodeTraktManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
 type IgnoredTraktShow = TraktShow & IgnoreTiming;
 type IgnoredTraktSeasons = { traktId: number; title: string; seasons: number[] } & IgnoreTiming;
 const traktShowKey = (show: TraktShow) => show.ids.trakt;
-const traktSeasonsKey = (rule: IgnoredTraktSeasons) => rule.traktId;
+const traktSeasonsKey = (rule: { traktId: number }) => rule.traktId;
 type ServerState = {
   report?: ScanReport;
   ignoredShows?: IgnoredTraktShow[];
@@ -309,24 +309,17 @@ export default function Home() {
 
   function openSeasonIgnore(show: TraktShow) {
     setSeasonIgnoreShow(show);
-    const existing = activeIgnores(ignoredSeasons).find((item) => item.traktId === show.ids.trakt);
-    setSeasonIgnoreDraft(existing?.seasons || []);
-    setSeasonIgnoreOptions([...new Set([...(existing?.seasons || []), ...missing.filter((episode) => episode.show.ids.trakt === show.ids.trakt).map((episode) => episode.season)])].sort((a, b) => a - b));
-    setSeasonIgnoreDuration(existing?.duration || "forever");
-    setSeasonIgnoreOriginalTiming(existing ? { expiresAt: existing.expiresAt, duration: existing.duration } : null);
+    const draft = openSeasonIgnoreRule(ignoredSeasons, traktSeasonsKey, show.ids.trakt, missing.filter((episode) => episode.show.ids.trakt === show.ids.trakt).map((episode) => episode.season), Date.now());
+    setSeasonIgnoreDraft(draft.selected);
+    setSeasonIgnoreOptions(draft.options);
+    setSeasonIgnoreDuration(draft.duration);
+    setSeasonIgnoreOriginalTiming(draft.originalTiming);
     setOpenShowMenu(null);
   }
 
   function saveIgnoredSeasons() {
     if (!seasonIgnoreShow) return;
-    const current = activeIgnores(ignoredSeasons);
-    const existing = seasonIgnoreOriginalTiming;
-    const timing = existing && (existing.duration || "forever") === seasonIgnoreDuration
-      ? { expiresAt: existing.expiresAt, duration: existing.duration }
-      : createIgnoreTiming(seasonIgnoreDuration);
-    const next = current.filter((show) => show.traktId !== seasonIgnoreShow.ids.trakt);
-    if (seasonIgnoreDraft.length && isIgnoreActive(timing)) next.push({ traktId: seasonIgnoreShow.ids.trakt, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b), ...timing });
-    const sorted = next.sort((a, b) => a.title.localeCompare(b.title));
+    const sorted = saveSeasonIgnore(ignoredSeasons, traktSeasonsKey, { traktId: seasonIgnoreShow.ids.trakt, title: seasonIgnoreShow.title }, { selected: seasonIgnoreDraft, duration: seasonIgnoreDuration, originalTiming: seasonIgnoreOriginalTiming }, Date.now());
     setIgnoredSeasons(sorted);
     saveIgnoreLists({ ignoredSeasons: sorted });
     setSeasonIgnoreShow(null);

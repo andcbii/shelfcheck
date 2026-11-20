@@ -577,6 +577,33 @@ for (const [writer,write] of [
   });
 }
 
+test("after a single-show Clear cache, a failing preferred series still downloads its young fallback until the preferred series downloads again", async t => {
+  const f = await fixture(t);
+  const show = await youngFallbackA(f);
+  // Open safeguard work: a specific requirement for an uncompared catalogue (12) the clear must keep.
+  show.clearObligation();
+  f.at(day(64));
+  plexScan.clearPlexScanCache(f.identity);
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[12]},everyAttempted:{tmdb:true,tvdb:true}},"the clear adds every-attempted without replacing other parts");
+  assert.ok(catalogues.readPlexInputs().tmdb["10"],"the shared catalogue A is not deleted");
+
+  for (const n of [65,66]) {
+    f.at(day(n)); const result = await f.run();
+    assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
+    assert.equal(f.tmdbDownloads(10),1,`young A is downloaded on day ${n}`);
+    assert.equal(result.tmdbId,10);
+    assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(n));
+    assert.deepEqual(show.refresh(),{tmdb:true,specificIds:{tmdb:[12]},everyAttempted:{tmdb:true}},"a fallback download satisfies nothing; TVDB's single catalogue download satisfies TVDB");
+  }
+
+  f.tmdb[11].fail = false;
+  f.at(day(67)); const result = await f.run();
+  assert.equal(result.tmdbId,11,"B recovers");
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[12]}},"B's download satisfies the preferred and every-attempted requirements, and keeps the safeguard's");
+  f.at(day(68)); await f.run();
+  assert.equal(f.tmdbDownloads(11),0,"young B is reused once every requirement it satisfies is closed");
+});
+
 test("a fallback in use is downloaded again once older than 20 days while the preferred requirement is open", async t => {
   const f = await fixture(t);
   const show = await youngFallbackA(f);

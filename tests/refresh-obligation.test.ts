@@ -54,3 +54,18 @@ test("a specific requirement forces only the catalogue with its ID, and that cat
   assert.deepEqual(applyObligationPatch(obligation, satisfiedByDownload({ id: 11, preferred: true })), { specificIds: [10] });
   assert.deepEqual(applyObligationPatch({ preferred: true, specificIds: [11] }, satisfiedByDownload({ id: 11, preferred: true })), {});
 });
+
+test("the every-attempted requirement forces every attempted catalogue, the preferred requirement only the preferred one", () => {
+  const preferred = { id: 11, preferred: true }, fallback = { id: 10, preferred: false };
+  assert.equal(requiresDownload({ everyAttempted: true }, preferred), true);
+  assert.equal(requiresDownload({ everyAttempted: true }, fallback), true);
+  assert.equal(requiresDownload({ preferred: true }, fallback), false);
+  assert.equal(requiresDownload({}, preferred), false);
+});
+
+test("the every-attempted requirement is satisfied with the preferred one: by a preferred download, never by a fallback download", () => {
+  assert.deepEqual(satisfiedByDownload({ id: 11, preferred: true }), { remove: { preferred: true, everyAttempted: true, specificIds: [11] } });
+  assert.deepEqual(satisfiedByDownload({ id: 10, preferred: false }), { remove: { specificIds: [10] } }, "only its own specific requirement");
+  // A single catalogue (single Plex ID or derived series) is the preferred one.
+  assert.deepEqual(applyObligationPatch({ everyAttempted: true, specificIds: [4] }, satisfiedByDownload({ preferred: true })), { specificIds: [4] });
+});

@@ -316,6 +316,23 @@ test("when the backup cannot be written, no migration runs and the open fails", 
   });
 });
 
+for (const [kind, content] of [["an empty file", ""], ["a file that is not a database", "incomplete"]] as const) {
+  test(`${kind} at the backup name is refused, kept and not migrated past`, (t) => {
+    const file = freshDatabaseFile(t);
+    fixture(file, `${TODAY_LAYOUT} INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user','{"diagnostics":true}');`);
+    writeFileSync(backupOf(file), content);
+    const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+    assert.throws(() => sqlite.readSingleUserState(), new RegExp(`${BACKUP_FILE_NAME.replace(/\./g, "\\.")} .*not a usable backup`));
+    assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+    assert.equal(readFileSync(backupOf(file), "utf8"), content, "The file at the backup name is not overwritten");
+    inspect(file, db => {
+      assert.equal(version(db), 0, "No migration ran");
+      assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before);
+    });
+  });
+}
+
 test("a retry after a failed migration keeps the original backup, and a partial file never counts as one", (t) => {
   const file = freshDatabaseFile(t);
   fixture(file, `${CORRECTIONS_LAYOUT}

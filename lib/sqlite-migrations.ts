@@ -32,7 +32,8 @@ export function refuseNewerDatabase(db: DatabaseSync) {
 // earlier release: shelfcheck-pre-migration-backup.db, next to shelfcheck.db. To roll
 // back, stop Shelfcheck and restore this file as shelfcheck.db with the old image.
 // It is written under a ".partial" name and renamed into place only once complete,
-// so a file at the backup name is always a complete backup and is never replaced.
+// so a file at the backup name is a complete backup and is never replaced. A file
+// there that is not a readable database with tables stops the upgrade instead.
 export const BACKUP_FILE_NAME = "shelfcheck-pre-migration-backup.db";
 
 /**
@@ -44,7 +45,10 @@ export function backupBeforeFirstMigration(db: DatabaseSync, file: string) {
   const tables = db.prepare("SELECT COUNT(*) AS count FROM sqlite_master").get() as { count: number };
   if (!tables.count) return;
   const backup = path.join(path.dirname(file), BACKUP_FILE_NAME);
-  if (statSync(backup, { throwIfNoEntry: false })?.isFile()) return;
+  if (statSync(backup, { throwIfNoEntry: false })?.isFile()) {
+    refuseUnusableBackup(backup);
+    return;
+  }
   const partial = `${backup}.partial`;
   rmSync(partial, { force: true });
   // VACUUM INTO reads through this connection, so committed data still in the WAL is included.
@@ -55,6 +59,24 @@ export function backupBeforeFirstMigration(db: DatabaseSync, file: string) {
     rmSync(partial, { force: true });
     throw error;
   }
+}
+
+/** An earlier backup counts only if it opens, passes quick_check and holds at least one table. */
+function refuseUnusableBackup(backup: string) {
+  let usable = false;
+  try {
+    const db = new DatabaseSync(backup, { readOnly: true });
+    try {
+      const check = db.prepare("PRAGMA quick_check").all() as { quick_check: string }[];
+      const tables = db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table'").get() as { count: number };
+      usable = check.length === 1 && check[0].quick_check === "ok" && tables.count > 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    usable = false;
+  }
+  if (!usable) throw new Error(`Shelfcheck will not upgrade this database: ${backup} is not a usable backup. Move that file aside, or restore it as the database if it is one, then start Shelfcheck again.`);
 }
 
 /** Apply every pending migration in one write transaction, or none of them. */

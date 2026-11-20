@@ -25,7 +25,7 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
-import { activeIgnores, createIgnoreTiming, isIgnoreActive, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
+import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodePlexManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
@@ -36,6 +36,7 @@ type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: 
 type FieldKey = "plexUrl" | "plexToken" | "tmdbToken" | "tvdbApiKey" | "tvdbPin";
 type IgnoredShow = { ratingKey: string; title: string } & IgnoreTiming;
 type IgnoredSeasons = { ratingKey: string; title: string; seasons: number[] } & IgnoreTiming;
+const plexKey = (rule: { ratingKey: string }) => rule.ratingKey;
 type PlexSettings = { ignoredShows: IgnoredShow[]; ignoredSeasons: IgnoredSeasons[]; hideUnairedEpisodes: boolean; airingOffsetDays: number; autoCompoundEpisodes: boolean; diagnosticsEnabled: boolean };
 
 const EMPTY_CONFIG: ConfigStatus = { plexUrl: "", plexTokenSaved: false, tmdbTokenSaved: false, tvdbApiKeySaved: false, tvdbPinSaved: false, configured: false };
@@ -272,7 +273,7 @@ export default function PlexPage() {
   }
 
   function ignoreShow(show: Show, duration: IgnoreDuration) {
-    const ignoredShows = [...activeIgnores(settings.ignoredShows).filter((item) => item.ratingKey !== show.ratingKey), { ratingKey: show.ratingKey, title: show.title, ...createIgnoreTiming(duration) }].sort((a, b) => a.title.localeCompare(b.title));
+    const ignoredShows = applyIgnore(settings.ignoredShows, plexKey, { ratingKey: show.ratingKey, title: show.title }, duration, Date.now());
     const hidden = report?.shows.filter((item) => item.ratingKey === show.ratingKey) || [];
     const hiddenCache = report?.scanCache?.[show.ratingKey];
     saveSettings({ ...settings, ignoredShows }, { ignoredShows }, (saved) => {
@@ -287,41 +288,37 @@ export default function PlexPage() {
     setOpenShowMenu(null);
   }
 
-  function restoreShow(ratingKey: string) { const ignoredShows = activeIgnores(settings.ignoredShows).filter((show) => show.ratingKey !== ratingKey); saveSettings({ ...settings, ignoredShows }, { ignoredShows }); }
-  function restoreSeasons(ratingKey: string) { const ignoredSeasons = activeIgnores(settings.ignoredSeasons).filter((show) => show.ratingKey !== ratingKey); saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons }); }
+  function restoreShow(ratingKey: string) { const ignoredShows = restoreIgnore(settings.ignoredShows, plexKey, ratingKey, Date.now()); saveSettings({ ...settings, ignoredShows }, { ignoredShows }); }
+  function restoreSeasons(ratingKey: string) { const ignoredSeasons = restoreIgnore(settings.ignoredSeasons, plexKey, ratingKey, Date.now()); saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons }); }
+  function restoreManagerItem(key: string | number) {
+    const target = decodePlexManagerKey(key);
+    if (target?.kind === "show") restoreShow(target.key);
+    else if (target?.kind === "seasons") restoreSeasons(target.key);
+  }
   function changeIgnoreDuration(key: string | number, duration: IgnoreDuration) {
-    const value = String(key);
-    const timing = createIgnoreTiming(duration);
-    if (value.startsWith("show|")) {
-      const ratingKey = value.slice(5);
-      const ignoredShows = activeIgnores(settings.ignoredShows).map((show) => show.ratingKey === ratingKey ? { ...show, expiresAt: undefined, ...timing } : show);
+    const target = decodePlexManagerKey(key);
+    const now = Date.now();
+    if (target?.kind === "show") {
+      const ignoredShows = changeIgnoreRuleDuration(settings.ignoredShows, plexKey, target.key, duration, now);
       saveSettings({ ...settings, ignoredShows }, { ignoredShows });
-    } else if (value.startsWith("seasons|")) {
-      const ratingKey = value.slice(8);
-      const ignoredSeasons = activeIgnores(settings.ignoredSeasons).map((show) => show.ratingKey === ratingKey ? { ...show, expiresAt: undefined, ...timing } : show);
+    } else if (target?.kind === "seasons") {
+      const ignoredSeasons = changeIgnoreRuleDuration(settings.ignoredSeasons, plexKey, target.key, duration, now);
       saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons });
     }
   }
   function openSeasonIgnore(show: Show) {
     const fullShow = report?.shows.find((item) => item.ratingKey === show.ratingKey) || show;
     setSeasonIgnoreShow(fullShow);
-    const existing = activeIgnores(settings.ignoredSeasons).find((item) => item.ratingKey === show.ratingKey);
-    setSeasonIgnoreDraft(existing?.seasons || []);
-    setSeasonIgnoreOptions([...new Set([...(existing?.seasons || []), ...fullShow.missing.map((episode) => episode.season)])].sort((a, b) => a - b));
-    setSeasonIgnoreDuration(existing?.duration || "forever");
-    setSeasonIgnoreOriginalTiming(existing ? { expiresAt: existing.expiresAt, duration: existing.duration } : null);
+    const draft = openSeasonIgnoreRule(settings.ignoredSeasons, plexKey, show.ratingKey, fullShow.missing.map((episode) => episode.season), Date.now());
+    setSeasonIgnoreDraft(draft.selected);
+    setSeasonIgnoreOptions(draft.options);
+    setSeasonIgnoreDuration(draft.duration);
+    setSeasonIgnoreOriginalTiming(draft.originalTiming);
     setOpenShowMenu(null);
   }
   function saveIgnoredSeasons() {
     if (!seasonIgnoreShow) return;
-    const current = activeIgnores(settings.ignoredSeasons);
-    const existing = seasonIgnoreOriginalTiming;
-    const timing = existing && (existing.duration || "forever") === seasonIgnoreDuration
-      ? { expiresAt: existing.expiresAt, duration: existing.duration }
-      : createIgnoreTiming(seasonIgnoreDuration);
-    const next = current.filter((show) => show.ratingKey !== seasonIgnoreShow.ratingKey);
-    if (seasonIgnoreDraft.length && isIgnoreActive(timing)) next.push({ ratingKey: seasonIgnoreShow.ratingKey, title: seasonIgnoreShow.title, seasons: [...seasonIgnoreDraft].sort((a, b) => a - b), ...timing });
-    const ignoredSeasons = next.sort((a, b) => a.title.localeCompare(b.title));
+    const ignoredSeasons = saveSeasonIgnore(settings.ignoredSeasons, plexKey, { ratingKey: seasonIgnoreShow.ratingKey, title: seasonIgnoreShow.title }, { selected: seasonIgnoreDraft, duration: seasonIgnoreDuration, originalTiming: seasonIgnoreOriginalTiming }, Date.now());
     saveSettings({ ...settings, ignoredSeasons }, { ignoredSeasons });
     setSeasonIgnoreShow(null);
   }
@@ -425,7 +422,7 @@ export default function PlexPage() {
       <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
     </section>
     <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{activeShows.filter((show) => show.missing.length).length}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
-      {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: `show|${show.ratingKey}`, title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: `seasons|${show.ratingKey}`, title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={(key) => { const value = String(key); if (value.startsWith("show|")) restoreShow(value.slice(5)); else if (value.startsWith("seasons|")) restoreSeasons(value.slice(8)); }} />}
+      {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: ignoreManagerKey("show", show.ratingKey), title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: ignoreManagerKey("seasons", show.ratingKey), title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={restoreManagerItem} />}
     </div>
     <div className="episode-reports-nav"><Link className="episode-reports-link" href="/reports">Reports <span>→</span></Link></div>
     <section className="report"><div className="report-heading"><p className="eyebrow">PLEX MISSING REPORT</p><div className="report-primary-row"><h2>{missingCount} missing episodes</h2><ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} /></div><div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllShows(false)}>Expand all</button><button onClick={() => setAllShows(true)}>Collapse all</button></div></div></div>

@@ -1,5 +1,6 @@
 ---
 status: accepted
+amends: ADR-0003, ADR-0005
 ---
 
 # Stop comparing a provider record only after repeated not-found answers

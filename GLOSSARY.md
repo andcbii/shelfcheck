@@ -70,11 +70,11 @@ An unresolved condition that prevents Shelfcheck from verifying episode coverage
 A Coverage Issue recording that a show or episode could not be looked up at a provider, for any reason: a missing ID, "not found", an outage, a rate limit, a failed sign-in or an unreadable answer.
 
 **Gone provider record**:
-A provider series record that has answered "not found" on 15 separate UTC days since its last successful download, and whose saved catalogue is more than 60 days old. Its saved catalogue is kept but never compared, and one successful download makes it usable again. Outages and other failures never count toward it.
+A provider series ID whose series request has answered "not found" on 15 separate UTC days since its last complete catalogue download, and whose saved catalogue is more than 60 days old. Its saved catalogue is kept but never compared, and one complete download makes it usable again. Outages, other failures, and "not found" answers for its seasons or episodes never count toward it. An ID never downloaded has no catalogue age and is never gone.
 _Avoid_: Deleted show, dead ID
 
 **Total Provider Lookup Failure**:
-A provider for which none of a show's series IDs currently works: Plex reports none, or the latest download attempt for every reported ID failed. A catalogue reused without a new attempt still works. The show may still fall back to a saved catalogue from that provider until it becomes a Gone provider record.
+A provider for which the show has no catalogue from a working ID. An ID works when its latest download attempt succeeded or its catalogue was reused without one, whether Plex reported the ID or Shelfcheck found it through the other provider; IDs not tried don't count as failing. The show may still use a saved catalogue kept after a failed attempt until that record is gone.
 
 **Unmatched show**:
 A library show with no usable catalogue from any provider, live or saved. The Unmatched Shows report lists them.

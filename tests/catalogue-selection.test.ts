@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectComparisonCatalogue } from "../lib/catalogue-selection";
+import { removedCandidates, selectComparisonCatalogue } from "../lib/catalogue-selection";
 
 test("automatic choice is the lowest numeric candidate", () => {
   assert.deepEqual(selectComparisonCatalogue({ observed: [10, 9], complete: true }), { candidates: [9, 10], commit: true, overrideCleared: false, automaticId: 9, preferredId: 9 });
@@ -33,4 +33,11 @@ test("an incomplete observation keeps the last observed set and the override", (
 
 test("an incomplete first observation selects from what was seen without committing it", () => {
   assert.deepEqual(selectComparisonCatalogue({ observed: [20, 3], complete: false }), { candidates: [3, 20], commit: false, overrideCleared: false, automaticId: 3, preferredId: 3 });
+});
+
+test("only a complete observation removes candidates, and only ones the committed set contained", () => {
+  assert.deepEqual(removedCandidates({ previous: [1, 2, 3], observed: [3, 4], complete: true }), [1, 2]);
+  assert.deepEqual(removedCandidates({ previous: [1, 2], observed: [], complete: true }), [1, 2], "Plex reporting none removes every committed candidate");
+  assert.deepEqual(removedCandidates({ previous: [1, 2], observed: [], complete: false }), [], "an incomplete observation is not evidence of removal");
+  assert.deepEqual(removedCandidates({ observed: [], complete: true }), [], "an empty set that never held an ID removes nothing");
 });

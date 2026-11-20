@@ -69,3 +69,11 @@ test("the every-attempted requirement is satisfied with the preferred one: by a 
   // A single catalogue (single Plex ID or derived series) is the preferred one.
   assert.deepEqual(applyObligationPatch({ everyAttempted: true, specificIds: [4] }, satisfiedByDownload({ preferred: true })), { specificIds: [4] });
 });
+
+test("a specific requirement matches a catalogue by its requested or its reported ID, and a download satisfies both names", () => {
+  const attempt = { id: 11, reportedId: 21, preferred: false };
+  assert.equal(requiresDownload({ specificIds: [21] }, attempt), true, "named by the ID the provider reports");
+  assert.equal(requiresDownload({ specificIds: [11] }, attempt), true, "named by the ID requested");
+  assert.equal(requiresDownload({ specificIds: [12] }, attempt), false);
+  assert.deepEqual(applyObligationPatch({ specificIds: [11, 12, 21] }, satisfiedByDownload(attempt)), { specificIds: [12] });
+});

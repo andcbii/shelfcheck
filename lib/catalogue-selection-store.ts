@@ -1,5 +1,5 @@
 import "server-only";
-import { PROVIDER_NAME, PROVIDERS, selectComparisonCatalogue, type CatalogueProvider, type CatalogueSelection, type CatalogueUseState } from "@/lib/catalogue-selection";
+import { PROVIDER_NAME, PROVIDERS, removedCandidates, selectComparisonCatalogue, type CatalogueProvider, type CatalogueSelection, type CatalogueUseState } from "@/lib/catalogue-selection";
 export type { CatalogueUseState } from "@/lib/catalogue-selection";
 import type { ShowProviderIds } from "@/lib/plex-inventory";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
@@ -77,18 +77,20 @@ const savedOverride = (db: Db, identity: string, provider: CatalogueProvider) =>
  * overrides, and choose the catalogue each provider prefers. The catalogue in use is recorded only
  * once a comparison completes (`recordCatalogueUse`), so a scan that keeps last-good results never
  * describes a catalogue those results did not compare. Only a complete observation (every record
- * returned usable metadata) replaces the candidates or clears an override.
+ * returned usable metadata) replaces the candidates or clears an override, and only it reports the
+ * candidates Plex removed (`removed`).
  */
-export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection> {
+export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection & { removed: number[] }> {
   const db = database();
   return transaction(db, () => Object.fromEntries(PROVIDERS.map(provider => {
     const previous = candidateIds(db, identity, provider);
-    const selection = selectComparisonCatalogue({
+    const input = {
       ...(previous.length ? { previous } : {}),
       observed: observed[provider].filter(id => Number.isSafeInteger(id) && id > 0),
       complete,
       override: savedOverride(db, identity, provider),
-    });
+    };
+    const selection = { ...selectComparisonCatalogue(input), removed: removedCandidates(input) };
     if (selection.commit) {
       const keep = new Set(selection.candidates);
       for (const id of previous) if (!keep.has(id)) db.prepare("DELETE FROM shelfcheck_catalogue_candidates WHERE identity=? AND provider=? AND series_id=?").run(identity, provider, id);
@@ -96,7 +98,7 @@ export function observeCatalogueCandidates(identity: string, observed: ShowProvi
     }
     if (selection.overrideCleared) db.prepare("DELETE FROM shelfcheck_catalogue_overrides WHERE identity=? AND provider=?").run(identity, provider);
     return [provider, selection];
-  })) as Record<CatalogueProvider, CatalogueSelection>);
+  })) as Record<CatalogueProvider, CatalogueSelection & { removed: number[] }>);
 }
 
 /**

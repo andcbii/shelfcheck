@@ -35,6 +35,17 @@ export type CatalogueSelection = {
 };
 
 /**
+ * The candidates Plex affirmatively removed: IDs in the last committed candidate set that a complete
+ * observation no longer reports. An incomplete observation removes nothing, and an ID never in the
+ * committed set (such as a derived series) is never removed.
+ */
+export function removedCandidates(input: Pick<CatalogueSelectionInput, "previous" | "observed" | "complete">): number[] {
+  if (!input.complete || !input.previous) return [];
+  const observed = new Set(input.observed);
+  return distinctSortedIds(input.previous).filter(id => !observed.has(id));
+}
+
+/**
  * Choose one comparison catalogue for a provider: the saved override when it is still a
  * candidate, else the lowest numeric candidate. Only a complete Plex observation can replace
  * the candidate set; removing any candidate from it clears the override.
@@ -44,7 +55,7 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
   const previous = input.previous ? distinctSortedIds(input.previous) : undefined;
   const commit = input.complete;
   const candidates = commit ? observed : previous || observed;
-  const removed = commit && !!previous?.some(id => !observed.includes(id));
+  const removed = removedCandidates(input).length > 0;
   const override = input.override !== undefined && !removed && candidates.includes(input.override) ? input.override : undefined;
   const automaticId = candidates[0];
   const preferredId = override ?? automaticId;

@@ -313,6 +313,40 @@ test("a specific requirement forces a single Plex ID's or derived series' downlo
   assert.deepEqual(resolved.tvdb.obligation, { remove: { specificIds: [7] } });
 });
 
+test("a specific requirement names the catalogue a provider reports, even when it answers a requested series as another", async () => {
+  // TMDB answers series 11 as series 21: the comparison, the change feed and the safeguard name 21.
+  const single = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 11: before(60_000) }, tvdb: tvdbSaved }, reports: { tmdb: { 11: 21 } } });
+  const loaded = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11, refreshObligation: { specificIds: [21] } }, tvdbOnly), { source: single.source });
+  assert.deepEqual(single.requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, true]], "the saved copy of 11 reports 21, so the requirement forces it");
+  assert.deepEqual([loaded.tmdb.identity, loaded.tmdb.catalogue?.origin], [21, "downloaded"]);
+  assert.deepEqual(loaded.tmdb.obligation, { remove: { specificIds: [21] } }, "the download satisfies the requirement it was forced by");
+
+  // A preferred catalogue answered as another series is still the preferred catalogue.
+  const several = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: tvdbSaved }, reports: { tmdb: { 11: 21 } } });
+  const preferred = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: { preferred: true, everyAttempted: true } }, tvdbOnly), { source: several.source });
+  assert.deepEqual([preferred.tmdb.identity, preferred.tmdb.catalogue?.origin], [21, "downloaded"]);
+  assert.deepEqual(preferred.tmdb.obligation, { remove: { preferred: true, everyAttempted: true } });
+});
+
+test("a specific requirement for a catalogue not compared is on hold: it forces nothing and reports nothing, and applies when that catalogue is compared again", async () => {
+  // A reported fallback (10) on hold while preferred B (11) loads.
+  const reported = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(60_000), 11: before(DAY) }, tvdb: tvdbSaved } });
+  const held = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: { specificIds: [10] } }, tvdbOnly), { source: reported.source });
+  assert.deepEqual(reported.requests.map(r => [r.provider, r.id, r.mandatory]), [["tmdb", 11, false], ["tvdb", 1, false]], "neither B nor the other provider is forced");
+  assert.equal(held.outcome, "comparable");
+  assert.deepEqual([held.tmdb.obligation, held.tvdb.obligation, held.warnings], [UNCHANGED, UNCHANGED, []]);
+  assert.ok(held.tmdb.issues.every(issue => issue.action === "resolve"), "no active failure");
+
+  // A derived TMDB series (50) on hold while TVDB 2's association names 60, applied when 50 is derived again.
+  const derived = () => inMemoryCatalogueSource({
+    now: NOW, saved: { tmdb: { 50: before(60_000), 60: before(60_000) }, tvdb: { 1: before(DAY), 2: before(DAY) } }, savedAssociations: { 1: 50, 2: 60 },
+  }).source;
+  const elsewhere = await resolveComparisonCatalogues(request({ candidates: [], refreshObligation: { specificIds: [50] } }, { candidates: [2], preferredId: 2 }), { source: derived() });
+  assert.deepEqual([elsewhere.tmdb.identity, elsewhere.tmdb.catalogue?.origin, elsewhere.tmdb.obligation, elsewhere.warnings], [60, "reused", UNCHANGED, []]);
+  const back = await resolveComparisonCatalogues(request({ candidates: [], refreshObligation: { specificIds: [50] } }, { candidates: [1], preferredId: 1 }), { source: derived() });
+  assert.deepEqual([back.tmdb.identity, back.tmdb.catalogue?.origin, back.tmdb.obligation], [50, "downloaded", { remove: { specificIds: [50] } }], "derived again, its same-day saved copy is downloaded");
+});
+
 
 test("each provider's obligation change is acknowledged by the progress sink before the other provider's work starts", async () => {
   const { source: inner } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });

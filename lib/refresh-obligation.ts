@@ -21,8 +21,17 @@ export const PREFERRED_REQUIRED: RefreshObligationPatch = { add: { preferred: tr
 /** Adds the every-attempted requirement: what a single-show Clear cache writes. */
 export const EVERY_ATTEMPTED_REQUIRED: RefreshObligationPatch = { add: { everyAttempted: true } };
 
-/** A catalogue a scan tries for a provider: its series ID, if known, and whether it is the preferred catalogue. */
-export type AttemptedCatalogue = { id?: number; preferred: boolean };
+/**
+ * A catalogue a scan tries for a provider, and whether it is the preferred catalogue. It is named by
+ * the series ID requested (`id`, when known) and by the ID the catalogue itself reports
+ * (`reportedId`: its saved copy's before a load, its download's after), which a provider can answer
+ * differently. A specific requirement names the reported ID of the catalogue compared, so either
+ * name matches it.
+ */
+export type AttemptedCatalogue = { id?: number; reportedId?: number; preferred: boolean };
+
+/** The IDs that name an attempted catalogue. */
+const namesOf = (attempt: AttemptedCatalogue) => [attempt.id, attempt.reportedId].filter((id): id is number => id !== undefined);
 
 /**
  * Every provider's refresh obligation as a saved comparison stores it. The per-provider flag is the
@@ -100,20 +109,22 @@ export function combinePatches(a: RefreshObligationPatch, b: RefreshObligationPa
 /**
  * Whether an attempted catalogue must be downloaded rather than reused: the every-attempted
  * requirement forces every catalogue, the preferred requirement only the preferred catalogue, and a
- * specific requirement only the catalogue with its ID. Otherwise the source's reuse policy decides.
+ * specific requirement only the catalogue it names. A specific requirement for a catalogue not
+ * attempted is on hold: it forces nothing. Otherwise the source's reuse policy decides.
  */
 export function requiresDownload(obligation: RefreshObligation, attempt: AttemptedCatalogue): boolean {
-  return !!obligation.everyAttempted || !!obligation.preferred && attempt.preferred || attempt.id !== undefined && !!obligation.specificIds?.includes(attempt.id);
+  return !!obligation.everyAttempted || !!obligation.preferred && attempt.preferred || namesOf(attempt).some(id => !!obligation.specificIds?.includes(id));
 }
 
 /**
  * The requirements a complete successful download of a catalogue satisfies: the specific requirement
- * for its own ID, and the preferred and every-attempted requirements when it is the preferred catalogue
+ * for the catalogue it names (requested or reported ID), and the preferred and every-attempted requirements when it is the preferred catalogue
  * (a fallback download satisfies neither). Reuse, title-only repair, failed and incomplete loads
  * satisfy nothing, so the caller asks only for a download.
  */
 export function satisfiedByDownload(attempt: AttemptedCatalogue): RefreshObligationPatch {
-  const remove: RefreshObligation = { ...(attempt.preferred ? { preferred: true, everyAttempted: true } : {}), ...(attempt.id !== undefined ? { specificIds: [attempt.id] } : {}) };
+  const ids = namesOf(attempt);
+  const remove: RefreshObligation = { ...(attempt.preferred ? { preferred: true, everyAttempted: true } : {}), ...(ids.length ? { specificIds: [...new Set(ids)] } : {}) };
   return Object.keys(remove).length ? { remove } : {};
 }
 

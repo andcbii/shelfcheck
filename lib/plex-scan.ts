@@ -1084,6 +1084,9 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     let tvdbSlug: string | undefined;
     const savedComparison = inputs.comparisons[ratingKey];
     const refresh = {...savedComparison?.refresh};
+    // A specific requirement is dropped only when this complete observation removes its ID from the
+    // reported candidates; on hold otherwise, it is kept for when its catalogue is compared again.
+    for (const provider of PROVIDERS) if (plexSelection[provider].removed.length) patchSavedObligation(refresh, provider, {remove: {specificIds: plexSelection[provider].removed}});
     inputs.comparisons[ratingKey] = savedComparison ? {...savedComparison,refresh} : {group, details, localMetadata, tmdbId, tvdbId, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
     savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
     let tmdbCatalogueReused = false;

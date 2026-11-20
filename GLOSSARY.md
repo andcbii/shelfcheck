@@ -118,8 +118,20 @@ _Avoid_: Derived flag, inferred missing
 A Manual Match whose TMDB and TVDB sides each list two or more episodes, so neither side is a single combined episode. Shelfcheck never guesses which opposite-side episode contains a reported-missing episode, so no status is derived: each Report Missing flag affects only its own episode. A manual save must leave either no flags or at least one explicit flag on each provider side (the **both-sides-or-none rule**); derived status never satisfies it. The rule checks manual saves, including membership edits that change the mapping into this shape, and never rejects reading or comparing saved flags, so a one-sided state left by automatic cleanup stays active until the next manual save repairs or clears it.
 _Avoid_: Partial selection, guessed correspondence
 
+**Air date**:
+The date a provider lists for an episode's first broadcast, whether past or future. Also called the premiere date; TMDB shows it as "Air Date" and TVDB as "First Aired". An episode may have none.
+_Avoid_: Release date, aired date
+
+**Aired**:
+The state of an episode whose air date is today or earlier in the user's local calendar. An episode with no air date, or an air date in the future, is **unaired**. The air-date delay never changes whether an episode has aired.
+_Avoid_: Released, available
+
+**Air-date delay**:
+A number of calendar days by which an episode's air date is treated as later when deciding whether to show it as missing. It affects only missing results, never whether the episode has aired.
+_Avoid_: Airing grace period, aired-date offset, airing offset
+
 **Settings**:
-The choices that control how Shelfcheck runs, made in the gear menu (such as diagnostics, the airing grace period and hiding unaired episodes), and the connections to the Trakt, Plex and provider APIs.
+The choices that control how Shelfcheck runs, made in the gear menu (such as diagnostics, the air-date delay and hiding unaired episodes), and the connections to the Trakt, Plex and provider APIs.
 _Avoid_: Preferences (for these choices)
 
 **Preferences**:

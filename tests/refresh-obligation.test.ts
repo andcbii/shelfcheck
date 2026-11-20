@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyObligationPatch, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, savedObligation, unionObligations, type SavedRefreshObligations } from "../lib/refresh-obligation";
+import { applyObligationPatch, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, requiresDownload, satisfiedByDownload, savedObligation, unionObligations, type SavedRefreshObligations } from "../lib/refresh-obligation";
 
 test("a provider flag saved before requirements existed reads as the preferred requirement alone", () => {
   // Whatever wrote it (a safeguard, a single-show Clear cache), only the preferred part survives the upgrade.
@@ -35,4 +35,19 @@ test("a saved obligation is patched in place for one provider, keeping the other
 test("saved specific IDs are read as positive, de-duplicated integers", () => {
   const saved = { specificIds: { tmdb: [5, 5, 0, -1, 2.5, "7", 3] } } as unknown as SavedRefreshObligations;
   assert.deepEqual(savedObligation(saved, "tmdb"), { specificIds: [3, 5] });
+});
+
+test("the every-attempted requirement forces every attempted catalogue, the preferred requirement only the preferred one", () => {
+  const preferred = { id: 11, preferred: true }, fallback = { id: 10, preferred: false };
+  assert.equal(requiresDownload({ everyAttempted: true }, preferred), true);
+  assert.equal(requiresDownload({ everyAttempted: true }, fallback), true);
+  assert.equal(requiresDownload({ preferred: true }, fallback), false);
+  assert.equal(requiresDownload({}, preferred), false);
+});
+
+test("the every-attempted requirement is satisfied with the preferred one: by a preferred download, never by a fallback download", () => {
+  assert.deepEqual(satisfiedByDownload({ id: 11, preferred: true }), { remove: { preferred: true, everyAttempted: true } });
+  assert.deepEqual(satisfiedByDownload({ id: 10, preferred: false }), {});
+  // A single catalogue (single Plex ID or derived series) is the preferred one.
+  assert.deepEqual(applyObligationPatch({ everyAttempted: true, specificIds: [4] }, satisfiedByDownload({ preferred: true })), { specificIds: [4] });
 });

@@ -18,6 +18,9 @@ export type RefreshObligationPatch = { add?: RefreshObligation; remove?: Refresh
 /** Adds the preferred requirement: what a failed preferred catalogue, a Manual Match change and a catalogue override change write. */
 export const PREFERRED_REQUIRED: RefreshObligationPatch = { add: { preferred: true } };
 
+/** Adds the every-attempted requirement: what a single-show Clear cache writes. */
+export const EVERY_ATTEMPTED_REQUIRED: RefreshObligationPatch = { add: { everyAttempted: true } };
+
 /** A catalogue a scan tries for a provider: its series ID, if known, and whether it is the preferred catalogue. */
 export type AttemptedCatalogue = { id?: number; preferred: boolean };
 
@@ -95,20 +98,21 @@ export function combinePatches(a: RefreshObligationPatch, b: RefreshObligationPa
 }
 
 /**
- * Whether an attempted catalogue must be downloaded rather than reused: the preferred requirement
- * forces only the preferred catalogue. Otherwise the source's reuse policy decides.
+ * Whether an attempted catalogue must be downloaded rather than reused: the every-attempted
+ * requirement forces every catalogue, the preferred requirement only the preferred catalogue.
+ * Otherwise the source's reuse policy decides.
  */
 export function requiresDownload(obligation: RefreshObligation, attempt: AttemptedCatalogue): boolean {
-  return !!obligation.preferred && attempt.preferred;
+  return !!obligation.everyAttempted || !!obligation.preferred && attempt.preferred;
 }
 
 /**
- * The requirements a complete successful download of a catalogue satisfies: the preferred
- * requirement, by the preferred catalogue. Reuse, failed and incomplete loads satisfy nothing, so the
- * caller asks only for a download.
+ * The requirements a complete successful download of a catalogue satisfies: the preferred and
+ * every-attempted requirements, by the preferred catalogue (a fallback download satisfies neither).
+ * Reuse, failed and incomplete loads satisfy nothing, so the caller asks only for a download.
  */
 export function satisfiedByDownload(attempt: AttemptedCatalogue): RefreshObligationPatch {
-  return attempt.preferred ? { remove: { preferred: true } } : {};
+  return attempt.preferred ? { remove: { preferred: true, everyAttempted: true } } : {};
 }
 
 /** A provider's refresh obligation from a saved comparison's stored value. */

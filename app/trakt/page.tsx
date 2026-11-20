@@ -42,6 +42,11 @@ function formatLastScan(value: string | null): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
+// The saved whole-show Ignore list, compacted as the page holds it; a missing list is empty.
+function savedIgnoredShows(state: ServerState): IgnoredTraktShow[] {
+  return Array.isArray(state.ignoredShows) ? state.ignoredShows.map((show) => ({ ...compactTraktShow(show), expiresAt: show.expiresAt, duration: show.duration })) : [];
+}
+
 function pruneClientReport(report: ScanReport, invalidated: Set<number>): ScanReport {
   return {
     ...report,
@@ -95,6 +100,8 @@ export default function Home() {
   // Restoring a show does not make responses from this scan safe to reuse.
   const reportInvalidations = useRef(new Set<number>());
   const loadedCacheKeys = useRef(new Set<string>());
+  // One generation for both Ignore lists; diagnostics and grace-period saves take none.
+  const ignoreSaves = useRef(0);
   const scanRequestPending = useRef(false);
   const scanInProgress = useRef(false);
   const { poll: pollServerScan, abort: abortScanPoll } = useScanPoller<{ scan: ScanStatus }>({
@@ -135,13 +142,15 @@ export default function Home() {
       if (!response.ok) return;
       const { state } = await response.json() as { state: ServerState | null };
       if (!state) {
+        // This write carries Ignore lists, so it supersedes any earlier Ignore save.
+        ignoreSaves.current++;
         syncServerState({ ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0 });
         return;
       }
       setDebugEnabled(state.diagnosticsEnabled !== false);
       setAiringGraceDays(Math.max(0, Math.min(30, Math.trunc(Number(state.airingGraceDays) || 0))));
       if (Array.isArray(state.ignoredShows)) {
-        const remoteIgnored = state.ignoredShows.map((show) => ({ ...compactTraktShow(show), expiresAt: show.expiresAt, duration: show.duration }));
+        const remoteIgnored = savedIgnoredShows(state);
         for (const show of activeIgnores(remoteIgnored)) initialInvalidations.add(show.ids.trakt);
         setIgnoredShows(remoteIgnored);
       }
@@ -195,8 +204,23 @@ export default function Home() {
   }
 
   // Every Ignore edit (Ignore, Restore, Change duration, season save) saves through here.
+  // A rejected save shows the Ignore lists the server saved, unless a newer Ignore
+  // edit of either list has started: that edit owns both displayed lists.
   function saveIgnoreLists(patch: Pick<ServerState, "ignoredShows" | "ignoredSeasons">) {
-    syncServerState(patch);
+    const save = ++ignoreSaves.current;
+    void fetch("/api/state", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
+      .then(async (response) => {
+        if (response.ok) return;
+        // A rejected save may still have written: show what was saved, never the pre-click lists.
+        const saved = await fetch("/api/state", { cache: "no-store" }).then((reply) => reply.ok ? reply.json() : null).catch(() => null) as { state?: ServerState | null } | null;
+        // Without a saved state there is nothing to confirm, so the current view stays.
+        if (save === ignoreSaves.current && saved?.state && typeof saved.state === "object") {
+          setIgnoredShows(savedIgnoredShows(saved.state));
+          setIgnoredSeasons(Array.isArray(saved.state.ignoredSeasons) ? saved.state.ignoredSeasons : []);
+        }
+        throw new Error("Shelfcheck could not save the settings.");
+      })
+      .catch((saveError) => setError(saveError instanceof Error ? saveError.message : "Shelfcheck could not save the settings."));
   }
 
   function setDiagnostics(enabled: boolean) {

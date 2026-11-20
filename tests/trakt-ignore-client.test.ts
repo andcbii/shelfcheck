@@ -7,6 +7,12 @@ import { mountDom } from "./dom-environment";
 // These tests pin today's Trakt Ignore behaviour through the rendered page and
 // the payloads it saves, so the Ignore code can move underneath them.
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 const NOW = Date.parse("2026-11-19T12:00:00.000Z");
 const alpha = { title: "Alpha Show", year: 2020, ids: { trakt: 101, slug: "alpha-show" } };
 const bravo = { title: "Bravo Show", year: 2021, ids: { trakt: 202, slug: "bravo-show" } };
@@ -29,15 +35,22 @@ function fakeServer(initial: Partial<TraktState> = {}) {
   const trakt: TraktState = { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0, report, ...initial };
   const plex = structuredClone(plexSeed);
   const saves: { url: string; body: Record<string, unknown> }[] = [];
-  const server = { trakt, plex, saves, failSaves: false };
+  const stateReads: (RequestInit | undefined)[] = [];
+  // intercept answers a request first when it returns a response, so a test can
+  // hold a save or a re-read open and decide when and how it resolves.
+  const server = { trakt, plex, saves, stateReads, failSaves: false, intercept: null as null | ((url: string, init?: RequestInit) => Promise<Response> | undefined) };
   const fetcher: typeof fetch = async (input, init) => {
     const url = String(input);
+    if (url === "/api/state" && !init?.method) stateReads.push(init);
+    if (url === "/api/state" && init?.method === "PATCH") saves.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+    const intercepted = server.intercept?.(url, init);
+    if (intercepted) return intercepted;
     if (url === "/api/scan-runs") return Response.json({ activeScanRun: null });
     if (url === "/api/config") return Response.json({ connected: true, applicationConfigured: true });
     if (url === "/api/state" && !init?.method) return Response.json({ state: structuredClone(trakt) });
     if ((url === "/api/state" || url === "/api/plex/state") && init?.method === "PATCH") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-      saves.push({ url, body });
+      if (url !== "/api/state") saves.push({ url, body });
       if (server.failSaves) return Response.json({ error: "failed" }, { status: 500 });
       Object.assign(url === "/api/state" ? trakt : plex.settings, body);
       return Response.json({ ok: true });
@@ -75,8 +88,11 @@ async function renderTrakt(t: test.TestContext, initial: Partial<TraktState> = {
   const shownTitles = () => Array.from(container.querySelectorAll(".show-name-button")).map((element) => element.textContent);
   const episodeCodes = () => Array.from(container.querySelectorAll(".episode-code-tile")).map((element) => element.textContent);
   const ignoredCount = () => container.querySelector(".ignored-stat strong")?.textContent;
+  // The Ignore manager rows as "title: expiry", with expiry the saved deadline or Forever.
+  const managerRows = () => Array.from(container.querySelectorAll(".ignored-manager .ignored-row")).map((row) => `${row.querySelector('button[aria-label^="Restore "]')?.getAttribute("aria-label")?.slice("Restore ".length)}: ${row.querySelector("time")?.getAttribute("datetime") || "Forever"}`);
+  const errorText = () => container.querySelector(".error")?.textContent || "";
   const traktSaves = () => server.saves.filter((save) => save.url === "/api/state").map((save) => save.body);
-  return { container, server, click, chooseSeasonDuration, toggleSeason, shownTitles, episodeCodes, ignoredCount, traktSaves };
+  return { container, server, click, chooseSeasonDuration, toggleSeason, shownTitles, episodeCodes, ignoredCount, managerRows, errorText, traktSaves };
 }
 
 const alphaThirtyDays = { ...alpha, duration: "30d", expiresAt: "2026-12-01T12:00:00.000Z" };
@@ -193,7 +209,7 @@ test("Trakt season save with no seasons selected removes the season ignore", asy
   assert.deepEqual(page.episodeCodes(), ["S01E01", "S02E01", "S01E03"]);
 });
 
-test("Trakt shows the error and undoes nothing when an Ignore save fails", async (t) => {
+test("Trakt shows the error and the saved Ignore lists when Ignore saves fail", async (t) => {
   const page = await renderTrakt(t, { ignoredSeasons: [{ traktId: 202, title: "Bravo Show", seasons: [1], duration: "forever" }] });
   page.server.failSaves = true;
   await page.click("Alpha Show");
@@ -203,10 +219,162 @@ test("Trakt shows the error and undoes nothing when an Ignore save fails", async
   await page.click("Restore Bravo Show (▤ S01)");
 
   assert.equal(page.traktSaves().length, 2);
-  assert.match(page.container.querySelector(".error")?.textContent || "", /Shelfcheck could not save the settings\./);
-  assert.deepEqual(page.shownTitles(), ["Bravo Show"], "the failed whole-show Ignore stays applied");
-  assert.deepEqual(page.episodeCodes(), ["S01E03"], "the failed season Restore stays applied");
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.deepEqual(page.server.stateReads.slice(1).map((init) => init?.cache), ["no-store", "no-store"], "each failed save re-reads without caching");
+  assert.deepEqual(page.managerRows(), ["Bravo Show (▤ S01): Forever"], "the saved lists show: no Alpha Ignore, Bravo's season Ignore kept");
   assert.equal(page.ignoredCount(), "1");
+  assert.ok(!page.episodeCodes().includes("S01E03"), "Bravo's saved season Ignore hides its season again");
+});
+
+test("Trakt failed Restore of a whole-show Ignore shows the saved Ignore and keeps its pruned results removed", async (t) => {
+  const page = await renderTrakt(t);
+  await page.click("Alpha Show");
+  await page.click("Ignore this show");
+  await page.click("Forever");
+  page.server.failSaves = true;
+  await page.click("IGNORED SHOWS");
+  await page.click("Restore Alpha Show");
+
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.deepEqual(page.managerRows(), ["Alpha Show: Forever"]);
+  assert.equal(page.ignoredCount(), "1");
+  assert.deepEqual(page.shownTitles(), ["Bravo Show"], "results removed by the accepted Ignore stay removed");
+});
+
+test("Trakt failed Restore of a season Ignore shows the saved season Ignore again", async (t) => {
+  const page = await renderTrakt(t, { ignoredSeasons: [{ traktId: 101, title: "Alpha Show", seasons: [2], duration: "30d", expiresAt: "2026-12-01T12:00:00.000Z" }] });
+  page.server.failSaves = true;
+  await page.click("IGNORED SHOWS");
+  await page.click("Restore Alpha Show (▤ S02)");
+
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.deepEqual(page.managerRows(), ["Alpha Show (▤ S02): 2026-12-01T12:00:00.000Z"]);
+  assert.deepEqual(page.episodeCodes(), ["S01E01", "S01E03"]);
+});
+
+test("Trakt failed Change duration shows both saved lists and the saved expiry", async (t) => {
+  const page = await renderTrakt(t, { ignoredShows: [alphaThirtyDays] });
+  // Saved elsewhere since the page loaded: the re-read must bring in both lists.
+  page.server.trakt.ignoredSeasons = [{ traktId: 202, title: "Bravo Show", seasons: [1], duration: "forever" }];
+  page.server.failSaves = true;
+  await page.click("IGNORED SHOWS");
+  await page.click("Change ignore duration for Alpha Show");
+  await page.click("90 days");
+
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.deepEqual(page.managerRows().sort(), ["Alpha Show: 2026-12-01T12:00:00.000Z", "Bravo Show (▤ S01): Forever"]);
+  assert.equal(page.ignoredCount(), "2");
+});
+
+test("Trakt failed season save shows the saved seasons and expiry again", async (t) => {
+  const page = await renderTrakt(t, { ignoredSeasons: [{ traktId: 101, title: "Alpha Show", seasons: [2], duration: "30d", expiresAt: "2026-12-01T12:00:00.000Z" }] });
+  page.server.failSaves = true;
+  await page.click("Alpha Show");
+  await page.click("Ignore seasons");
+  await page.toggleSeason("Season 01");
+  await page.chooseSeasonDuration("90d");
+  await page.click("Save seasons");
+
+  assert.equal(page.traktSaves().length, 1);
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.deepEqual(page.episodeCodes(), ["S01E01", "S01E03"]);
+  await page.click("IGNORED SHOWS");
+  assert.deepEqual(page.managerRows(), ["Alpha Show (▤ S02): 2026-12-01T12:00:00.000Z"]);
+});
+
+test("Trakt shows what the server saved, not the pre-click lists, when a failed save was kept", async (t) => {
+  const page = await renderTrakt(t, { ignoredShows: [alphaThirtyDays] });
+  page.server.intercept = (url, init) => {
+    if (url !== "/api/state" || init?.method !== "PATCH") return undefined;
+    Object.assign(page.server.trakt, JSON.parse(String(init.body)));
+    return Promise.resolve(Response.json({ error: "failed" }, { status: 500 }));
+  };
+  await page.click("IGNORED SHOWS");
+  await page.click("Change ignore duration for Alpha Show");
+  await page.click("90 days");
+
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  assert.deepEqual(page.managerRows(), ["Alpha Show: 2027-02-17T12:00:00.000Z"]);
+});
+
+const unusableRereads: [string, () => Promise<Response>][] = [
+  ["a non-ok re-read", async () => Response.json({ error: "down" }, { status: 503 })],
+  ["a rejected re-read", async () => { throw new TypeError("offline"); }],
+  ["an unreadable re-read body", async () => new Response("not json", { headers: { "Content-Type": "application/json" } })],
+  ["a null saved state", async () => Response.json({ state: null })],
+];
+
+for (const [name, reread] of unusableRereads) {
+  test(`Trakt keeps the current view and shows the save error after ${name}`, async (t) => {
+    const page = await renderTrakt(t, { ignoredShows: [alphaThirtyDays] });
+    page.server.failSaves = true;
+    page.server.intercept = (url, init) => url === "/api/state" && !init?.method ? reread() : undefined;
+    await page.click("IGNORED SHOWS");
+    await page.click("Restore Alpha Show");
+
+    assert.equal(page.server.stateReads.length, 2, "the failed save re-read the saved state");
+    assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+    assert.equal(page.ignoredCount(), "0", "the Restore stays shown");
+  });
+}
+
+test("Trakt shows only the error when an Ignore save cannot reach the server", async (t) => {
+  const page = await renderTrakt(t, { ignoredShows: [alphaThirtyDays] });
+  page.server.intercept = (url, init) => url === "/api/state" && init?.method === "PATCH" ? Promise.reject(new TypeError("Failed to fetch")) : undefined;
+  await page.click("IGNORED SHOWS");
+  await page.click("Restore Alpha Show");
+
+  assert.match(page.errorText(), /Failed to fetch/);
+  assert.equal(page.server.stateReads.length, 1, "no re-read after a network failure");
+  assert.equal(page.ignoredCount(), "0");
+});
+
+test("Trakt ignores a failed save's late re-read once a newer Ignore edit of either list has started", async (t) => {
+  const page = await renderTrakt(t);
+  const reread = deferred<Response>();
+  page.server.failSaves = true;
+  page.server.intercept = (url, init) => url === "/api/state" && !init?.method ? reread.promise : undefined;
+  await page.click("Alpha Show");
+  await page.click("Ignore this show");
+  await page.click("Forever");
+  assert.equal(page.server.stateReads.length, 2, "the failed whole-show save is re-reading");
+
+  page.server.failSaves = false;
+  await page.click("Bravo Show");
+  await page.click("Ignore seasons");
+  await page.toggleSeason("Season 01");
+  await page.click("Save seasons");
+  await act(async () => { reread.resolve(Response.json({ state: { ignoredShows: [], ignoredSeasons: [], report } })); });
+
+  assert.match(page.errorText(), /Shelfcheck could not save the settings\./);
+  await page.click("IGNORED SHOWS");
+  assert.deepEqual(page.managerRows().sort(), ["Alpha Show: Forever", "Bravo Show (▤ S01): Forever"], "neither list goes back to the stale re-read");
+  assert.deepEqual(page.shownTitles(), [], "the report is unchanged");
+});
+
+test("Trakt reconciles a failed Ignore save without overwriting a newer diagnostics save or the grace period", async (t) => {
+  const page = await renderTrakt(t, { ignoredShows: [alphaThirtyDays], airingGraceDays: 7 });
+  const reread = deferred<Response>();
+  page.server.intercept = (url, init) => {
+    if (url !== "/api/state") return undefined;
+    if (!init?.method) return reread.promise;
+    if ("ignoredShows" in JSON.parse(String(init.body))) return Promise.resolve(Response.json({ error: "failed" }, { status: 500 }));
+    return undefined;
+  };
+  await page.click("IGNORED SHOWS");
+  await page.click("Restore Alpha Show");
+  await page.click("IGNORED SHOWS");
+  await page.click("Trakt settings");
+  const diagnostics = page.container.querySelector<HTMLInputElement>(".diagnostics-toggle input");
+  assert.ok(diagnostics, "diagnostics toggle");
+  await act(async () => { diagnostics.click(); });
+  // The re-read was taken before the diagnostics save landed: it carries older unrelated values.
+  await act(async () => { reread.resolve(Response.json({ state: { ignoredShows: [alphaThirtyDays], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0, report } })); });
+
+  assert.deepEqual(page.traktSaves(), [{ ignoredShows: [] }, { diagnosticsEnabled: false }]);
+  assert.equal(page.ignoredCount(), "1", "the failed Restore reconciles to the saved Ignore");
+  assert.equal(diagnostics.checked, false, "the newer diagnostics setting stays");
+  assert.equal(page.container.querySelector<HTMLInputElement>('input[aria-label="Airing grace period in days"]')?.value, "7", "the grace period is not replaced by the re-read");
 });
 
 test("Trakt Ignore edits save only to the Trakt state and leave the Plex Ignore list alone", async (t) => {

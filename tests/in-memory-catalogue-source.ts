@@ -1,5 +1,5 @@
 import { reuseProviderCatalogue } from "../lib/plex-catalogue-policy";
-import type { CatalogueLoad, CatalogueLoadSettings, ComparisonCatalogueSource } from "../lib/comparison-catalogue-resolver";
+import type { CatalogueLoad, CatalogueLoadSettings, ComparisonCatalogueSource, SeriesAssociation } from "../lib/comparison-catalogue-resolver";
 import type { CatalogueProvider } from "../lib/catalogue-selection";
 
 /** The catalogue payload this source hands back: which series, as downloaded when. */
@@ -23,29 +23,43 @@ export function inMemoryCatalogueSource(options: {
   saved?: Partial<Record<CatalogueProvider, Record<number, string>>>;
   /** Series whose download fails, with what the failure carries. */
   failing?: Partial<Record<CatalogueProvider, Record<number, Failure>>>;
+  /** The TVDB series each TMDB catalogue names; a TMDB catalogue not listed names none. */
+  tvdbOfTmdb?: Record<number, number>;
+  /** TMDB's series association for each TVDB ID; an unlisted TVDB ID's association is missing. */
+  associations?: Record<number, SeriesAssociation>;
 }) {
   const saved: Record<CatalogueProvider, Map<number, string>> = {
     tmdb: new Map(Object.entries(options.saved?.tmdb || {}).map(([id, at]) => [Number(id), at])),
     tvdb: new Map(Object.entries(options.saved?.tvdb || {}).map(([id, at]) => [Number(id), at])),
   };
   const requests: CatalogueRequest[] = [];
+  /** The TVDB IDs whose TMDB series association was asked for, in order. */
+  const associationRequests: number[] = [];
   const catalogue = (provider: CatalogueProvider, id: number, downloadedAt: string): FixtureCatalogue => ({ provider, id, downloadedAt });
+  const association = (provider: CatalogueProvider, id: number) => {
+    const tvdbId = provider === "tmdb" ? options.tvdbOfTmdb?.[id] : undefined;
+    return tvdbId === undefined ? {} : { associatedTvdbId: tvdbId };
+  };
   const source: ComparisonCatalogueSource<FixturePayloads> = {
     async loadCatalogue(provider, id, settings) {
       requests.push({ provider, id, ...settings });
       const downloadedAt = saved[provider].get(id);
       const reuse = reuseProviderCatalogue({ provider, now: options.now, downloadedAt, usable: downloadedAt !== undefined, mandatory: settings.mandatory, targeted: false, changed: false, refreshAfter: settings.refreshAfter });
-      if (reuse) return { outcome: "reused", id, catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt! };
+      if (reuse) return { outcome: "reused", id, catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
       const failure = options.failing?.[provider]?.[id];
       if (failure) return { outcome: "failed", ...failure };
       const at = options.downloadAt || options.now;
       saved[provider].set(id, at);
-      return { outcome: "downloaded", id, catalogue: catalogue(provider, id, at), downloadedAt: at };
+      return { outcome: "downloaded", id, catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };
     },
     savedCatalogue(provider, id) {
       const downloadedAt = saved[provider].get(id);
-      return downloadedAt === undefined ? undefined : { id, catalogue: catalogue(provider, id, downloadedAt), downloadedAt };
+      return downloadedAt === undefined ? undefined : { id, catalogue: catalogue(provider, id, downloadedAt), downloadedAt, ...association(provider, id) };
+    },
+    async tmdbSeriesForTvdb(tvdbId) {
+      associationRequests.push(tvdbId);
+      return options.associations?.[tvdbId] || { outcome: "missing" };
     },
   };
-  return { source, requests, saved };
+  return { source, requests, associationRequests, saved };
 }

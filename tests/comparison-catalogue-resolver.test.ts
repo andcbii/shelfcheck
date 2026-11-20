@@ -165,3 +165,22 @@ test("a failure caused by provider authentication names that cause, and the othe
   assert.deepEqual(issue.issue.lookup?.requested, { provider: "TVDB", kind: "series", id: 1 });
   assert.equal(resolved.tvdb.catalogue?.id, 3);
 });
+
+const noTvdb = { candidates: [] };
+const noTmdb = { candidates: [] };
+
+test("a show with no Plex TVDB ID compares the TVDB series named by the TMDB catalogue in use", async () => {
+  const { source, requests } = inMemoryCatalogueSource({
+    now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(70 * DAY) }, tvdb: { 7: before(DAY) } },
+    failing: { tmdb: { 11: notFound(11) } }, tvdbOfTmdb: { 10: 7, 11: 8 },
+  });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, noTvdb), { source });
+
+  assert.equal(resolved.outcome, "comparable");
+  assert.equal(resolved.tmdb.catalogue?.id, 10, "the TMDB fallback is the catalogue in use");
+  assert.equal(resolved.tvdb.identity, 7);
+  assert.deepEqual(resolved.tvdb.catalogue, { id: 7, origin: "reused", downloadedAt: before(DAY), catalogue: { provider: "tvdb", id: 7, downloadedAt: before(DAY) } });
+  assert.deepEqual(resolved.tvdb.use, { action: "set", use: { usingId: 7, state: "derived", derivedFrom: 10, usingDownloadedAt: before(DAY) } });
+  assert.deepEqual(resolved.tvdb.issues, [{ action: "resolve", id: "catalogue-refresh:TVDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TVDB:show-1" }]);
+  assert.deepEqual(requests.filter(r => r.provider === "tvdb"), [{ provider: "tvdb", id: 7, mandatory: false }], "a derived series loads under the single-catalogue reuse policy");
+});

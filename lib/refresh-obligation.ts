@@ -96,19 +96,21 @@ export function combinePatches(a: RefreshObligationPatch, b: RefreshObligationPa
 
 /**
  * Whether an attempted catalogue must be downloaded rather than reused: the preferred requirement
- * forces only the preferred catalogue. Otherwise the source's reuse policy decides.
+ * forces only the preferred catalogue, and a specific requirement only the catalogue with its ID.
+ * Otherwise the source's reuse policy decides.
  */
 export function requiresDownload(obligation: RefreshObligation, attempt: AttemptedCatalogue): boolean {
-  return !!obligation.preferred && attempt.preferred;
+  return !!obligation.preferred && attempt.preferred || attempt.id !== undefined && !!obligation.specificIds?.includes(attempt.id);
 }
 
 /**
- * The requirements a complete successful download of a catalogue satisfies: the preferred
- * requirement, by the preferred catalogue. Reuse, failed and incomplete loads satisfy nothing, so the
- * caller asks only for a download.
+ * The requirements a complete successful download of a catalogue satisfies: the specific requirement
+ * for its own ID, and the preferred requirement when it is the preferred catalogue. Reuse, title-only
+ * repair, failed and incomplete loads satisfy nothing, so the caller asks only for a download.
  */
 export function satisfiedByDownload(attempt: AttemptedCatalogue): RefreshObligationPatch {
-  return attempt.preferred ? { remove: { preferred: true } } : {};
+  const remove: RefreshObligation = { ...(attempt.preferred ? { preferred: true } : {}), ...(attempt.id !== undefined ? { specificIds: [attempt.id] } : {}) };
+  return Object.keys(remove).length ? { remove } : {};
 }
 
 /** A provider's refresh obligation from a saved comparison's stored value. */

@@ -603,6 +603,54 @@ test("an obligation saved before requirements existed reads as preferred-only, s
 });
 
 /**
+ * With B's preferred requirement open, day 71's first scan downloads A (older than 20 days), and TMDB
+ * then reports A changed the same UTC day, so scans two to four reuse it. The fifth completed scan's
+ * safeguard targets A, the compared catalogue.
+ */
+async function safeguardedFallbackA(f: Awaited<ReturnType<typeof fixture>>) {
+  const show = await youngFallbackA(f);
+  f.at(day(71)); await f.run();
+  assert.equal(f.tmdbDownloads(10),1);
+  f.changes([10]);
+  for (const hour of [13,14,15]) {
+    f.at(day(71).replace("12:00",`${hour}:00`)); await f.run();
+    assert.equal(f.tmdbDownloads(10),0,"A, changed but downloaded earlier today, is reused under TMDB's same-day reuse");
+  }
+  assert.deepEqual(show.refresh(),{tmdb:true},"B's preferred requirement is the open work");
+  f.at(day(71).replace("12:00","16:00"));
+  return show;
+}
+
+test("a fifth-scan safeguard forces the fallback downloaded earlier the same UTC day while preferred work is open, satisfying only its own requirement", async t => {
+  const f = await fixture(t);
+  const show = await safeguardedFallbackA(f);
+  await f.run();
+  assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
+  assert.equal(f.tmdbDownloads(10),1,"the safeguard downloads A again");
+  f.restart();
+  assert.deepEqual(show.refresh(),{tmdb:true},"after a restart only B's requirement remains");
+
+  f.at(day(71).replace("12:00","17:00")); await f.run();
+  assert.equal(f.tmdbDownloads(10),0,"the next ordinary scan reuses A");
+  assert.ok(f.requests.includes("/3/tv/11"),"B is still retried");
+  assert.deepEqual(show.refresh(),{tmdb:true});
+});
+
+test("a failed safeguarded fallback download keeps its requirement until a later download succeeds", async t => {
+  const f = await fixture(t);
+  const show = await safeguardedFallbackA(f);
+  f.tmdb[10].fail = true;
+  await f.run();
+  assert.equal(f.tmdbDownloads(10),0,"A's download fails");
+  assert.deepEqual(show.refresh(),{tmdb:true,specificIds:{tmdb:[10]}},"the safeguard's requirement for A is kept beside B's");
+
+  f.tmdb[10].fail = false;
+  f.at(day(71).replace("12:00","17:00")); await f.run();
+  assert.equal(f.tmdbDownloads(10),1,"the next ordinary scan downloads A, though it was downloaded earlier today");
+  assert.deepEqual(show.refresh(),{tmdb:true},"only B's requirement remains");
+});
+
+/**
  * Prepare `provider` with candidates A (lower) and B: B is preferred by override and failing, its saved
  * catalogue downloaded on day 2; A's saved catalogue was downloaded on day 40. Day 41's scan compares saved B.
  */

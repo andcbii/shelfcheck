@@ -267,6 +267,53 @@ test("a reused preferred catalogue never clears a refresh obligation", async () 
   assert.deepEqual(resolved.tmdb.obligation, UNCHANGED);
 });
 
+test("a specific requirement forces its own catalogue, preferred work coexisting, and its complete successful download satisfies only that ID", async () => {
+  // Preferred B (11) is unavailable; fallback A (10) was downloaded earlier the same UTC day.
+  const both: RefreshObligation = { preferred: true, specificIds: [10] };
+  const { source, requests } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(60_000), 11: before(61 * DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: both }, tvdbOnly), { source });
+  assert.deepEqual(requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, true], [10, true]]);
+  assert.deepEqual([resolved.tmdb.catalogue?.id, resolved.tmdb.catalogue?.origin], [10, "downloaded"]);
+  assert.deepEqual(resolved.tmdb.obligation, { remove: { specificIds: [10] } });
+  assert.deepEqual(applyObligationPatch(both, resolved.tmdb.obligation), { preferred: true }, "the preferred requirement stays open");
+});
+
+test("a specific requirement for another catalogue forces nothing, and its target's failed download satisfies nothing", async () => {
+  const other = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: tvdbSaved } });
+  const untargeted = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: { specificIds: [99] } }, tvdbOnly), { source: other.source });
+  assert.deepEqual(other.requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, false]]);
+  assert.equal(untargeted.tmdb.catalogue?.origin, "reused");
+  assert.deepEqual(untargeted.tmdb.obligation, UNCHANGED, "reuse satisfies nothing");
+
+  const failing = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(60_000), 11: before(61 * DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 10: notFound(10), 11: notFound(11) } } });
+  const failed = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: { specificIds: [10] } }, tvdbOnly), { source: failing.source });
+  assert.deepEqual(failing.requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, false], [10, true]]);
+  assert.deepEqual(applyObligationPatch({ specificIds: [10] }, failed.tmdb.obligation), { preferred: true, specificIds: [10] }, "the failed target keeps its requirement");
+});
+
+test("one complete successful download of a catalogue both preferred and targeted satisfies both requirements", async () => {
+  const both: RefreshObligation = { preferred: true, specificIds: [11] };
+  const { source, requests } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(60_000) }, tvdb: tvdbSaved } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: both }, tvdbOnly), { source });
+  assert.deepEqual(requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, true]]);
+  assert.deepEqual(resolved.tmdb.obligation, { remove: { preferred: true, specificIds: [11] } });
+  assert.deepEqual(applyObligationPatch(both, resolved.tmdb.obligation), {});
+});
+
+test("a specific requirement forces a single Plex ID's or derived series' download, and only that download satisfies it", async () => {
+  const single = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 11: before(60_000) }, tvdb: { 1: before(DAY) } } });
+  const loaded = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11, refreshObligation: { specificIds: [11] } }, { candidates: [1], preferredId: 1, refreshObligation: { specificIds: [9] } }), { source: single.source });
+  assert.deepEqual(single.requests.map(r => [r.provider, r.id, r.mandatory]), [["tmdb", 11, true], ["tvdb", 1, false]]);
+  assert.deepEqual(loaded.tmdb.obligation, { remove: { specificIds: [11] } });
+  assert.deepEqual(loaded.tvdb.obligation, UNCHANGED, "a requirement for another series is not satisfied by reuse");
+
+  const derived = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: tmdbSaved, tvdb: { 7: before(60_000) } }, tvdbOfTmdb: { 11: 7 } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, { candidates: [], refreshObligation: { specificIds: [7] } }), { source: derived.source });
+  assert.equal(resolved.tvdb.catalogue?.origin, "downloaded");
+  assert.deepEqual(resolved.tvdb.obligation, { remove: { specificIds: [7] } });
+});
+
+
 test("each provider's obligation change is acknowledged by the progress sink before the other provider's work starts", async () => {
   const { source: inner } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
   const events: string[] = [];

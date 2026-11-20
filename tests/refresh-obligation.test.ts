@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyObligationPatch, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, savedObligation, unionObligations, type SavedRefreshObligations } from "../lib/refresh-obligation";
+import { applyObligationPatch, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, requiresDownload, satisfiedByDownload, savedObligation, unionObligations, type SavedRefreshObligations } from "../lib/refresh-obligation";
 
 test("a provider flag saved before requirements existed reads as the preferred requirement alone", () => {
   // Whatever wrote it (a safeguard, a single-show Clear cache), only the preferred part survives the upgrade.
@@ -35,4 +35,22 @@ test("a saved obligation is patched in place for one provider, keeping the other
 test("saved specific IDs are read as positive, de-duplicated integers", () => {
   const saved = { specificIds: { tmdb: [5, 5, 0, -1, 2.5, "7", 3] } } as unknown as SavedRefreshObligations;
   assert.deepEqual(savedObligation(saved, "tmdb"), { specificIds: [3, 5] });
+});
+
+test("specific IDs are validated when written: only positive integers are stored, once each", () => {
+  const saved: SavedRefreshObligations = { specificIds: { tmdb: [4] } };
+  patchSavedObligation(saved, "tmdb", { add: { specificIds: [9, 4, 9, 0, -3, 1.5, Number.NaN] } });
+  assert.deepEqual(saved, { specificIds: { tmdb: [4, 9] } });
+  patchSavedObligation(saved, "tvdb", { add: { specificIds: [0, -1] } });
+  assert.deepEqual(saved, { specificIds: { tmdb: [4, 9] } }, "an add of only invalid IDs stores nothing");
+});
+
+test("a specific requirement forces only the catalogue with its ID, and that catalogue's download satisfies only its own requirement", () => {
+  const obligation = { preferred: true as const, specificIds: [10] };
+  assert.equal(requiresDownload(obligation, { id: 10, preferred: false }), true);
+  assert.equal(requiresDownload(obligation, { id: 12, preferred: false }), false);
+  assert.equal(requiresDownload(obligation, { id: 11, preferred: true }), true);
+  assert.deepEqual(applyObligationPatch(obligation, satisfiedByDownload({ id: 10, preferred: false })), { preferred: true });
+  assert.deepEqual(applyObligationPatch(obligation, satisfiedByDownload({ id: 11, preferred: true })), { specificIds: [10] });
+  assert.deepEqual(applyObligationPatch({ preferred: true, specificIds: [11] }, satisfiedByDownload({ id: 11, preferred: true })), {});
 });

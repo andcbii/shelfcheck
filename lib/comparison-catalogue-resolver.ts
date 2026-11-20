@@ -334,12 +334,12 @@ async function chooseProviderCatalogue<P extends CataloguePayloads, K extends Ca
 async function singleIdCatalogue<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K, id: number): Promise<ProviderResolution<P[K]>> {
   const { request, source, identities } = resolving;
   const providerRequest = request[provider];
-  const load = await loadSingleCatalogue(source, provider, id, requiresDownload(providerRequest.refreshObligation, THE_ONE_CATALOGUE));
+  const load = await loadSingleCatalogue(source, provider, id, requiresDownload(providerRequest.refreshObligation, theOneCatalogue(id)));
   if (load.outcome === "no-series") return noSeries(provider, request, id, providerRequest.lookupSource, { action: "set", use: singleIdUse(id, undefined) });
   if (load.outcome !== "failed") return {
     identity: load.id, lookupSource: load.lookupSource ?? providerRequest.lookupSource, catalogue: comparedFrom(load, load.outcome),
     use: { action: "set", use: singleIdUse(load.id, load.downloadedAt) },
-    obligation: loadedObligation(providerRequest, load.outcome), issues: resolvedIssues(provider, request),
+    obligation: loadedObligation(providerRequest, load), issues: resolvedIssues(provider, request),
   };
   // Shares the derived series' failure: the saved catalogue at any age, else unavailable.
   const saved = source.savedCatalogue(provider, id);
@@ -393,11 +393,11 @@ async function deriveTvdb<P extends CataloguePayloads>(resolving: Resolving<P>):
   const lookupSource: LookupSourceStep[] = [...request.tmdb.lookupSource, { provider: "TMDB", kind: "external TVDB ID", id: tvdbId, cached: compared.origin !== "downloaded" }];
   const derivedUse = (downloadedAt?: string): CatalogueUseProposal => ({ action: "set", use: { usingId: tvdbId, state: "derived", derivedFrom: compared.id, ...(downloadedAt ? { usingDownloadedAt: downloadedAt } : {}) } });
   const identities = { tmdb: compared.id, tvdb: tvdbId };
-  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tvdb", tvdbId) : await loadSingleCatalogue(source, "tvdb", tvdbId, requiresDownload(request.tvdb.refreshObligation, THE_ONE_CATALOGUE));
+  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tvdb", tvdbId) : await loadSingleCatalogue(source, "tvdb", tvdbId, requiresDownload(request.tvdb.refreshObligation, theOneCatalogue(tvdbId)));
   if (!load) return missingFromSaved("tvdb", request, tvdbId, lookupSource);
   if (load.outcome === "no-series") return noSeries("tvdb", request, tvdbId, lookupSource, derivedUse());
   if (load.outcome !== "failed")
-    return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, load.outcome), issues: loadedIssues("tvdb", request) };
+    return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, load), issues: loadedIssues("tvdb", request) };
   // A derived series whose load fails keeps its saved catalogue at any age, as a single Plex ID does.
   const saved = source.savedCatalogue("tvdb", tvdbId);
   return singleCatalogueFailure("tvdb", request, identities, load, { kind: "series", id: tvdbId }, { lookupSource, saved, use: derivedUse(saved?.downloadedAt) });
@@ -441,13 +441,13 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
     return failed.catalogue ? { ...failed, lookupSource: [plexStep, resolvedStep(failed.catalogue.id, true)] } : failed;
   }
   const lookupSource: LookupSourceStep[] = [plexStep, resolvedStep(association.id, association.cached)];
-  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tmdb", association.id) : await loadSingleCatalogue(source, "tmdb", association.id, requiresDownload(request.tmdb.refreshObligation, THE_ONE_CATALOGUE));
+  const load = request.context.kind === "cached-recheck" ? readSaved(source, "tmdb", association.id) : await loadSingleCatalogue(source, "tmdb", association.id, requiresDownload(request.tmdb.refreshObligation, theOneCatalogue(association.id)));
   if (!load) return missingFromSaved("tmdb", request, association.id, lookupSource);
   if (load.outcome === "no-series") return noSeries("tmdb", request, association.id, lookupSource, { action: "set", use: { usingId: association.id, state: "derived", derivedFrom: tvdbId } });
   if (load.outcome !== "failed") return {
     identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome),
     use: { action: "set", use: { usingId: load.id, state: "derived", derivedFrom: tvdbId, usingDownloadedAt: load.downloadedAt } },
-    obligation: loadedObligation(request.tmdb, load.outcome),
+    obligation: loadedObligation(request.tmdb, load),
     issues: loadedIssues("tmdb", request),
   };
   // The series resolved before the failure is the one its Coverage Issue names, with its provenance.
@@ -474,11 +474,13 @@ async function loadSingleCatalogue<P extends CataloguePayloads, K extends Catalo
 
 const NO_CHANGE: RefreshObligationChange = {};
 /** A single Plex ID or derived series is the provider's one catalogue, so it is the preferred one. */
+const theOneCatalogue = (id: number): AttemptedCatalogue => ({ id, preferred: true });
+/** The one catalogue before its series is known: only the preferred requirement can apply to it. */
 const THE_ONE_CATALOGUE: AttemptedCatalogue = { preferred: true };
 
 /** A single catalogue that loads satisfies requirements only by downloading. */
-const loadedObligation = (providerRequest: ProviderRequest, outcome: "downloaded" | "reused"): RefreshObligationChange =>
-  outcome === "downloaded" ? effectivePatch(providerRequest.refreshObligation, satisfiedByDownload(THE_ONE_CATALOGUE)) : NO_CHANGE;
+const loadedObligation = (providerRequest: ProviderRequest, load: { outcome: "downloaded" | "reused"; id: number }): RefreshObligationChange =>
+  load.outcome === "downloaded" ? effectivePatch(providerRequest.refreshObligation, satisfiedByDownload(theOneCatalogue(load.id))) : NO_CHANGE;
 
 /** A preferred catalogue that could not be loaded adds the preferred requirement, keeping every other part. */
 const failedObligation = (providerRequest: ProviderRequest): RefreshObligationChange => effectivePatch(providerRequest.refreshObligation, PREFERRED_REQUIRED);

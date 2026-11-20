@@ -520,7 +520,8 @@ function retainVerifiedChanges(inputs: PlexGeneratedInputs, tmdb: Set<number> | 
 
 /**
  * A safeguard is fulfilled once its change list is retrieved and each changed library show with a
- * saved TMDB catalogue holds a durable refresh obligation; otherwise it stays pending.
+ * saved TMDB catalogue holds a durable specific requirement for the compared TMDB catalogue, added
+ * beside any work already open; otherwise it stays pending.
  */
 function retainSafeguard(inputs: PlexGeneratedInputs, utcDate: string, changes: Set<number> | null, candidates: PlexShowGroup[]) {
   if (changes === null) {
@@ -529,8 +530,9 @@ function retainSafeguard(inputs: PlexGeneratedInputs, utcDate: string, changes: 
   }
   for (const group of candidates) {
     const comparison = inputs.comparisons[group.identity];
-    if (!comparison?.tmdbId || !changes.has(comparison.tmdbId) || !inputs.tmdb[String(comparison.tmdbId)] || comparison.refresh?.tmdb) continue;
-    comparison.refresh = {...comparison.refresh, tmdb: true};
+    if (!comparison?.tmdbId || !changes.has(comparison.tmdbId) || !inputs.tmdb[String(comparison.tmdbId)]) continue;
+    if (savedObligation(comparison.refresh, "tmdb").specificIds?.includes(comparison.tmdbId)) continue;
+    comparison.refresh = patchSavedObligation({...comparison.refresh}, "tmdb", {add: {specificIds: [comparison.tmdbId]}});
     savePlexComparison(group.identity, comparison);
   }
   if (inputs.pendingSafeguards[utcDate]) { delete inputs.pendingSafeguards[utcDate]; savePendingSafeguards(inputs.pendingSafeguards); }

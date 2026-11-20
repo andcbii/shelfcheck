@@ -31,6 +31,10 @@ export function inMemoryCatalogueSource(options: {
   associations?: Record<number, SeriesAssociation>;
   /** Saved association evidence, TVDB ID to TMDB series, answered without a request unless the request is mandatory. */
   savedAssociations?: Record<number, number>;
+  /** Series flagged changed by the provider's change detection, which the production reuse policy downloads again (TMDB reuses a same-UTC-day download). */
+  changed?: Partial<Record<CatalogueProvider, number[]>>;
+  /** A targeted single-show scan, which downloads every catalogue it loads. */
+  targeted?: boolean;
   /** Saved records too incomplete to compare: series ID to original download time. */
   unusable?: Partial<Record<CatalogueProvider, Record<number, string>>>;
 }) {
@@ -50,7 +54,7 @@ export function inMemoryCatalogueSource(options: {
     async loadCatalogue(provider, id, settings) {
       requests.push({ provider, id, ...settings });
       const downloadedAt = saved[provider].get(id);
-      const reuse = reuseProviderCatalogue({ provider, now: options.now, downloadedAt, usable: downloadedAt !== undefined, mandatory: settings.mandatory, targeted: false, changed: false, refreshAfter: settings.refreshAfter });
+      const reuse = reuseProviderCatalogue({ provider, now: options.now, downloadedAt, usable: downloadedAt !== undefined, mandatory: settings.mandatory, targeted: !!options.targeted, changed: !!options.changed?.[provider]?.includes(id), refreshAfter: settings.refreshAfter });
       if (reuse) return { outcome: "reused", id, catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
       const failure = options.failing?.[provider]?.[id];
       if (failure) return { outcome: "failed", ...failure };

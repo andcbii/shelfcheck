@@ -4,6 +4,7 @@ import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/cat
 import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
+import type { SavedRefreshObligations } from "@/lib/refresh-obligation";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
@@ -34,7 +35,8 @@ export type SavedPlexComparison = {
   tmdbEpisodeAliases?: number[];
   tvdbEpisodeImdbIds?: Record<string, string[]>;
   complete: boolean;
-  refresh?: {tmdb?: boolean; tvdb?: boolean};
+  /** Each provider's refresh obligation, in its stored shape (`lib/refresh-obligation.ts`). */
+  refresh?: SavedRefreshObligations;
   /** A verified provider change to an alias whose relationships this comparison has not yet rebuilt. */
   staleRelationships?: {tmdb?: true; tvdb?: true};
 };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import type { SeriesAssociation } from "../lib/comparison-catalogue-resolver";
+import { applyObligationPatch, type RefreshObligation } from "../lib/refresh-obligation";
 import { inMemoryCatalogueSource } from "./in-memory-catalogue-source";
 
 // The resolver builds Coverage Issue values with the production lookup helper, a server-only module.
@@ -15,10 +16,14 @@ const DAY = 86400_000;
 const before = (ms: number) => new Date(Date.parse(NOW) - ms).toISOString();
 const show = { ratingKey: "show-1", title: "Example Show" };
 
-type ProviderSetup = { candidates: number[]; preferredId?: number; refreshObligation?: boolean };
+/** `refreshObligation: true` is the preferred requirement, as a saved per-provider flag reads. */
+type ProviderSetup = { candidates: number[]; preferredId?: number; refreshObligation?: boolean | RefreshObligation };
+const obligationOf = (value: ProviderSetup["refreshObligation"]): RefreshObligation => value === true ? { preferred: true } : value || {};
+/** Obligation patches: the preferred requirement added, removed, or nothing changed. */
+const ADDS_PREFERRED = { add: { preferred: true } }, SATISFIES_PREFERRED = { remove: { preferred: true } }, UNCHANGED = {};
 function request(tmdb: ProviderSetup, tvdb: ProviderSetup) {
   const provider = (setup: ProviderSetup, kind: "TMDB show" | "TVDB series") => ({
-    candidates: setup.candidates, preferredId: setup.preferredId, refreshObligation: !!setup.refreshObligation,
+    candidates: setup.candidates, preferredId: setup.preferredId, refreshObligation: obligationOf(setup.refreshObligation),
     lookupSource: setup.preferredId ? [{ provider: "Plex" as const, kind, id: setup.preferredId }] : [],
   });
   return { context: { kind: "live-scan" as const }, show, resolvedAt: NOW, tmdb: provider(tmdb, "TMDB show"), tvdb: provider(tvdb, "TVDB series") };
@@ -135,13 +140,13 @@ for (const [label, age, origin] of [
   });
 }
 
-test("every candidate load asks for the 20-day refresh, and is mandatory while a refresh obligation is open", async () => {
+test("every candidate load asks for the 20-day refresh, and the preferred requirement makes only the preferred catalogue mandatory", async () => {
   for (const refreshObligation of [false, true]) {
     const { source, requests } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
     await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation }, tvdbOnly), { source });
     assert.deepEqual(requests.filter(r => r.provider === "tmdb"), [
       { provider: "tmdb", id: 11, mandatory: refreshObligation, refreshAfter: 20 * DAY },
-      { provider: "tmdb", id: 10, mandatory: refreshObligation, refreshAfter: 20 * DAY },
+      { provider: "tmdb", id: 10, mandatory: false, refreshAfter: 20 * DAY },
     ]);
   }
 });
@@ -178,27 +183,79 @@ test("a preferred failure sets the refresh obligation only after candidate choic
 
   assert.deepEqual(requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, false], [10, false]]);
   assert.equal(resolved.tmdb.catalogue?.origin, "reused");
-  assert.equal(resolved.tmdb.obligation, "set");
-  assert.equal(resolved.tvdb.obligation, "unchanged");
+  assert.deepEqual(resolved.tmdb.obligation, ADDS_PREFERRED);
+  assert.deepEqual(resolved.tvdb.obligation, UNCHANGED);
 });
 
-test("an open refresh obligation makes every attempted candidate a mandatory download, and only a downloaded preferred catalogue clears it", async () => {
+test("the preferred requirement forces only the preferred catalogue, and only its complete successful download satisfies it", async () => {
   const preferredDownloads = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: tvdbSaved } });
   const cleared = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: preferredDownloads.source });
   assert.equal(cleared.tmdb.catalogue?.origin, "downloaded");
-  assert.equal(cleared.tmdb.obligation, "clear");
+  assert.deepEqual(cleared.tmdb.obligation, SATISFIES_PREFERRED);
 
   const fallbackDownloads = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
   const kept = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: fallbackDownloads.source });
   assert.deepEqual(fallbackDownloads.requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, true]]);
   assert.equal(kept.tmdb.catalogue?.id, 11, "the preferred saved copy is still within 60 days");
-  assert.equal(kept.tmdb.obligation, "unchanged");
+  assert.deepEqual(kept.tmdb.obligation, UNCHANGED);
 
-  const tooOld = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(61 * DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
-  const fallback = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: tooOld.source });
-  assert.deepEqual(tooOld.requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, true], [10, true]]);
-  assert.deepEqual([fallback.tmdb.catalogue?.id, fallback.tmdb.catalogue?.origin], [10, "downloaded"]);
-  assert.equal(fallback.tmdb.obligation, "unchanged", "a fallback download does not clear the obligation");
+  const youngFallback = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(61 * DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
+  const reused = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: youngFallback.source });
+  assert.deepEqual(youngFallback.requests.filter(r => r.provider === "tmdb").map(r => [r.id, r.mandatory]), [[11, true], [10, false]]);
+  assert.deepEqual([reused.tmdb.catalogue?.id, reused.tmdb.catalogue?.origin], [10, "reused"], "a young fallback is not downloaded again");
+  assert.deepEqual(reused.tmdb.obligation, UNCHANGED, "the preferred requirement stays open");
+
+  const oldFallback = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(21 * DAY), 11: before(61 * DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
+  const fallback = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: oldFallback.source });
+  assert.deepEqual([fallback.tmdb.catalogue?.id, fallback.tmdb.catalogue?.origin], [10, "downloaded"], "a fallback older than 20 days is downloaded");
+  assert.deepEqual(fallback.tmdb.obligation, UNCHANGED, "a fallback download does not satisfy the preferred requirement");
+});
+
+/** Preferred B (11) has no usable copy and fails; fallback A (10) is the catalogue in use, its download decided by the production reuse policy. */
+async function fallbackUnderPreferredRequirement(options: { savedAt?: string; changed?: boolean; targeted?: boolean }) {
+  const { source, requests } = inMemoryCatalogueSource({
+    now: NOW, saved: { tmdb: options.savedAt ? { 10: options.savedAt } : {}, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } },
+    ...(options.changed ? { changed: { tmdb: [10] } } : {}), ...(options.targeted ? { targeted: true } : {}),
+  });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source });
+  assert.equal(resolved.tmdb.catalogue?.id, 10);
+  assert.deepEqual(requests.filter(r => r.provider === "tmdb" && r.id === 10).map(r => r.mandatory), [false], "the preferred requirement never forces the fallback");
+  assert.deepEqual(resolved.tmdb.obligation, UNCHANGED, "the fallback satisfies nothing, downloaded or not");
+  return resolved.tmdb.catalogue?.origin;
+}
+
+for (const [label, age, origin] of [
+  ["one millisecond under 20 days", 20 * DAY - 1, "reused"],
+  ["exactly 20 days", 20 * DAY, "reused"],
+  ["one millisecond over 20 days", 20 * DAY + 1, "downloaded"],
+] as const) {
+  test(`with the preferred requirement open, a fallback ${label} old is ${origin} under the production reuse policy`, async () => {
+    assert.equal(await fallbackUnderPreferredRequirement({ savedAt: before(age) }), origin);
+  });
+}
+
+test("with the preferred requirement open, a fallback flagged changed keeps today's freshness rules, including TMDB's same-day reuse", async () => {
+  assert.equal(await fallbackUnderPreferredRequirement({ savedAt: before(60_000), changed: true }), "reused", "downloaded earlier the same UTC day");
+  assert.equal(await fallbackUnderPreferredRequirement({ savedAt: before(DAY), changed: true }), "downloaded", "downloaded on an earlier UTC day");
+});
+
+test("with the preferred requirement open, a fallback with no saved copy is downloaded, and a targeted scan downloads a young one", async () => {
+  assert.equal(await fallbackUnderPreferredRequirement({}), "downloaded");
+  assert.equal(await fallbackUnderPreferredRequirement({ savedAt: before(DAY), targeted: true }), "downloaded");
+});
+
+test("a preferred failure adds the preferred requirement and its download removes only that, keeping every other part of the obligation", async () => {
+  const others: RefreshObligation = { specificIds: [99] };
+  const failing = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
+  const failed = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: others }, tvdbOnly), { source: failing.source });
+  assert.deepEqual(failed.tmdb.obligation, ADDS_PREFERRED);
+  assert.deepEqual(applyObligationPatch(others, failed.tmdb.obligation), { preferred: true, specificIds: [99] });
+
+  const loading = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: tvdbSaved } });
+  const loaded = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: { ...others, preferred: true } }, tvdbOnly), { source: loading.source });
+  assert.equal(loaded.tmdb.catalogue?.origin, "downloaded");
+  assert.deepEqual(loaded.tmdb.obligation, SATISFIES_PREFERRED);
+  assert.deepEqual(applyObligationPatch({ ...others, preferred: true }, loaded.tmdb.obligation), others);
 });
 
 test("a reused preferred catalogue never clears a refresh obligation", async () => {
@@ -207,7 +264,7 @@ test("a reused preferred catalogue never clears a refresh obligation", async () 
   const source = { ...reusing, async loadCatalogue(provider: "tmdb" | "tvdb", id: number) { const saved = reusing.savedCatalogue(provider, id)!; return { outcome: "reused" as const, ...saved }; } };
   const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: source as typeof reusing });
   assert.equal(resolved.tmdb.catalogue?.origin, "reused");
-  assert.equal(resolved.tmdb.obligation, "unchanged");
+  assert.deepEqual(resolved.tmdb.obligation, UNCHANGED);
 });
 
 test("each provider's obligation change is acknowledged by the progress sink before the other provider's work starts", async () => {
@@ -219,18 +276,18 @@ test("each provider's obligation change is acknowledged by the progress sink bef
   const resolving = resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), {
     source,
     onProviderResolved: async ({ provider, obligation }) => {
-      events.push(`patch ${provider} ${obligation}`);
+      events.push(`patch ${provider} ${JSON.stringify(obligation)}`);
       if (provider === "tmdb") await acknowledged;
       events.push(`acknowledged ${provider}`);
     },
   });
   await new Promise(resolve => setTimeout(resolve, 10));
-  assert.deepEqual(events, ["load tmdb 11", "load tmdb 10", "patch tmdb set"], "TVDB waits for the TMDB patch to be acknowledged");
+  assert.deepEqual(events, ["load tmdb 11", "load tmdb 10", 'patch tmdb {"add":{"preferred":true}}'], "TVDB waits for the TMDB patch to be acknowledged");
 
   acknowledge();
   const resolved = await resolving;
-  assert.deepEqual(events, ["load tmdb 11", "load tmdb 10", "patch tmdb set", "acknowledged tmdb", "load tvdb 1", "patch tvdb unchanged", "acknowledged tvdb"]);
-  assert.equal(resolved.tmdb.obligation, "set");
+  assert.deepEqual(events, ["load tmdb 11", "load tmdb 10", 'patch tmdb {"add":{"preferred":true}}', "acknowledged tmdb", "load tvdb 1", "patch tvdb {}", "acknowledged tvdb"]);
+  assert.deepEqual(resolved.tmdb.obligation, ADDS_PREFERRED);
 });
 
 test("a rejecting progress sink fails the resolution as a persistence failure, not a provider failure", async () => {
@@ -249,8 +306,8 @@ test("a pending outcome leaves acknowledged obligation changes as they were sent
   const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source, onProviderResolved: async ({ provider, obligation }) => { patches.push({ provider, obligation }); } });
 
   assert.equal(resolved.outcome, "pending");
-  assert.deepEqual(patches, [{ provider: "tmdb", obligation: "set" }, { provider: "tvdb", obligation: "unchanged" }]);
-  assert.deepEqual([resolved.tmdb.obligation, resolved.tvdb.obligation], ["set", "unchanged"]);
+  assert.deepEqual(patches, [{ provider: "tmdb", obligation: ADDS_PREFERRED }, { provider: "tvdb", obligation: UNCHANGED }]);
+  assert.deepEqual([resolved.tmdb.obligation, resolved.tvdb.obligation], [ADDS_PREFERRED, UNCHANGED]);
 });
 
 const noTvdb = { candidates: [] };
@@ -319,7 +376,7 @@ test("a known-empty association means no derived TMDB series, while one missing 
   assert.equal(none.outcome, "comparable", "TVDB alone is compared");
   assert.equal(none.tmdb.identity, undefined);
   assert.deepEqual(none.tmdb.use, { action: "clear" });
-  assert.equal(none.tmdb.obligation, "unchanged");
+  assert.deepEqual(none.tmdb.obligation, UNCHANGED);
   assert.deepEqual(none.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
   assert.ok(!empty.requests.some(r => r.provider === "tmdb"));
 
@@ -329,7 +386,7 @@ test("a known-empty association means no derived TMDB series, while one missing 
   assert.equal(pending.tmdb.identity, undefined);
   assert.deepEqual(pending.tmdb.use, { action: "unchanged" });
   assert.deepEqual(pending.tmdb.issues, preserved("tmdb"));
-  assert.equal(pending.tmdb.obligation, "unchanged");
+  assert.deepEqual(pending.tmdb.obligation, UNCHANGED);
   assert.equal(pending.tmdb.warning, "TMDB's association for TVDB series 1 is not saved, so its TMDB series could not be resolved from saved inputs. Last-good results were kept until the next Plex scan.");
 });
 
@@ -342,7 +399,7 @@ test("a failed association is a catalogue-refresh Coverage Issue, and the TMDB s
   assert.deepEqual(resolved.tmdb.catalogue, { id: 40, origin: "saved", downloadedAt: before(90 * DAY), catalogue: { provider: "tmdb", id: 40, downloadedAt: before(90 * DAY) } });
   assert.equal(resolved.tmdb.identity, 40);
   assert.deepEqual(resolved.tmdb.use, { action: "clear" });
-  assert.equal(resolved.tmdb.obligation, "set");
+  assert.deepEqual(resolved.tmdb.obligation, ADDS_PREFERRED);
   assert.equal(resolved.tmdb.warning, "TMDB request failed (503).");
   const issue = resolved.tmdb.issues[0];
   assert.equal(issue.action, "set");
@@ -364,7 +421,7 @@ test("a single Plex ID the provider answers with no series for has no catalogue 
   assert.equal(resolved.tmdb.catalogue, undefined, "the saved copy is not compared");
   assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TMDB show", id: 11 }]);
   assert.deepEqual(resolved.tmdb.use, { action: "set", use: { preferredId: 11, usingId: 11, state: "preferred" } });
-  assert.equal(resolved.tmdb.obligation, "unchanged");
+  assert.deepEqual(resolved.tmdb.obligation, UNCHANGED);
   assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
   assert.deepEqual([resolved.unavailableCauses, resolved.warnings], [[], []]);
 });
@@ -378,7 +435,7 @@ test("a derived TMDB series the provider answers with no series for has no catal
   assert.equal(resolved.tmdb.catalogue, undefined);
   assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }, { provider: "TMDB", kind: "resolved show", id: 50, cached: false }]);
   assert.deepEqual(resolved.tmdb.use, { action: "set", use: { usingId: 50, state: "derived", derivedFrom: 1 } });
-  assert.equal(resolved.tmdb.obligation, "unchanged");
+  assert.deepEqual(resolved.tmdb.obligation, UNCHANGED);
   assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
   assert.deepEqual([resolved.unavailableCauses, resolved.warnings], [[], []]);
 });
@@ -390,7 +447,7 @@ test("a candidate among several that the provider answers with no series for is 
   assert.equal(resolved.outcome, "comparable");
   assert.equal(resolved.tmdb.catalogue?.id, 10);
   assert.equal((resolved.tmdb.use as { use: { state: string } }).use.state, "fallback");
-  assert.equal(resolved.tmdb.obligation, "set");
+  assert.deepEqual(resolved.tmdb.obligation, ADDS_PREFERRED);
   const issue = resolved.tmdb.issues[0];
   assert.equal(issue.action, "set");
   if (issue.action !== "set") return;
@@ -433,7 +490,7 @@ test("a derived TVDB series that cannot be loaded keeps its saved catalogue at a
     const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, { candidates: [], refreshObligation: true }), { source });
 
     assert.equal(resolved.tvdb.identity, 7);
-    assert.equal(resolved.tvdb.obligation, "unchanged", "an obligation already open stays open");
+    assert.deepEqual(resolved.tvdb.obligation, UNCHANGED, "an obligation already open stays open");
     assert.deepEqual(resolved.tvdb.use, { action: "set", use: { usingId: 7, state: "derived", derivedFrom: 11, ...(savedAt ? { usingDownloadedAt: savedAt } : {}) } });
     assert.equal(resolved.outcome, savedAt ? "comparable" : "pending");
     assert.equal(resolved.tvdb.catalogue?.origin, savedAt ? "saved" : undefined);
@@ -449,7 +506,7 @@ test("a derived TVDB series that cannot be loaded keeps its saved catalogue at a
 test("a derived series that fails with no obligation open sets one", async () => {
   const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: tmdbSaved }, tvdbOfTmdb: { 11: 7 }, failing: { tvdb: { 7: { error: new Error("TVDB is down.") } } } });
   const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, noTvdb), { source });
-  assert.equal(resolved.tvdb.obligation, "set");
+  assert.deepEqual(resolved.tvdb.obligation, ADDS_PREFERRED);
   assert.equal(resolved.tvdb.warning, "TVDB is down.");
 });
 
@@ -459,7 +516,7 @@ test("a downloaded derived series clears its open refresh obligation; a reused o
     // The production reuse policy reuses a young saved copy unless the obligation makes the load mandatory.
     const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, { candidates: [], refreshObligation: obligation }), { source });
     assert.equal(resolved.tvdb.catalogue?.origin, obligation ? "downloaded" : "reused");
-    assert.equal(resolved.tvdb.obligation, obligation ? "clear" : "unchanged");
+    assert.deepEqual(resolved.tvdb.obligation, obligation ? SATISFIES_PREFERRED : UNCHANGED);
   }
 });
 
@@ -476,17 +533,17 @@ test("in the TVDB-first case, TVDB's patch is acknowledged by the progress sink 
   const resolving = resolveComparisonCatalogues(request(noTmdb, tvdbOnly), {
     source,
     onProviderResolved: async ({ provider, obligation }) => {
-      events.push(`patch ${provider} ${obligation}`);
+      events.push(`patch ${provider} ${JSON.stringify(obligation)}`);
       if (provider === "tvdb") await acknowledged;
       events.push(`acknowledged ${provider}`);
     },
   });
   await new Promise(resolve => setTimeout(resolve, 10));
-  assert.deepEqual(events, ["load tvdb 1", "load tvdb 3", "patch tvdb set"], "TMDB waits for the TVDB patch to be acknowledged");
+  assert.deepEqual(events, ["load tvdb 1", "load tvdb 3", 'patch tvdb {"add":{"preferred":true}}'], "TMDB waits for the TVDB patch to be acknowledged");
 
   acknowledge();
   await resolving;
-  assert.deepEqual(events, ["load tvdb 1", "load tvdb 3", "patch tvdb set", "acknowledged tvdb", "association 3", "load tmdb 50", "patch tmdb unchanged", "acknowledged tmdb"]);
+  assert.deepEqual(events, ["load tvdb 1", "load tvdb 3", 'patch tvdb {"add":{"preferred":true}}', "acknowledged tvdb", "association 3", "load tmdb 50", "patch tmdb {}", "acknowledged tmdb"]);
 });
 
 test("the progress sink receives each provider's chosen catalogue before the other provider loads, so the second load can depend on it", async () => {
@@ -540,7 +597,7 @@ test("with TVDB chosen first and unavailable, TMDB is still derived from the pre
   assert.deepEqual(resolved.tmdb.use, { action: "set", use: { usingId: 50, state: "derived", derivedFrom: 1, usingDownloadedAt: before(DAY) } });
   assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
   assert.deepEqual(resolved.unavailableCauses, ["catalogue-refresh:TVDB:show-1"]);
-  assert.deepEqual(patches, [{ provider: "tvdb", obligation: "set" }, { provider: "tmdb", obligation: "unchanged" }]);
+  assert.deepEqual(patches, [{ provider: "tvdb", obligation: ADDS_PREFERRED }, { provider: "tmdb", obligation: UNCHANGED }]);
 });
 
 test("a pending outcome lists the comparison-inputs issue's causes and the warnings in resolution order, while comparison order stays TMDB then TVDB", async () => {
@@ -590,7 +647,7 @@ test("a cached recheck compares an untried preference's usable saved copy, loadi
   assert.deepEqual(resolved.tmdb.use, { action: "set", use: { preferredId: 11, usingId: 11, state: "preferred", preferredDownloadedAt: before(60 * DAY), preferredUsableUntil: usableUntil(before(60 * DAY)), usingDownloadedAt: before(60 * DAY) } });
   assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TMDB show", id: 11 }]);
   for (const provider of ["tmdb", "tvdb"] as const) {
-    assert.equal(resolved[provider].obligation, "unchanged");
+    assert.deepEqual(resolved[provider].obligation, UNCHANGED);
     assert.deepEqual(resolved[provider].issues, preserved(provider));
   }
 });
@@ -688,7 +745,7 @@ test("a cached recheck keeps a derived TVDB series while the TMDB series compare
   assert.equal(changed.tvdb.identity, 8);
   assert.deepEqual(changed.tvdb.use, { action: "set", use: { usingId: 8, state: "derived", derivedFrom: 11, usingDownloadedAt: before(DAY) } });
   assert.deepEqual(changed.tvdb.issues, preserved("tvdb"));
-  assert.equal(changed.tvdb.obligation, "unchanged");
+  assert.deepEqual(changed.tvdb.obligation, UNCHANGED);
 
   const unnamed = inMemoryCatalogueSource({ now: NOW, saved });
   const cleared = await resolveComparisonCatalogues(cachedRequest({ candidates: [10, 11], preferredId: 11 }, noTvdb, { tmdb: { recordedUse } }, { tmdbId: 10, tvdbId: 7 }), { source: unnamed.source });
@@ -742,7 +799,7 @@ test("a cached recheck reports no obligation change to the progress sink, even w
   const progress: unknown[] = [];
   const resolved = await resolveComparisonCatalogues(cachedRequest({ candidates: [10, 11], preferredId: 11, refreshObligation: true }, { ...tvdbOnly, refreshObligation: true }, {}, { tmdbId: 10, tvdbId: 1 }), { source, onProviderResolved: async ({ provider, obligation }) => { progress.push({ provider, obligation }); } });
   assert.equal(resolved.outcome, "comparable");
-  assert.deepEqual(progress, [{ provider: "tmdb", obligation: "unchanged" }, { provider: "tvdb", obligation: "unchanged" }]);
+  assert.deepEqual(progress, [{ provider: "tmdb", obligation: UNCHANGED }, { provider: "tvdb", obligation: UNCHANGED }]);
 });
 
 test("a provider with one Plex ID compares its catalogue under the single-catalogue reuse policy and records the scan's existing single-ID use", async () => {
@@ -758,7 +815,7 @@ test("a provider with one Plex ID compares its catalogue under the single-catalo
   assert.deepEqual(resolved.tvdb.use, { action: "set", use: { preferredId: 1, usingId: 1, state: "preferred", preferredDownloadedAt: before(DAY), usingDownloadedAt: before(DAY) } });
   assert.deepEqual(resolved.tmdb.issues, [{ action: "resolve", id: "catalogue-refresh:TMDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" }]);
   assert.deepEqual(resolved.tvdb.issues, [{ action: "resolve", id: "catalogue-refresh:TVDB:show-1" }, { action: "resolve", id: "catalogue-fallback-refresh:TVDB:show-1" }]);
-  assert.deepEqual([resolved.tmdb.obligation, resolved.tvdb.obligation], ["unchanged", "unchanged"]);
+  assert.deepEqual([resolved.tmdb.obligation, resolved.tvdb.obligation], [UNCHANGED, UNCHANGED]);
   assert.deepEqual([resolved.unavailableCauses, resolved.warnings], [[], []]);
 });
 
@@ -773,7 +830,7 @@ test("a provider with one Plex ID keeps its saved catalogue at any age after a f
     assert.deepEqual(resolved.tmdb.use, { action: "set", use: savedAt
       ? { preferredId: 11, usingId: 11, preferredDownloadedAt: savedAt, usingDownloadedAt: savedAt, state: "saved-unavailable", preferredFailedAt: NOW }
       : { preferredId: 11, state: "unavailable", preferredFailedAt: NOW } });
-    assert.equal(resolved.tmdb.obligation, "set");
+    assert.deepEqual(resolved.tmdb.obligation, ADDS_PREFERRED);
     assert.deepEqual(resolved.tmdb.issues, [
       { action: "set", issue: {
         id: "catalogue-refresh:TMDB:show-1", operation: "catalogue-refresh", provider: "TMDB", scope: "show",
@@ -799,7 +856,7 @@ test("a single TVDB ID failing on provider authentication names that cause, and 
   const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11 }, { candidates: [1], preferredId: 1, refreshObligation: true }), { source });
 
   assert.equal(resolved.outcome, "pending");
-  assert.equal(resolved.tvdb.obligation, "unchanged", "an obligation already open stays open");
+  assert.deepEqual(resolved.tvdb.obligation, UNCHANGED, "an obligation already open stays open");
   const issue = resolved.tvdb.issues[0];
   assert.equal(issue.action, "set");
   if (issue.action !== "set") return;
@@ -816,7 +873,7 @@ test("any successful download from a single-ID provider clears its open refresh 
     const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11, refreshObligation: obligation }, { candidates: [1], preferredId: 1 }), { source });
     assert.deepEqual(requests[0], { provider: "tmdb", id: 11, mandatory: obligation });
     assert.equal(resolved.tmdb.catalogue?.origin, obligation ? "downloaded" : "reused");
-    assert.equal(resolved.tmdb.obligation, obligation ? "clear" : "unchanged");
+    assert.deepEqual(resolved.tmdb.obligation, obligation ? SATISFIES_PREFERRED : UNCHANGED);
     assert.deepEqual(resolved.tmdb.use, { action: "set", use: { preferredId: 11, usingId: 11, state: "preferred", preferredDownloadedAt: obligation ? NOW : before(DAY), usingDownloadedAt: obligation ? NOW : before(DAY) } });
   }
 });

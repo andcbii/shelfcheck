@@ -425,7 +425,7 @@ test("TVDB applies the same saved-catalogue limit and fallback independently of 
   assert.equal(f.selection().tmdb.current?.state,"preferred","TMDB is unaffected");
 });
 
-test("an outstanding refresh obligation also downloads the fallback in use until the preferred series downloads again", async t => {
+test("an outstanding preferred requirement retries the preferred series every scan, while the fallback in use downloads only under its own freshness rules", async t => {
   const f = await fixture(t);
   f.plex.tmdb = [10,11];
   await f.run();
@@ -443,25 +443,27 @@ test("an outstanding refresh obligation also downloads the fallback in use until
   assert.equal(f.tmdbDownloads(10),0,"without an obligation, young A is reused");
   assert.equal(obligation()?.tmdb,true,"B's failure leaves a refresh obligation");
 
-  for (const n of [64,65]) {
+  // Deliberately changed (SHELFCHECK-97): the open obligation used to download young A on every scan.
+  for (const n of [64,65,70]) {
     f.at(day(n)); show = await f.run();
     assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
-    assert.equal(f.tmdbDownloads(10),1,`the obligation downloads A on day ${n} although it is younger than 20 days`);
+    assert.equal(f.tmdbDownloads(10),0,`A, ${n - 50} days old, is reused on day ${n}: B's requirement never forces the fallback`);
     assert.equal(show.tmdbId,10);
-    assert.equal(obligation()?.tmdb,true,"a successful fallback download does not satisfy B's obligation");
+    assert.equal(obligation()?.tmdb,true,"B's requirement stays open");
     assert.equal(obligation()?.tvdb,undefined,"TVDB has no obligation of its own");
-    assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(n));
+    assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(50));
   }
   assert.equal(f.selection().tmdb.current?.preferredDownloadedAt,day(2),"B's download time is unchanged");
 
+  // Day 71: A is older than 20 days, so it is downloaded again; that download fails.
   f.tmdb[10].fail = true;
-  f.at(day(66)); show = await f.run();
+  f.at(day(71)); show = await f.run();
   assert.equal(show.tmdbId,10,"saved A, within 60 days, is still compared");
   assert.deepEqual(missingTmdb(show),[1002]);
   assert.equal(show.warning,undefined,"no duplicate generic warning for a complete saved comparison");
   let current = f.selection().tmdb.current!;
-  assert.equal(current.state,"fallback"); assert.equal(current.usingDownloadedAt,day(65),"A's failed refresh renews nothing");
-  assert.equal(current.usingFailedAt,day(66),"A's failed refresh is recorded with the catalogue in use");
+  assert.equal(current.state,"fallback"); assert.equal(current.usingDownloadedAt,day(50),"A's failed refresh renews nothing");
+  assert.equal(current.usingFailedAt,day(71),"A's failed refresh is recorded with the catalogue in use");
   assert.equal(obligation()?.tmdb,true);
   type Issue = {id:string;operation:string;show?:{tmdbId?:number};lookup?:{impact:string}};
   const fallbackIssue = (issues: Issue[]) => issues.find(issue=>issue.id === `catalogue-fallback-refresh:TMDB:${f.identity}`);
@@ -469,17 +471,24 @@ test("an outstanding refresh obligation also downloads the fallback in use until
   assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"B's failure stays a Coverage Issue");
   assert.equal(fallbackIssue(issues)?.operation,"catalogue-refresh");
   assert.equal(fallbackIssue(issues)?.show?.tmdbId,10);
-  assert.match(fallbackIssue(issues)?.lookup?.impact || "",/saved catalogue, downloaded 2026-03-07/);
+  assert.match(fallbackIssue(issues)?.lookup?.impact || "",/saved catalogue, downloaded 2026-02-20/);
 
   f.restart();
   await plexScan.requestCoverageRecheck({members:[{provider:"TMDB",id:1001,showId:10,show:"TMDB 10",title:"Episode 1",season:1,episode:1,url:""}]});
   issues = await f.issues() as Issue[];
   assert.ok(fallbackIssue(issues),"an offline recheck preserves A's failure");
   assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"and B's");
-  assert.equal(f.selection().tmdb.current?.usingFailedAt,day(66));
+  assert.equal(f.selection().tmdb.current?.usingFailedAt,day(71));
+
+  f.tmdb[10].fail = false;
+  f.at(day(72)); show = await f.run();
+  assert.equal(f.tmdbDownloads(10),1,"A, still older than 20 days, downloads once it loads again");
+  assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(72));
+  assert.equal(obligation()?.tmdb,true,"a fallback download does not satisfy B's requirement");
+  assert.equal(fallbackIssue(await f.issues() as Issue[]),undefined,"A's refresh failure is resolved");
 
   f.tmdb[11].fail = false;
-  f.at(day(67)); show = await f.run();
+  f.at(day(73)); show = await f.run();
   assert.equal(show.tmdbId,11,"B recovers");
   assert.equal(f.tmdbDownloads(10),0,"A is no longer loaded");
   assert.equal(obligation()?.tmdb,undefined,"a successful B download clears only TMDB's obligation");
@@ -521,6 +530,76 @@ test("a scan interrupted after a show's preferred TMDB download keeps that progr
   assert.deepEqual(saved().comparisons[f.identity].refresh,{},"no obligation remains");
   held.release();
   await interrupted;
+});
+
+/**
+ * TMDB candidates A (10) and B (11): B is preferred by override and failing with no saved copy within
+ * 60 days, so A, downloaded on day 50, is the fallback in use from day 63. B's failure leaves the
+ * preferred requirement open; `clearObligation` then removes it, so a writer can be observed alone.
+ */
+async function youngFallbackA(f: Awaited<ReturnType<typeof fixture>>) {
+  f.plex.tmdb = [10,11];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.at(day(2)); await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",null);
+  f.at(day(50)); await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",11);
+  f.tmdb[11].fail = true;
+  f.at(day(63)); await f.run();
+  assert.equal(f.selection().tmdb.current?.state,"fallback");
+  assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(50));
+  return {
+    refresh: () => catalogues.readPlexInputs().comparisons[f.identity]?.refresh,
+    /** Replace the saved obligation: no requirement, or a specific requirement for an uncompared catalogue (12) a writer must keep. */
+    clearObligation() { catalogues.savePlexComparison(f.identity,{...catalogues.readPlexInputs().comparisons[f.identity],refresh:{specificIds:{tmdb:[12]}}}); },
+  };
+}
+
+for (const [writer,write] of [
+  ["a Manual Match change",() => plexScan.requestCoverageRecheck({members:[{provider:"TMDB",id:1001,showId:10,show:"TMDB 10",title:"Episode 1",season:1,episode:1,url:""}]})],
+  ["a catalogue override change",(f: Awaited<ReturnType<typeof fixture>>) => plexScan.requestCatalogueRecheck(f.identity,"tmdb")],
+] as const) {
+  test(`${writer} adds the preferred requirement without replacing other parts, and the next scan does not download the young fallback again`, async t => {
+    const f = await fixture(t);
+    const show = await youngFallbackA(f);
+    show.clearObligation();
+    f.at(day(64));
+    await write(f);
+    const refresh = show.refresh();
+    assert.equal(refresh?.tmdb,true,"the preferred requirement is added");
+    assert.deepEqual(refresh?.specificIds,{tmdb:[12]},"the other requirement is kept");
+
+    f.at(day(65)); await f.run();
+    assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
+    assert.equal(f.tmdbDownloads(10),0,"young A is reused");
+    assert.equal(show.refresh()?.tmdb,true,"B's requirement stays open");
+  });
+}
+
+test("a fallback in use is downloaded again once older than 20 days while the preferred requirement is open", async t => {
+  const f = await fixture(t);
+  const show = await youngFallbackA(f);
+  f.at(day(70)); await f.run();
+  assert.equal(f.tmdbDownloads(10),0,"A is reusable at exactly 20 days");
+  f.at(new Date(Date.parse(day(70)) + 1).toISOString()); await f.run();
+  assert.equal(f.tmdbDownloads(10),1,"A older than 20 days is downloaded");
+  assert.equal(show.refresh()?.tmdb,true,"and satisfies nothing");
+});
+
+test("an obligation saved before requirements existed reads as preferred-only, so its fallback part is lost once", async t => {
+  const f = await fixture(t);
+  const show = await youngFallbackA(f);
+  // Day 71: A, older than 20 days, is downloaded; TMDB then reports A changed the same UTC day.
+  f.at(day(71)); await f.run();
+  assert.equal(f.tmdbDownloads(10),1);
+  // A pre-upgrade fifth-scan safeguard for A stored only the provider flag.
+  catalogues.savePlexComparison(f.identity,{...catalogues.readPlexInputs().comparisons[f.identity],refresh:{tmdb:true}});
+  f.changes([10]);
+  f.at(day(71).replace("12:00","13:00")); await f.run();
+  assert.ok(f.requests.includes("/3/tv/11"),"the flag still requires preferred B");
+  assert.equal(f.tmdbDownloads(10),0,"the accepted loss: A, changed but downloaded earlier today, is reused instead of downloaded");
+  assert.deepEqual(show.refresh(),{tmdb:true});
 });
 
 /**

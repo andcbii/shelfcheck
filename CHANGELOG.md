@@ -15,6 +15,15 @@
 
 ### Changed
 
+- A show whose preferred catalogue cannot be loaded no longer downloads its
+  fallback catalogue again on every Plex scan. The preferred catalogue is
+  still retried on every full scan; the fallback is downloaded again only when
+  it is older than 20 days, flagged changed by TMDB or TVDB, or has no usable
+  saved copy. Editing a Manual Match or changing a catalogue override likewise
+  requires only the preferred catalogue's download. The fifth-scan safeguard
+  and clearing one show's cache still download the fallback. A fallback that a
+  safeguard or single-show Clear cache marked just before the upgrade catches up
+  under the same freshness rules.
 - Both scans send Trakt requests through one provider client: one token
   refresh is shared by every request that needs it, and Trakt requests are
   paced from Trakt's own rate-limit header in both scans.

@@ -29,6 +29,7 @@ import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelecti
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { NO_PLEX_IDS_WARNING, ProgressPersistenceError, resolveComparisonCatalogues, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderRequest } from "@/lib/comparison-catalogue-resolver";
 import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
+import { patchSavedObligation, PREFERRED_REQUIRED, savedObligation } from "@/lib/refresh-obligation";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
@@ -1127,11 +1128,11 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         resolution = await resolveComparisonCatalogues<DownloadCataloguePayloads>({
           context: {kind:"live-scan"}, show: {ratingKey, title: primary.title}, resolvedAt: startedAt,
           ...(savedComparison ? {previousComparison: {tmdbId: savedComparison.tmdbId, tvdbId: savedComparison.tvdbId, complete: !!savedComparison.complete}} : {}),
-          tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: !!refresh.tmdb, lookupSource: tmdbSource},
-          tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: !!refresh.tvdb, lookupSource: tvdbSource},
+          tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: savedObligation(refresh, "tmdb"), lookupSource: tmdbSource},
+          tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: savedObligation(refresh, "tvdb"), lookupSource: tvdbSource},
         }, {source, onProviderResolved: async progress => {
-          if (progress.obligation === "set") refresh[progress.provider] = true;
-          else if (progress.obligation === "clear") delete refresh[progress.provider];
+          // The provider-scoped patch changes only its own parts of the saved obligation.
+          patchSavedObligation(refresh, progress.provider, progress.obligation);
           savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
           phaseTimings[`${progress.provider}Ms`] = Date.now() - phaseStarted;
           phaseStarted = Date.now();
@@ -1432,7 +1433,7 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const saved=inputs.comparisons[identity];
   // Persist the obligation first: the next scan downloads the newly preferred series.
-  if (saved) {saved.refresh={...saved.refresh,[provider]:true};savePlexComparison(identity,saved);}
+  if (saved) {saved.refresh=patchSavedObligation({...saved.refresh},provider,PREFERRED_REQUIRED);savePlexComparison(identity,saved);}
   const pending=(cause: string) => setCoverageIssue({id:`comparison-inputs:${identity}`,operation:"comparison",scope:"show",show:{ratingKey:identity,title:saved?.group.records[0]?.title,tmdbId:saved?.tmdbId,tvdbId:saved?.tvdbId},cause,action:`Run a Plex scan to download the selected ${PROVIDER_NAME[provider]} catalogue and compare it.`});
   if (!prior || !inputs.inventory?.complete || !saved?.complete) {
     pending("Saved comparison inputs for this show are missing or incomplete, so the new catalogue selection could not be compared. Last-good results were kept.");
@@ -1459,7 +1460,11 @@ async function recheckCoverage(impact: CoverageImpact) {
   // Persist obligations first. A failed local comparison must never consume them.
   for (const key of targets) {
     const input=inputs.comparisons[key];
-    if (input) {input.refresh={...input.refresh,...(input.tmdbId ? {tmdb:true} : {}),...(input.tvdbId ? {tvdb:true} : {})};savePlexComparison(key,input);}
+    if (input) {
+      const refresh={...input.refresh};
+      for (const provider of PROVIDERS) if (input[PROVIDER_ID_FIELD[provider]]) patchSavedObligation(refresh,provider,PREFERRED_REQUIRED);
+      input.refresh=refresh;savePlexComparison(key,input);
+    }
   }
   if (!prior || !inputs.inventory?.complete) {
     const keys=targets.size ? [...targets] : [undefined];
@@ -1521,7 +1526,7 @@ async function resolveSavedComparison(identity: string, saved: SavedPlexComparis
   };
   const providerRequest=(provider: CatalogueProvider): ProviderRequest => ({
     candidates:selection?.[provider].candidates.map(candidate=>candidate.id) || [],preferredId:selection?.[provider].preferredId,
-    refreshObligation:!!saved.refresh?.[provider],lookupSource:[],
+    refreshObligation:savedObligation(saved.refresh,provider),lookupSource:[],
   });
   const resolution=await resolveComparisonCatalogues({
     context:{kind:"cached-recheck",history:{tmdb:history("tmdb"),tvdb:history("tvdb")}},

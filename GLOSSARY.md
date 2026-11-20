@@ -45,7 +45,7 @@ Refreshing the TMDB catalogues whose freshness TMDB's change feed cannot vouch f
 _Avoid_: Blanket refresh, baseline recovery
 
 **Refresh obligation**:
-A show's durable requirement to download a fresh catalogue from one provider on the next full scan, satisfied only by a successful download from that provider. Where the provider has a catalogue override, only a successful download of the preferred catalogue satisfies it; downloading a fallback catalogue does not. Manual Match changes, catalogue override changes, cache clearing, and the fifth-scan safeguard create one.
+A show's durable, per-provider record of which catalogue downloads the next full scans must make instead of reusing a saved copy. It holds requirements that coexist and merge, never replacing one another: the preferred catalogue (raised by a failed preferred catalogue, a Manual Match change or a catalogue override change); specific catalogue IDs (raised by the fifth-scan safeguard for the catalogue it was raised for, including a fallback); and every catalogue the scan tries (raised by a single-show Clear cache). Each requirement is satisfied only by a complete successful download of the catalogue it names: a fallback download satisfies its own specific requirement but never the preferred one, and the every-attempted requirement clears with the preferred one. For a provider with one catalogue, that catalogue is the preferred one. Reuse, failed downloads and cached rechecks satisfy nothing. A fallback catalogue the obligation does not name is downloaded again only under its normal freshness rules.
 _Avoid_: Refresh flag, pending refresh
 
 **Cached recheck**:

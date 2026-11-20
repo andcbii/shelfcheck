@@ -68,7 +68,25 @@ _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
 A match determined and controlled by Shelfcheck through automatic matching.
 
 **Coverage Issue**:
-An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists.
+An unresolved condition that prevents Shelfcheck from verifying episode coverage or provider catalogue freshness. It may affect a show, an episode, or an entire library, whether or not a Manual Match exists. The Scan Issues report lists them.
+
+**Provider Lookup Failure**:
+A Coverage Issue recording that a show or episode could not be looked up at a provider, for any reason: a missing ID, "not found", an outage, a rate limit, a failed sign-in or an unreadable answer.
+
+**Gone provider record**:
+A provider series ID whose series request has answered "not found" on 15 separate UTC days since its last complete catalogue download, and whose saved catalogue is more than 60 days old. Its saved catalogue is kept but never compared, and one complete download makes it usable again. Outages, other failures, and "not found" answers for its seasons or episodes never count toward it. An ID never downloaded has no catalogue age and is never gone.
+_Avoid_: Deleted show, dead ID
+
+**Total Provider Lookup Failure**:
+A provider for which the show has no catalogue from a working ID. An ID works when its latest download attempt succeeded or its catalogue was reused without one, whether Plex reported the ID or Shelfcheck found it through the other provider; IDs not tried don't count as failing. The show may still use a saved catalogue kept after a failed attempt until that record is gone.
+
+**Unmatched show**:
+A library show with no usable catalogue from any provider, live or saved. The Unmatched Shows report lists them.
+_Avoid_: Unmatched (for a show that still has results)
+
+**Partially matched show**:
+A show that is not unmatched but has a Total Provider Lookup Failure for at least one provider, including one that is falling back to a saved catalogue. It is compared with whatever catalogues remain usable.
+_Avoid_: Partial Match (Manual Match and Auto Match are episode matches)
 
 **Episode-scoped failure**:
 An unresolved episode lookup or coverage check whose impact is limited to the affected episode and relationships that depend on it. Independent episode checks remain usable, including other ways to establish coverage for that episode.

@@ -8,6 +8,7 @@ import test, { type TestContext } from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const store = await import("../lib/catalogue-selection-store");
 const sqlite = await import("../lib/sqlite");
+const { clearPlexInputs } = await import("../lib/plex-catalogues");
 const { scanRuns } = await import("../lib/scan-run");
 hook.deregister();
 
@@ -30,8 +31,8 @@ test("an override is saved only for a currently reported candidate and survives 
   assert.throws(() => store.saveCatalogueOverride(show,"tmdb",73817), rejection("validation"), "a TVDB ID is not a TMDB candidate");
   store.saveCatalogueOverride(show,"tmdb",337142);
   restart();
-  sqlite.deletePlexGeneratedInputs();
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  clearPlexInputs();
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   const saved = store.readCatalogueSelections()[show];
   assert.deepEqual(saved.tmdb.candidates.map(candidate => candidate.id),[2150,337142]);
   assert.equal(saved.tmdb.automaticId,2150);

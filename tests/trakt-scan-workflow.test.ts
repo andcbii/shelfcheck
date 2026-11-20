@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { AsyncResource } from "node:async_hooks";
 import test, { type TestContext } from "node:test";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
@@ -18,6 +18,7 @@ const lifecycle = await import("../lib/scan-run");
 const logs = await import("../app/api/logs/route");
 const { scanProviderClient } = await import("../lib/scan-provider-client");
 const { systemClock } = await import("../lib/provider-client");
+const { collectionFingerprint } = await import("../lib/scan-cache");
 hook.deregister();
 
 // Characterizes today's Trakt scan through its public start and status routes,
@@ -52,11 +53,13 @@ const airDates: Record<number, string[]> = {
 type Report = { shows: { show: { title: string; ids: { trakt: number } } }[]; missing: { show: { title: string }; season: number; episode: number }[]; lastScan: string; scanCache?: Record<string, unknown> };
 type ScanStatus = { status: string; processed: number; total: number; error?: string; finishedAt?: string; rateLimitPaused?: boolean; rateLimitResumeAt?: string; heartbeatAt?: string; activeShows?: unknown[] };
 
-async function fixture(t: TestContext) {
+/** `earlierRelease`, when given, leaves a database in the data directory before Shelfcheck first opens it. */
+async function fixture(t: TestContext, earlierRelease?: (dataDirectory: string) => void) {
   const dir = mkdtempSync(path.join(tmpdir(), "trakt-scan-workflow-"));
   const previous = { data: process.env.SHELFCHECK_DATA_DIR, config: process.env.SHELFCHECK_CONFIG_DIR };
   process.env.SHELFCHECK_DATA_DIR = dir;
   process.env.SHELFCHECK_CONFIG_DIR = dir;
+  earlierRelease?.(dir);
   const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
   // Each test is a fresh server process for provider pacing and deadlines.
   scanProviderClient.forgetProviderDeadlines();
@@ -237,7 +240,7 @@ const status = async () => (await (await scan.GET()).json() as { scan: ScanStatu
 
 test("a Trakt scan run with no heartbeat for more than 90 seconds and no live owner is an Interrupted scan, written once", async (t) => {
   await fixture(t);
-  sqlite.writeSingleUserScanStatus({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
+  sqlite.savedScanState("trakt").status.write({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
   assert.equal((await status()).status, "running", "exactly 90 seconds without a heartbeat is still running");
   t.mock.timers.tick(1);
   const first = await status();
@@ -311,7 +314,7 @@ const rateLimitedResponse = (scope: AsyncResource) => scope.runInAsyncScope(() =
 const observe = async () => ({
   lock: ((await (await scanRuns.GET()).json()) as { activeScanRun: unknown }).activeScanRun,
   trakt: { status: await status(), log: await (await logs.GET()).text(), resumePoint: await storedResumePoint() },
-  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: sqlite.readPlexCheckpoint() },
+  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: sqlite.savedScanState("plex").resumePoint.read() },
 });
 
 test("a late 429 for a request of a settled Trakt scan run changes nothing in a following Trakt or Plex scan run", async (t) => {
@@ -393,7 +396,7 @@ async function seedResumePoint(f: Awaited<ReturnType<typeof fixture>>, fields: (
   const now = Date.now();
   const point: Record<string, unknown> = { ...report, missing: report!.missing.filter((episode) => episode.show.title === "Bravo" && episode.episode === 2), savedAt: new Date(now - HOUR).toISOString(), resumePointVersion: 1, airingGraceDays: 0, ...fields(now) };
   for (const [key, value] of Object.entries(point)) if (value === undefined) delete point[key];
-  sqlite.patchSingleUserState({ checkpoint: point });
+  sqlite.savedScanState("trakt").resumePoint.write(point);
   return report!;
 }
 
@@ -633,4 +636,28 @@ test("a Trakt rate-limit reset more than 15 minutes away ends the scan run with 
   assert.equal(failed.status, "error");
   assert.equal(failed.error, "Trakt's rate limit resets in 20 minutes. Start the scan again after that to resume.");
   assert.deepEqual(perShow(f.requests), [], "the collection response was used; the next request was not sent");
+});
+
+test("after the upgrade the Trakt page is idle and its next full scan starts over, though a usable Resume point was saved before", async (t) => {
+  // A database an earlier release left: a report, a usable Resume point whose only result is
+  // Bravo S1E2, and a running scan status, in the old Trakt tables.
+  const f = await fixture(t, (dir) => {
+    const legacy = new DatabaseSync(path.join(dir, "shelfcheck.db"));
+    legacy.exec("CREATE TABLE shelfcheck_states(user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    legacy.exec("CREATE TABLE shelfcheck_scan_status(user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    const bravo = library()[1];
+    const scanCache = Object.fromEntries(library().map((item) => [String(item.show.ids.trakt), { collectionFingerprint: collectionFingerprint(item), airedEpisodes: item.show.aired_episodes, traktUpdatedAt: item.show.updated_at, lastCheckedAt: NOW }]));
+    const checkpoint = { shows: library().map((item) => ({ show: item.show })), missing: [{ show: bravo.show, season: 1, episode: 2 }], lastScan: NOW, scanCache, savedAt: new Date(Date.parse(NOW) - 3_600_000).toISOString(), resumePointVersion: 1, airingGraceDays: 0 };
+    legacy.prepare("INSERT INTO shelfcheck_states(user_id, payload) VALUES('single-user', ?)").run(JSON.stringify({ airingGraceDays: 0, diagnosticsEnabled: false, report: checkpoint, checkpoint }));
+    legacy.prepare("INSERT INTO shelfcheck_scan_status(user_id, payload) VALUES('single-user', ?)").run(JSON.stringify({ status: "running", processed: 1, total: 3, startedAt: NOW }));
+    legacy.close();
+  });
+
+  assert.deepEqual((await (await scan.GET()).json() as { scan: ScanStatus }).scan, { status: "idle", processed: 0, total: 0 }, "No stale progress or Interrupted scan appears");
+  assert.equal(await f.report(), undefined, "No earlier report is shown");
+  const status = await f.run();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.equal(status.processed, 3);
+  assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/3/progress/collection"], "Nothing is reused from the old Resume point or report");
+  assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"], "The scan started over rather than resuming");
 });

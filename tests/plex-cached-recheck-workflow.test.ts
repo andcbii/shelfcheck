@@ -19,7 +19,7 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   const global=globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync};
   t.after(()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;if(beforeData===undefined)delete process.env.SHELFCHECK_DATA_DIR;else process.env.SHELFCHECK_DATA_DIR=beforeData;if(beforeConfig===undefined)delete process.env.SHELFCHECK_CONFIG_DIR;else process.env.SHELFCHECK_CONFIG_DIR=beforeConfig;rmSync(dir,{recursive:true,force:true});});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({ignoredShows:[{ratingKey:"ratingKey:source",title:"Ignored source"}],diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({ignoredShows:[{ratingKey:"ratingKey:source",title:"Ignored source"}],diagnosticsEnabled:false});
   const requests:string[]=[];
   let blockSave=false,blockCatalogue=false,changeFeedUnavailable=false;
   let enterSave!:()=>void,releaseSave!:()=>void,releaseCatalogue!:()=>void;

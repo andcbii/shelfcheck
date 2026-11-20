@@ -59,8 +59,8 @@ test("a Plex start, full or single-show, is refused with 409 while a Trakt scan 
   const accepted = await startTrakt();
   assert.equal(accepted.status, 202);
   await scans.providerCalled("api.trakt.tv");
-  const traktStatus = sqlite.readSingleUserScanStatus();
-  const plexStatus = sqlite.readPlexScanStatus();
+  const traktStatus = sqlite.savedScanState("trakt").status.read();
+  const plexStatus = sqlite.savedScanState("plex").status.read();
   const logs = scans.logs();
 
   for (const body of [{}, { ratingKey: "42" }]) {
@@ -72,8 +72,8 @@ test("a Plex start, full or single-show, is refused with 409 while a Trakt scan 
     assert.equal(json.activeScanRun.status.status, "running");
     assert.equal(json.scan, undefined, "the Trakt status is never presented as the requested Plex scan");
   }
-  assert.deepEqual(sqlite.readSingleUserScanStatus(), traktStatus);
-  assert.deepEqual(sqlite.readPlexScanStatus(), plexStatus);
+  assert.deepEqual(sqlite.savedScanState("trakt").status.read(), traktStatus);
+  assert.deepEqual(sqlite.savedScanState("plex").status.read(), plexStatus);
   assert.deepEqual(scans.logs(), logs, "a refused start rotates no log");
   assert.equal(scanRuns.activeScanRun()?.kind, "trakt");
 
@@ -96,8 +96,8 @@ test("a Trakt start, full or single-show, is refused with 409 while a Plex scan 
   const accepted = await startPlex();
   assert.equal(accepted.status, 202);
   await scans.providerCalled("plex");
-  const traktStatus = sqlite.readSingleUserScanStatus();
-  const plexStatus = sqlite.readPlexScanStatus();
+  const traktStatus = sqlite.savedScanState("trakt").status.read();
+  const plexStatus = sqlite.savedScanState("plex").status.read();
   const logs = scans.logs();
 
   for (const body of [{}, { force: true }, { traktId: 7 }]) {
@@ -109,8 +109,8 @@ test("a Trakt start, full or single-show, is refused with 409 while a Plex scan 
     assert.equal(json.activeScanRun.status.status, "running");
     assert.equal(json.scan, undefined, "the Plex status is never presented as the requested Trakt scan");
   }
-  assert.deepEqual(sqlite.readSingleUserScanStatus(), traktStatus);
-  assert.deepEqual(sqlite.readPlexScanStatus(), plexStatus);
+  assert.deepEqual(sqlite.savedScanState("trakt").status.read(), traktStatus);
+  assert.deepEqual(sqlite.savedScanState("plex").status.read(), plexStatus);
   assert.deepEqual(scans.logs(), logs, "a refused start rotates no log");
 
   const sameKind = await startPlex({ ratingKey: "42" });

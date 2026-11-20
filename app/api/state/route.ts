@@ -1,14 +1,33 @@
-import { patchSingleUserState, readSingleUserScanStatus, readSingleUserState } from "@/lib/sqlite";
+import { savedScanState } from "@/lib/sqlite";
 import { parseTraktPreferencesPatch } from "@/lib/preferences";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/**
+ * The Trakt saved state, built from one snapshot: the options, with the report,
+ * Resume point (as checkpoint) and scan status (as scan) nested when saved.
+ * updatedAt is the state timestamp, which scan heartbeats do not move. Until the
+ * report, Resume point or options are first saved there is no state, even when a
+ * scan status is.
+ */
+function stateResponse() {
+  const saved = savedScanState("trakt").snapshot();
+  if (!saved?.updatedAt) return { state: null, updatedAt: null };
+  return {
+    state: {
+      ...(saved.options || {}),
+      ...(saved.report ? { report: saved.report } : {}),
+      ...(saved.resumePoint ? { checkpoint: saved.resumePoint } : {}),
+      ...(saved.status ? { scan: saved.status } : {}),
+    },
+    updatedAt: saved.updatedAt,
+  };
+}
+
 export async function GET() {
   try {
-    const stored = readSingleUserState();
-    const scan = readSingleUserScanStatus();
-    return Response.json({ ...stored, state: stored.state ? { ...stored.state, ...(scan ? { scan } : {}) } : stored.state }, { headers: { "Cache-Control": "private, no-store" } });
+    return Response.json(stateResponse(), { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Shelfcheck state could not be loaded." }, { status: 500, headers: { "Cache-Control": "private, no-store" } });
   }
@@ -17,7 +36,7 @@ export async function GET() {
 export async function PATCH(request: Request) {
   try {
     const body: unknown = await request.json().catch(() => ({}));
-    patchSingleUserState(parseTraktPreferencesPatch(body));
+    savedScanState("trakt").options.patch(parseTraktPreferencesPatch(body));
     return Response.json({ saved: true }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (error) {
     return Response.json({ error: error instanceof Error ? error.message : "Shelfcheck settings could not be saved." }, { status: 500, headers: { "Cache-Control": "private, no-store" } });

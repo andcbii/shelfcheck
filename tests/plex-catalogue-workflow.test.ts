@@ -20,7 +20,7 @@ test("full scans reuse catalogues while comparing current holdings across databa
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   let owned = true;
   let malformedTmdb = false;
@@ -190,7 +190,7 @@ test("saved identity relationships revalidate ownership and retain aliases and i
     rmSync(dir,{recursive:true,force:true}); });
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false,ignoredShows:[{ratingKey:"ratingKey:ignored",title:"Ignored source"}]});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false,ignoredShows:[{ratingKey:"ratingKey:ignored",title:"Ignored source"}]});
   // The lowest IDs (TMDB 11, TVDB 21) supply the compared catalogues; the others are identity evidence.
   const a = {ratingKey:"a",guid:"plex://show/target",title:"Target",Guid:[{id:"tmdb://14"},{id:"tvdb://24"}]};
   const b = {ratingKey:"b",guid:"plex://show/target",title:"Target",Guid:[{id:"tmdb://11"},{id:"tvdb://21"}]};
@@ -279,7 +279,7 @@ test("explicit zero-sized Plex collections withdraw previous ownership while inc
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   const responses = new Map<string,unknown>();
   const show = {ratingKey:"1",title:"Example",Guid:[{id:"tmdb://10"}]};
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {

@@ -58,7 +58,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   });
   const show = { ratingKey: "1", title: "Target", Guid: [{ id: "tmdb://10" }], updatedAt: 1 };
   const source = { ratingKey: "2", title: "Ignored source", Guid: [{ id: "tvdb://20" }], updatedAt: 1 };
-  sqlite.writePlexSettings({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
+  sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     if (u.pathname === "/v4/episodes/200/extended" && healthFailure) return Response.json({}, {status: healthFailure, headers: healthFailure === 429 ? {"Retry-After":"86400"} : undefined});
@@ -209,7 +209,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   saved.mapping = (await restored.json()).mapping;
   await wait();
   sourceId = 200;
-  sqlite.clearPlexReport();
+  sqlite.savedScanState("plex").clearReportAndResumePoint();
   cache.__shelfcheckDatabase?.close();
   delete cache.__shelfcheckDatabase;
   assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 2);
@@ -420,7 +420,7 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   });
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-11T12:00:00Z") });
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
-  sqlite.writePlexSettings({ ignoredShows: [{ ratingKey: "ratingKey:source", title: "Ignored source" }], diagnosticsEnabled: false });
+  sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:source", title: "Ignored source" }], diagnosticsEnabled: false });
   const target = { ratingKey: "target", title: "Combined target", Guid: [{ id: "tmdb://10" }] };
   const source = { ratingKey: "source", title: "Ignored source", Guid: [{ id: "tvdb://20" }] };
   let secondPart = true;
@@ -549,7 +549,7 @@ test("upgrading discards saved ownership corrections and keeps every Manual Matc
   assert.deepEqual(upgraded.mappings, [{ ...mapping, members: mapping.members.map(m => ({ ...m, reportMissing: false })), evidence: [] }], "Manual Matches survive unchanged with Report Missing off, with no inferred decisions");
   assert.ok(upgraded.revision > 4, "Discarding corrections advances the coverage revision");
   assert.ok(upgraded.issues.some((issue: { id: string }) => issue.id === "comparison-pending"), "Cached results shaped by corrections are flagged for comparison");
-  assert.equal(sqlite.coverageDatabase().prepare("SELECT 1 FROM sqlite_master WHERE name='shelfcheck_coverage_corrections'").get(), undefined, "Saved corrections are discarded");
+  assert.equal(sqlite.database().prepare("SELECT 1 FROM sqlite_master WHERE name='shelfcheck_coverage_corrections'").get(), undefined, "Saved corrections are discarded");
   const repeat = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   assert.equal(repeat.revision, upgraded.revision, "The migration runs once");
 });
@@ -569,7 +569,7 @@ test("a needs-review message saved before Manual Match wording reads as a Manual
   const member = (provider: string, id: number) => ({ provider, id, showId: 10, show: "Example", title: "Episode " + id, season: 1, episode: 1, url: "https://example.com/" + id });
   // Needs-review matches are skipped by health rechecks, so this text stays stored until the match is repaired.
   const stored = { id: "broken", revision: 1, createdAt: "2026-01-01T00:00:00.000Z", health: "needs-review", healthMessage: "A provider episode record was not found. Resolve and review replacements to repair this mapping.", members: [member("TMDB", 100), member("TVDB", 200)] };
-  const db = sqlite.coverageDatabase();
+  const db = sqlite.database();
   db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run(stored.id, JSON.stringify(stored));
   for (const m of stored.members) db.prepare("INSERT INTO shelfcheck_coverage_members(provider,episode_id,mapping_id) VALUES(?,?,?)").run(m.provider, m.id, stored.id);
   const listed = (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings[0];

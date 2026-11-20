@@ -27,6 +27,16 @@
   whatever remains of the cooldown until Shelfcheck restarts.
 - Trakt requests now have 30 seconds per attempt, including reading the
   response.
+- On the first start after this upgrade, Shelfcheck keeps a copy of its
+  database as shelfcheck-pre-migration-backup.db, next to the database, before
+  it upgrades the database layout. An older Shelfcheck refuses to open a
+  database a newer one has upgraded. To roll back, stop Shelfcheck and restore
+  that copy as the database before starting the older version.
+- After this upgrade, the saved results, Resume point and scan status of both
+  the Trakt and Plex pages are cleared once. Each page shows its usual prompt
+  to run a scan, and the next Trakt scan and the next Plex scan are full scans.
+  Settings, Ignore lists, Manual Matches, catalogue choices, Report Missing
+  flags and downloaded provider catalogues are kept.
 
 ## 2.6.2 - 2026-11-18
 

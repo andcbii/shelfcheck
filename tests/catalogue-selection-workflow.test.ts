@@ -21,7 +21,7 @@ test("scans compare the lowest Plex series ID or the saved override, reconciling
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.writePlexSettings({diagnosticsEnabled:false});
+  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   const identity = "ratingKey:1";
   let guids = ["tmdb://10","tvdb://21","tmdb://9","tvdb://20","tmdb://9"];

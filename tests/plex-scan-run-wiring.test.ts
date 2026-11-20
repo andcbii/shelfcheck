@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const plex = await import("../lib/plex-scan");
@@ -11,6 +11,7 @@ const sqlite = await import("../lib/sqlite");
 const issues = await import("../lib/coverage-issues");
 const config = await import("../lib/server-config");
 const { scanRuns } = await import("../lib/scan-run");
+const { PLEX_CACHE_VERSION } = await import("../lib/plex-scan-cache");
 hook.deregister();
 
 const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
@@ -35,7 +36,7 @@ function directory(t: TestContext) {
 
 test("an Interrupted Plex scan is written once and raises the scan-failure Coverage Issue once", (t) => {
   directory(t);
-  sqlite.writePlexScanStatus({ status: "running", processed: 1, total: 4, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 95_000).toISOString(), currentPhase: "tvdb-series-and-episodes", currentShow: "Show A" });
+  sqlite.savedScanState("plex").status.write({ status: "running", processed: 1, total: 4, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 95_000).toISOString(), currentPhase: "tvdb-series-and-episodes", currentShow: "Show A" });
   const first = plex.getPlexScanStatus();
   assert.equal(first.status, "error");
   assert.equal(first.error, "The previous Plex scan was interrupted during tvdb-series-and-episodes (Show A). Start a new scan to resume from its checkpoint.");
@@ -106,11 +107,11 @@ test("a rate-limit pause saves a Resume point of the completed shows when it sta
     if (u.pathname !== "/3/tv/12") return undefined;
     if (!limited) {
       // Show 12 is rate limited once the other two shows have completed.
-      while ((sqlite.readPlexScanStatus() as { processed: number }).processed < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+      while ((sqlite.savedScanState("plex").status.read() as { processed: number }).processed < 2) await new Promise((resolve) => setTimeout(resolve, 5));
       limited = true;
       return new Response("{}", { status: 429, headers: { "Retry-After": "1" } });
     }
-    pauseCheckpoint = sqlite.readPlexCheckpoint() as Checkpoint | null;
+    pauseCheckpoint = sqlite.savedScanState("plex").resumePoint.read() as Checkpoint | null;
     return undefined;
   });
   const status = await fullScan();
@@ -119,7 +120,7 @@ test("a rate-limit pause saves a Resume point of the completed shows when it sta
   assert.ok(saved, "the pause saved a Resume point");
   assert.deepEqual(saved.shows.map((show) => show.ratingKey).sort(), ["ratingKey:10", "ratingKey:11"], "the in-flight show is not saved");
   assert.deepEqual(Object.keys(saved.scanCache).sort(), ["ratingKey:10", "ratingKey:11"]);
-  assert.equal(sqlite.readPlexCheckpoint(), null, "the completed run clears its Resume point");
+  assert.equal(sqlite.savedScanState("plex").resumePoint.read(), null, "the completed run clears its Resume point");
 });
 
 test("a full Plex scan run that fails saves a Resume point at once, and the next full run resumes from it", async (t) => {
@@ -129,18 +130,18 @@ test("a full Plex scan run that fails saves a Resume point at once, and the next
     if (u.pathname === "/3/tv/11" && !ignoredAndRestored) {
       // Ignore then Restore during the run: the forced save must not resurrect show 11.
       ignoredAndRestored = true;
-      sqlite.writePlexSettings({ ignoredShows: [{ ratingKey: "ratingKey:11", title: "Show 11" }] });
-      sqlite.writePlexSettings({ ignoredShows: [] });
+      sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:11", title: "Show 11" }] });
+      sqlite.savedScanState("plex").options.patch({ ignoredShows: [] });
     }
     return undefined;
   });
-  sqlite.readPlexScanStatus();
+  sqlite.savedScanState("plex").status.read();
   // The report store fails at the final commit, after every show has completed.
-  database().exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_plex_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
+  database().exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
   const failed = await fullScan();
   assert.equal(failed.status, "error");
   assert.equal(failed.error, "report store unavailable");
-  const saved = sqlite.readPlexCheckpoint() as Checkpoint | null;
+  const saved = sqlite.savedScanState("plex").resumePoint.read() as Checkpoint | null;
   assert.ok(saved, "the failure saved a Resume point");
   assert.deepEqual(saved.shows.map((show) => show.ratingKey).sort(), ["ratingKey:10", "ratingKey:12"]);
   assert.deepEqual(Object.keys(saved.scanCache).sort(), ["ratingKey:10", "ratingKey:12"]);
@@ -160,7 +161,7 @@ test("a Plex scan run vetoed by a coverage-revision change ends at once with a c
     if (u.pathname === "/3/tv/12" && !changed) {
       // A Manual Match saved while the scan runs moves the coverage revision this run snapshotted.
       changed = true;
-      sqlite.coverageDatabase().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1");
+      sqlite.database().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1");
     }
     return undefined;
   });
@@ -172,7 +173,56 @@ test("a Plex scan run vetoed by a coverage-revision change ends at once with a c
   assert.equal(status.activeShows, undefined);
   assert.equal(status.currentShow, undefined);
   assert.ok(status.finishedAt);
-  assert.equal(sqlite.readPlexReport(), null, "nothing is committed");
-  assert.equal(sqlite.readPlexCheckpoint(), null, "no Resume point is forced for a vetoed report");
+  assert.equal(sqlite.savedScanState("plex").report.read(), null, "nothing is committed");
+  assert.equal(sqlite.savedScanState("plex").resumePoint.read(), null, "no Resume point is forced for a vetoed report");
   assert.equal(issues.getCoverageIssue("scan-failure"), undefined);
+});
+
+test("after the upgrade a Plex page is idle and its next full scan starts over, though a usable Resume point was saved before", async (t) => {
+  const dir = await library(t);
+  // A database an earlier release left: a usable Resume point and a running scan status in the old Plex table.
+  const legacy = new DatabaseSync(path.join(dir, "shelfcheck.db"));
+  legacy.exec("CREATE TABLE shelfcheck_plex_state (user_id TEXT PRIMARY KEY NOT NULL, report TEXT, checkpoint TEXT, scan_status TEXT NOT NULL DEFAULT '{}', settings TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+  const checkpoint = { shows: [{ ratingKey: "ratingKey:10", title: "Show 10", plexEpisodes: 0, missing: [] }], scanCache: { "ratingKey:10": {} }, cacheVersion: PLEX_CACHE_VERSION, autoCompoundEpisodes: true, savedAt: new Date().toISOString() };
+  legacy.prepare("INSERT INTO shelfcheck_plex_state(user_id,checkpoint,scan_status,settings) VALUES('single-user',?,?,?)")
+    .run(JSON.stringify(checkpoint), JSON.stringify({ status: "running", processed: 1, total: 3, startedAt: new Date().toISOString() }), JSON.stringify({ diagnosticsEnabled: true }));
+  legacy.close();
+
+  assert.deepEqual(plex.getPlexScanStatus(), { status: "idle", processed: 0, total: 0 }, "No stale progress or Interrupted scan appears");
+  assert.equal(issues.getCoverageIssue("scan-failure"), undefined);
+  const status = await fullScan();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.equal(logEvents(dir, "plex.checkpoint.resume").length, 0, "Nothing resumes");
+  assert.equal(logEvents(dir, "plex.checkpoint.discarded").length, 0, "No Resume point was left to discard");
+  assert.equal(status.processed, 3, "Every show is scanned");
+});
+
+/** A usable Resume point that resumes show 10, saved by an earlier full run. */
+const earlierResumePoint = () => ({ shows: [{ ratingKey: "ratingKey:10", title: "Show 10", plexEpisodes: 0, missing: [] }], scanCache: { "ratingKey:10": {} }, cacheVersion: PLEX_CACHE_VERSION, autoCompoundEpisodes: true, savedAt: new Date().toISOString() });
+const earlierReport = { shows: [], scanCache: {}, lastScan: "earlier", finishedAt: "earlier" };
+
+test("a full Plex scan whose completion the store rejects keeps the earlier report with the earlier Resume point", async (t) => {
+  await library(t);
+  const store = sqlite.savedScanState("plex");
+  const point = earlierResumePoint();
+  store.report.write(earlierReport);
+  store.resumePoint.write(point);
+  // The store rejects every Resume point change, so the clear that completes the run fails.
+  cache.__shelfcheckDatabase!.exec("CREATE TRIGGER fail_resume_point BEFORE UPDATE OF resume_point ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'resume point store unavailable'); END;");
+  const status = await fullScan();
+  assert.equal(status.status, "error");
+  assert.deepEqual(store.report.read(), earlierReport, "No new report is saved beside the earlier Resume point");
+  assert.deepEqual(store.resumePoint.read(), point, "The earlier Resume point stays");
+});
+
+test("a completed full Plex scan saves its report with no Resume point left", async (t) => {
+  await library(t);
+  const store = sqlite.savedScanState("plex");
+  store.report.write(earlierReport);
+  store.resumePoint.write(earlierResumePoint());
+  const status = await fullScan();
+  assert.equal(status.status, "completed", status.error || "");
+  const report = store.report.read() as { shows: { ratingKey: string }[] };
+  assert.deepEqual(report.shows.map((show) => show.ratingKey).sort(), ["ratingKey:10", "ratingKey:11", "ratingKey:12"]);
+  assert.equal(store.resumePoint.read(), null);
 });

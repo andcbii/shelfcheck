@@ -42,8 +42,8 @@ export function installWindowClock(t: test.TestContext, browser: Window, start: 
 }
 
 /** Counts the listeners added and not yet removed for one event type on a target. */
-export function countListeners(page: object, type: string) {
-  const target = page as EventTarget;
+export function countListeners(eventTarget: object, type: string) {
+  const target = eventTarget as EventTarget;
   const live = new Set<unknown>();
   const add = target.addEventListener.bind(target);
   const remove = target.removeEventListener.bind(target);

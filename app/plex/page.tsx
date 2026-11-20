@@ -9,6 +9,7 @@ import Link from "next/link";
 import { INCOMPLETE_LABEL, missingPartsExplanation, type CoverageGroup } from "@/lib/manual-coverage-model";
 import { ManualCoverageManager } from "@/app/components/manual-coverage-manager";
 import { CatalogueNotice } from "@/app/components/catalogue-notice";
+import { useMenuClosing } from "@/app/hooks/use-menu-closing";
 import type { ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { matchesSearch } from "@/lib/search";
@@ -148,27 +149,14 @@ export default function PlexPage() {
     }).catch(() => setError("The previous Plex scan status could not be loaded."));
   }, [poll]);
 
-  useEffect(() => {
-    if (!ignoredOpen && openShowMenu === null && openEpisodeMenu === null && !connectionOpen && !preferencesOpen && !sortMenuOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      if (ignoredOpen && !target.closest(".summary-wrap")) setIgnoredOpen(false);
-      if (openShowMenu !== null && !target.closest("[data-show-menu-id]")) setOpenShowMenu(null);
-      if (openEpisodeMenu !== null && !target.closest(".plex-episode-item")) setOpenEpisodeMenu(null);
-      if (sortMenuOpen && !target.closest('[data-menu-root="sort"]')) setSortMenuOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setIgnoredOpen(false); setOpenShowMenu(null); setOpenEpisodeMenu(null); setSeasonIgnoreShow(null); setConnectionOpen(false); setPreferencesOpen(false); setSortMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [connectionOpen, ignoredOpen, openEpisodeMenu, openShowMenu, preferencesOpen, sortMenuOpen]);
+  useMenuClosing([
+    { open: ignoredOpen, isInside: (target) => target.closest(".summary-wrap") !== null, close: () => setIgnoredOpen(false) },
+    { open: openShowMenu !== null, isInside: (target) => target.closest("[data-show-menu-id]") !== null, close: () => setOpenShowMenu(null) },
+    { open: openEpisodeMenu !== null, isInside: (target) => target.closest(".plex-episode-item") !== null, close: () => setOpenEpisodeMenu(null) },
+    { open: sortMenuOpen, isInside: (target) => target.closest('[data-menu-root="sort"]') !== null, close: () => setSortMenuOpen(false) },
+    { open: connectionOpen, close: () => setConnectionOpen(false) },
+    { open: preferencesOpen, close: () => setPreferencesOpen(false) },
+  ], [() => setSeasonIgnoreShow(null)]);
 
   const ignoreRules = useMemo(() => [...settings.ignoredShows, ...settings.ignoredSeasons], [settings.ignoredShows, settings.ignoredSeasons]);
   const ignoreNow = useIgnoreClock(ignoreRules);

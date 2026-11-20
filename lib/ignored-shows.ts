@@ -46,3 +46,60 @@ export function ignoredPlexKeys(value: unknown, now = Date.now()): Set<string> {
     return typeof key === "string" && key ? [key] : [];
   }));
 }
+
+// Ignore list rules shared by the Trakt and Plex pages. Each operation takes one
+// clock value, never changes its inputs and returns a new list. Keys are compared
+// exactly: Trakt reads numbers, Plex reads strings.
+
+export type IgnoreKey = string | number;
+type TitledRule = { title: string };
+
+function byTitle(a: TitledRule, b: TitledRule): number {
+  return a.title.localeCompare(b.title);
+}
+
+/** Ignores a whole show: replaces any rule for the same key, keeps other active rules, sorts by title. */
+export function applyIgnore<R extends TitledRule, K extends IgnoreKey>(rules: readonly (R & IgnoreTiming)[], keyOf: (rule: R) => K, record: R, duration: IgnoreDuration, now: number): (R & IgnoreTiming)[] {
+  const key = keyOf(record);
+  return [...activeIgnores(rules, now).filter((rule) => keyOf(rule) !== key), { ...record, ...createIgnoreTiming(duration, new Date(now)) }].sort(byTitle);
+}
+
+/** Restores one rule (whole-show or seasons, whichever list is given) and keeps other active rules. */
+export function restoreIgnore<T extends IgnoreTiming, K extends IgnoreKey>(rules: readonly T[], keyOf: (rule: T) => K, key: K, now: number): T[] {
+  return activeIgnores(rules, now).filter((rule) => keyOf(rule) !== key);
+}
+
+/** Gives one rule a new timing from the clock value; Forever clears any expiry. Keeps other active rules. */
+export function changeIgnoreDuration<T extends IgnoreTiming, K extends IgnoreKey>(rules: readonly T[], keyOf: (rule: T) => K, key: K, duration: IgnoreDuration, now: number): T[] {
+  const timing = createIgnoreTiming(duration, new Date(now));
+  return activeIgnores(rules, now).map((rule) => keyOf(rule) === key ? { ...rule, expiresAt: undefined, ...timing } : rule);
+}
+
+// Ignored Shows manager keys: "show|<key>" and "seasons|<key>". A UI transport
+// detail only; list operations take typed keys.
+
+export type IgnoreKind = "show" | "seasons";
+export type IgnoreManagerTarget<K extends IgnoreKey> = { kind: IgnoreKind; key: K };
+
+export function ignoreManagerKey(kind: IgnoreKind, key: IgnoreKey): string {
+  return `${kind}|${key}`;
+}
+
+/** Decodes a manager key, keeping the full text after the known prefix; an unknown prefix gives null. */
+export function decodeIgnoreManagerKey<K extends IgnoreKey>(value: string | number, parseKey: (text: string) => K): IgnoreManagerTarget<K> | null {
+  const text = String(value);
+  for (const kind of ["show", "seasons"] as const) {
+    if (text.startsWith(`${kind}|`)) return { kind, key: parseKey(text.slice(kind.length + 1)) };
+  }
+  return null;
+}
+
+/** Trakt identities are numbers; this is the one place the decoded text becomes a number. */
+export function decodeTraktManagerKey(value: string | number): IgnoreManagerTarget<number> | null {
+  return decodeIgnoreManagerKey(value, Number);
+}
+
+/** Plex identities stay strings, even when they look like numbers. */
+export function decodePlexManagerKey(value: string | number): IgnoreManagerTarget<string> | null {
+  return decodeIgnoreManagerKey(value, (text) => text);
+}

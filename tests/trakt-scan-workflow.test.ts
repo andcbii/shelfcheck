@@ -739,3 +739,27 @@ test("after the upgrade the Trakt page is idle and its next full scan starts ove
   assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/2/seasons", "/shows/3/progress/collection", "/shows/3/seasons"], "Nothing is reused from the old Resume point or report");
   assert.deepEqual(missing(await f.report()), ["Bravo S1E2", "Bravo S1E3", "Charlie S1E2"], "The scan started over rather than resuming");
 });
+
+test("after migration 4 the next Trakt scan rechecks every show, though the old report's scan cache and Resume point would have been reused", async (t) => {
+  // A version 3 database: an old report whose scan cache matches the library and an empty missing
+  // list, and a Resume point in the current format, both saved before episodes inside the delay were kept.
+  const f = await fixture(t, (dir) => {
+    const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
+    sqlite.savedScanState("trakt").snapshot();
+    global.__shelfcheckDatabase?.close();
+    delete global.__shelfcheckDatabase;
+    const older = new DatabaseSync(path.join(dir, "shelfcheck.db"));
+    const scanCache = Object.fromEntries(library().map((item) => [String(item.show.ids.trakt), { collectionFingerprint: collectionFingerprint(item), airedEpisodes: item.show.aired_episodes, traktUpdatedAt: item.show.updated_at, lastCheckedAt: NOW }]));
+    const report = { shows: library().map((item) => ({ show: item.show })), missing: [], lastScan: NOW, scanCache, airingGraceDays: 0 };
+    const resumePoint = { ...report, savedAt: new Date(Date.parse(NOW) - 3_600_000).toISOString(), resumePointVersion: 2 };
+    older.prepare("INSERT INTO shelfcheck_scan_state(mode, report, resume_point, options) VALUES('trakt', ?, ?, ?)").run(JSON.stringify(report), JSON.stringify(resumePoint), JSON.stringify({ airingGraceDays: 0, diagnosticsEnabled: false }));
+    older.exec("PRAGMA user_version = 3");
+    older.close();
+  });
+
+  assert.equal(await f.report(), undefined, "The old report is cleared");
+  const status = await f.run();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.deepEqual(perShow(f.requests), ["/shows/2/progress/collection", "/shows/2/seasons", "/shows/3/progress/collection", "/shows/3/seasons"], "Every incomplete show is rechecked; nothing comes from the old scan cache or Resume point");
+  assert.deepEqual(dated(await f.report()), ALL_DATED);
+});

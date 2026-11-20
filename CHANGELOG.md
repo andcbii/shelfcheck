@@ -37,6 +37,11 @@
   to run a scan, and the next Trakt scan and the next Plex scan are full scans.
   Settings, Ignore lists, Manual Matches, catalogue choices, Report Missing
   flags and downloaded provider catalogues are kept.
+- Trakt results saved before this upgrade left out episodes still inside the
+  Air-date delay, so on the first start after it the saved Trakt results and
+  Trakt Resume point are cleared once, and the next Trakt scan is a full scan.
+  Trakt Settings, Ignore lists, the Trakt scan status and everything on the
+  Plex page are kept.
 
 ## 2.6.2 - 2026-11-18
 

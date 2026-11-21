@@ -828,8 +828,8 @@ function cachedPreferenceState(recorded: CatalogueUse | undefined, preferredId: 
  * Several Plex candidates in a cached recheck: the preferred saved copy within 60 days, else, once a
  * scan has tried this preference, the lowest remaining candidate with one, else the most recently saved
  * catalogue that is not gone, at any age. A preference not tried yet is never replaced by a fallback:
- * without a usable saved copy the comparison is pending. With none, a provider the last scan recorded
- * with no catalogue keeps that status.
+ * without a usable saved copy the comparison is pending. A tried provider the last scan recorded with
+ * no catalogue, or gone, compares none and keeps that status, even if a candidate has been saved since.
  */
 function chooseAmongSavedCandidates<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K, preferredId: number, history: PriorSelection): ProviderChoice<P[K]> {
   const { request, source } = resolving;
@@ -839,10 +839,12 @@ function chooseAmongSavedCandidates<P extends CataloguePayloads, K extends Catal
   const recorded = history.recordedUse;
   const preferredState = cachedPreferenceState(recorded, preferredId);
   const tried = preferredState !== "not-tried-yet";
+  // Checked before choosing: a candidate saved since that scan, such as a shared catalogue another show
+  // downloaded, is not compared until the next scan judges the provider again.
+  const recordedFailure = tried ? keptRecordedFailure(request, provider, preferredId, providerRequest.lookupSource) : undefined;
+  if (recordedFailure) return recordedFailure;
   const savedAt = (id: number) => source.savedCatalogue(provider, id)?.downloadedAt;
   const usingId = chooseSavedCatalogue({ preferredId, candidates: providerRequest.candidates, now: request.resolvedAt, tried, downloadedAt: savedAt, gone: id => goneRecord(source, provider, id, request.resolvedAt) !== undefined });
-  const recordedFailure = usingId === undefined && tried ? keptRecordedFailure(request, provider, preferredId, providerRequest.lookupSource) : undefined;
-  if (recordedFailure) return recordedFailure;
   if (usingId === undefined) return {
     identity: preferredId, lookupSource: providerRequest.lookupSource, ...unchangedResolution, issues, incomplete: true,
     warning: tried

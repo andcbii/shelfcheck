@@ -1137,3 +1137,37 @@ test("a TMDB record gone after 15 counted 404 days and 60 days stops being compa
   assert.equal(show.providerResolution?.status,"matched");
   assert.equal(seriesNotFoundHistory().countedDays("tmdb",10),0);
 });
+
+// A cached recheck never changes a show's status by itself: a shared catalogue another show downloads
+// after the last scan recorded this show's provider with no catalogue, or gone, waits for the next scan.
+for (const recorded of ["none","gone"] as const) test(`a Manual Match cached recheck keeps an Unmatched show Unmatched when another show downloads a shared TMDB candidate the last scan recorded as ${recorded}`, async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = [10,11]; f.tvdb[1].fail = true;
+  // Series 10 is saved on day 1 (and series 11 too for gone), then 404s for 15 counted days until its copy is more than 60 days old.
+  // Gone with a never-downloaded candidate beside it is no catalogue; every candidate gone is gone.
+  await f.run();
+  if (recorded === "gone") { selections.saveCatalogueOverride(f.identity,"tmdb",11); await f.run(); selections.saveCatalogueOverride(f.identity,"tmdb",null); }
+  for (const id of recorded === "gone" ? [10,11] : [10]) for (let n = 40; n < 54; n++) seriesNotFoundHistory().recordNotFound("tmdb",id,day(n));
+  f.tmdb[10].fail = true; f.tmdb[11].fail = true; f.changes([10,11]);
+  f.at(day(62));
+  let show = await f.run() as Judged;
+  assert.equal(show.providerResolution?.status,"unmatched");
+  assert.equal(show.providerResolution?.providers?.tmdb?.catalogue,recorded);
+
+  // Another show with TMDB series 11 downloads it in the next scan; Scooby asks for series 11 first and still gets a 404.
+  f.at(day(63)); f.setSecond({tmdb:11,tvdb:2});
+  Object.defineProperty(f.tmdb[11],"fail",{get: () => f.requests.filter(p=>p === "/3/tv/11").length < 2,configurable:true});
+  show = await f.run() as Judged;
+  assert.equal(show.providerResolution?.status,"unmatched","Scooby's scan judged TMDB before Other downloaded series 11");
+  assert.equal(show.providerResolution?.providers?.tmdb?.catalogue,recorded);
+  assert.equal(catalogues.readPlexInputs().tmdb["11"]?.downloadedAt,day(63),"the shared catalogue is saved");
+  const lastGood = show.missing;
+
+  await plexScan.requestCoverageRecheck({members:[{provider:"TVDB",id:1001,showId:1,show:"TVDB 1",title:"Episode 1",season:1,episode:1,url:""}]});
+  show = (await (await scan.GET()).json()).report.shows.find((item: Show) => item.ratingKey === f.identity) as Judged;
+  const inputs = (await f.issues() as {id:string;cause?:string}[]).find(issue=>issue.id === `comparison-inputs:${f.identity}`);
+  assert.match(inputs?.cause || "",/^No provider has a usable saved catalogue/,"the recheck compares neither provider and keeps last-good results");
+  assert.deepEqual(show.missing,lastGood,"the shared catalogue is not compared until the next scan");
+  assert.equal(show.providerResolution?.status,"unmatched","the recheck never changes the show's status by itself");
+  assert.equal(show.providerResolution?.providers?.tmdb?.catalogue,recorded);
+});

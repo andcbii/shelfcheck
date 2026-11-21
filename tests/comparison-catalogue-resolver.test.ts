@@ -1458,3 +1458,21 @@ test("a cached recheck whose candidates are all gone keeps the provider the last
   assert.deepEqual(resolved.tmdb.status, lastScan.tmdb);
   assert.equal(resolved.pendingWarning, undefined);
 });
+
+// A shared catalogue another show downloaded after the last scan does not change this show's status:
+// the provider the last scan recorded with no catalogue, or gone, stays uncompared until the next scan.
+for (const recorded of ["none", "gone"] as const) {
+  test(`a cached recheck keeps a tried provider the last scan recorded as ${recorded} uncompared, even once another show saves a shared candidate's catalogue`, async () => {
+    const tmdbSavedNow: Record<number, string> = recorded === "gone" ? { 10: before(DAY), 11: before(61 * DAY) } : { 10: before(DAY) };
+    const { source, requests } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: tmdbSavedNow }, seriesNotFoundDays: { tmdb: { 11: 15 } } });
+    const recordedUse = { preferredId: 11, state: "unavailable" as const, preferredFailedAt: before(DAY) };
+    const lastScan = { tmdb: { state: "total-failure" as const, catalogue: recorded, cause: "404 — record not found" }, tvdb: { state: "total-failure" as const, catalogue: "none" as const, cause: "404 — record not found" } };
+    const resolved = await resolveComparisonCatalogues({ ...cachedRequest({ candidates: [10, 11], preferredId: 11 }, tvdbSingle, { tmdb: { recordedUse } }), previousComparison: { tmdbId: 11, tvdbId: 1, complete: true, status: lastScan } }, { source });
+
+    assert.deepEqual(requests, []);
+    assert.equal(resolved.tmdb.catalogue, undefined, "the newly shared catalogue of candidate 10 is not compared");
+    assert.deepEqual(resolved.tmdb.use, { action: "unchanged" });
+    assert.deepEqual([resolved.tmdb.status, resolved.tvdb.status], [lastScan.tmdb, lastScan.tvdb]);
+    assert.equal(resolved.showStatus, "unmatched", "the recheck never changes an Unmatched show's status by itself");
+  });
+}

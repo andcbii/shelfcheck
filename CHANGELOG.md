@@ -23,8 +23,13 @@
   provider's cause, and a show leaves it after the next successful download.
   A show compared with one provider while the other fails keeps a Scan Issues
   entry for the failing provider; a provider with several Plex IDs has one
-  entry listing each ID tried and why it failed. Rechecks from saved data keep
-  each provider's status from the last scan.
+  entry listing each ID tried and why it failed. A provider with no ID from
+  Plex and none found through the other provider, and an ID TMDB answers with
+  an empty show, now count as that provider failing: the show is compared with
+  the other provider and keeps a Scan Issues entry such as "No TVDB series ID
+  from Plex or TMDB", instead of being reported as fully matched or left
+  waiting with its old results. Rechecks from saved data keep each provider's
+  status from the last scan.
 - Scan Issues entries for a catalogue that could not be refreshed now show
   how old the saved catalogue is, and when TMDB or TVDB answered "not found"
   for the series itself, on how many UTC days it has, for example "404 on 7 of
@@ -40,7 +45,11 @@
   reads, for example, "Gone: 404 on 16 days · catalogue 74 days old". Outages,
   rate limits and sign-in failures still keep the last saved catalogue at any
   age, Manual Matches on a gone series stay saved, and one complete download
-  makes the series usable again.
+  makes the series usable again. A show with several Plex IDs for a provider
+  chooses among them as before while any ID loads or has a catalogue from the
+  last 60 days; when none does, it now compares the most recently saved
+  catalogue that is not gone, at any age, instead of none, and the provider
+  is gone only when every ID is. Unmatched Shows labels a gone provider.
 - Scan Issues no longer repeats a show listed in Unmatched Shows: its own
   catalogue refresh and comparison entries are hidden there, since its
   Unmatched Shows row gives each provider's cause, and the Scan Issues count

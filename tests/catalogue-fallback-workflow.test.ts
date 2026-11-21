@@ -377,22 +377,28 @@ test("a single-ID show keeps comparing its old saved catalogue, unverified, afte
   assert.equal(current.preferredUsableUntil,undefined,"no 60-day deadline applies to a single ID");
 });
 
-for (const [label,tvdbIds] of [["a single-ID show",[1]],["a show with one TMDB ID and several TVDB IDs",[1,3]]] as const) test(`${label} whose TMDB show request answers with no show stays pending without a catalogue Coverage Issue`, async t => {
+// Deliberately changed (Andrew, 2026-11-21): an empty show used to leave the show pending with last-good
+// results and no Coverage Issue. It is now treated like a 404: a Total Provider Lookup Failure with no
+// catalogue, compared with TVDB as Partially matched. It is not a series-request 404, so it is never counted.
+for (const [label,tvdbIds] of [["a single-ID show",[1]],["a show with one TMDB ID and several TVDB IDs",[1,3]]] as const) test(`${label} whose TMDB show request answers with no show is compared with TVDB as Partially matched, with a TMDB catalogue Coverage Issue`, async t => {
   const f = await fixture(t);
   f.plex.tvdb = [...tvdbIds];
   await f.run();
   f.tmdb[10].noShow = true; f.changes([10]);
   f.at(day(2));
-  const show = await f.run();
+  const show = await f.run() as Show & {providerResolution?:{status?:string;providers?:Record<string,{state:string;catalogue?:string}>}};
   assert.ok(f.requests.includes("/3/tv/10"),"the changed show was requested");
   assert.equal(show.tmdbId,10);
-  assert.deepEqual(missingTmdb(show),[1002],"last-good results are kept");
-  assert.match(show.warning || "",/Episode comparison could not be checked/);
+  assert.deepEqual(missingTmdb(show),[],"TMDB's saved catalogue is not compared");
+  assert.equal(show.providerResolution?.status,"partially-matched");
+  assert.deepEqual([show.providerResolution?.providers?.tmdb?.state,show.providerResolution?.providers?.tmdb?.catalogue],["total-failure","none"]);
+  assert.equal(show.warning,"TMDB returned no show 10.");
   const issues = await f.issues() as {id:string;causedBy?:string[]}[];
-  assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"no show is not a failed catalogue refresh");
-  assert.equal(issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.causedBy,undefined);
-  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,undefined,"no refresh obligation is set");
-  assert.equal(f.selection().tmdb.current?.state,"preferred","the last comparison's catalogue use is kept");
+  assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"TMDB keeps a Scan Issues entry");
+  assert.ok(!issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison ran");
+  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,true,"TMDB is retried as after any failed download");
+  assert.equal(f.selection().tmdb.current?.state,"unavailable");
+  assert.equal(seriesNotFoundHistory().countedDays("tmdb",10),0,"an empty show is not a counted 404 day");
   assert.equal(f.tmdbDownloads(10),0);
 });
 
@@ -403,7 +409,8 @@ async function derivedFromSeveralTvdbIds(f: Awaited<ReturnType<typeof fixture>>)
   assert.equal(show.tmdbId,10); assert.deepEqual(missingTmdb(show),[1002]);
 }
 
-test("a derived TMDB series TMDB answers with no show leaves the show pending, without comparing the series last compared or a catalogue Coverage Issue", async t => {
+// Deliberately changed (Andrew, 2026-11-21): an empty show is treated like a 404, so the show is compared with TVDB instead of staying pending.
+test("a derived TMDB series TMDB answers with no show is a TMDB catalogue Coverage Issue: the series last compared is not compared, and the show is compared with TVDB", async t => {
   const f = await fixture(t);
   await derivedFromSeveralTvdbIds(f);
   f.tmdb[10].noShow = true; f.changes([10]);
@@ -412,13 +419,12 @@ test("a derived TMDB series TMDB answers with no show leaves the show pending, w
   assert.ok(f.requests.includes("/3/find/1") && f.requests.includes("/3/tv/10"),"the association and the changed show were requested");
   assert.equal(f.tmdbDownloads(10),0);
   assert.equal(show.tmdbId,10);
-  assert.deepEqual(missingTmdb(show),[1002],"last-good results are kept");
-  assert.match(show.warning || "",/Episode comparison could not be checked/);
+  assert.deepEqual(missingTmdb(show),[],"no TMDB catalogue is compared");
+  assert.equal(show.warning,"TMDB returned no show 10.");
   const issues = await f.issues() as {id:string;causedBy?:string[]}[];
-  assert.ok(!issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"no show is not a failed catalogue refresh");
-  assert.ok(issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison is pending");
-  assert.equal(issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.causedBy,undefined);
-  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,undefined,"no refresh obligation is set");
+  assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"TMDB keeps a Scan Issues entry");
+  assert.ok(!issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison ran");
+  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.refresh?.tmdb,true,"TMDB is retried as after any failed download");
 });
 
 test("a show with several TVDB IDs and no Plex TMDB ID reports the TMDB phase before TMDB's find request, also when the find names no series", async t => {
@@ -813,8 +819,22 @@ test("a show with only a TMDB ID that fails with no saved data, and no TVDB foun
   f.plex.tvdb = []; f.tmdb[10].fail = true;
   const show = await f.run() as Judged;
   assert.equal(show.providerResolution?.status,"unmatched");
-  assert.deepEqual(show.providerResolution?.providers?.tvdb,{state:"no-series"});
+  // Changed (Andrew, 2026-11-21): a missing ID is a Total Provider Lookup Failure with its own cause.
+  assert.deepEqual(show.providerResolution?.providers?.tvdb,{state:"total-failure",catalogue:"none",cause:"No TVDB series ID from Plex or TMDB"});
   assert.deepEqual(unmatchedKeys(),[f.identity]);
+});
+
+test("a show with only a Plex TMDB ID and no TVDB found through TMDB is Partially matched, with one TVDB Scan Issues entry", async t => {
+  const f = await fixture(t);
+  f.plex.tvdb = []; f.tmdb[10].tvdb = null;
+  const show = await f.run() as Judged;
+  assert.deepEqual(missingTmdb(show),[1002],"TMDB is compared");
+  assert.equal(show.providerResolution?.status,"partially-matched");
+  assert.deepEqual(show.providerResolution?.providers?.tvdb,{state:"total-failure",catalogue:"none",cause:"No TVDB series ID from Plex or TMDB"});
+  assert.equal(show.warning,undefined,"a missing ID adds no result warning");
+  const entries = (await f.issues() as {id:string;show?:{ratingKey?:string}}[]).filter(issue=>issue.show?.ratingKey === f.identity);
+  assert.deepEqual(entries.map(issue=>issue.id),[`catalogue-refresh:TVDB:${f.identity}`]);
+  assert.deepEqual(unmatchedKeys(),[]);
 });
 
 test("a TMDB record gone after 15 counted 404 days and 60 days stops being compared in scans and cached rechecks, keeps its Manual Match, and one download restores it", async t => {

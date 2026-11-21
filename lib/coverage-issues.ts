@@ -7,7 +7,8 @@ export type ProviderLookup = {
   source: LookupSourceStep[];
   requested?: { provider: LookupSourceStep["provider"]; kind: string; id?: number };
   status?: number;
-  failureKind: "http" | "network" | "invalid-response" | "rate-limit";
+  /** `missing-id`: no series ID to look up, from Plex or through the other provider. */
+  failureKind: "http" | "network" | "invalid-response" | "rate-limit" | "missing-id";
   impact: string;
 };
 

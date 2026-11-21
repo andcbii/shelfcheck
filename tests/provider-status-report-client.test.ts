@@ -25,7 +25,7 @@ test("an Unmatched Shows row gives each provider's cause", () => {
   assert.match(row, /TMDB lookup 404 — record not found/);
   assert.match(row, /TVDB lookup TVDB network request failed/);
 
-  const tmdbOnly = text(renderToStaticMarkup(createElement(UnmatchedShowReport, { shows: [{ ...show, tvdbId: undefined, providerResolution: { tmdb: false, tvdb: false, status: "unmatched", providers: { tmdb: show.providerResolution!.providers!.tmdb, tvdb: { state: "no-series" } } } }] })));
+  const tmdbOnly = text(renderToStaticMarkup(createElement(UnmatchedShowReport, { shows: [{ ...show, tvdbId: undefined, providerResolution: { tmdb: false, tvdb: false, status: "unmatched", providers: { tmdb: show.providerResolution!.providers!.tmdb, tvdb: { state: "total-failure", catalogue: "none", cause: "No TVDB series ID from Plex or TMDB" } } } }] })));
   assert.match(tmdbOnly, /TVDB lookup No TVDB series ID from Plex or TMDB/);
 
   const gone = text(renderToStaticMarkup(createElement(UnmatchedShowReport, { shows: [{ ...show, providerResolution: { tmdb: false, tvdb: false, status: "unmatched", providers: { tmdb: { state: "total-failure", catalogue: "gone", cause: "404 — record not found" }, tvdb: show.providerResolution!.providers!.tvdb } } }] })));

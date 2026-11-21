@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyObligationPatch, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, requiresDownload, satisfiedByDownload, savedObligation, unionObligations, type SavedRefreshObligations } from "../lib/refresh-obligation";
+import { applyObligationPatch, droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, requiresDownload, satisfiedByDownload, savedObligation, unionObligations, type SavedRefreshObligations } from "../lib/refresh-obligation";
 
 test("a provider flag saved before requirements existed reads as the preferred requirement alone", () => {
   // Whatever wrote it (a safeguard, a single-show Clear cache), only the preferred part survives the upgrade.
@@ -76,4 +76,21 @@ test("a specific requirement matches a catalogue by its requested or its reporte
   assert.equal(requiresDownload({ specificIds: [11] }, attempt), true, "named by the ID requested");
   assert.equal(requiresDownload({ specificIds: [12] }, attempt), false);
   assert.deepEqual(applyObligationPatch({ specificIds: [11, 12, 21] }, satisfiedByDownload(attempt)), { specificIds: [12] });
+});
+
+test("a specific requirement naming a reported ID keeps its requested Plex candidate, so removing that candidate drops it", () => {
+  const saved: SavedRefreshObligations = { specificIds: { tmdb: [14] } };
+  recordRequestedCandidate(saved, "tmdb", 14, 13);
+  recordRequestedCandidate(saved, "tmdb", 15, 12);
+  recordRequestedCandidate(saved, "tmdb", 14, 14);
+  assert.deepEqual(saved, { specificIds: { tmdb: [14] }, requestedIds: { tmdb: { 14: 13 } } }, "only for a held requirement whose IDs differ");
+  assert.deepEqual(droppedByRemoval(saved, "tmdb", [13], [10]), [13, 14]);
+  assert.deepEqual(droppedByRemoval(saved, "tmdb", [13], [10, 14]), [13], "an ID still a candidate is kept");
+  assert.deepEqual(droppedByRemoval(saved, "tmdb", [], [10]), [], "no removal drops nothing");
+  assert.deepEqual(droppedByRemoval(saved, "tvdb", [13], [10]), [13], "the evidence is per provider");
+  // A requirement saved without the evidence is matched by its own ID alone.
+  assert.deepEqual(droppedByRemoval({ specificIds: { tmdb: [14] } }, "tmdb", [13], [10]), [13]);
+
+  patchSavedObligation(saved, "tmdb", { remove: { specificIds: [14] } });
+  assert.deepEqual(saved, {}, "the evidence goes with its requirement");
 });

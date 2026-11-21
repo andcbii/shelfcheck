@@ -4,6 +4,7 @@ import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/cat
 import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
+import { PROVIDERS } from "@/lib/catalogue-selection";
 import { EVERY_ATTEMPTED_REQUIRED, patchSavedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
@@ -176,7 +177,7 @@ export function clearPlexInputs(ratingKey?: string): string[] {
   const relationships = Object.keys(previous.relationships);
   // The next scan downloads every catalogue it tries, keeping requirements already open; shared catalogues stay.
   const refresh = {...previous.refresh};
-  for (const provider of ["tmdb", "tvdb"] as const) patchSavedObligation(refresh, provider, EVERY_ATTEMPTED_REQUIRED);
+  for (const provider of PROVIDERS) patchSavedObligation(refresh, provider, EVERY_ATTEMPTED_REQUIRED);
   previous.refresh = refresh;
   previous.complete = false;
   previous.relationships = {};

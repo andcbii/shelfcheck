@@ -26,7 +26,7 @@ test("an effective patch holds only what changes the obligation", () => {
 
 test("a saved obligation is patched in place for one provider, keeping the other provider and every other part", () => {
   const saved: SavedRefreshObligations = { tvdb: true, specificIds: { tmdb: [4], tvdb: [9] }, everyAttempted: { tvdb: true } };
-  assert.equal(patchSavedObligation(saved, "tmdb", PREFERRED_REQUIRED), saved);
+  patchSavedObligation(saved, "tmdb", PREFERRED_REQUIRED);
   assert.deepEqual(saved, { tmdb: true, tvdb: true, specificIds: { tmdb: [4], tvdb: [9] }, everyAttempted: { tvdb: true } });
   patchSavedObligation(saved, "tvdb", { remove: { preferred: true, specificIds: [9], everyAttempted: true } });
   assert.deepEqual(saved, { tmdb: true, specificIds: { tmdb: [4] } }, "emptied parts are left out of the stored value");

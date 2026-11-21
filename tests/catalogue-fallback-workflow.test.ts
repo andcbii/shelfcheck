@@ -41,7 +41,8 @@ async function fixture(t: TestContext) {
   let second: {tmdb:number;tvdb:number} | undefined;
   /** Plex's per-show metadata answer: complete, without provider IDs (an incomplete observation), or a failed request. */
   let metadata: "complete" | "no-guids" | "fail" = "complete";
-  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean;seasonFail?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
+  /** TMDB series; `reports` is the ID TMDB answers a request for that series with, when it differs. */
+  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean;seasonFail?:boolean;reports?:number}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
   const tvdb: Record<number,{episodes:number;fail?:boolean}> = {1:{episodes:1},2:{episodes:1},3:{episodes:1}};
   let tmdbChanges: number[] = [];
   const requests: string[] = [];
@@ -74,7 +75,7 @@ async function fixture(t: TestContext) {
       if(series.fail) return Response.json({status_message:"not found"},{status:404});
       if(series.noShow && !tmdbShow[2]) return Response.json(null);
       if(series.seasonFail && tmdbShow[2]) return Response.json({status_message:"not found"},{status:404});
-      if(!tmdbShow[2]) return Response.json({id,name:`TMDB ${id}`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
+      if(!tmdbShow[2]) return Response.json({id:series.reports ?? id,name:`TMDB ${id}`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
       return Response.json({episodes:Array.from({length:series.episodes},(_,n)=>({id:id*100+n+1,season_number:1,episode_number:n+1,name:`Episode ${n+1}`,air_date:"2020-01-01"}))});
     }
     const tvdbSeries = u.pathname.match(/^\/v4\/series\/(\d+)(\/episodes\/default)?$/);
@@ -746,6 +747,27 @@ test("a safeguard requirement on hold forces nothing and survives restarts and i
   assert.equal(f.tmdbDownloads(10),0);
 });
 
+test("a complete observation removing a candidate also drops a safeguard requirement naming the ID that candidate's catalogue reported", async t => {
+  const f = await fixture(t);
+  // TMDB answers a request for series 13 with series 14's ID.
+  f.tmdb[13] = {episodes:1,tvdb:1,reports:14}; f.tmdb[14] = {episodes:1,tvdb:1};
+  f.plex.tmdb = [10,13];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",13);
+  f.at(day(2));
+  let result = await f.run();
+  assert.equal(result.tmdbId,14,"candidate 13 is compared under the ID its catalogue reports");
+  // What the fifth-scan safeguard writes for that comparison: the reported ID.
+  const comparison = catalogues.readPlexInputs().comparisons[f.identity];
+  catalogues.savePlexComparison(f.identity,{...comparison,refresh:{specificIds:{tmdb:[14]}}});
+
+  f.plex.tmdb = [10];
+  f.at(day(3));
+  result = await f.run();
+  assert.equal(result.tmdbId,10);
+  assert.deepEqual(catalogues.readPlexInputs().comparisons[f.identity].refresh,{},"removing candidate 13 drops the requirement for 14, its catalogue's reported ID");
+});
+
 test("a fallback's safeguard requirement on hold applies when that catalogue is compared again", async t => {
   const f = await fixture(t);
   const show = await safeguardedFallbackA(f);
@@ -790,8 +812,9 @@ test("with no Plex TMDB candidate, a safeguard for the derived TMDB catalogue st
   f.plex.tvdb = [1]; f.tvdb[2].fail = false;
   f.at(day(5).replace("12:00","17:00"));
   result = await f.run();
+  // Pinned: the safeguard requires only the derived catalogue's download, not a fresh association lookup.
   const find = f.requests.indexOf("/3/find/1"), load = f.requests.indexOf("/3/tv/10");
-  assert.ok(load >= 0 && (find < 0 || find > load),"the association for TVDB 1 is answered from saved evidence, not a find request");
+  assert.ok(load >= 0 && (find < 0 || find > load),"the association for TVDB 1 is answered from saved evidence, not a find request before the load");
   assert.equal(result.tmdbId,10,"10 is derived again");
   assert.equal(f.tmdbDownloads(10),1,"its requirement forces 10, downloaded earlier today, to download");
   assert.deepEqual(refresh(),{},"that download satisfies it");

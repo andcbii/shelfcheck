@@ -32,6 +32,8 @@ export type CatalogueSelection = {
   automaticId?: number;
   /** The override when saved, else the automatic choice. */
   preferredId?: number;
+  /** The candidates Plex affirmatively removed (`removedCandidates`). */
+  removed: number[];
 };
 
 /**
@@ -55,8 +57,8 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
   const previous = input.previous ? distinctSortedIds(input.previous) : undefined;
   const commit = input.complete;
   const candidates = commit ? observed : previous || observed;
-  const removed = removedCandidates(input).length > 0;
-  const override = input.override !== undefined && !removed && candidates.includes(input.override) ? input.override : undefined;
+  const removed = removedCandidates(input);
+  const override = input.override !== undefined && !removed.length && candidates.includes(input.override) ? input.override : undefined;
   const automaticId = candidates[0];
   const preferredId = override ?? automaticId;
   return {
@@ -66,6 +68,7 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
     overrideCleared: input.override !== undefined && override === undefined,
     ...(automaticId !== undefined ? { automaticId } : {}),
     ...(preferredId !== undefined ? { preferredId } : {}),
+    removed,
   };
 }
 

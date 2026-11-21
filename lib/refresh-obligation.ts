@@ -61,7 +61,7 @@ function normalized(obligation: RefreshObligation): RefreshObligation {
 }
 
 /** Whether the obligation requires anything. */
-export const obligationOpen = (obligation: RefreshObligation) => Object.keys(normalized(obligation)).length > 0;
+const obligationOpen = (obligation: RefreshObligation) => Object.keys(normalized(obligation)).length > 0;
 
 /** Every requirement of both obligations. */
 export function unionObligations(a: RefreshObligation, b: RefreshObligation): RefreshObligation {
@@ -139,17 +139,17 @@ export function savedObligation(saved: SavedRefreshObligations | undefined, prov
 
 /**
  * Patch one provider's obligation in a saved comparison's stored value, in place, leaving every other
- * part and the other provider unchanged. Returns the same object.
+ * part and the other provider unchanged.
  */
-export function patchSavedObligation(saved: SavedRefreshObligations, provider: CatalogueProvider, patch: RefreshObligationPatch): SavedRefreshObligations {
+export function patchSavedObligation(saved: SavedRefreshObligations, provider: CatalogueProvider, patch: RefreshObligationPatch): void {
   const next = applyObligationPatch(savedObligation(saved, provider), patch);
   if (next.preferred) saved[provider] = true; else delete saved[provider];
-  const part = <K extends "specificIds" | "everyAttempted">(key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) => {
-    const parts: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };
-    if (value === undefined) delete parts[provider]; else parts[provider] = value;
-    if (Object.keys(parts).length) saved[key] = parts as SavedRefreshObligations[K]; else delete saved[key];
+  /** Sets or removes this provider's entry under a per-provider key, removing the key once empty. */
+  const setProviderEntry = <K extends "specificIds" | "everyAttempted">(key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) => {
+    const entries: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };
+    if (value === undefined) delete entries[provider]; else entries[provider] = value;
+    if (Object.keys(entries).length) saved[key] = entries as SavedRefreshObligations[K]; else delete saved[key];
   };
-  part("specificIds", next.specificIds && [...next.specificIds]);
-  part("everyAttempted", next.everyAttempted);
-  return saved;
+  setProviderEntry("specificIds", next.specificIds && [...next.specificIds]);
+  setProviderEntry("everyAttempted", next.everyAttempted);
 }

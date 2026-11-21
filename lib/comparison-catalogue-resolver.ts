@@ -1,6 +1,6 @@
 import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
-import { PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { catalogueIssueIds, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
@@ -324,7 +324,7 @@ function judged<T>(request: ComparisonCatalogueRequest, provider: CatalogueProvi
   if (choice.incomplete) return { ...choice, status: { state: "pending" } };
   const recorded = request.context.kind === "cached-recheck" ? request.previousComparison?.status?.[provider] : undefined;
   if (recorded && recorded.state !== "pending") return { ...choice, status: recorded };
-  const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
+  const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   const failure = choice.issues.find(action => action.action === "set" && (action.issue.id === refreshId || action.issue.id === fallbackId));
   const cause = failure?.action === "set" ? failure.issue.cause : undefined;
   if (choice.catalogue) return { ...choice, status: choice.catalogue.origin === "saved" && cause !== undefined ? { state: "total-failure", catalogue: "saved", cause } : { state: "working" } };
@@ -422,21 +422,15 @@ async function singleIdCatalogue<P extends CataloguePayloads, K extends Catalogu
   return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, failure, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, saved, use, downloadedAt: source.savedRecordDownloadedAt(provider, id), gone });
 }
 
-/** A provider's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs. */
-function catalogueIssueIds(provider: CatalogueProvider, request: ComparisonCatalogueRequest) {
-  const name = PROVIDER_NAME[provider];
-  return { refreshId: `catalogue-refresh:${name}:${request.show.ratingKey}`, fallbackId: `catalogue-fallback-refresh:${name}:${request.show.ratingKey}` };
-}
-
 /** Both catalogue issues resolved: the provider's catalogue loaded, or it has no series. */
 function resolvedIssues(provider: CatalogueProvider, request: ComparisonCatalogueRequest): CatalogueIssueAction[] {
-  const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
+  const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   return [{ action: "resolve", id: refreshId }, { action: "resolve", id: fallbackId }];
 }
 
 /** Both catalogue issues kept as they are: a cached recheck, or a series not yet resolvable, never sets or resolves one. */
 function preservedIssues(provider: CatalogueProvider, request: ComparisonCatalogueRequest): CatalogueIssueAction[] {
-  const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
+  const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   return [{ action: "preserve", id: refreshId }, { action: "preserve", id: fallbackId }];
 }
 
@@ -493,7 +487,7 @@ function noDerivedSeries(provider: CatalogueProvider, request: ComparisonCatalog
   const unchanged = { lookupSource, use: { action: "clear" as const }, obligation: NO_CHANGE };
   if (request.context.kind === "cached-recheck") return { ...unchanged, issues: preservedIssues(provider, request) };
   if (!request.tmdb.candidates.length && !request.tvdb.candidates.length) return { ...unchanged, issues: resolvedIssues(provider, request) };
-  const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
+  const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   const name = PROVIDER_NAME[provider], other = PROVIDER_NAME[PROVIDER_TERMS[provider].other];
   const ids = { ...identities, [provider]: undefined };
   const issue: CoverageIssue = {
@@ -631,7 +625,7 @@ function singleCatalogueFailureImpact(provider: CatalogueProvider, request: Comp
  * and the saved catalogue kept (any age), if any.
  */
 function singleCatalogueFailure<T>(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, failure: Failure, requested: { kind: RequestedKind; id: number }, kept: { lookupSource: LookupSourceStep[]; saved: SavedCatalogue<T> | undefined; use: CatalogueUseProposal; downloadedAt?: string; gone?: GoneRecord }): ProviderChoice<T> {
-  const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
+  const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   const { lookupSource, saved, use, downloadedAt } = kept;
   const seriesId = identities[provider];
   // Only the failed series itself is reported gone, and only when nothing else is compared in its place.
@@ -679,7 +673,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const catalogue = choice.loaded?.value;
   const identity = catalogue ? catalogue.id : preferredId;
   const kind = PROVIDER_TERMS[provider].requestedKind;
-  const { refreshId, fallbackId } = catalogueIssueIds(provider, request);
+  const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   const issues: CatalogueIssueAction[] = [];
   let warning: string | undefined, unavailableCause: string | undefined;
   // No catalogue from a working candidate: a Total Provider Lookup Failure, whose one entry lists each candidate tried and why it failed.

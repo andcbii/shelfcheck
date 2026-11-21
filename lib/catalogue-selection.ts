@@ -4,6 +4,12 @@ export const PROVIDER_NAME: Record<CatalogueProvider, "TMDB" | "TVDB"> = { tmdb:
 /** The field a show's series ID is kept under for each provider, in saved comparisons and Coverage Issues. */
 export const PROVIDER_ID_FIELD: Record<CatalogueProvider, "tmdbId" | "tvdbId"> = { tmdb: "tmdbId", tvdb: "tvdbId" };
 
+/** A show's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs for one provider. */
+export function catalogueIssueIds(provider: CatalogueProvider, ratingKey: string) {
+  const name = PROVIDER_NAME[provider];
+  return { refreshId: `catalogue-refresh:${name}:${ratingKey}`, fallbackId: `catalogue-fallback-refresh:${name}:${ratingKey}` };
+}
+
 /** Distinct series IDs in ascending numeric order. */
 export function distinctSortedIds(ids: Iterable<number>): number[] {
   return [...new Set(ids)].sort((left, right) => left - right);

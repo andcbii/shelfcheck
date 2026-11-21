@@ -27,7 +27,7 @@ import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
-import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { catalogueIssueIds, PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePayloads, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderLookupStatus, type ProviderRequest, type ShowMatchStatus } from "@/lib/comparison-catalogue-resolver";
 import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
 import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
@@ -1552,7 +1552,7 @@ class PendingSavedComparison extends Error {}
  */
 async function resolveSavedComparison(identity: string, saved: SavedPlexComparison, inputs: PlexGeneratedInputs, selection: ShowCatalogueSelection | undefined, now: string, status: PlexProviderResolution["providers"]) {
   const history=(provider: CatalogueProvider): PriorSelection => {
-    const issue=getCoverageIssue(`catalogue-refresh:${PROVIDER_NAME[provider]}:${identity}`);
+    const issue=getCoverageIssue(catalogueIssueIds(provider,identity).refreshId);
     return {recordedUse:selection?.[provider].current,...(issue ? {refreshIssue:{seriesId:issue.show?.[PROVIDER_ID_FIELD[provider]],failedAt:issue.failedAt}} : {})};
   };
   const providerRequest=(provider: CatalogueProvider): ProviderRequest => ({

@@ -1,6 +1,8 @@
 "use client";
 import { CoverageWarning } from "@/app/reports/components/coverage-issue-report";
 import type { CoverageIssue } from "@/lib/coverage-issues";
+import type { PlexProviderResolution } from "@/lib/plex-scan";
+import { shownScanIssues } from "@/lib/scan-issues-shown";
 
 /* Plex artwork is served through an authenticated app-owned proxy. */
 /* eslint-disable @next/next/no-img-element */
@@ -31,7 +33,7 @@ import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDur
 import { parsePlexPreferences } from "@/lib/preferences";
 
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
-type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string; catalogueSelection?: ShowCatalogueSelection };
+type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string; catalogueSelection?: ShowCatalogueSelection; providerResolution?: PlexProviderResolution };
 type Report = { shows: Show[]; lastScan: string; coverageGroups?: CoverageGroup[]; scanCache?: Record<string, unknown> };
 type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" };
 type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: boolean; tvdbApiKeySaved: boolean; tvdbPinSaved: boolean; configured: boolean };
@@ -404,7 +406,7 @@ export default function PlexPage() {
     <div className="episode-reports-nav"><Link className="episode-reports-link" href="/reports">Reports <span>→</span></Link></div>
     <section className="report"><div className="report-heading"><p className="eyebrow">PLEX MISSING REPORT</p><div className="report-primary-row"><h2>{missingCount} missing episodes</h2><ScanSortControl field={sortField} ascending={sortAscending} open={sortMenuOpen} onToggle={() => setSortMenuOpen((open) => !open)} onChoose={chooseSort} /></div><div className="report-secondary-row"><label className="search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search shows" /></label><div className="show-all-controls"><button onClick={() => setAllShows(false)}>Expand all</button><button onClick={() => setAllShows(true)}>Collapse all</button></div></div></div>
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
-      <CoverageWarning issues={coverageIssues} />
+      <CoverageWarning issues={shownScanIssues(coverageIssues, report?.shows || [])} />
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
       {!scanning && coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>

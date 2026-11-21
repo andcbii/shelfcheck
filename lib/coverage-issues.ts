@@ -41,7 +41,7 @@ export type CoverageIssue = {
   lookup?: ProviderLookup;
   /** Provider Lookup: when this request last failed (ISO time). Absent on causes recorded before it was kept. */
   failedAt?: string;
-  /** A provider choosing among several Plex series that has no catalogue from a working one: each candidate tried, why it failed and its catalogue age and 404 progress, in the order tried. */
+  /** A provider choosing among several Plex series whose preferred series failed: each candidate that failed, why, and its catalogue age and 404 progress, in the order tried. */
   candidates?: { id: number; cause: string; catalogueRefresh?: CatalogueRefreshState }[];
   /** Failure IDs captured when this operation establishes its blocked inputs. */
   causedBy?: string[];
@@ -50,7 +50,7 @@ export type CoverageIssue = {
   show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number };
   episode?: { provider?: "TMDB" | "TVDB"; id?: number; showId?: number; season?: number; episode?: number; title?: string };
   mappingId?: string;
-  /** Catalogue-refresh issues: the failed series' catalogue age and 404 progress (ADR-0006). */
+  /** Catalogue-refresh issues: the age of the catalogue in use (else the failed series') and the failed series' 404 progress (ADR-0006). */
   catalogueRefresh?: CatalogueRefreshState;
 };
 /** A failed catalogue refresh's state as of the resolution that recorded it. Times are ISO strings. */

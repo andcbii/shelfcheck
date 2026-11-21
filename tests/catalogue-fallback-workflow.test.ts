@@ -530,7 +530,7 @@ test("an outstanding preferred requirement retries the preferred series every sc
   assert.equal(obligation()?.tmdb,true,"a fallback download does not satisfy B's requirement");
   issues = await f.issues() as Issue[];
   assert.equal(fallbackIssue(issues),undefined);
-  assert.equal(refreshIssue(issues)?.candidates,undefined,"A's refresh failure is resolved: TMDB works again through A, and only B's failure remains");
+  assert.deepEqual(refreshIssue(issues)?.candidates?.map(candidate=>candidate.id),[11],"A's refresh failure is resolved: TMDB works again through A, and only B's failure remains");
 
   f.tmdb[11].fail = false;
   f.at(day(73)); show = await f.run();

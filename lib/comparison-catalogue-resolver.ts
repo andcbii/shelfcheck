@@ -435,23 +435,23 @@ function preservedIssues(provider: CatalogueProvider, request: ComparisonCatalog
 }
 
 /** A provider's catalogue-refresh Coverage Issue value, in the shape the scan sets it. */
-function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; downloadedAt?: string; gone?: GoneRecord }): CoverageIssue {
+function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; catalogueRefresh?: CatalogueRefreshState }): CoverageIssue {
   const name = PROVIDER_NAME[provider];
   const ids = { ...identities, [provider]: input.seriesId };
   return {
     id: input.id, ...(input.failedAt ? { failedAt: input.failedAt } : {}), ...(input.failure.causedBy?.length ? { causedBy: input.failure.causedBy } : {}),
     operation: "catalogue-refresh", provider: name, scope: "show",
     show: { ...request.show, tmdbId: ids.tmdb, tvdbId: ids.tvdb },
-    ...(input.seriesId !== undefined ? { catalogueRefresh: catalogueRefreshState(request, input.failure, input.downloadedAt, input.gone) } : {}),
+    ...(input.catalogueRefresh ? { catalogueRefresh: input.catalogueRefresh } : {}),
     ...providerLookupContext(input.failure.error, { source: input.failure.lookupSource || input.source, requested: { provider: name, ...input.requested }, impact: input.impact }),
     ...(input.candidates ? { candidates: input.candidates } : {}),
   } as CoverageIssue;
 }
 
-/** The failed series' catalogue age and 404 progress, as of this resolution. */
-function catalogueRefreshState(request: ComparisonCatalogueRequest, failure: Failure, downloadedAt: string | undefined, gone?: GoneRecord): CatalogueRefreshState {
+/** A series' catalogue age and, when its load failed with a series-request 404, its 404 progress, as of this resolution. */
+function catalogueRefreshState(request: ComparisonCatalogueRequest, failure: Failure | undefined, downloadedAt: string | undefined, gone?: GoneRecord): CatalogueRefreshState {
   // A gone record shows its counted 404 days whatever today's failure was.
-  const seriesNotFoundDays = gone?.seriesNotFoundDays ?? (failure.kind === "series-not-found" ? failure.seriesNotFoundDays : undefined);
+  const seriesNotFoundDays = gone?.seriesNotFoundDays ?? (failure?.kind === "series-not-found" ? failure.seriesNotFoundDays : undefined);
   return {
     checkedAt: request.resolvedAt, ...(downloadedAt ? { downloadedAt } : {}),
     ...(seriesNotFoundDays !== undefined ? { seriesNotFoundDays } : {}),
@@ -631,7 +631,7 @@ function singleCatalogueFailure<T>(provider: CatalogueProvider, request: Compari
   // Only the failed series itself is reported gone, and only when nothing else is compared in its place.
   const gone = !saved && seriesId !== undefined ? kept.gone : undefined;
   const issues: CatalogueIssueAction[] = [
-    { action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId, requested, source: lookupSource, impact: singleCatalogueFailureImpact(provider, request, !!saved, gone && seriesId), downloadedAt, gone }) },
+    { action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId, requested, source: lookupSource, impact: singleCatalogueFailureImpact(provider, request, !!saved, gone && seriesId), ...(seriesId !== undefined ? { catalogueRefresh: catalogueRefreshState(request, failure, downloadedAt, gone) } : {}) }) },
     { action: "resolve", id: fallbackId },
   ];
   const warning = failureWarning(failure, PROVIDER_TERMS[provider].lookupFailed);
@@ -676,16 +676,20 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   const issues: CatalogueIssueAction[] = [];
   let warning: string | undefined, unavailableCause: string | undefined;
-  // No catalogue from a working candidate: a Total Provider Lookup Failure, whose one entry lists each candidate tried and why it failed.
-  const failing = !catalogue || catalogue.origin === "saved";
   if (preferredState === "failed-this-attempt") {
     const failure = failureOf(choice.preferredError);
-    const candidates = failing ? choice.failures.map(({ id, error }) => {
+    // The one entry lists each candidate tried, why it failed, and its own catalogue age and 404 progress.
+    const candidates = choice.failures.map(({ id, error }) => {
       const candidateFailure = failureOf(error);
       return { id, cause: providerLookupContext(candidateFailure.error, { source: [], requested: { provider: PROVIDER_NAME[provider], kind, id }, impact: "" }).cause, catalogueRefresh: catalogueRefreshState(request, candidateFailure, source.savedRecordDownloadedAt(provider, id), goneOf(id)) };
-    }) : undefined;
+    });
+    // The entry itself shows the catalogue in use: its age and, when it failed too, its 404 progress; with none in use, the preferred series'.
+    const inUseFailure = catalogue && choice.failures.find(({ id }) => id === choice.usingId);
+    const entryState = catalogue
+      ? { failure: inUseFailure && failureOf(inUseFailure.error), downloadedAt: catalogue.downloadedAt }
+      : { failure, downloadedAt: source.savedRecordDownloadedAt(provider, preferredId), gone: goneOf(preferredId) };
     const impact = choice.gone ? severalGoneImpact(provider, choice.failures.map(({ id }) => id)) : unavailablePreferredImpact(provider, use);
-    issues.push({ action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: preferredId, requested: { kind, id: preferredId }, source: providerRequest.lookupSource, impact, failedAt: now, downloadedAt: source.savedRecordDownloadedAt(provider, preferredId), candidates, gone: goneOf(preferredId) }) });
+    issues.push({ action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: preferredId, requested: { kind, id: preferredId }, source: providerRequest.lookupSource, impact, failedAt: now, candidates, catalogueRefresh: catalogueRefreshState(request, entryState.failure, entryState.downloadedAt, entryState.gone) }) });
     if (!catalogue) {
       unavailableCause = refreshId;
       warning = failureWarning(failure, `${PROVIDER_NAME[provider]} lookup failed.`);

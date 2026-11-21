@@ -81,10 +81,12 @@ test("an unloadable preferred catalogue is a catalogue-refresh Coverage Issue wi
     { action: "set", issue: {
       id: "catalogue-refresh:TMDB:show-1", failedAt: NOW, operation: "catalogue-refresh", provider: "TMDB", scope: "show",
       show: { ratingKey: "show-1", title: "Example Show", tmdbId: 11, tvdbId: 1 },
-      catalogueRefresh: { checkedAt: NOW },
+      // The age of the catalogue in use, fallback 10; the preferred series is listed with its own.
+      catalogueRefresh: { checkedAt: NOW, downloadedAt: before(DAY) },
       category: "Provider Lookup",
       lookup: { source: [{ provider: "Plex", kind: "TMDB show", id: 11 }], requested: { provider: "TMDB", kind: "show", id: 11 }, impact: "Preferred: 11 · Currently using: 10 · 11 unavailable; no saved catalogue. TMDB series 11 is retried every scan; the preference is kept.", status: 404, failureKind: "http" },
       cause: "404 — record not found", action: "Check the Plex provider ID reference; retry after checking or correcting the reference.",
+      candidates: [{ id: 11, cause: "404 — record not found", catalogueRefresh: { checkedAt: NOW } }],
     } },
     { action: "resolve", id: "catalogue-fallback-refresh:TMDB:show-1" },
   ]);
@@ -106,7 +108,8 @@ test("fallback candidates are tried in numeric order, and a fallback compared fr
   assert.deepEqual(resolved.tmdb.issues, [{ action: "set", issue: {
     id: "catalogue-refresh:TMDB:show-1", failedAt: NOW, operation: "catalogue-refresh", provider: "TMDB", scope: "show",
     show: { ratingKey: "show-1", title: "Example Show", tmdbId: 100, tvdbId: 1 },
-    catalogueRefresh: { checkedAt: NOW },
+    // The age of the catalogue in use: 20's saved copy.
+    catalogueRefresh: { checkedAt: NOW, downloadedAt: before(30 * DAY) },
     category: "Provider Lookup",
     lookup: { source: [{ provider: "Plex", kind: "TMDB show", id: 100 }], requested: { provider: "TMDB", kind: "show", id: 100 }, impact: `Preferred: 100 · Currently using: 20 · 100 unavailable; no saved catalogue · 20 could not be refreshed either; its saved catalogue, downloaded ${before(30 * DAY).slice(0, 10)}, is in use. TMDB series 100 is retried every scan; the preference is kept.`, status: 404, failureKind: "http" },
     cause: "404 — record not found", action: "Check the Plex provider ID reference; retry after checking or correcting the reference.",
@@ -125,11 +128,13 @@ test("a series-request 404 puts the series' counted 404 days and catalogue age o
     const set = resolved.tmdb.issues.find(action => action.action === "set");
     assert.deepEqual(set?.action === "set" && set.issue.catalogueRefresh, expected);
   }
-  // Several candidates: the preferred series' issue names its own counted days; never downloaded, it has no age.
+  // Several candidates: the entry shows the age of the catalogue in use, the fallback 10; the preferred
+  // series, never downloaded, is listed with its own counted days.
   const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 10: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: { ...seriesNotFound, seriesNotFoundDays: 3 } } } });
   const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source });
   const set = resolved.tmdb.issues.find(action => action.action === "set");
-  assert.deepEqual(set?.action === "set" && set.issue.catalogueRefresh, { checkedAt: NOW, seriesNotFoundDays: 3 });
+  assert.deepEqual(set?.action === "set" && set.issue.catalogueRefresh, { checkedAt: NOW, downloadedAt: before(DAY) });
+  assert.deepEqual(set?.action === "set" && set.issue.candidates, [{ id: 11, cause: "404 — record not found", catalogueRefresh: { checkedAt: NOW, seriesNotFoundDays: 3 } }]);
 });
 
 test("no candidate with a usable catalogue leaves the provider unavailable, and the show is compared with the other provider", async () => {
@@ -1176,6 +1181,7 @@ test("several candidates failing: one catalogue-refresh entry lists each tried c
   assert.deepEqual(resolved.tmdb.status, { state: "total-failure", catalogue: "saved", cause: "404 — record not found" });
   const [refresh, fallback] = resolved.tmdb.issues;
   assert.equal(refresh.action === "set" && refresh.issue.id, "catalogue-refresh:TMDB:show-1");
+  assert.deepEqual(refresh.action === "set" && refresh.issue.catalogueRefresh, { checkedAt: NOW, downloadedAt: before(30 * DAY), seriesNotFoundDays: 2 }, "the age and 404 progress of 20, the saved catalogue in use");
   assert.deepEqual(refresh.action === "set" && refresh.issue.candidates, [
     { id: 100, cause: "404 — record not found", catalogueRefresh: { checkedAt: NOW, seriesNotFoundDays: 4 } },
     { id: 3, cause: "TMDB returned an incomplete or unreadable response", catalogueRefresh: { checkedAt: NOW } },

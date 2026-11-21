@@ -786,8 +786,9 @@ test("a safeguard requirement on hold forces nothing and survives restarts and i
   assert.equal(f.tmdbDownloads(10),0);
 });
 
-test("a complete observation removing a candidate also drops a safeguard requirement naming the ID that candidate's catalogue reported", async t => {
+test("a complete observation removing a candidate also drops a safeguard requirement naming the ID that candidate's catalogue reported, even after comparison switched away and a restart", async t => {
   const f = await fixture(t);
+  const refresh = () => catalogues.readPlexInputs().comparisons[f.identity].refresh;
   // TMDB answers a request for series 13 with series 14's ID.
   f.tmdb[13] = {episodes:1,tvdb:1,reports:14}; f.tmdb[14] = {episodes:1,tvdb:1};
   f.plex.tmdb = [10,13];
@@ -796,15 +797,29 @@ test("a complete observation removing a candidate also drops a safeguard require
   f.at(day(2));
   let result = await f.run();
   assert.equal(result.tmdbId,14,"candidate 13 is compared under the ID its catalogue reports");
-  // What the fifth-scan safeguard writes for that comparison: the reported ID.
-  const comparison = catalogues.readPlexInputs().comparisons[f.identity];
-  catalogues.savePlexComparison(f.identity,{...comparison,refresh:{specificIds:{tmdb:[14]}}});
 
-  f.plex.tmdb = [10];
+  // The fifth completed scan's safeguard names the reported ID; its download fails, so it stays open.
+  f.changes([14]);
+  for (const hour of [13,14,15]) { f.at(day(2).replace("12:00",`${hour}:00`)); await f.run(); }
+  // The request for 13 is answered under 14, so its episodes are requested as 14's.
+  f.tmdb[14].seasonFail = true;
+  f.at(day(2).replace("12:00","16:00")); await f.run();
+  assert.deepEqual([refresh()?.specificIds,refresh()?.requestedIds],[{tmdb:[14]},{tmdb:{14:13}}],"the safeguard requires 14 and records 13, the Plex candidate requested for it");
+
+  // Comparison switches to candidate 10, so the requirement for 14 is on hold, across a restart.
+  f.tmdb[14].seasonFail = false; f.changes([]);
+  selections.saveCatalogueOverride(f.identity,"tmdb",10);
   f.at(day(3));
   result = await f.run();
   assert.equal(result.tmdbId,10);
-  assert.deepEqual(catalogues.readPlexInputs().comparisons[f.identity].refresh,{},"removing candidate 13 drops the requirement for 14, its catalogue's reported ID");
+  assert.deepEqual(refresh(),{specificIds:{tmdb:[14]},requestedIds:{tmdb:{14:13}}},"the requirement for 14 is on hold");
+  f.restart();
+
+  f.plex.tmdb = [10];
+  f.at(day(4));
+  result = await f.run();
+  assert.equal(result.tmdbId,10);
+  assert.deepEqual(refresh(),{},"removing candidate 13 drops the requirement for 14, its catalogue's reported ID");
 });
 
 test("a fallback's safeguard requirement on hold applies when that catalogue is compared again", async t => {

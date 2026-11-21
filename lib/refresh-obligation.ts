@@ -37,11 +37,17 @@ const namesOf = (attempt: AttemptedCatalogue) => [attempt.id, attempt.reportedId
  * Every provider's refresh obligation as a saved comparison stores it. The per-provider flag is the
  * preferred requirement; obligations saved before requirements existed therefore read as
  * preferred-only. The other parts sit beside it, keyed by provider, and are absent when empty.
+ *
+ * `requestedIds` is evidence, not a requirement: for a specific requirement naming the ID a catalogue
+ * reported, the Plex candidate requested for it (reported ID to requested ID), so removing that
+ * candidate drops the requirement even after comparison moved away. It is kept only beside its
+ * requirement; a requirement saved without it is matched by its own ID alone.
  */
 export type SavedRefreshObligations = {
   tmdb?: boolean; tvdb?: boolean;
   specificIds?: Partial<Record<CatalogueProvider, number[]>>;
   everyAttempted?: Partial<Record<CatalogueProvider, true>>;
+  requestedIds?: Partial<Record<CatalogueProvider, Record<string, number>>>;
 };
 
 /** Positive integer IDs, de-duplicated and sorted. */
@@ -139,17 +145,40 @@ export function savedObligation(saved: SavedRefreshObligations | undefined, prov
 
 /**
  * Patch one provider's obligation in a saved comparison's stored value, in place, leaving every other
- * part and the other provider unchanged.
+ * part and the other provider unchanged. Requested-candidate evidence goes with its specific requirement.
  */
 export function patchSavedObligation(saved: SavedRefreshObligations, provider: CatalogueProvider, patch: RefreshObligationPatch): void {
   const next = applyObligationPatch(savedObligation(saved, provider), patch);
   if (next.preferred) saved[provider] = true; else delete saved[provider];
-  /** Sets or removes this provider's entry under a per-provider key, removing the key once empty. */
-  const setProviderEntry = <K extends "specificIds" | "everyAttempted">(key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) => {
-    const entries: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };
-    if (value === undefined) delete entries[provider]; else entries[provider] = value;
-    if (Object.keys(entries).length) saved[key] = entries as SavedRefreshObligations[K]; else delete saved[key];
-  };
-  setProviderEntry("specificIds", next.specificIds && [...next.specificIds]);
-  setProviderEntry("everyAttempted", next.everyAttempted);
+  const requested = Object.entries(saved.requestedIds?.[provider] ?? {}).filter(([reportedId]) => next.specificIds?.includes(Number(reportedId)));
+  setProviderEntry(saved, provider, "specificIds", next.specificIds && [...next.specificIds]);
+  setProviderEntry(saved, provider, "everyAttempted", next.everyAttempted);
+  setProviderEntry(saved, provider, "requestedIds", requested.length ? Object.fromEntries(requested) : undefined);
+}
+
+/** Sets or removes one provider's entry under a per-provider key, removing the key once empty. */
+function setProviderEntry<K extends "specificIds" | "everyAttempted" | "requestedIds">(saved: SavedRefreshObligations, provider: CatalogueProvider, key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) {
+  const entries: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };
+  if (value === undefined) delete entries[provider]; else entries[provider] = value;
+  if (Object.keys(entries).length) saved[key] = entries as SavedRefreshObligations[K]; else delete saved[key];
+}
+
+/**
+ * Record, in place, that a held specific requirement names the ID reported for the Plex candidate
+ * requested (`requestedId`). Nothing is recorded when the two IDs agree or the requirement is not held.
+ */
+export function recordRequestedCandidate(saved: SavedRefreshObligations, provider: CatalogueProvider, reportedId: number, requestedId: number): void {
+  if (reportedId === requestedId || !savedObligation(saved, provider).specificIds?.includes(reportedId)) return;
+  setProviderEntry(saved, provider, "requestedIds", { ...saved.requestedIds?.[provider], [reportedId]: requestedId });
+}
+
+/**
+ * The specific requirement IDs a complete observation's removal of Plex candidates drops: each removed
+ * candidate, and each ID reported for a removed candidate, unless that ID is still a candidate.
+ */
+export function droppedByRemoval(saved: SavedRefreshObligations | undefined, provider: CatalogueProvider, removed: readonly number[], candidates: readonly number[]): number[] {
+  const reported = Object.entries(saved?.requestedIds?.[provider] ?? {})
+    .filter(([reportedId, requestedId]) => removed.includes(requestedId) && !candidates.includes(Number(reportedId)))
+    .map(([reportedId]) => Number(reportedId));
+  return [...removed, ...reported];
 }

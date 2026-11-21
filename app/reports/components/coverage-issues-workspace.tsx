@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { CoverageIssue } from "@/lib/coverage-issues";
 import { ReportSidebar } from "@/app/reports/report-sidebar";
 import { CoverageIssueReport } from "./coverage-issue-report";
+import { shownScanIssues } from "@/lib/scan-issues-shown";
 
 type Props = {initialIssues: CoverageIssue[]; autoCount: number; unmatchedCount: number; providerCount: number; manualCount: number; multipleIdCount?: number};
 export function CoverageIssuesWorkspace({initialIssues,...counts}: Props) {
@@ -18,7 +19,8 @@ export function CoverageIssuesWorkspace({initialIssues,...counts}: Props) {
         const body=await response.json();
         if(!response.ok) throw new Error(body.error || "Scan Issues could not be loaded.");
         if(!Array.isArray(body.coverage?.issues)) throw new Error("Scan Issues could not be verified from the shared scan state.");
-        if(!stopped && request===generation){setIssues(body.coverage.issues);setError("");}
+        // The same projection as the server-rendered list: an Unmatched show's own entries stay hidden.
+        if(!stopped && request===generation){setIssues(shownScanIssues(body.coverage.issues,Array.isArray(body.report?.shows) ? body.report.shows : []));setError("");}
       } catch(error){if(!stopped && request===generation)setError(error instanceof Error ? error.message : "Scan Issues could not be loaded.");}
     };
     void load();

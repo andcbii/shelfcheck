@@ -78,7 +78,7 @@ A provider series ID whose series request has answered "not found" on 15 separat
 _Avoid_: Deleted show, dead ID
 
 **Total Provider Lookup Failure**:
-A provider for which the show has no catalogue from a working ID. An ID works when its latest download attempt succeeded or its catalogue was reused without one, whether Plex reported the ID or Shelfcheck found it through the other provider; IDs not tried don't count as failing. The show may still use a saved catalogue kept after a failed attempt until that record is gone.
+A provider that cannot describe a show from a current lookup: every series ID tried for it has a Provider Lookup Failure, or it has no ID at all, from Plex or through the other provider. IDs never tried don't count as failing. The show may still compare that provider's last saved catalogue until the record is a Gone provider record.
 
 **Unmatched show**:
 A library show with no usable catalogue from any provider, live or saved. The Unmatched Shows report lists them.

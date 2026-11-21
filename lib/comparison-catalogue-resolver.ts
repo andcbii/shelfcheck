@@ -3,7 +3,7 @@ import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, mult
 import { catalogueIssueIds, OTHER_PROVIDER, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
-import { GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
+import { CATALOGUE_AGE_LIMIT_TEXT, GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
 import { combinePatches, effectivePatch, PREFERRED_REQUIRED, requiresDownload, satisfiedByDownload, type AttemptedCatalogue, type RefreshObligation, type RefreshObligationPatch } from "@/lib/refresh-obligation";
 
 /**
@@ -405,9 +405,10 @@ async function chooseProviderCatalogue<P extends CataloguePayloads, K extends Ca
 }
 
 /**
- * A provider with one Plex ID (ADR-0003): its catalogue loads under the single-catalogue reuse policy,
- * and after a failed lookup its saved catalogue stays in use at any age. Any successful download
- * clears an open obligation, since the one ID is the preferred catalogue.
+ * A provider with one Plex ID (ADR-0003, ADR-0006): its catalogue loads under the single-catalogue
+ * reuse policy, and after a failed lookup its saved catalogue stays in use at any age, unless the series
+ * is a Gone provider record or answered with an empty show. Any successful download clears an open
+ * obligation, since the one ID is the preferred catalogue.
  */
 async function singleIdCatalogue<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K, id: number): Promise<ProviderChoice<P[K]>> {
   const { request, source, identities } = resolving;
@@ -629,7 +630,7 @@ const failedObligation = (providerRequest: ProviderRequest): RefreshObligationPa
 /** The impact of a single catalogue that could not be loaded. */
 function singleCatalogueFailureImpact(provider: CatalogueProvider, request: ComparisonCatalogueRequest, retained: boolean, goneId?: number) {
   const name = PROVIDER_NAME[provider];
-  if (goneId !== undefined) return `${name} episode coverage could not be verified. ${name} series ${goneId} is a gone provider record: its series request has answered 404 on ${GONE_RECORD_NOT_FOUND_DAYS} or more days and its saved catalogue is more than 60 days old, so that catalogue is kept but no longer compared. One complete download makes it usable again.`;
+  if (goneId !== undefined) return goneImpact(provider, `${name} series ${goneId} is a gone provider record`, "that catalogue is", "it");
   return `${PROVIDER_NAME[provider]} episode coverage could not be fully verified. ${retained ? "Last-good catalogue data was retained." : "No previous catalogue data is available."} ${request.previousComparison?.complete ? "Last-good comparison results remain available." : "No previous comparison results are available."}`;
 }
 
@@ -654,7 +655,11 @@ function singleCatalogueFailure<T>(provider: CatalogueProvider, request: Compari
   return { ...(seriesId !== undefined ? { identity: seriesId } : {}), lookupSource: provenance, use, obligation, issues, unavailableCause: refreshId, warning, ...(gone ? { gone: true as const } : {}) };
 }
 
-/** A provider with several Plex candidates: preferred, its saved copy within 60 days, the lowest usable fallback, else unavailable. */
+/**
+ * A provider with several Plex candidates (ADR-0005, ADR-0006): the preferred series, its saved copy
+ * within 60 days, the lowest usable fallback, else the most recently saved catalogue that is not gone,
+ * at any age; with none, unavailable, and gone only when every candidate is gone.
+ */
 async function chooseAmongCandidates<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K, preferredId: number): Promise<ProviderChoice<P[K]>> {
   const { request, source, identities } = resolving;
   const providerRequest = request[provider];
@@ -723,7 +728,13 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
 /** The impact of a provider whose every candidate is a Gone provider record. */
 function severalGoneImpact(provider: CatalogueProvider, ids: number[]) {
   const name = PROVIDER_NAME[provider];
-  return `${name} episode coverage could not be verified. Every reported ${name} series (${ids.join(", ")}) is a gone provider record: its series request has answered 404 on ${GONE_RECORD_NOT_FOUND_DAYS} or more days and its saved catalogue is more than 60 days old, so those catalogues are kept but no longer compared. One complete download makes a series usable again.`;
+  return goneImpact(provider, `Every reported ${name} series (${ids.join(", ")}) is a gone provider record`, "those catalogues are", "a series");
+}
+
+/** The impact of a provider with no catalogue because its series is (or every candidate is) a Gone provider record. */
+function goneImpact(provider: CatalogueProvider, gone: string, kept: string, restored: string) {
+  const name = PROVIDER_NAME[provider];
+  return `${name} episode coverage could not be verified. ${gone}: its series request has answered 404 on ${GONE_RECORD_NOT_FOUND_DAYS} or more days and its saved catalogue is more than ${CATALOGUE_AGE_LIMIT_TEXT} old, so ${kept} kept but no longer compared. One complete download makes ${restored} usable again.`;
 }
 
 /**
@@ -790,12 +801,21 @@ function keepCompared<P extends CataloguePayloads, K extends CatalogueProvider>(
   const issues = preservedIssues(provider, request);
   const id = request.previousComparison?.[`${provider}Id`];
   if (id === undefined) return { lookupSource: [], ...unchangedResolution, issues };
-  // The last scan had no catalogue for this provider, or judged its series gone, so the recheck compares none either and keeps that status.
-  const recorded = request.previousComparison?.status?.[provider];
-  if (recorded?.state === "total-failure" && recorded.catalogue !== "saved") return { identity: id, lookupSource, ...unchangedResolution, issues, ...(recorded.catalogue === "gone" ? { gone: true as const } : {}) };
+  const recordedFailure = keptRecordedFailure(request, provider, id, lookupSource);
+  if (recordedFailure) return recordedFailure;
   const saved = goneRecord(source, provider, id, request.resolvedAt) ? undefined : source.savedCatalogue(provider, id);
   if (!saved) return missingFromSaved(resolving, provider, id, lookupSource);
   return { identity: id, lookupSource, catalogue: comparedFrom(saved, "reused"), ...unchangedResolution, issues };
+}
+
+/**
+ * A provider the last scan had no catalogue for, or judged gone: the cached recheck compares none either
+ * and keeps that status. Absent when the last scan recorded another status.
+ */
+function keptRecordedFailure(request: ComparisonCatalogueRequest, provider: CatalogueProvider, identity: number, lookupSource: LookupSourceStep[]): ProviderChoice<never> | undefined {
+  const recorded = request.previousComparison?.status?.[provider];
+  if (recorded?.state !== "total-failure" || recorded.catalogue === "saved") return undefined;
+  return { identity, lookupSource, ...unchangedResolution, issues: preservedIssues(provider, request), ...(recorded.catalogue === "gone" ? { gone: true as const } : {}) };
 }
 
 /** The state a cached recheck's preference was left in: not tried yet unless the recorded use names it. */
@@ -806,8 +826,10 @@ function cachedPreferenceState(recorded: CatalogueUse | undefined, preferredId: 
 
 /**
  * Several Plex candidates in a cached recheck: the preferred saved copy within 60 days, else, once a
- * scan has tried this preference, the lowest remaining candidate with one. A preference not tried yet
- * is never replaced by a fallback: without a usable saved copy the comparison is pending.
+ * scan has tried this preference, the lowest remaining candidate with one, else the most recently saved
+ * catalogue that is not gone, at any age. A preference not tried yet is never replaced by a fallback:
+ * without a usable saved copy the comparison is pending. With none, a provider the last scan recorded
+ * with no catalogue keeps that status.
  */
 function chooseAmongSavedCandidates<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K, preferredId: number, history: PriorSelection): ProviderChoice<P[K]> {
   const { request, source } = resolving;
@@ -819,10 +841,8 @@ function chooseAmongSavedCandidates<P extends CataloguePayloads, K extends Catal
   const tried = preferredState !== "not-tried-yet";
   const savedAt = (id: number) => source.savedCatalogue(provider, id)?.downloadedAt;
   const usingId = chooseSavedCatalogue({ preferredId, candidates: providerRequest.candidates, now: request.resolvedAt, tried, downloadedAt: savedAt, gone: id => goneRecord(source, provider, id, request.resolvedAt) !== undefined });
-  // The last scan had no catalogue for this provider, or judged it gone, so a recheck that finds none compares none either and keeps that status.
-  const recordedStatus = request.previousComparison?.status?.[provider];
-  if (usingId === undefined && tried && recordedStatus?.state === "total-failure" && recordedStatus.catalogue !== "saved")
-    return { identity: preferredId, lookupSource: providerRequest.lookupSource, ...unchangedResolution, issues, ...(recordedStatus.catalogue === "gone" ? { gone: true as const } : {}) };
+  const recordedFailure = usingId === undefined && tried ? keptRecordedFailure(request, provider, preferredId, providerRequest.lookupSource) : undefined;
+  if (recordedFailure) return recordedFailure;
   if (usingId === undefined) return {
     identity: preferredId, lookupSource: providerRequest.lookupSource, ...unchangedResolution, issues, incomplete: true,
     warning: tried

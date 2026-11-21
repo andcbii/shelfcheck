@@ -1,4 +1,6 @@
 export const CATALOGUE_AGE_LIMIT = 60 * 86400_000;
+/** `CATALOGUE_AGE_LIMIT` as report text: "60 days". */
+export const CATALOGUE_AGE_LIMIT_TEXT = `${CATALOGUE_AGE_LIMIT / 86400_000} days`;
 /** The in-use catalogue of a provider with several Plex IDs is downloaded again once older than this. */
 export const MULTIPLE_ID_REFRESH_AGE = 20 * 86400_000;
 /** A series ID is a Gone provider record once its series request has answered 404 on this many UTC days (ADR-0006). */

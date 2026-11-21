@@ -70,7 +70,7 @@ test("a preference not yet compared says which catalogue results still use", () 
 test("no usable catalogue is reported without claiming a comparison", () => {
   const summary = selectionSummary("tmdb", scooby({ current: { preferredId: 2150, state: "unavailable", selectedAt: "2026-01-01T00:00:00Z", preferredFailedAt: "2026-01-01T00:00:00Z" } }).tmdb);
   assert.equal(summary.using, "None");
-  assert.equal(summary.explanation, "No reported TMDB series could supply a usable catalogue; last-good results are kept.");
+  assert.equal(summary.explanation, "No reported TMDB series could supply a usable catalogue, so TMDB is not compared for this show.");
 });
 
 test("a saved catalogue compared as the last resort, past its 60 days, says so instead of showing an expired deadline", () => {

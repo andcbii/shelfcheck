@@ -50,7 +50,7 @@ export type CoverageIssue = {
   show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number };
   episode?: { provider?: "TMDB" | "TVDB"; id?: number; showId?: number; season?: number; episode?: number; title?: string };
   mappingId?: string;
-  /** Catalogue-refresh issues: the age of the catalogue in use (else the failed series') and the failed series' 404 progress (ADR-0006). */
+  /** Catalogue-refresh issues: the age and 404 progress of the catalogue in use, else of the failed series (ADR-0006). */
   catalogueRefresh?: CatalogueRefreshState;
 };
 /** A failed catalogue refresh's state as of the resolution that recorded it. Times are ISO strings. */

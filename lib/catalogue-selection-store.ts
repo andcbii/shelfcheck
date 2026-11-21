@@ -77,26 +77,32 @@ const savedOverride = (db: Db, identity: string, provider: CatalogueProvider) =>
  * overrides, and choose the catalogue each provider prefers. The catalogue in use is recorded only
  * once a comparison completes (`recordCatalogueUse`), so a scan that keeps last-good results never
  * describes a catalogue those results did not compare. Only a complete observation (every record
- * returned usable metadata) replaces the candidates or clears an override.
+ * returned usable metadata) replaces the candidates or clears an override, and only it reports the
+ * candidates Plex removed (`removed`). `saveRemovals`, called inside the same transaction when a
+ * candidate was removed, saves what the removal drops, so a crash cannot commit one without the other.
  */
-export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection> {
+export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean, saveRemovals?: (selections: Record<CatalogueProvider, CatalogueSelection>) => void): Record<CatalogueProvider, CatalogueSelection> {
   const db = database();
-  return transaction(db, () => Object.fromEntries(PROVIDERS.map(provider => {
-    const previous = candidateIds(db, identity, provider);
-    const selection = selectComparisonCatalogue({
-      ...(previous.length ? { previous } : {}),
-      observed: observed[provider].filter(id => Number.isSafeInteger(id) && id > 0),
-      complete,
-      override: savedOverride(db, identity, provider),
-    });
-    if (selection.commit) {
-      const keep = new Set(selection.candidates);
-      for (const id of previous) if (!keep.has(id)) db.prepare("DELETE FROM shelfcheck_catalogue_candidates WHERE identity=? AND provider=? AND series_id=?").run(identity, provider, id);
-      for (const id of selection.candidates) db.prepare("INSERT OR IGNORE INTO shelfcheck_catalogue_candidates(identity,provider,series_id) VALUES(?,?,?)").run(identity, provider, id);
-    }
-    if (selection.overrideCleared) db.prepare("DELETE FROM shelfcheck_catalogue_overrides WHERE identity=? AND provider=?").run(identity, provider);
-    return [provider, selection];
-  })) as Record<CatalogueProvider, CatalogueSelection>);
+  return transaction(db, () => {
+    const selections = Object.fromEntries(PROVIDERS.map(provider => {
+      const previous = candidateIds(db, identity, provider);
+      const selection = selectComparisonCatalogue({
+        ...(previous.length ? { previous } : {}),
+        observed: observed[provider].filter(id => Number.isSafeInteger(id) && id > 0),
+        complete,
+        override: savedOverride(db, identity, provider),
+      });
+      if (selection.commit) {
+        const keep = new Set(selection.candidates);
+        for (const id of previous) if (!keep.has(id)) db.prepare("DELETE FROM shelfcheck_catalogue_candidates WHERE identity=? AND provider=? AND series_id=?").run(identity, provider, id);
+        for (const id of selection.candidates) db.prepare("INSERT OR IGNORE INTO shelfcheck_catalogue_candidates(identity,provider,series_id) VALUES(?,?,?)").run(identity, provider, id);
+      }
+      if (selection.overrideCleared) db.prepare("DELETE FROM shelfcheck_catalogue_overrides WHERE identity=? AND provider=?").run(identity, provider);
+      return [provider, selection];
+    })) as Record<CatalogueProvider, CatalogueSelection>;
+    if (PROVIDERS.some(provider => selections[provider].removed.length)) saveRemovals?.(selections);
+    return selections;
+  });
 }
 
 /**

@@ -32,7 +32,20 @@ export type CatalogueSelection = {
   automaticId?: number;
   /** The override when saved, else the automatic choice. */
   preferredId?: number;
+  /** The candidates Plex affirmatively removed (`removedCandidates`). */
+  removed: number[];
 };
+
+/**
+ * The candidates Plex affirmatively removed: IDs in the last committed candidate set that a complete
+ * observation no longer reports. An incomplete observation removes nothing, and an ID never in the
+ * committed set (such as a derived series) is never removed.
+ */
+export function removedCandidates(input: Pick<CatalogueSelectionInput, "previous" | "observed" | "complete">): number[] {
+  if (!input.complete || !input.previous) return [];
+  const observed = new Set(input.observed);
+  return distinctSortedIds(input.previous).filter(id => !observed.has(id));
+}
 
 /**
  * Choose one comparison catalogue for a provider: the saved override when it is still a
@@ -44,8 +57,8 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
   const previous = input.previous ? distinctSortedIds(input.previous) : undefined;
   const commit = input.complete;
   const candidates = commit ? observed : previous || observed;
-  const removed = commit && !!previous?.some(id => !observed.includes(id));
-  const override = input.override !== undefined && !removed && candidates.includes(input.override) ? input.override : undefined;
+  const removed = removedCandidates(input);
+  const override = input.override !== undefined && !removed.length && candidates.includes(input.override) ? input.override : undefined;
   const automaticId = candidates[0];
   const preferredId = override ?? automaticId;
   return {
@@ -55,6 +68,7 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
     overrideCleared: input.override !== undefined && override === undefined,
     ...(automaticId !== undefined ? { automaticId } : {}),
     ...(preferredId !== undefined ? { preferredId } : {}),
+    removed,
   };
 }
 

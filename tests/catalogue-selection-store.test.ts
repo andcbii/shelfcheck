@@ -65,6 +65,20 @@ test("the next scan uses the saved override until Plex removes a candidate", t =
   assert.equal(saved.tmdb.current,undefined,"observing candidates never claims a catalogue in use; only a completed comparison does");
 });
 
+test("what a removal drops is saved with the observation: if saving it fails, the removal is not committed and is reported again", t => {
+  temporaryDatabase(t);
+  store.observeCatalogueCandidates(show,{tmdb:[1,2],tvdb:[7]},true);
+  assert.throws(() => store.observeCatalogueCandidates(show,{tmdb:[2],tvdb:[7]},true,() => { throw new Error("crash before the drop is saved"); }),/crash/);
+  assert.deepEqual(store.readCatalogueSelections()[show].tmdb.candidates.map(candidate=>candidate.id),[1,2],"the candidate set is not committed without the drop");
+  let persisted: Record<string,number[]> | undefined;
+  const removed = store.observeCatalogueCandidates(show,{tmdb:[2],tvdb:[7]},true,selections => { persisted = {tmdb:selections.tmdb.removed,tvdb:selections.tvdb.removed}; });
+  assert.deepEqual(persisted,{tmdb:[1],tvdb:[]},"the next observation reports the removal again, inside its transaction");
+  assert.deepEqual(removed.tmdb.removed,[1]);
+  let called = false;
+  store.observeCatalogueCandidates(show,{tmdb:[2],tvdb:[7]},true,() => { called = true; });
+  assert.equal(called,false,"an observation removing nothing has nothing to save");
+});
+
 test("candidate names are kept for retained IDs and do not affect the override", t => {
   temporaryDatabase(t);
   store.observeCatalogueCandidates(show,{tmdb:[2150,337142],tvdb:[]},true);

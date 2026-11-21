@@ -25,10 +25,11 @@ import { parsePlexPreferences } from "@/lib/preferences";
 import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
-import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
+import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { ProgressPersistenceError, resolveComparisonCatalogues, type ComparisonCatalogueSource, type PriorSelection, type ProviderRequest } from "@/lib/comparison-catalogue-resolver";
 import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
+import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
@@ -518,8 +519,20 @@ function retainVerifiedChanges(inputs: PlexGeneratedInputs, tmdb: Set<number> | 
 }
 
 /**
+ * The Plex candidate the show's last comparison requested for a provider: the single candidate, or the
+ * one the recorded use names among several. A derived catalogue is no candidate.
+ */
+function requestedCandidateId(prior: ProviderCatalogueSelection | undefined): number | undefined {
+  const current = prior?.current;
+  if (current?.state === "derived") return undefined;
+  return prior?.candidates.length === 1 ? prior.candidates[0].id : current?.usingId;
+}
+
+/**
  * A safeguard is fulfilled once its change list is retrieved and each changed library show with a
- * saved TMDB catalogue holds a durable refresh obligation; otherwise it stays pending.
+ * saved TMDB catalogue holds a durable specific requirement for the compared TMDB catalogue, added
+ * beside any work already open; otherwise it stays pending. The compared catalogue is named by the ID
+ * it reported; when that differs from the Plex candidate requested, the candidate is recorded with it.
  */
 function retainSafeguard(inputs: PlexGeneratedInputs, utcDate: string, changes: Set<number> | null, candidates: PlexShowGroup[]) {
   if (changes === null) {
@@ -528,8 +541,14 @@ function retainSafeguard(inputs: PlexGeneratedInputs, utcDate: string, changes: 
   }
   for (const group of candidates) {
     const comparison = inputs.comparisons[group.identity];
-    if (!comparison?.tmdbId || !changes.has(comparison.tmdbId) || !inputs.tmdb[String(comparison.tmdbId)] || comparison.refresh?.tmdb) continue;
-    comparison.refresh = {...comparison.refresh, tmdb: true};
+    if (!comparison?.tmdbId || !changes.has(comparison.tmdbId) || !inputs.tmdb[String(comparison.tmdbId)]) continue;
+    const change = effectivePatch(savedObligation(comparison.refresh, "tmdb"), {add: {specificIds: [comparison.tmdbId]}});
+    if (!change.add) continue;
+    const refresh = {...comparison.refresh};
+    patchSavedObligation(refresh, "tmdb", change);
+    const requestedId = requestedCandidateId(readShowCatalogueSelection(group.identity)?.tmdb);
+    if (requestedId !== undefined) recordRequestedCandidate(refresh, "tmdb", comparison.tmdbId, requestedId);
+    comparison.refresh = refresh;
     savePlexComparison(group.identity, comparison);
   }
   if (inputs.pendingSafeguards[utcDate]) { delete inputs.pendingSafeguards[utcDate]; savePendingSafeguards(inputs.pendingSafeguards); }
@@ -1056,7 +1075,16 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       retainComparison(message);
       return;
     }
-    const plexSelection = observeCatalogueCandidates(ratingKey, showProviderIds(details.flatMap((detail) => detail.Guid || [])), metadataComplete);
+    // A specific requirement is dropped only when this complete observation removes its catalogue from the
+    // reported candidates, saved in the observation's own transaction; on hold otherwise, it is kept.
+    const plexSelection = observeCatalogueCandidates(ratingKey, showProviderIds(details.flatMap((detail) => detail.Guid || [])), metadataComplete, selections => {
+      const saved = inputs.comparisons[ratingKey];
+      if (!saved) return;
+      const refresh = {...saved.refresh};
+      for (const provider of PROVIDERS) patchSavedObligation(refresh, provider, {remove: {specificIds: droppedByRemoval(saved.refresh, provider, selections[provider].removed, selections[provider].candidates)}});
+      savePlexComparison(ratingKey, {...saved, refresh});
+      inputs.comparisons[ratingKey] = {...saved, refresh};
+    });
     let tmdbId = plexSelection.tmdb.preferredId, tvdbId = plexSelection.tvdb.preferredId;
     let tmdbSource: LookupSourceStep[] = tmdbId ? [{provider:"Plex",kind:"TMDB show",id:tmdbId}] : tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
     let tvdbSource: LookupSourceStep[] = tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
@@ -1122,11 +1150,11 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const resolution = await resolveComparisonCatalogues<DownloadCataloguePayloads>({
       context: {kind:"live-scan"}, show: {ratingKey, title: primary.title}, resolvedAt: startedAt,
       ...(savedComparison ? {previousComparison: {tmdbId: savedComparison.tmdbId, tvdbId: savedComparison.tvdbId, complete: !!savedComparison.complete}} : {}),
-      tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: !!refresh.tmdb, lookupSource: tmdbSource},
-      tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: !!refresh.tvdb, lookupSource: tvdbSource},
+      tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: savedObligation(refresh, "tmdb"), lookupSource: tmdbSource},
+      tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: savedObligation(refresh, "tvdb"), lookupSource: tvdbSource},
       }, {source, onProviderResolved: async progress => {
-      if (progress.obligation === "set") refresh[progress.provider] = true;
-      else if (progress.obligation === "clear") delete refresh[progress.provider];
+      // The provider-scoped patch changes only its own parts of the saved obligation.
+      patchSavedObligation(refresh, progress.provider, progress.obligation);
       savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
       phaseTimings[`${progress.provider}Ms`] = Date.now() - phaseStarted;
       phaseStarted = Date.now();
@@ -1421,7 +1449,7 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const saved=inputs.comparisons[identity];
   // Persist the obligation first: the next scan downloads the newly preferred series.
-  if (saved) {saved.refresh={...saved.refresh,[provider]:true};savePlexComparison(identity,saved);}
+  if (saved) {const refresh={...saved.refresh};patchSavedObligation(refresh,provider,PREFERRED_REQUIRED);saved.refresh=refresh;savePlexComparison(identity,saved);}
   const pending=(cause: string) => setCoverageIssue({id:`comparison-inputs:${identity}`,operation:"comparison",scope:"show",show:{ratingKey:identity,title:saved?.group.records[0]?.title,tmdbId:saved?.tmdbId,tvdbId:saved?.tvdbId},cause,action:`Run a Plex scan to download the selected ${PROVIDER_NAME[provider]} catalogue and compare it.`});
   if (!prior || !inputs.inventory?.complete || !saved?.complete) {
     pending("Saved comparison inputs for this show are missing or incomplete, so the new catalogue selection could not be compared. Last-good results were kept.");
@@ -1448,7 +1476,11 @@ async function recheckCoverage(impact: CoverageImpact) {
   // Persist obligations first. A failed local comparison must never consume them.
   for (const key of targets) {
     const input=inputs.comparisons[key];
-    if (input) {input.refresh={...input.refresh,...(input.tmdbId ? {tmdb:true} : {}),...(input.tvdbId ? {tvdb:true} : {})};savePlexComparison(key,input);}
+    if (input) {
+      const refresh={...input.refresh};
+      for (const provider of PROVIDERS) if (input[PROVIDER_ID_FIELD[provider]]) patchSavedObligation(refresh,provider,PREFERRED_REQUIRED);
+      input.refresh=refresh;savePlexComparison(key,input);
+    }
   }
   if (!prior || !inputs.inventory?.complete) {
     const keys=targets.size ? [...targets] : [undefined];
@@ -1510,7 +1542,7 @@ async function resolveSavedComparison(identity: string, saved: SavedPlexComparis
   };
   const providerRequest=(provider: CatalogueProvider): ProviderRequest => ({
     candidates:selection?.[provider].candidates.map(candidate=>candidate.id) || [],preferredId:selection?.[provider].preferredId,
-    refreshObligation:!!saved.refresh?.[provider],lookupSource:[],
+    refreshObligation:savedObligation(saved.refresh,provider),lookupSource:[],
   });
   const resolution=await resolveComparisonCatalogues({
     context:{kind:"cached-recheck",history:{tmdb:history("tmdb"),tvdb:history("tvdb")}},

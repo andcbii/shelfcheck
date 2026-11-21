@@ -229,19 +229,34 @@ test("when no candidate can supply a usable catalogue, the show is compared with
   assert.deepEqual(missingTmdb(good),[1102,1103]);
   f.tmdb[11].fail = true; f.tmdb[10].fail = true;
   f.at(day(70));
-  const show = await f.run() as Judged;
-  assert.ok(show.warning,"TMDB's failure is reported with the result");
-  // Deliberately changed (SHELFCHECK-27): last-good results used to be kept; TMDB's failure no longer blocks TVDB's comparison.
-  assert.deepEqual(missingTmdb(show),[],"no TMDB catalogue is compared");
-  assert.equal(show.missing.length,1,"TVDB's missing episode is reported");
+  // Deliberately changed again (SHELFCHECK-120, ADR-0006): with no candidate working or saved within 60 days, the most recently saved catalogue that is not gone (B) is compared at any age.
+  let show = await f.run() as Judged;
+  assert.deepEqual(missingTmdb(show),[1102,1103],"saved B, the newest catalogue that is not gone, is compared");
+  assert.equal(show.missing.length,2,"TVDB's comparison runs too");
+  assert.deepEqual(show.providerResolution?.providers?.tmdb,{state:"total-failure",catalogue:"saved",cause:"404 — record not found"});
   assert.equal(show.providerResolution?.status,"partially-matched");
-  assert.equal(f.selection().tmdb.current?.state,"unavailable");
-  assert.equal(f.selection().tmdb.current?.usingId,undefined);
-  const issues = await f.issues() as {id:string;impacts?:string[];lookup?:{impact:string};candidates?:{id:number}[]}[];
-  const root = issues.find(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`);
-  assert.match(root?.lookup?.impact || "",/No reported TMDB series could supply a usable catalogue/);
+  assert.equal(f.selection().tmdb.current?.state,"saved-unavailable");
+  assert.equal(f.selection().tmdb.current?.usingId,11);
+  let issues = await f.issues() as {id:string;impacts?:string[];lookup?:{impact:string};candidates?:{id:number;catalogueRefresh?:{gone?:true}}[]}[];
+  let root = issues.find(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`);
+  assert.match(root?.lookup?.impact || "",/no reported TMDB series has a catalogue from the last 60 days; the newest saved catalogue that is not gone/);
   assert.deepEqual(root?.candidates?.map(candidate=>candidate.id),[11,10],"the entry lists each candidate tried");
   assert.ok(!issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison ran");
+
+  // Every candidate gone: TMDB is gone for the show, and the show is compared with TVDB alone.
+  for (const id of [10,11]) for (let n = 0; n < 14; n++) seriesNotFoundHistory().recordNotFound("tmdb",id,day(50 + n));
+  f.at(day(71));
+  show = await f.run() as Judged;
+  assert.ok(show.warning,"TMDB's failure is reported with the result");
+  assert.deepEqual(missingTmdb(show),[],"no TMDB catalogue is compared");
+  assert.equal(show.missing.length,1,"TVDB's missing episode is reported");
+  assert.deepEqual(show.providerResolution?.providers?.tmdb,{state:"total-failure",catalogue:"gone",cause:"404 — record not found"});
+  assert.equal(show.providerResolution?.status,"partially-matched");
+  assert.equal(f.selection().tmdb.current?.state,"unavailable");
+  issues = await f.issues() as typeof issues;
+  root = issues.find(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`);
+  assert.match(root?.lookup?.impact || "",/Every reported TMDB series \(11, 10\) is a gone provider record/);
+  assert.deepEqual(root?.candidates?.map(candidate=>candidate.catalogueRefresh?.gone),[true,true]);
 });
 
 test("the catalogue in use for a provider with several IDs is downloaded again once older than 20 days", async t => {
@@ -675,8 +690,14 @@ for (const [provider,a,b,members] of [["tmdb",10,11,[member("TMDB",11,1101),memb
     assert.equal(saved.comparisons[f.identity].refresh?.[provider],true,"the refresh obligation is retained");
     assert.deepEqual([saved[provider][String(b)].downloadedAt,saved[provider][String(a)].downloadedAt],[day(2),day(40)],"no download time is renewed");
 
-    show = await offlineRecheck(f,new Date(Date.parse(day(40)) + 60 * DAY + 1).toISOString(),members);
-    assert.equal(id(show),a,"last-good results are kept once A is expired too");
+    // Deliberately changed (SHELFCHECK-120, ADR-0006): once A is expired too, the most recently saved catalogue that is not gone (A) is still compared; only gone copies leave the recheck pending.
+    const bothExpired = new Date(Date.parse(day(40)) + 60 * DAY + 1).toISOString();
+    show = await offlineRecheck(f,bothExpired,members);
+    assert.equal(id(show),a,"saved A, the newest catalogue that is not gone, is compared once it is expired too");
+    assert.ok(!(await f.issues()).some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the recheck compared");
+    for (const series of [a,b]) for (let n = 0; n < 15; n++) seriesNotFoundHistory().recordNotFound(provider,series,day(41 + n));
+    show = await offlineRecheck(f,bothExpired,members);
+    assert.equal(id(show),a,"last-good results are kept once every candidate is gone");
     issues = await f.issues();
     const pending = issues.find(issue=>issue.id === `comparison-inputs:${f.identity}`) as {cause?:string} | undefined;
     assert.match(pending?.cause || "",new RegExp(`No reported ${label} series has a saved catalogue from the last 60 days`));

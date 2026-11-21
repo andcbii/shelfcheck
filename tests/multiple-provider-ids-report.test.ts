@@ -72,3 +72,12 @@ test("no usable catalogue is reported without claiming a comparison", () => {
   assert.equal(summary.using, "None");
   assert.equal(summary.explanation, "No reported TMDB series could supply a usable catalogue; last-good results are kept.");
 });
+
+test("a saved catalogue compared as the last resort, past its 60 days, says so instead of showing an expired deadline", () => {
+  const preferred = selectionSummary("tmdb", scooby({ override: 337142, preferredId: 337142,
+    current: { preferredId: 337142, usingId: 337142, state: "saved-unavailable", selectedAt: "2026-04-01T00:00:00Z", preferredDownloadedAt: "2026-01-01T12:00:00Z", preferredUsableUntil: "2026-03-02T12:00:00Z", preferredFailedAt: "2026-04-01T00:00:00Z", usingDownloadedAt: "2026-01-01T12:00:00Z" } }).tmdb);
+  assert.equal(preferred.explanation, "337142 could not be loaded, and no reported TMDB series has a catalogue from the last 60 days; the newest saved catalogue that is not gone, downloaded 2026-01-01, is in use.");
+  const fallback = selectionSummary("tmdb", scooby({ override: 337142, preferredId: 337142,
+    current: { preferredId: 337142, usingId: 2150, state: "fallback", selectedAt: "2026-04-01T00:00:00Z", preferredDownloadedAt: "2026-01-20T12:00:00Z", preferredUsableUntil: "2026-03-21T12:00:00Z", preferredFailedAt: "2026-04-01T00:00:00Z", usingDownloadedAt: "2026-01-01T12:00:00Z", usingFailedAt: "2026-04-01T00:00:00Z" } }).tmdb);
+  assert.equal(fallback.explanation, "Preferred: 337142 · Currently using: 2150 · No reported TMDB series could be loaded or has a catalogue from the last 60 days; the newest saved catalogue that is not gone, 2150 downloaded 2026-01-01, is in use.");
+});

@@ -624,6 +624,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const obligation = providerRequest.refreshObligation;
   const attempted = (id: number): AttemptedCatalogue => ({ id, preferred: id === preferredId });
   let preferredProvenance: LookupSourceStep[] | undefined;
+  const goneOf = (id: number) => goneRecord(source, provider, id, now);
   const choice: CatalogueChoice<ComparedCatalogue<P[K]>> = await chooseAvailableCatalogue<ComparedCatalogue<P[K]>>({
     preferredId, candidates: providerRequest.candidates, now,
     load: async id => {
@@ -637,6 +638,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
       const saved = source.savedCatalogue(provider, id);
       return saved && { value: comparedFrom(saved, "saved"), downloadedAt: saved.downloadedAt };
     },
+    gone: id => goneOf(id) !== undefined,
   });
   const preferredState: CandidateState = choice.preferredError ? "failed-this-attempt" : "loaded";
   // The preferred series' download time comes from its saved record, even one too incomplete to compare.
@@ -653,9 +655,10 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
     const failure = failureOf(choice.preferredError);
     const candidates = failing ? choice.failures.map(({ id, error }) => {
       const candidateFailure = failureOf(error);
-      return { id, cause: providerLookupContext(candidateFailure.error, { source: [], requested: { provider: PROVIDER_NAME[provider], kind, id }, impact: "" }).cause, catalogueRefresh: catalogueRefreshState(request, candidateFailure, source.savedRecordDownloadedAt(provider, id)) };
+      return { id, cause: providerLookupContext(candidateFailure.error, { source: [], requested: { provider: PROVIDER_NAME[provider], kind, id }, impact: "" }).cause, catalogueRefresh: catalogueRefreshState(request, candidateFailure, source.savedRecordDownloadedAt(provider, id), goneOf(id)) };
     }) : undefined;
-    issues.push({ action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: preferredId, requested: { kind, id: preferredId }, source: providerRequest.lookupSource, impact: unavailablePreferredImpact(provider, use), failedAt: now, downloadedAt: source.savedRecordDownloadedAt(provider, preferredId), candidates }) });
+    const impact = choice.gone ? severalGoneImpact(provider, choice.failures.map(({ id }) => id)) : unavailablePreferredImpact(provider, use);
+    issues.push({ action: "set", issue: catalogueIssue(provider, request, identities, { id: refreshId, failure, seriesId: preferredId, requested: { kind, id: preferredId }, source: providerRequest.lookupSource, impact, failedAt: now, downloadedAt: source.savedRecordDownloadedAt(provider, preferredId), candidates, gone: goneOf(preferredId) }) });
     if (!catalogue) {
       unavailableCause = refreshId;
       warning = failureWarning(failure, `${PROVIDER_NAME[provider]} lookup failed.`);
@@ -668,7 +671,13 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const obligationChange = effectivePatch(obligation, preferredState === "failed-this-attempt" ? combinePatches(satisfied, PREFERRED_REQUIRED) : satisfied);
   // A fallback keeps the preference's provenance.
   const lookupSource = (preferredState === "loaded" && preferredProvenance) || providerRequest.lookupSource;
-  return { identity, lookupSource, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, obligation: obligationChange, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}) };
+  return { identity, lookupSource, ...(catalogue ? { catalogue } : {}), use: { action: "set", use }, obligation: obligationChange, issues, ...(unavailableCause ? { unavailableCause } : {}), ...(warning ? { warning } : {}), ...(choice.gone ? { gone: true as const } : {}) };
+}
+
+/** The impact of a provider whose every candidate is a Gone provider record. */
+function severalGoneImpact(provider: CatalogueProvider, ids: number[]) {
+  const name = PROVIDER_NAME[provider];
+  return `${name} episode coverage could not be verified. Every reported ${name} series (${ids.join(", ")}) is a gone provider record: its series request has answered 404 on ${GONE_RECORD_NOT_FOUND_DAYS} or more days and its saved catalogue is more than 60 days old, so those catalogues are kept but no longer compared. One complete download makes a series usable again.`;
 }
 
 /**
@@ -763,7 +772,11 @@ function chooseAmongSavedCandidates<P extends CataloguePayloads, K extends Catal
   const preferredState = cachedPreferenceState(recorded, preferredId);
   const tried = preferredState !== "not-tried-yet";
   const savedAt = (id: number) => source.savedCatalogue(provider, id)?.downloadedAt;
-  const usingId = chooseSavedCatalogue({ preferredId, candidates: providerRequest.candidates, now: request.resolvedAt, tried, downloadedAt: savedAt });
+  const usingId = chooseSavedCatalogue({ preferredId, candidates: providerRequest.candidates, now: request.resolvedAt, tried, downloadedAt: savedAt, gone: id => goneRecord(source, provider, id, request.resolvedAt) !== undefined });
+  // The last scan had no catalogue for this provider, or judged it gone, so a recheck that finds none compares none either and keeps that status.
+  const recordedStatus = request.previousComparison?.status?.[provider];
+  if (usingId === undefined && tried && recordedStatus?.state === "total-failure" && recordedStatus.catalogue !== "saved")
+    return { identity: preferredId, lookupSource: providerRequest.lookupSource, ...unchangedResolution, issues, ...(recordedStatus.catalogue === "gone" ? { gone: true as const } : {}) };
   if (usingId === undefined) return {
     identity: preferredId, lookupSource: providerRequest.lookupSource, ...unchangedResolution, issues, incomplete: true,
     warning: tried

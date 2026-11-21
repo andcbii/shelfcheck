@@ -11,7 +11,7 @@ const PROVIDER_LABEL: Record<CatalogueProvider, { name: string; other: string }>
 /** Why a provider has no usable catalogue for an Unmatched show. */
 function providerCause(provider: CatalogueProvider, status: ProviderLookupStatus) {
   const { name, other } = PROVIDER_LABEL[provider];
-  if (status.state === "total-failure") return status.cause;
+  if (status.state === "total-failure") return status.catalogue === "gone" ? `Gone provider record: ${status.cause}; its saved catalogue is kept but no longer compared` : status.cause;
   if (status.state === "no-series") return `No ${name} series ID from Plex or ${other}`;
   return status.state === "pending" ? `${name} series not resolved yet` : `${name} catalogue in use`;
 }

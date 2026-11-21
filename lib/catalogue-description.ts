@@ -1,5 +1,6 @@
 import { PROVIDER_NAME, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse, ProviderCatalogueSelection } from "@/lib/catalogue-selection-store";
+import { withinCatalogueAgeLimit } from "@/lib/plex-catalogue-policy";
 
 /** The calendar day of an ISO time, as shown with catalogue download times and deadlines. */
 export const formatDay = (value?: string) => value?.slice(0, 10) || "unknown";
@@ -39,6 +40,14 @@ export function catalogueStatus(selection: ProviderCatalogueSelection): Catalogu
 export function catalogueUseExplanation(provider: CatalogueProvider, use: CatalogueUse): string | undefined {
   const name = PROVIDER_NAME[provider];
   if (use.state === "unavailable" || use.usingId === undefined) return `No reported ${name} series could supply a usable catalogue; last-good results are kept.`;
+  // The last resort (ADR-0006): the saved catalogue in use was already past its 60 days when its load failed.
+  const failedAt = use.state === "fallback" ? use.usingFailedAt : use.state === "saved-unavailable" ? use.preferredFailedAt : undefined;
+  if (failedAt && use.usingDownloadedAt && !withinCatalogueAgeLimit(use.usingDownloadedAt, failedAt)) {
+    const newest = `the newest saved catalogue that is not gone, ${use.state === "fallback" ? `${use.usingId} ` : ""}downloaded ${formatDay(use.usingDownloadedAt)}, is in use.`;
+    return use.state === "fallback"
+      ? `Preferred: ${use.preferredId} · Currently using: ${use.usingId} · No reported ${name} series could be loaded or has a catalogue from the last 60 days; ${newest}`
+      : `${use.usingId} could not be loaded, and no reported ${name} series has a catalogue from the last 60 days; ${newest}`;
+  }
   if (use.state === "fallback") {
     const expired = use.preferredDownloadedAt ? `saved catalogue expired ${formatDay(use.preferredUsableUntil)}` : "no saved catalogue";
     const fallbackSaved = use.usingFailedAt ? ` · ${use.usingId} could not be refreshed either; its saved catalogue, downloaded ${formatDay(use.usingDownloadedAt)}, is in use.` : ".";

@@ -14,6 +14,8 @@ export type CatalogueChoice<T> = {
   fallbackError?: unknown;
   /** Every candidate whose load failed, in the order tried; candidates not tried are absent. */
   failures: { id: number; error: unknown }[];
+  /** Unavailable because every candidate is a Gone provider record. */
+  gone?: true;
 };
 
 /**
@@ -21,7 +23,9 @@ export type CatalogueChoice<T> = {
  * the preferred series makes it unavailable; its saved catalogue is then used while it is within
  * the 60-day limit of its last successful download. Otherwise the lowest remaining candidate that
  * can supply a usable catalogue (loaded, or saved within the same limit) is the fallback; when it
- * is its saved catalogue, the fallback's own load failure is kept too.
+ * is its saved catalogue, the fallback's own load failure is kept too. Only when no candidate
+ * qualifies is the most recently saved catalogue that is not a Gone provider record compared, at
+ * any age (ADR-0006); with none, the provider is gone only when every candidate is gone.
  */
 export async function chooseAvailableCatalogue<T>(input: {
   preferredId: number;
@@ -31,6 +35,8 @@ export async function chooseAvailableCatalogue<T>(input: {
   load: (id: number) => Promise<LoadedCatalogue<T>>;
   /** A series' saved catalogue, if any, regardless of age. */
   saved: (id: number) => LoadedCatalogue<T> | undefined;
+  /** Whether a series is a Gone provider record, whose saved catalogue is never compared. */
+  gone: (id: number) => boolean;
 }): Promise<CatalogueChoice<T>> {
   const usableSaved = (id: number) => {
     const saved = input.saved(id);
@@ -56,7 +62,25 @@ export async function chooseAvailableCatalogue<T>(input: {
       if (fallback) return { state: "fallback", usingId: id, loaded: fallback, preferredError, fallbackError, failures };
     }
   }
-  return { state: "unavailable", preferredError, failures };
+  const candidates = distinctSortedIds(input.candidates);
+  const lastResort = newestSavedNotGone(candidates, id => input.saved(id)?.downloadedAt, input.gone);
+  if (lastResort !== undefined) {
+    const loaded = input.saved(lastResort)!;
+    if (lastResort === input.preferredId) return { state: "saved-unavailable", usingId: lastResort, loaded, preferredError, failures };
+    const fallbackError = failures.find(failure => failure.id === lastResort)?.error;
+    return { state: "fallback", usingId: lastResort, loaded, preferredError, fallbackError, failures };
+  }
+  return { state: "unavailable", preferredError, failures, ...(candidates.every(input.gone) ? { gone: true as const } : {}) };
+}
+
+/** The last resort: the candidate with the most recently saved catalogue that is not gone, at any age; the lowest ID on a tie. */
+function newestSavedNotGone(candidates: number[], downloadedAt: (id: number) => string | undefined, gone: (id: number) => boolean): number | undefined {
+  let newest: { id: number; at: number } | undefined;
+  for (const id of candidates) {
+    const at = Date.parse(downloadedAt(id) || "");
+    if (Number.isFinite(at) && !gone(id) && (!newest || at > newest.at)) newest = { id, at };
+  }
+  return newest?.id;
 }
 
 /** The catalogue a provider with several Plex IDs is using, with the preferred series' 60-day deadline. */
@@ -84,12 +108,15 @@ export function failedSingleIdUse(preferredId: number, savedDownloadedAt: string
  * The offline counterpart of `chooseAvailableCatalogue` for a cached recheck, which loads nothing.
  * The preferred series is compared when its saved catalogue is within 60 days of `now`. Once a scan
  * has tried this preference (`tried`), the lowest remaining candidate with such a catalogue is the
- * fallback; a preference no scan has tried yet is never replaced by a fallback.
+ * fallback, and with none, the most recently saved catalogue that is not gone, at any age; a
+ * preference no scan has tried yet is never replaced by a fallback.
  */
-export function chooseSavedCatalogue(input: { preferredId: number; candidates: number[]; now: string; tried: boolean; downloadedAt: (id: number) => string | undefined }): number | undefined {
+export function chooseSavedCatalogue(input: { preferredId: number; candidates: number[]; now: string; tried: boolean; downloadedAt: (id: number) => string | undefined; gone: (id: number) => boolean }): number | undefined {
   const usable = (id: number) => withinCatalogueAgeLimit(input.downloadedAt(id), input.now);
   if (usable(input.preferredId)) return input.preferredId;
-  return input.tried ? distinctSortedIds(input.candidates).find(id => id !== input.preferredId && usable(id)) : undefined;
+  if (!input.tried) return undefined;
+  const candidates = distinctSortedIds(input.candidates);
+  return candidates.find(id => id !== input.preferredId && usable(id)) ?? newestSavedNotGone(candidates, input.downloadedAt, input.gone);
 }
 
 /**

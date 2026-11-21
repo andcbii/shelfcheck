@@ -1,6 +1,10 @@
 export const CATALOGUE_AGE_LIMIT = 60 * 86400_000;
+/** `CATALOGUE_AGE_LIMIT` as report text: "60 days". */
+export const CATALOGUE_AGE_LIMIT_TEXT = `${CATALOGUE_AGE_LIMIT / 86400_000} days`;
 /** The in-use catalogue of a provider with several Plex IDs is downloaded again once older than this. */
 export const MULTIPLE_ID_REFRESH_AGE = 20 * 86400_000;
+/** A series ID is a Gone provider record once its series request has answered 404 on this many UTC days (ADR-0006). */
+export const GONE_RECORD_NOT_FOUND_DAYS = 15;
 
 /**
  * Whether a saved catalogue may still serve as current comparison input when its series could
@@ -9,6 +13,17 @@ export const MULTIPLE_ID_REFRESH_AGE = 20 * 86400_000;
 export function withinCatalogueAgeLimit(downloadedAt: string | undefined, now: string): boolean {
   const downloaded = Date.parse(downloadedAt || "");
   return Number.isFinite(downloaded) && Date.parse(now) - downloaded <= CATALOGUE_AGE_LIMIT;
+}
+
+/**
+ * Whether a series ID is a Gone provider record (ADR-0006): its series request has answered 404 on
+ * at least 15 counted UTC days and its saved catalogue is more than 60 days old since its last
+ * complete download. A series never downloaded has no catalogue age and is never gone. The rule is
+ * the same for one Plex ID, a derived series, and each of several candidates.
+ */
+export function goneProviderRecord(input: { seriesNotFoundDays: number; downloadedAt: string | undefined; now: string }): boolean {
+  if (!Number.isFinite(Date.parse(input.downloadedAt || ""))) return false;
+  return input.seriesNotFoundDays >= GONE_RECORD_NOT_FOUND_DAYS && !withinCatalogueAgeLimit(input.downloadedAt, input.now);
 }
 
 /** The last moment a saved catalogue downloaded at `downloadedAt` may still be compared (exactly 60 days later). */

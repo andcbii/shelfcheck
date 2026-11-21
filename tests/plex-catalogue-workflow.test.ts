@@ -10,6 +10,8 @@ const scan = await import("../app/api/plex/scan/route");
 const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 hook.deregister();
+// These shows have no TVDB ID from Plex or TMDB: since SHELFCHECK-27 (ADR-0006) each has a TVDB missing-ID Scan Issues entry, which these checks are not about.
+const withoutMissingIds = (issues: {lookup?:{failureKind?:string}}[]) => issues.filter(issue=>issue.lookup?.failureKind !== "missing-id");
 
 test("full scans reuse catalogues while comparing current holdings across database reloads", async t => {
   const dir = mkdtempSync(path.join(tmpdir(),"catalogues-"));
@@ -170,8 +172,9 @@ test("full scans reuse catalogues while comparing current holdings across databa
   malformedTmdb = true;
   await run();
   const blocked = (await (await scan.GET()).json()).coverage.issues;
-  assert.equal(blocked.length,1,"failed TMDB catalogue and its blocked comparison are one cause");
-  assert.match(blocked[0].impacts.join(" "),/comparison could not be checked/);
+  // Deliberately changed (SHELFCHECK-27): the failed TMDB catalogue no longer blocks TVDB's comparison.
+  assert.equal(blocked.length,1,"the failed TMDB catalogue is the one cause");
+  assert.equal(blocked[0].impacts,undefined,"no comparison is blocked: the show is compared with TVDB");
   assert.equal(requests.filter(p=>p === "/v4/series/20/episodes/default").length,2);
   malformedTmdb = false;
   requests.length = 0;
@@ -310,8 +313,8 @@ test("explicit zero-sized Plex collections withdraw previous ownership while inc
   assert.equal(empty.scan.status,"completed",empty.scan.error);
   assert.equal(empty.report.shows[0].missing.length,1,"a valid empty collection removes previous ownership");
   assert.equal(empty.report.shows[0].missing[0].tmdbEpisodeId,100);
-  assert.deepEqual(empty.coverage.issues,[]);
-  assert.equal(empty.coverage.pending,0);
+  assert.deepEqual(withoutMissingIds(empty.coverage.issues),[]);
+  assert.equal(empty.coverage.pending,empty.coverage.issues.length ? 1 : 0,"pending reflects only the missing-ID entries");
   responses.clear();
   for (const endpoint of ["/library/sections/1/all","/library/sections"]) {
     assert.deepEqual((await run()).report.shows[0].missing,[]);
@@ -319,8 +322,8 @@ test("explicit zero-sized Plex collections withdraw previous ownership while inc
     const emptyLibrary = await run();
     assert.equal(emptyLibrary.scan.status,"completed",emptyLibrary.scan.error);
     assert.deepEqual(emptyLibrary.report.shows,[],"an explicitly empty library must remove its former shows");
-    assert.deepEqual(emptyLibrary.coverage.issues,[]);
-    assert.equal(emptyLibrary.coverage.pending,0);
+    assert.deepEqual(withoutMissingIds(emptyLibrary.coverage.issues),[]);
+    assert.equal(emptyLibrary.coverage.pending,emptyLibrary.coverage.issues.length ? 1 : 0,"pending reflects only the missing-ID entries");
     responses.clear();
   }
   for (const endpoint of ["/library/sections","/library/sections/1/all","/library/metadata/1/allLeaves","/library/metadata/1"]) {
@@ -333,7 +336,7 @@ test("explicit zero-sized Plex collections withdraw previous ownership while inc
     for (const body of incompleteBodies) {
       const restored = await run();
       assert.equal(restored.scan.status,"completed",restored.scan.error);
-      assert.deepEqual(restored.coverage.issues,[]);
+      assert.deepEqual(withoutMissingIds(restored.coverage.issues),[]);
       responses.set(endpoint,body);
       const unavailable = await run();
       const message = `${endpoint}: ${JSON.stringify(body)}`;

@@ -1,41 +1,62 @@
-# Shelfcheck 2.6.2
+# Shelfcheck 2.7.0
 
-Shelfcheck 2.6.2 runs one scan at a time and makes Trakt scans recover from
-interruptions the same way Plex scans do.
+Shelfcheck 2.7.0 checks TMDB and TVDB separately for each show, stops
+comparing shows a provider has deleted, stops downloading fallback catalogues
+again on every scan, and makes Trakt requests steadier in both scans.
 
-## One scan at a time
+## Plex scans and reports
 
-- Only one scan runs at a time, Trakt or Plex, whether it checks the whole
-  library or a single show. While a scan runs, the scan buttons on the other
-  page are locked and a message says which scan is running. They unlock when
-  it finishes.
+- A show is compared with whichever of TMDB and TVDB can describe it. One
+  provider failing no longer hides the other provider's missing episodes or
+  leaves the show with old results.
+- A show missing one provider is listed as partially matched, with a Scan
+  Issues entry for that provider giving the cause. Unmatched Shows lists only
+  shows that no provider can describe, each with every provider's cause.
+- Scan Issues no longer repeats an unmatched show's own entries, and every
+  Scan Issues count matches the entries shown.
+- Scan Issues entries for a catalogue that could not be refreshed show how old
+  the catalogue in use is and, when TMDB or TVDB reported the show as not
+  found, on how many separate days.
+- A show reported as not found on 15 separate days whose saved catalogue is
+  more than 60 days old is treated as gone from that provider: its catalogue
+  is kept but no longer compared. Outages, rate limits and sign-in failures
+  never count, and one complete download makes the show usable again.
+- A show whose preferred catalogue cannot be loaded no longer downloads its
+  fallback catalogue again on every scan; the fallback is refreshed after 20
+  days, when TMDB or TVDB flags it changed, or when it has no saved copy.
+- Rechecks after a Manual Match change now work for partially matched shows.
 
-## Plex scans
+## Trakt and providers
 
-- If a Plex scan fails, or Plex asks Shelfcheck to slow down, the shows
-  checked so far are saved straight away, so the next scan continues from
-  there.
-- If you change a Manual Match while a Plex scan is running, the scan now ends
-  with a clear message asking you to start a new Plex scan, instead of
-  appearing to run until it is reported as interrupted.
+- A Trakt login that expires during a Plex scan is refreshed and the scan
+  carries on; a login that cannot be recovered is reported once with the real
+  cause.
+- Both scans share one Trakt client with one token refresh and pacing from
+  Trakt's own rate-limit header. Trakt requests have 30 seconds per attempt.
+- A provider that asks Shelfcheck to wait more than 15 minutes is skipped for
+  that scan instead of being waited out.
+- The Trakt "Airing grace period" setting is now called Air-date delay, as on
+  the Plex page, and the Trakt page works out which episodes have aired from
+  your browser's date when it draws.
 
-## Trakt scans
+## First scan after upgrading
 
-- A running Trakt scan now checks in every 15 seconds. It is reported as
-  interrupted only after more than 90 seconds without checking in, as Plex
-  scans are.
-- When Trakt asks Shelfcheck to slow down, the pause and when it ends now stay
-  on screen until the scan continues.
-- The progress a Trakt scan saves part-way through is used for 6 hours, and
-  only while the airing grace period is unchanged. A failed or paused scan
-  saves the shows checked so far.
-- Checking a single show no longer uses or saves part-way progress, and no
-  longer throws away the progress of an unfinished full scan.
-- The first Trakt scan after upgrading starts from your last completed results
-  instead of any progress saved by an earlier version, so it is still quick.
+- Shelfcheck keeps a copy of its database as
+  `shelfcheck-pre-migration-backup.db` before upgrading the database layout.
+- The saved Trakt and Plex results, Resume points and scan status are cleared
+  once, so the next Trakt scan and the next Plex scan are full scans.
+  Settings, Ignore lists, Manual Matches, catalogue choices, Report Missing
+  flags and downloaded provider catalogues are kept.
+- Shows that used to wait for both providers are compared with whichever one
+  works, so expect new missing-episode results and new partially matched
+  entries in Scan Issues, and a shorter Unmatched Shows list.
+- Counting of not-found days starts at the upgrade, so no show can be treated
+  as gone for at least 15 days.
 
 ## Upgrading
 
-Use `andcbii/shelfcheck:2.6.2` or `andcbii/shelfcheck:latest` and retain your
+Use `andcbii/shelfcheck:2.7.0` or `andcbii/shelfcheck:latest` and retain your
 existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
-No configuration or database reset is required.
+An older Shelfcheck refuses to open a database 2.7.0 has upgraded: to roll
+back, stop Shelfcheck and restore `shelfcheck-pre-migration-backup.db` as the
+database before starting the older version.

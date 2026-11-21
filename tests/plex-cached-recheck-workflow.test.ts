@@ -11,6 +11,8 @@ const scan=await import("../app/api/plex/scan/route");
 const config=await import("../lib/server-config");
 const sqlite=await import("../lib/sqlite");
 hook.deregister();
+// These shows have no TVDB ID from Plex or TMDB: since SHELFCHECK-27 (ADR-0006) each has a TVDB missing-ID Scan Issues entry, which these checks are not about.
+const withoutMissingIds = (issues: {lookup?:{failureKind?:string}}[]) => issues.filter(issue=>issue.lookup?.failureKind !== "missing-id");
 
 test("cached Manual Match edits reconcile old and new shows without HTTP, preserve unrelated results, and refresh only affected catalogues after restart",async t=>{
   const dir=mkdtempSync(path.join(tmpdir(),"cached-recheck-"));
@@ -85,8 +87,8 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   assert.equal(requests.length,beforeConcurrentDelete);
   assert.deepEqual(current.report.shows.find((show:{tmdbId:number})=>show.tmdbId===12),unrelated);
   assert.equal(current.report.lastScan,initial.report.lastScan);
-  assert.deepEqual(current.coverage.issues,[]);
-  assert.equal(current.coverage.pending,0);
+  assert.deepEqual(withoutMissingIds(current.coverage.issues),[]);
+  assert.equal(current.coverage.pending,current.coverage.issues.length ? 1 : 0,"pending reflects only the missing-ID entries");
   edited=(await (await api.POST(request({action:"save",preview:replacement}))).json()).mapping;
   secondMapping=(await (await api.POST(request({action:"save",preview:secondPreview}))).json()).mapping;
   const beforeDelete=requests.length;

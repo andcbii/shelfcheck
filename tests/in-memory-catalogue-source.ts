@@ -37,6 +37,8 @@ export function inMemoryCatalogueSource(options: {
   targeted?: boolean;
   /** Saved records too incomplete to compare: series ID to original download time. */
   unusable?: Partial<Record<CatalogueProvider, Record<number, string>>>;
+  /** Each series' counted 404 days; an unlisted series has none. */
+  seriesNotFoundDays?: Partial<Record<CatalogueProvider, Record<number, number>>>;
   /** Requested series the provider answers as another series: requested ID to the ID its saved copy and downloads report. */
   reports?: Partial<Record<CatalogueProvider, Record<number, number>>>;
 }) {
@@ -61,7 +63,7 @@ export function inMemoryCatalogueSource(options: {
       if (reuse) return { outcome: "reused", id: reported(provider, id), catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
       const failure = options.failing?.[provider]?.[id];
       if (failure) return { outcome: "failed", ...failure };
-      if (options.noSeries?.[provider]?.includes(id)) return { outcome: "no-series" };
+      if (options.noSeries?.[provider]?.includes(id)) return { outcome: "empty-show" };
       const at = options.downloadAt || options.now;
       saved[provider].set(id, at);
       return { outcome: "downloaded", id: reported(provider, id), catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };
@@ -72,6 +74,9 @@ export function inMemoryCatalogueSource(options: {
     },
     savedRecordDownloadedAt(provider, id) {
       return saved[provider].get(id) ?? options.unusable?.[provider]?.[id];
+    },
+    seriesNotFoundDays(provider, id) {
+      return options.seriesNotFoundDays?.[provider]?.[id] ?? 0;
     },
     async tmdbSeriesForTvdb(tvdbId, settings) {
       associationRequests.push({ tvdbId, mandatory: settings.mandatory });

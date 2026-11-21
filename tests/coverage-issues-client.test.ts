@@ -46,3 +46,20 @@ test("the report refreshes shared causes and never presents loading failure as v
  current=[];await act(async()=>browser.dispatchEvent(new browser.Event("focus")));assert.match(container.textContent!,/No current Scan Issues/);
  assert.ok(requests.every(request=>request==="GET /api/plex/scan"),"reading a report never retries provider work or scans");
 });
+
+test("polled Scan Issues hide an Unmatched show's own entries and count only what is shown",async t=>{
+ const browser=new Window({url:"http://localhost/reports/coverage-issues"});const old=new Map<string,PropertyDescriptor|undefined>();
+ const signIn:CoverageIssue={id:"provider-authentication:TVDB",scope:"library",provider:"TVDB",operation:"authentication",cause:"TVDB sign-in failed",action:"Check TVDB credentials.",impacts:["Lost: TVDB catalogue could not be refreshed.","Found: TVDB catalogue could not be refreshed."]};
+ const own:CoverageIssue={id:"catalogue-refresh:TMDB:ratingKey:1",scope:"show",provider:"TMDB",operation:"catalogue-refresh",show:{ratingKey:"ratingKey:1",title:"Lost"},cause:"404 — record not found",action:"Check the Plex provider ID reference."};
+ const partial:CoverageIssue={...own,id:"catalogue-refresh:TMDB:ratingKey:2",show:{ratingKey:"ratingKey:2",title:"Found"},cause:"503 — TMDB request failed"};
+ const shows=[{ratingKey:"ratingKey:1",providerResolution:{tmdb:false,tvdb:false,status:"unmatched"}},{ratingKey:"ratingKey:2",providerResolution:{tmdb:false,tvdb:true,status:"partially-matched"}}];
+ for(const [key,value] of Object.entries({window:browser,self:browser,document:browser.document,HTMLElement:browser.HTMLElement,IS_REACT_ACT_ENVIRONMENT:true,fetch:async()=>Response.json({report:{shows},coverage:{issues:[signIn,own,partial]}})})){old.set(key,Object.getOwnPropertyDescriptor(globalThis,key));Object.defineProperty(globalThis,key,{configurable:true,writable:true,value});}
+ const container=document.createElement("div");const root=createRoot(container);
+ t.after(async()=>{await act(async()=>root.unmount());await browser.happyDOM.close();for(const [key,value]of old){if(value)Object.defineProperty(globalThis,key,value);else Reflect.deleteProperty(globalThis,key);}});
+ await act(async()=>root.render(createElement(CoverageIssuesWorkspace,{initialIssues:[],autoCount:0,unmatchedCount:1,providerCount:0,manualCount:0})));
+ await act(async()=>browser.dispatchEvent(new browser.Event("focus")));
+ assert.match(container.textContent!,/2 current issues/);
+ assert.equal(container.querySelector('nav a[href="/reports/coverage-issues"] small')?.textContent,"2");
+ assert.ok(!container.textContent!.includes("404 — record not found"),"the Unmatched show's own entry is hidden");
+ for(const value of ["TVDB sign-in failed","Lost: TVDB catalogue could not be refreshed.","Found: TVDB catalogue could not be refreshed.","503 — TMDB request failed"]) assert.ok(container.textContent!.includes(value),value);
+});

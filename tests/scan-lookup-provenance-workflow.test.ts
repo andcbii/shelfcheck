@@ -57,8 +57,9 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   };
   const first = await run();
   const issue = first.coverage.issues.find((i:{id:string})=>i.id==="catalogue-refresh:TVDB:ratingKey:1");
-  assert.equal(first.coverage.issues.length,1,"lookup and its blocked comparison count as one cause");
-  assert.match(issue.impacts.join(" "),/comparison.*could not be checked/i);
+  // Deliberately changed (SHELFCHECK-27): TVDB's failure no longer blocks TMDB's comparison, so no comparison issue depends on it.
+  assert.equal(first.coverage.issues.length,1,"the lookup is the one cause");
+  assert.equal(issue.impacts,undefined);
   assert.equal(issue.category,"Provider Lookup");
   assert.deepEqual(issue.lookup.source,[{provider:"Plex",kind:"TMDB show",id:300594},{provider:"TMDB",kind:"external TVDB ID",id:484205,cached:false}]);
   assert.deepEqual(issue.lookup.requested,{provider:"TVDB",kind:"series",id:484205});

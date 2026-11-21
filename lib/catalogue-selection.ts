@@ -1,8 +1,16 @@
 export type CatalogueProvider = "tmdb" | "tvdb";
 export const PROVIDERS: readonly CatalogueProvider[] = ["tmdb", "tvdb"];
 export const PROVIDER_NAME: Record<CatalogueProvider, "TMDB" | "TVDB"> = { tmdb: "TMDB", tvdb: "TVDB" };
+/** The provider a show's series can be found through when Plex reports none for this one. */
+export const OTHER_PROVIDER: Record<CatalogueProvider, CatalogueProvider> = { tmdb: "tvdb", tvdb: "tmdb" };
 /** The field a show's series ID is kept under for each provider, in saved comparisons and Coverage Issues. */
 export const PROVIDER_ID_FIELD: Record<CatalogueProvider, "tmdbId" | "tvdbId"> = { tmdb: "tmdbId", tvdb: "tvdbId" };
+
+/** A show's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs for one provider. */
+export function catalogueIssueIds(provider: CatalogueProvider, ratingKey: string) {
+  const name = PROVIDER_NAME[provider];
+  return { refreshId: `catalogue-refresh:${name}:${ratingKey}`, fallbackId: `catalogue-fallback-refresh:${name}:${ratingKey}` };
+}
 
 /** Distinct series IDs in ascending numeric order. */
 export function distinctSortedIds(ids: Iterable<number>): number[] {
@@ -75,9 +83,11 @@ export function selectComparisonCatalogue(input: CatalogueSelectionInput): Catal
 /**
  * How a scan is using a provider's comparison catalogue:
  * - `preferred`: the preferred series (override or automatic choice) loaded or was reused under the freshness policies.
- * - `saved-unavailable`: the preferred series could not be loaded; its saved catalogue, within the 60-day limit, is compared.
- * - `fallback`: the preferred series could not be loaded and has no usable saved catalogue; another Plex candidate is compared.
- * - `unavailable`: no candidate could supply a usable catalogue; last-good results are kept.
+ * - `saved-unavailable`: the preferred series could not be loaded; its saved catalogue, within the 60-day limit, is compared,
+ *   or at any age as the last resort when no candidate qualifies (ADR-0006).
+ * - `fallback`: the preferred series could not be loaded and has no usable saved catalogue; another Plex candidate is compared,
+ *   or, as the last resort, the most recently saved catalogue that is not gone.
+ * - `unavailable`: no candidate could supply a usable catalogue, so the provider is not compared for the show.
  * - `derived`: Plex reported no ID for this provider; the series came from the other provider's catalogue in use.
  */
 export type CatalogueUseState = "preferred" | "saved-unavailable" | "fallback" | "unavailable" | "derived";

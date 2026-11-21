@@ -41,7 +41,10 @@ async function fixture(t: TestContext) {
   const plex = {tmdb:[10] as number[], tvdb:[1] as number[]};
   /** A second, single-ID show, when set. */
   let second: {tmdb:number;tvdb:number} | undefined;
-  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
+  /** Plex's per-show metadata answer: complete, without provider IDs (an incomplete observation), or a failed request. */
+  let metadata: "complete" | "no-guids" | "fail" = "complete";
+  /** TMDB series; `reports` is the ID TMDB answers a request for that series with, when it differs. */
+  const tmdb: Record<number,{episodes:number;tvdb?:number|null;fail?:boolean;noShow?:boolean;seasonFail?:boolean;reports?:number}> = {10:{episodes:2,tvdb:1},11:{episodes:3,tvdb:1},12:{episodes:1,tvdb:2}};
   const tvdb: Record<number,{episodes:number;fail?:boolean}> = {1:{episodes:1},2:{episodes:1},3:{episodes:1}};
   let tmdbChanges: number[] = [];
   /** When set, TVDB sign-in is refused. */
@@ -64,7 +67,8 @@ async function fixture(t: TestContext) {
       if(u.pathname === "/library/sections/1/all") return Response.json({MediaContainer:{Metadata:shows}});
       if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[{ratingKey:"ep",parentIndex:1,index:1,Guid:[]}]}});
       const key = u.pathname.match(/^\/library\/metadata\/(\d+)$/)?.[1];
-      return Response.json({MediaContainer:{Metadata:shows.filter(show=>show.ratingKey === key)}});
+      if(metadata === "fail") return Response.json({},{status:404});
+      return Response.json({MediaContainer:{Metadata:shows.filter(show=>show.ratingKey === key).map(show=>metadata === "no-guids" ? {...show,Guid:undefined} : show)}});
     }
     if(u.pathname === "/v4/login") return tvdbLoginFails ? Response.json({},{status:401}) : Response.json({data:{token:"test"}});
     if(u.pathname === "/3/tv/changes") return Response.json({results:tmdbChanges.map(id=>({id})),total_pages:1});
@@ -74,7 +78,8 @@ async function fixture(t: TestContext) {
       const id = Number(tmdbShow[1]), series = tmdb[id];
       if(series.fail) return Response.json({status_message:"not found"},{status:404});
       if(series.noShow && !tmdbShow[2]) return Response.json(null);
-      if(!tmdbShow[2]) return Response.json({id,name:`TMDB ${id}`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
+      if(series.seasonFail && tmdbShow[2]) return Response.json({status_message:"not found"},{status:404});
+      if(!tmdbShow[2]) return Response.json({id:series.reports ?? id,name:`TMDB ${id}`,seasons:[{season_number:1}],external_ids:{tvdb_id:series.tvdb ?? null}});
       return Response.json({episodes:Array.from({length:series.episodes},(_,n)=>({id:id*100+n+1,season_number:1,episode_number:n+1,name:`Episode ${n+1}`,air_date:"2020-01-01"}))});
     }
     const tvdbSeries = u.pathname.match(/^\/v4\/series\/(\d+)(\/episodes\/default)?$/);
@@ -102,6 +107,7 @@ async function fixture(t: TestContext) {
     plex, tmdb, tvdb, find, timeline, identity, requests, heldTvdb,
     setSecond(value: typeof second) { second = value; },
     failTvdbLogin(value: boolean) { tvdbLoginFails = value; },
+    setMetadata(value: typeof metadata) { metadata = value; },
     changes(ids: number[]) { tmdbChanges = ids; },
     at(value: string) { t.mock.timers.setTime(Date.parse(value)); },
     restart() { global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase; },
@@ -616,6 +622,33 @@ for (const [writer,write] of [
   });
 }
 
+test("after a single-show Clear cache, a failing preferred series still downloads its young fallback until the preferred series downloads again", async t => {
+  const f = await fixture(t);
+  const show = await youngFallbackA(f);
+  // Open safeguard work: a specific requirement for an uncompared catalogue (12) the clear must keep.
+  show.clearObligation();
+  f.at(day(64));
+  plexScan.clearPlexScanCache(f.identity);
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[12]},everyAttempted:{tmdb:true,tvdb:true}},"the clear adds every-attempted without replacing other parts");
+  assert.ok(catalogues.readPlexInputs().tmdb["10"],"the shared catalogue A is not deleted");
+
+  for (const n of [65,66]) {
+    f.at(day(n)); const result = await f.run();
+    assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
+    assert.equal(f.tmdbDownloads(10),1,`young A is downloaded on day ${n}`);
+    assert.equal(result.tmdbId,10);
+    assert.equal(f.selection().tmdb.current?.usingDownloadedAt,day(n));
+    assert.deepEqual(show.refresh(),{tmdb:true,specificIds:{tmdb:[12]},everyAttempted:{tmdb:true}},"a fallback download satisfies nothing; TVDB's single catalogue download satisfies TVDB");
+  }
+
+  f.tmdb[11].fail = false;
+  f.at(day(67)); const result = await f.run();
+  assert.equal(result.tmdbId,11,"B recovers");
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[12]}},"B's download satisfies the preferred and every-attempted requirements, and keeps the safeguard's");
+  f.at(day(68)); await f.run();
+  assert.equal(f.tmdbDownloads(11),0,"young B is reused once every requirement it satisfies is closed");
+});
+
 test("a fallback in use is downloaded again once older than 20 days while the preferred requirement is open", async t => {
   const f = await fixture(t);
   const show = await youngFallbackA(f);
@@ -639,6 +672,191 @@ test("an obligation saved before requirements existed reads as preferred-only, s
   assert.ok(f.requests.includes("/3/tv/11"),"the flag still requires preferred B");
   assert.equal(f.tmdbDownloads(10),0,"the accepted loss: A, changed but downloaded earlier today, is reused instead of downloaded");
   assert.deepEqual(show.refresh(),{tmdb:true});
+});
+
+/**
+ * With B's preferred requirement open, day 71's first scan downloads A (older than 20 days), and TMDB
+ * then reports A changed the same UTC day, so scans two to four reuse it. The fifth completed scan's
+ * safeguard targets A, the compared catalogue.
+ */
+async function safeguardedFallbackA(f: Awaited<ReturnType<typeof fixture>>) {
+  const show = await youngFallbackA(f);
+  f.at(day(71)); await f.run();
+  assert.equal(f.tmdbDownloads(10),1);
+  f.changes([10]);
+  for (const hour of [13,14,15]) {
+    f.at(day(71).replace("12:00",`${hour}:00`)); await f.run();
+    assert.equal(f.tmdbDownloads(10),0,"A, changed but downloaded earlier today, is reused under TMDB's same-day reuse");
+  }
+  assert.deepEqual(show.refresh(),{tmdb:true},"B's preferred requirement is the open work");
+  f.at(day(71).replace("12:00","16:00"));
+  return show;
+}
+
+test("a fifth-scan safeguard forces the fallback downloaded earlier the same UTC day while preferred work is open, satisfying only its own requirement", async t => {
+  const f = await fixture(t);
+  const show = await safeguardedFallbackA(f);
+  await f.run();
+  assert.ok(f.requests.includes("/3/tv/11"),"B is retried");
+  assert.equal(f.tmdbDownloads(10),1,"the safeguard downloads A again");
+  f.restart();
+  assert.deepEqual(show.refresh(),{tmdb:true},"after a restart only B's requirement remains");
+
+  f.at(day(71).replace("12:00","17:00")); await f.run();
+  assert.equal(f.tmdbDownloads(10),0,"the next ordinary scan reuses A");
+  assert.ok(f.requests.includes("/3/tv/11"),"B is still retried");
+  assert.deepEqual(show.refresh(),{tmdb:true});
+});
+
+test("a failed or incomplete safeguarded fallback download keeps its requirement until a later download succeeds", async t => {
+  const f = await fixture(t);
+  const show = await safeguardedFallbackA(f);
+  f.tmdb[10].seasonFail = true;
+  await f.run();
+  assert.ok(f.requests.includes("/3/tv/10"),"A's series is fetched, but its episodes are not");
+  assert.deepEqual(show.refresh(),{tmdb:true,specificIds:{tmdb:[10]}},"an incomplete download satisfies nothing");
+  f.tmdb[10].seasonFail = false;
+  f.tmdb[10].fail = true;
+  f.at(day(71).replace("12:00","16:30")); await f.run();
+  assert.equal(f.tmdbDownloads(10),0,"A's download fails");
+  assert.deepEqual(show.refresh(),{tmdb:true,specificIds:{tmdb:[10]}},"the safeguard's requirement for A is kept beside B's");
+
+  f.tmdb[10].fail = false;
+  f.at(day(71).replace("12:00","17:00")); await f.run();
+  assert.equal(f.tmdbDownloads(10),1,"the next ordinary scan downloads A, though it was downloaded earlier today");
+  assert.deepEqual(show.refresh(),{tmdb:true},"only B's requirement remains");
+});
+
+test("preferred, specific and every-attempted requirements coexist, a cached recheck consumes none, and each provider's downloads satisfy only their own", async t => {
+  const f = await fixture(t);
+  const show = await youngFallbackA(f);
+  const all = {tmdb:true,specificIds:{tmdb:[10]},everyAttempted:{tvdb:true as const}};
+  catalogues.savePlexComparison(f.identity,{...catalogues.readPlexInputs().comparisons[f.identity],refresh:all});
+  f.at(day(64)); f.requests.length = 0;
+  await plexScan.requestCatalogueRecheck(f.identity,"tmdb");
+  assert.equal(f.requests.length,0,"the cached recheck makes no request");
+  assert.deepEqual(show.refresh(),all,"and consumes no requirement");
+
+  await f.run();
+  assert.ok(f.requests.includes("/3/tv/11"),"B, still failing, is retried");
+  assert.deepEqual([f.tmdbDownloads(10),f.tvdbDownloads(1)],[1,1],"A's specific requirement forces young A; TVDB's every-attempted requirement forces TVDB 1");
+  assert.deepEqual(show.refresh(),{tmdb:true},"A's download satisfies only its own requirement, TVDB's only TVDB's");
+
+  f.tmdb[11].fail = false;
+  f.at(day(65)); await f.run();
+  assert.deepEqual([f.tmdbDownloads(11),f.tmdbDownloads(10),f.tvdbDownloads(1)],[1,0,0]);
+  assert.deepEqual(show.refresh(),{},"B's download satisfies the preferred requirement");
+});
+
+const catalogueIssueIds = (identity: string) => ["TMDB","TVDB"].flatMap(name => [`catalogue-refresh:${name}:${identity}`,`catalogue-fallback-refresh:${name}:${identity}`]);
+
+test("a safeguard requirement on hold forces nothing and survives restarts and incomplete or failed Plex observations, until a complete one removes its candidate", async t => {
+  const f = await fixture(t);
+  const show = await safeguardedFallbackA(f);
+  f.tmdb[10].fail = true;
+  await f.run();
+  assert.deepEqual(show.refresh(),{tmdb:true,specificIds:{tmdb:[10]}},"the safeguard's download of A failed");
+
+  f.tmdb[10].fail = false; f.tmdb[11].fail = false;
+  f.at(day(71).replace("12:00","17:00"));
+  let result = await f.run();
+  assert.equal(result.tmdbId,11,"B recovers, so A is no longer compared");
+  assert.equal(f.tmdbDownloads(10),0,"A, not compared, is not downloaded");
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[10]}},"A's requirement is on hold");
+  assert.equal(result.warning,undefined,"the comparison is healthy");
+  const active = async () => (await f.issues()).map(issue=>issue.id).filter(id=>[...catalogueIssueIds(f.identity),`comparison-inputs:${f.identity}`].includes(id));
+  assert.deepEqual(await active(),[],"a requirement on hold is no active failure");
+
+  f.restart();
+  f.at(day(71).replace("12:00","18:00"));
+  result = await f.run();
+  assert.deepEqual([f.tmdbDownloads(10),f.tmdbDownloads(11),f.tvdbDownloads(1)],[0,0,0],"on hold, it forces no catalogue");
+  assert.equal(result.warning,undefined);
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[10]}},"it is kept across a restart");
+
+  f.plex.tmdb = [11];
+  for (const [answer,label] of [["no-guids","an incomplete"],["fail","a failed"]] as const) {
+    f.setMetadata(answer); await f.run();
+    assert.deepEqual(show.refresh(),{specificIds:{tmdb:[10]}},`${label} observation without A is no removal`);
+  }
+  f.setMetadata("complete");
+  result = await f.run();
+  assert.equal(result.tmdbId,11);
+  assert.deepEqual(show.refresh(),{},"a complete observation removing A from the candidates drops its requirement");
+  assert.equal(f.tmdbDownloads(10),0);
+});
+
+test("a complete observation removing a candidate also drops a safeguard requirement naming the ID that candidate's catalogue reported", async t => {
+  const f = await fixture(t);
+  // TMDB answers a request for series 13 with series 14's ID.
+  f.tmdb[13] = {episodes:1,tvdb:1,reports:14}; f.tmdb[14] = {episodes:1,tvdb:1};
+  f.plex.tmdb = [10,13];
+  await f.run();
+  selections.saveCatalogueOverride(f.identity,"tmdb",13);
+  f.at(day(2));
+  let result = await f.run();
+  assert.equal(result.tmdbId,14,"candidate 13 is compared under the ID its catalogue reports");
+  // What the fifth-scan safeguard writes for that comparison: the reported ID.
+  const comparison = catalogues.readPlexInputs().comparisons[f.identity];
+  catalogues.savePlexComparison(f.identity,{...comparison,refresh:{specificIds:{tmdb:[14]}}});
+
+  f.plex.tmdb = [10];
+  f.at(day(3));
+  result = await f.run();
+  assert.equal(result.tmdbId,10);
+  assert.deepEqual(catalogues.readPlexInputs().comparisons[f.identity].refresh,{},"removing candidate 13 drops the requirement for 14, its catalogue's reported ID");
+});
+
+test("a fallback's safeguard requirement on hold applies when that catalogue is compared again", async t => {
+  const f = await fixture(t);
+  const show = await safeguardedFallbackA(f);
+  f.tmdb[10].fail = true; await f.run();
+  f.tmdb[10].fail = false; f.tmdb[11].fail = false;
+  f.at(day(71).replace("12:00","17:00")); await f.run();
+  assert.deepEqual(show.refresh(),{specificIds:{tmdb:[10]}},"A's requirement is on hold while B is compared");
+
+  // Overriding the preference to A directly in the store raises no preferred requirement.
+  selections.saveCatalogueOverride(f.identity,"tmdb",10);
+  f.at(day(71).replace("12:00","18:00"));
+  const result = await f.run();
+  assert.equal(result.tmdbId,10,"A is compared again");
+  assert.equal(f.tmdbDownloads(10),1,"its requirement forces A, downloaded earlier today, to download");
+  assert.deepEqual(show.refresh(),{},"A's download satisfies its requirement");
+});
+
+test("with no Plex TMDB candidate, a safeguard for the derived TMDB catalogue stays on hold while the derivation moves away, and forces its same-day download when derived again", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = []; f.find[1] = {tmdb:10}; f.find[2] = {tmdb:12};
+  const refresh = () => catalogues.readPlexInputs().comparisons[f.identity]?.refresh;
+  f.at(day(5));
+  let result = await f.run();
+  assert.equal(result.tmdbId,10,"TMDB 10 is derived from TVDB 1");
+  assert.equal(f.tmdbDownloads(10),1);
+  f.changes([10]);
+  for (const hour of [13,14,15]) {
+    f.at(day(5).replace("12:00",`${hour}:00`)); await f.run();
+    assert.equal(f.tmdbDownloads(10),0,"changed but downloaded earlier today, derived 10 is reused");
+  }
+
+  // Before the fifth scan, Plex reports TVDB 2 instead, which fails to load and whose TMDB association names 12.
+  f.plex.tvdb = [2]; f.tvdb[2].fail = true;
+  f.at(day(5).replace("12:00","16:00"));
+  await f.run();
+  assert.ok(f.requests.includes("/3/find/2"),"TMDB is derived from TVDB 2");
+  assert.equal(f.tmdbDownloads(10),0,"derived 10 is no longer compared, so it is not downloaded");
+  assert.deepEqual(refresh(),{tvdb:true,specificIds:{tmdb:[10]}},"the safeguard's requirement for derived 10 is on hold, an empty TMDB candidate set being no removal, beside TVDB 2's failure");
+  assert.equal(f.selection().tmdb.candidates.length,0);
+
+  f.restart();
+  f.plex.tvdb = [1]; f.tvdb[2].fail = false;
+  f.at(day(5).replace("12:00","17:00"));
+  result = await f.run();
+  // Pinned: the safeguard requires only the derived catalogue's download, not a fresh association lookup.
+  const find = f.requests.indexOf("/3/find/1"), load = f.requests.indexOf("/3/tv/10");
+  assert.ok(load >= 0 && (find < 0 || find > load),"the association for TVDB 1 is answered from saved evidence, not a find request before the load");
+  assert.equal(result.tmdbId,10,"10 is derived again");
+  assert.equal(f.tmdbDownloads(10),1,"its requirement forces 10, downloaded earlier today, to download");
+  assert.deepEqual(refresh(),{},"that download satisfies it");
 });
 
 /**

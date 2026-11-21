@@ -39,6 +39,8 @@ export function inMemoryCatalogueSource(options: {
   unusable?: Partial<Record<CatalogueProvider, Record<number, string>>>;
   /** Each series' counted 404 days; an unlisted series has none. */
   seriesNotFoundDays?: Partial<Record<CatalogueProvider, Record<number, number>>>;
+  /** Requested series the provider answers as another series: requested ID to the ID its saved copy and downloads report. */
+  reports?: Partial<Record<CatalogueProvider, Record<number, number>>>;
 }) {
   const saved: Record<CatalogueProvider, Map<number, string>> = {
     tmdb: new Map(Object.entries(options.saved?.tmdb || {}).map(([id, at]) => [Number(id), at])),
@@ -48,6 +50,7 @@ export function inMemoryCatalogueSource(options: {
   /** Each TVDB ID whose TMDB series association was asked for, with whether the request was mandatory, in order. */
   const associationRequests: { tvdbId: number; mandatory: boolean }[] = [];
   const catalogue = (provider: CatalogueProvider, id: number, downloadedAt: string): FixtureCatalogue => ({ provider, id, downloadedAt });
+  const reported = (provider: CatalogueProvider, id: number) => options.reports?.[provider]?.[id] ?? id;
   const association = (provider: CatalogueProvider, id: number) => {
     const tvdbId = provider === "tmdb" ? options.tvdbOfTmdb?.[id] : undefined;
     return tvdbId === undefined ? {} : { associatedTvdbId: tvdbId };
@@ -57,17 +60,17 @@ export function inMemoryCatalogueSource(options: {
       requests.push({ provider, id, ...settings });
       const downloadedAt = saved[provider].get(id);
       const reuse = reuseProviderCatalogue({ provider, now: options.now, downloadedAt, usable: downloadedAt !== undefined, mandatory: settings.mandatory, targeted: !!options.targeted, changed: !!options.changed?.[provider]?.includes(id), refreshAfter: settings.refreshAfter });
-      if (reuse) return { outcome: "reused", id, catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
+      if (reuse) return { outcome: "reused", id: reported(provider, id), catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
       const failure = options.failing?.[provider]?.[id];
       if (failure) return { outcome: "failed", ...failure };
       if (options.noSeries?.[provider]?.includes(id)) return { outcome: "no-series" };
       const at = options.downloadAt || options.now;
       saved[provider].set(id, at);
-      return { outcome: "downloaded", id, catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };
+      return { outcome: "downloaded", id: reported(provider, id), catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };
     },
     savedCatalogue(provider, id) {
       const downloadedAt = saved[provider].get(id);
-      return downloadedAt === undefined ? undefined : { id, catalogue: catalogue(provider, id, downloadedAt), downloadedAt, ...association(provider, id) };
+      return downloadedAt === undefined ? undefined : { id: reported(provider, id), catalogue: catalogue(provider, id, downloadedAt), downloadedAt, ...association(provider, id) };
     },
     savedRecordDownloadedAt(provider, id) {
       return saved[provider].get(id) ?? options.unusable?.[provider]?.[id];

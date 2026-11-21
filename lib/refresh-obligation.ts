@@ -18,8 +18,20 @@ export type RefreshObligationPatch = { add?: RefreshObligation; remove?: Refresh
 /** Adds the preferred requirement: what a failed preferred catalogue, a Manual Match change and a catalogue override change write. */
 export const PREFERRED_REQUIRED: RefreshObligationPatch = { add: { preferred: true } };
 
-/** A catalogue a scan tries for a provider: its series ID, if known, and whether it is the preferred catalogue. */
-export type AttemptedCatalogue = { id?: number; preferred: boolean };
+/** Adds the every-attempted requirement: what a single-show Clear cache writes. */
+export const EVERY_ATTEMPTED_REQUIRED: RefreshObligationPatch = { add: { everyAttempted: true } };
+
+/**
+ * A catalogue a scan tries for a provider, and whether it is the preferred catalogue. It is named by
+ * the series ID requested (`id`, when known) and by the ID the catalogue itself reports
+ * (`reportedId`: its saved copy's before a load, its download's after), which a provider can answer
+ * differently. A specific requirement names the reported ID of the catalogue compared, so either
+ * name matches it.
+ */
+export type AttemptedCatalogue = { id?: number; reportedId?: number; preferred: boolean };
+
+/** The IDs that name an attempted catalogue. */
+const namesOf = (attempt: AttemptedCatalogue) => [attempt.id, attempt.reportedId].filter((id): id is number => id !== undefined);
 
 /**
  * Every provider's refresh obligation as a saved comparison stores it. The per-provider flag is the
@@ -49,7 +61,7 @@ function normalized(obligation: RefreshObligation): RefreshObligation {
 }
 
 /** Whether the obligation requires anything. */
-export const obligationOpen = (obligation: RefreshObligation) => Object.keys(normalized(obligation)).length > 0;
+const obligationOpen = (obligation: RefreshObligation) => Object.keys(normalized(obligation)).length > 0;
 
 /** Every requirement of both obligations. */
 export function unionObligations(a: RefreshObligation, b: RefreshObligation): RefreshObligation {
@@ -95,20 +107,25 @@ export function combinePatches(a: RefreshObligationPatch, b: RefreshObligationPa
 }
 
 /**
- * Whether an attempted catalogue must be downloaded rather than reused: the preferred requirement
- * forces only the preferred catalogue. Otherwise the source's reuse policy decides.
+ * Whether an attempted catalogue must be downloaded rather than reused: the every-attempted
+ * requirement forces every catalogue, the preferred requirement only the preferred catalogue, and a
+ * specific requirement only the catalogue it names. A specific requirement for a catalogue not
+ * attempted is on hold: it forces nothing. Otherwise the source's reuse policy decides.
  */
 export function requiresDownload(obligation: RefreshObligation, attempt: AttemptedCatalogue): boolean {
-  return !!obligation.preferred && attempt.preferred;
+  return !!obligation.everyAttempted || !!obligation.preferred && attempt.preferred || namesOf(attempt).some(id => !!obligation.specificIds?.includes(id));
 }
 
 /**
- * The requirements a complete successful download of a catalogue satisfies: the preferred
- * requirement, by the preferred catalogue. Reuse, failed and incomplete loads satisfy nothing, so the
- * caller asks only for a download.
+ * The requirements a complete successful download of a catalogue satisfies: the specific requirement
+ * for the catalogue it names (requested or reported ID), and the preferred and every-attempted requirements when it is the preferred catalogue
+ * (a fallback download satisfies neither). Reuse, title-only repair, failed and incomplete loads
+ * satisfy nothing, so the caller asks only for a download.
  */
 export function satisfiedByDownload(attempt: AttemptedCatalogue): RefreshObligationPatch {
-  return attempt.preferred ? { remove: { preferred: true } } : {};
+  const ids = namesOf(attempt);
+  const remove: RefreshObligation = { ...(attempt.preferred ? { preferred: true, everyAttempted: true } : {}), ...(ids.length ? { specificIds: [...new Set(ids)] } : {}) };
+  return Object.keys(remove).length ? { remove } : {};
 }
 
 /** A provider's refresh obligation from a saved comparison's stored value. */
@@ -122,17 +139,17 @@ export function savedObligation(saved: SavedRefreshObligations | undefined, prov
 
 /**
  * Patch one provider's obligation in a saved comparison's stored value, in place, leaving every other
- * part and the other provider unchanged. Returns the same object.
+ * part and the other provider unchanged.
  */
-export function patchSavedObligation(saved: SavedRefreshObligations, provider: CatalogueProvider, patch: RefreshObligationPatch): SavedRefreshObligations {
+export function patchSavedObligation(saved: SavedRefreshObligations, provider: CatalogueProvider, patch: RefreshObligationPatch): void {
   const next = applyObligationPatch(savedObligation(saved, provider), patch);
   if (next.preferred) saved[provider] = true; else delete saved[provider];
-  const part = <K extends "specificIds" | "everyAttempted">(key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) => {
-    const parts: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };
-    if (value === undefined) delete parts[provider]; else parts[provider] = value;
-    if (Object.keys(parts).length) saved[key] = parts as SavedRefreshObligations[K]; else delete saved[key];
+  /** Sets or removes this provider's entry under a per-provider key, removing the key once empty. */
+  const setProviderEntry = <K extends "specificIds" | "everyAttempted">(key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) => {
+    const entries: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };
+    if (value === undefined) delete entries[provider]; else entries[provider] = value;
+    if (Object.keys(entries).length) saved[key] = entries as SavedRefreshObligations[K]; else delete saved[key];
   };
-  part("specificIds", next.specificIds && [...next.specificIds]);
-  part("everyAttempted", next.everyAttempted);
-  return saved;
+  setProviderEntry("specificIds", next.specificIds && [...next.specificIds]);
+  setProviderEntry("everyAttempted", next.everyAttempted);
 }

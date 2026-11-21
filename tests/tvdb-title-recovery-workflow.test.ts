@@ -165,7 +165,7 @@ test("a cached Manual Match recheck stays offline and keeps an unresolved Englis
   assert.equal(episodeIssues(rechecked).find(item => item.operation === "title-recovery")?.cause, "English title recovery could not be checked: 403 — TVDB request failed.");
 });
 
-test("a reused TVDB catalogue chosen from several Plex TVDB IDs asks again for an English title the TMDB-derived combined/split match needs", async t => {
+test("a reused TVDB catalogue chosen from several Plex TVDB IDs asks again for an English title the TMDB-derived combined/split match needs, and the repair satisfies no requirement", async t => {
   // Plex reports two TVDB series and no TMDB ID, so TMDB is resolved from the TVDB series compared.
   const untitledPart2 = { ...part2, name: null };
   const { rerun, state, requests } = await harness(t, [combined, part1, untitledPart2], [combined]);
@@ -178,8 +178,12 @@ test("a reused TVDB catalogue chosen from several Plex TVDB IDs asks again for a
   assert.deepEqual(translationRequests(requests), ["/v4/episodes/102/translations/eng"]);
   const downloadedAt = catalogues.readPlexInputs().tvdb["20"].downloadedAt;
 
-  // TVDB adds the English title before the next ordinary scan, which reuses both catalogues.
+  // TVDB adds the English title before the next ordinary scan, which reuses both catalogues. The
+  // show's TVDB obligation holds a safeguard requirement on hold, for the candidate not compared.
   state.english.set(102, "Arrival (2)");
+  const comparison = catalogues.readPlexInputs().comparisons["ratingKey:target"];
+  const obligation = { specificIds: { tvdb: [21] } };
+  catalogues.savePlexComparison("ratingKey:target", { ...comparison, refresh: obligation });
   const before = requests.length;
   const second = await rerun();
   const scanned = requests.slice(before);
@@ -190,4 +194,5 @@ test("a reused TVDB catalogue chosen from several Plex TVDB IDs asks again for a
   assert.equal(saved.episodes.find(episode => episode.providerEpisodeId === 102)?.title, "Arrival (2)", "the repaired catalogue is saved");
   assert.equal(saved.titleRecovery, undefined);
   assert.equal(saved.downloadedAt, downloadedAt, "the download time is not renewed");
+  assert.deepEqual(catalogues.readPlexInputs().comparisons["ratingKey:target"].refresh, obligation, "a title-only repair satisfies no requirement");
 });

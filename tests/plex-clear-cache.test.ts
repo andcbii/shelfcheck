@@ -81,7 +81,8 @@ test("clearing one show marks only its comparison for refresh and keeps every ot
   assert.deepEqual(plex.clearPlexInputs("show-1"), ["tmdb:1"]);
   const inputs = plex.readPlexInputs();
   assert.deepEqual(inputs.comparisons["show-1"].relationships, {});
-  assert.deepEqual(inputs.comparisons["show-1"].refresh, {tmdb: true, tvdb: true});
+  // Storage shape changed deliberately (SHELFCHECK-97): the clear adds the every-attempted requirement, not the preferred flag.
+  assert.deepEqual(inputs.comparisons["show-1"].refresh, {everyAttempted: {tmdb: true, tvdb: true}});
   assert.equal(inputs.comparisons["show-1"].complete, false);
   assert.deepEqual(inputs.comparisons["show-2"], comparison("show-2"));
   assert.deepEqual(Object.keys(inputs.tmdb), ["1"]);
@@ -91,4 +92,11 @@ test("clearing one show marks only its comparison for refresh and keeps every ot
   assert.deepEqual(inputs.pendingTvdbChanges, {"2": true});
   assert.deepEqual(plex.readSharedTmdbCrosswalk(77), {value: {id: 5}, receivedAt: "2026-11-01T00:00:00Z"});
   assert.deepEqual(plex.clearPlexInputs("never-saved"), []);
+});
+
+test("clearing one show adds the every-attempted requirement for each provider and keeps the requirements already open", t => {
+  temporaryDatabase(t);
+  plex.savePlexComparison("show-1", {...comparison("show-1"), refresh: {tmdb: true, specificIds: {tvdb: [9]}}});
+  plex.clearPlexInputs("show-1");
+  assert.deepEqual(plex.readPlexInputs().comparisons["show-1"].refresh, {tmdb: true, specificIds: {tvdb: [9]}, everyAttempted: {tmdb: true, tvdb: true}});
 });

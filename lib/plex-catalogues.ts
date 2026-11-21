@@ -4,7 +4,8 @@ import { normaliseSavedEpisodes, type MalformedCatalogueRecord } from "@/lib/cat
 import { savedTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
-import type { SavedRefreshObligations } from "@/lib/refresh-obligation";
+import { PROVIDERS } from "@/lib/catalogue-selection";
+import { EVERY_ATTEMPTED_REQUIRED, patchSavedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
@@ -168,13 +169,16 @@ export function invalidateSharedTmdbCrosswalk(tvdbEpisodeId: number) {
 }
 /** Scan accounting, provider verification positions and pending safeguards survive a full catalogue Clear cache. */
 const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards"] as const;
-/** Clears one show's saved comparison, or all generated inputs except `keptByFullClear`; returns the cleared show's relationship keys. */
+/** Clears one show's saved comparison (adding the every-attempted requirement), or all generated inputs except `keptByFullClear`; returns the cleared show's relationship keys. */
 export function clearPlexInputs(ratingKey?: string): string[] {
   if (!ratingKey) { deletePlexGeneratedInputsExcept(keptByFullClear); return []; }
   const previous = readPlexGeneratedInputs<SavedPlexComparison>(`comparison:${ratingKey}`);
   if (!previous) return [];
   const relationships = Object.keys(previous.relationships);
-  previous.refresh = {tmdb:true, tvdb:true};
+  // The next scan downloads every catalogue it tries, keeping requirements already open; shared catalogues stay.
+  const refresh = {...previous.refresh};
+  for (const provider of PROVIDERS) patchSavedObligation(refresh, provider, EVERY_ATTEMPTED_REQUIRED);
+  previous.refresh = refresh;
   previous.complete = false;
   previous.relationships = {};
   savePlexComparison(ratingKey, previous);

@@ -1105,8 +1105,6 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const localImdbEpisodeIds = new Set(localProviderEpisodes.flatMap((episode) => episode.imdbEpisodeId ? [episode.imdbEpisodeId] : []));
     phaseTimings.plexInventoryMs = Date.now() - phaseStarted;
     let warning: string | undefined;
-    let cacheable = true;
-    const addWarning = (message: string) => { warning = warning ? `${warning} ${message}` : message; cacheable = false; };
     const providerEpisodes: ProviderEpisode[] = [];
     // Individual catalogue records that could not be used, from whichever catalogue was compared.
     const malformedRecords: MalformedCatalogueRecord[] = [];
@@ -1185,7 +1183,14 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       }
       if (use.action === "set") catalogueUse[provider] = use.use;
     }
-    for (const message of resolution.warnings) addWarning(message);
+    if (resolution.warnings.length) warning = resolution.warnings.join(" ");
+    /**
+     * A comparison made from every usable catalogue is complete for cached rechecks, even with a
+     * provider that has no catalogue: that provider is still retried under its refresh obligation and
+     * keeps its catalogue Coverage Issue. As before, only a single Plex ID's or derived series' saved
+     * copy compared after a failed lookup keeps the last-good comparison for rechecks (ADR-0003).
+     */
+    const cacheable = !PROVIDERS.some(provider => resolution[provider].singleCatalogue && resolution[provider].catalogue?.origin === "saved");
     // A single-catalogue TVDB series that could not be loaded logs the show's warnings.
     if (tvdb.warning && tvdb.singleCatalogue) logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
     tmdbId = tmdb.identity; tvdbId = tvdb.identity;
@@ -1607,11 +1612,18 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
   // A provider the last scan had no catalogue for is not compared, even if a saved copy appeared since.
   const tmdb=input.tmdbId && compares.tmdb ? inputs.tmdb[String(input.tmdbId)] : undefined,tvdb=input.tvdbId && compares.tvdb ? inputs.tvdb[String(input.tvdbId)] : undefined;
   const replay={missing:new Set<string>(),recovered:new Map<string,string>()};
-  const summaries=Object.fromEntries(showProviderIds(input.details.flatMap(detail=>detail.Guid || [])).tmdb.flatMap(id=>{
+  const plexIds=showProviderIds(input.details.flatMap(detail=>detail.Guid || []));
+  const summaries=Object.fromEntries(plexIds.tmdb.flatMap(id=>{
     const saved=inputs.tmdb[String(id)];
     return usableProviderCatalogue(saved) ? [[relationshipKey("TMDB",`${TMDB}/tv/${id}`),{provider:"TMDB" as const,value:saved.show,receivedAt:saved.downloadedAt}]] : [];
   }));
-  const relationships={...summaries,...input.relationships};
+  // A provider the last scan could not load is a Total Provider Lookup Failure: its series requests failed
+  // in that scan too, so the replay answers any it has no saved answer for as finding no series, as the scan did.
+  const failedSeriesRequests=Object.fromEntries([
+    ...(compares.tmdb ? [] : plexIds.tmdb.map(id=>[relationshipKey("TMDB",`${TMDB}/tv/${id}`),{provider:"TMDB",value:null}] as const)),
+    ...(compares.tvdb ? [] : plexIds.tvdb.map(id=>[relationshipKey("TVDB",`${TVDB}/series/${id}`),{provider:"TVDB",value:{}}] as const)),
+  ]);
+  const relationships={...failedSeriesRequests,...summaries,...input.relationships};
   const compared=await replayScope.run(replay,()=>comparisonIssueScope.run({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},()=>relationshipScope.run(relationships,()=>compareLoadedPlexShow({
     ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
     providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),cachedTvdbEpisodeImdbIds:{...input.tvdbEpisodeImdbIds},

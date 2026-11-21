@@ -866,9 +866,9 @@ test("with no Plex TMDB candidate, a safeguard for the derived TMDB catalogue st
   f.plex.tvdb = [1]; f.tvdb[2].fail = false;
   f.at(day(5).replace("12:00","17:00"));
   result = await f.run();
-  // Pinned: the safeguard requires only the derived catalogue's download, not a fresh association lookup.
-  const find = f.requests.indexOf("/3/find/1"), load = f.requests.indexOf("/3/tv/10");
-  assert.ok(load >= 0 && (find < 0 || find > load),"the association for TVDB 1 is answered from saved evidence, not a find request before the load");
+  // Changed (SHELFCHECK-27): the 16:00 scan compared TMDB 12 with TVDB 2 failing, now a complete comparison
+  // that replaced the saved association for TVDB 1, so it is requested again; the safeguard forces only the download.
+  assert.ok(f.requests.includes("/3/find/1"),"saved evidence no longer answers the association for TVDB 1");
   assert.equal(result.tmdbId,10,"10 is derived again");
   assert.equal(f.tmdbDownloads(10),1,"its requirement forces 10, downloaded earlier today, to download");
   assert.deepEqual(refresh(),{},"that download satisfies it");
@@ -1005,6 +1005,29 @@ test("a show whose TMDB record 404s and whose TVDB catalogue works leaves Unmatc
   const issues = await f.issues();
   assert.ok(issues.some(issue=>issue.id === `catalogue-refresh:TMDB:${f.identity}`),"TMDB keeps its Scan Issues entry");
   assert.ok(!issues.some(issue=>issue.id === `comparison-inputs:${f.identity}`),"the comparison ran");
+});
+
+for (const failing of ["TMDB","TVDB"] as const) test(`a Partially matched show's comparison is complete for a Manual Match cached recheck, while ${failing} is still retried and keeps its Scan Issue`, async t => {
+  const f = await fixture(t);
+  if (failing === "TMDB") { f.tmdb[10].fail = true; f.tvdb[1].episodes = 2; } else f.tvdb[1].fail = true;
+  let show = await f.run() as Judged;
+  assert.equal(show.providerResolution?.status,"partially-matched");
+  assert.equal(show.missing.length,1,"the working provider's missing episode is reported");
+  assert.equal(catalogues.readPlexInputs().comparisons[f.identity]?.complete,true,"a comparison made from every usable catalogue is complete");
+
+  const member = failing === "TMDB" ? {provider:"TVDB" as const,id:1002,showId:1,show:"TVDB 1"} : {provider:"TMDB" as const,id:1002,showId:10,show:"TMDB 10"};
+  await plexScan.requestCoverageRecheck({members:[{...member,title:"Episode 2",season:1,episode:2,url:""}]});
+  show = (await (await scan.GET()).json()).report.shows[0] as Judged;
+  const refreshIssue = `catalogue-refresh:${failing}:${f.identity}`;
+  const recheckIssues = await f.issues() as {id:string;cause?:string}[];
+  assert.equal(recheckIssues.find(issue=>issue.id === `comparison-inputs:${f.identity}`)?.cause,undefined,"the cached recheck compares the saved inputs");
+  assert.equal(show.missing.length,1);
+  assert.equal(show.providerResolution?.status,"partially-matched","the recheck keeps each provider's status");
+  assert.ok(recheckIssues.some(issue=>issue.id === refreshIssue),`${failing} keeps its Scan Issue`);
+
+  f.at(day(2)); show = await f.run() as Judged;
+  assert.ok(f.requests.includes(failing === "TMDB" ? "/3/tv/10" : "/v4/series/1"),`the next scan retries ${failing}`);
+  assert.ok((await f.issues()).some(issue=>issue.id === refreshIssue));
 });
 
 test("an Unmatched show's own entries are hidden from Scan Issues while a TVDB sign-in failure it shares with a Partially matched show stays visible with both impacts", async t => {

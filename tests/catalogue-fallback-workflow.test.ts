@@ -383,7 +383,7 @@ test("a single-ID show keeps comparing its old saved catalogue, unverified, afte
   assert.equal(current.preferredUsableUntil,undefined,"no 60-day deadline applies to a single ID");
 });
 
-// Deliberately changed (Andrew, 2026-11-21): an empty show used to leave the show pending with last-good
+// Deliberately changed (ADR-0006): an empty show used to leave the show pending with last-good
 // results and no Coverage Issue. It is now treated like a 404: a Total Provider Lookup Failure with no
 // catalogue, compared with TVDB as Partially matched. It is not a series-request 404, so it is never counted.
 for (const [label,tvdbIds] of [["a single-ID show",[1]],["a show with one TMDB ID and several TVDB IDs",[1,3]]] as const) test(`${label} whose TMDB show request answers with no show is compared with TVDB as Partially matched, with a TMDB catalogue Coverage Issue`, async t => {
@@ -415,7 +415,7 @@ async function derivedFromSeveralTvdbIds(f: Awaited<ReturnType<typeof fixture>>)
   assert.equal(show.tmdbId,10); assert.deepEqual(missingTmdb(show),[1002]);
 }
 
-// Deliberately changed (Andrew, 2026-11-21): an empty show is treated like a 404, so the show is compared with TVDB instead of staying pending.
+// Deliberately changed (ADR-0006): an empty show is treated like a 404, so the show is compared with TVDB instead of staying pending.
 test("a derived TMDB series TMDB answers with no show is a TMDB catalogue Coverage Issue: the series last compared is not compared, and the show is compared with TVDB", async t => {
   const f = await fixture(t);
   await derivedFromSeveralTvdbIds(f);
@@ -520,7 +520,7 @@ test("an outstanding preferred requirement retries the preferred series every sc
   f.restart();
   await plexScan.requestCoverageRecheck({members:[{provider:"TMDB",id:1001,showId:10,show:"TMDB 10",title:"Episode 1",season:1,episode:1,url:""}]});
   issues = await f.issues() as Issue[];
-  assert.deepEqual(refreshIssue(issues)?.candidates?.map(candidate=>candidate.id),[11,10],"an offline recheck preserves A's and B's failures");
+  assert.deepEqual(refreshIssue(issues)?.candidates?.map(candidate=>candidate.id),[11,10],"a cached recheck preserves A's and B's failures");
   assert.equal(f.selection().tmdb.current?.usingFailedAt,day(71));
 
   f.tmdb[10].fail = false;
@@ -1035,7 +1035,7 @@ test("an Unmatched show's own entries are hidden from Scan Issues while a TVDB s
   f.setSecond({tmdb:12,tvdb:2});
   f.tmdb[10].fail = true; f.failTvdbLogin(true);
   await f.run();
-  const unmatched = f.identity, partial = "ratingKey:2";
+  const unmatched = f.identity;
   assert.deepEqual(unmatchedKeys(),[unmatched],"Scooby has no usable catalogue; Other compares TMDB");
   assert.ok((await f.issues()).some(issue=>issue.id === `catalogue-refresh:TMDB:${unmatched}`),"hiding deletes no Coverage Issue");
 
@@ -1075,8 +1075,9 @@ test("a show with only a TMDB ID that fails with no saved data, and no TVDB foun
   f.plex.tvdb = []; f.tmdb[10].fail = true;
   const show = await f.run() as Judged;
   assert.equal(show.providerResolution?.status,"unmatched");
-  // Changed (Andrew, 2026-11-21): a missing ID is a Total Provider Lookup Failure with its own cause.
-  assert.deepEqual(show.providerResolution?.providers?.tvdb,{state:"total-failure",catalogue:"none",cause:"No TVDB series ID from Plex or TMDB"});
+  // TVDB was never asked: its ID could only come from the TMDB catalogue, so it is not counted as failing.
+  assert.deepEqual(show.providerResolution?.providers?.tvdb,{state:"not-looked-up",cause:"Not looked up: the TMDB catalogue, which names the TVDB series, could not be loaded"});
+  assert.ok(!(await f.issues()).some(issue=>issue.id === `catalogue-refresh:TVDB:${f.identity}`),"no missing-ID Scan Issue for TVDB");
   assert.deepEqual(unmatchedKeys(),[f.identity]);
 });
 

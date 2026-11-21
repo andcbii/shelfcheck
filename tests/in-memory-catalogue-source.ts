@@ -63,7 +63,7 @@ export function inMemoryCatalogueSource(options: {
       if (reuse) return { outcome: "reused", id: reported(provider, id), catalogue: catalogue(provider, id, downloadedAt!), downloadedAt: downloadedAt!, ...association(provider, id) };
       const failure = options.failing?.[provider]?.[id];
       if (failure) return { outcome: "failed", ...failure };
-      if (options.noSeries?.[provider]?.includes(id)) return { outcome: "no-series" };
+      if (options.noSeries?.[provider]?.includes(id)) return { outcome: "empty-show" };
       const at = options.downloadAt || options.now;
       saved[provider].set(id, at);
       return { outcome: "downloaded", id: reported(provider, id), catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };

@@ -10,7 +10,7 @@ const scan = await import("../app/api/plex/scan/route");
 const sqlite = await import("../lib/sqlite");
 const config = await import("../lib/server-config");
 hook.deregister();
-// These shows have no TVDB ID from Plex or TMDB: since SHELFCHECK-27 (Andrew, 2026-11-21) each has a TVDB missing-ID Scan Issues entry, which these checks are not about.
+// These shows have no TVDB ID from Plex or TMDB: since SHELFCHECK-27 (ADR-0006) each has a TVDB missing-ID Scan Issues entry, which these checks are not about.
 const withoutMissingIds = (issues: {lookup?:{failureKind?:string}}[]) => issues.filter(issue=>issue.lookup?.failureKind !== "missing-id");
 
 test("full scans reuse catalogues while comparing current holdings across database reloads", async t => {

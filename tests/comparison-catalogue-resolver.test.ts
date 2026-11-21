@@ -15,6 +15,7 @@ const NOW = "2026-06-01T12:00:00.000Z";
 const DAY = 86400_000;
 const before = (ms: number) => new Date(Date.parse(NOW) - ms).toISOString();
 const show = { ratingKey: "show-1", title: "Example Show" };
+const TVDB_NOT_LOOKED_UP = "Not looked up: the TMDB catalogue, which names the TVDB series, could not be loaded";
 
 /** `refreshObligation: true` is the preferred requirement, as a saved per-provider flag reads. */
 type ProviderSetup = { candidates: number[]; preferredId?: number; refreshObligation?: boolean | RefreshObligation };
@@ -468,7 +469,7 @@ test("a Plex-reported ID always beats a derived one", async () => {
   assert.ok(!requests.some(r => r.id === 99 || r.id === 77));
 });
 
-// Changed (Andrew, 2026-11-21): a provider with no Plex ID and none found through the other provider is a
+// Changed (ADR-0006): a provider with no Plex ID and none found through the other provider is a
 // Total Provider Lookup Failure for a missing ID, with no catalogue, instead of having no series to look up.
 const missingTvdbIssue = {
   id: "catalogue-refresh:TVDB:show-1", operation: "catalogue-refresh", provider: "TVDB", scope: "show",
@@ -542,7 +543,7 @@ test("a failed association is a catalogue-refresh Coverage Issue, and the TMDB s
   assert.deepEqual(resolved.tmdb.lookupSource, [{ provider: "Plex", kind: "TVDB series", id: 1 }, { provider: "TMDB", kind: "resolved show", id: 40, cached: true }], "the kept series is the one resolved before, from saved evidence");
 });
 
-// Changed (Andrew, 2026-11-21): an empty show for a Plex-reported (or derived) ID is treated like a 404:
+// Changed (ADR-0006): an empty show for a Plex-reported (or derived) ID is treated like a 404:
 // a Total Provider Lookup Failure with no catalogue, and the show is compared with the other provider.
 // It is not a series-request 404, so it never counts toward the series' 404 days.
 test("a single Plex ID the provider answers with no series for is a Total Provider Lookup Failure with no catalogue: the show is compared with the other provider", async () => {
@@ -1141,7 +1142,7 @@ test("a TVDB catalogue loaded through TMDB's external IDs is working, though Ple
 });
 
 test("a provider with no Plex ID and none found through the other provider is a Total Provider Lookup Failure, so the show is Partially matched", async () => {
-  // Changed (Andrew, 2026-11-21): this provider used to have no series to look up, and the show was matched.
+  // Changed (ADR-0006): this provider used to have no series to look up, and the show was matched.
   const { source } = inMemoryCatalogueSource({ now: NOW, saved: { tmdb: { 11: before(DAY) } } });
   const resolved = await resolveComparisonCatalogues(request(tmdbSingle, noTvdb), { source });
 
@@ -1157,8 +1158,10 @@ test("a show with only a TMDB ID that fails with no saved data, and no TVDB foun
 
   assert.equal(resolved.outcome, "unmatched");
   assert.equal(resolved.showStatus, "unmatched");
-  // Changed (Andrew, 2026-11-21): TVDB's cause is its missing ID.
-  assert.deepEqual(resolved.tvdb.status, { state: "total-failure", catalogue: "none", cause: "No TVDB series ID from Plex or TMDB" });
+  // TVDB was never asked, since its ID could only come from the TMDB catalogue: it is not looked up, not failing.
+  assert.deepEqual(resolved.tvdb.status, { state: "not-looked-up", cause: TVDB_NOT_LOOKED_UP });
+  assert.ok(resolved.tvdb.issues.every(action => action.action === "resolve"), "no missing-ID Scan Issue for TVDB");
+  assert.deepEqual(resolved.unavailableCauses, ["catalogue-refresh:TMDB:show-1"]);
 });
 
 test("several candidates: a fallback that loads is working, and untried candidates never count as failing", async () => {
@@ -1199,7 +1202,7 @@ test("a live scan of a show Plex reports no TMDB or TVDB ID for is unmatched wit
   assert.deepEqual(resolved.warnings, ["No TMDB or TVDB ID was exposed by Plex."]);
   assert.deepEqual([requests, associationRequests], [[], []]);
   // With no ID at all there is no other provider to search: the one warning says so, and no catalogue issue is set.
-  assert.deepEqual([resolved.tmdb.status, resolved.tvdb.status], [{ state: "no-series" }, { state: "no-series" }]);
+  assert.deepEqual([resolved.tmdb.status, resolved.tvdb.status], [{ state: "not-looked-up" }, { state: "not-looked-up" }]);
   assert.deepEqual(resolved.unavailableCauses, []);
   assert.ok([...resolved.tmdb.issues, ...resolved.tvdb.issues].every(action => action.action === "resolve"));
 });

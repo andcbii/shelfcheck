@@ -11,8 +11,8 @@ test("a result saved before scans judged each provider is Unmatched by the legac
   const compared = { ratingKey: "ratingKey:2", providerResolution: { tmdb: true, tvdb: false } };
   assert.equal(isUnmatchedShow(legacy), true, "neither provider was compared");
   assert.equal(isUnmatchedShow(compared), false);
-  assert.equal(isUnmatchedShow({ ratingKey: "ratingKey:3" }), false, "a result with no provider resolution is not listed");
-  assert.equal(isUnmatchedShow({ ratingKey: "ratingKey:4", providerResolution: { tmdb: false, tvdb: false, status: "partially-matched" } }), false, "a judged status wins over the legacy rule");
+  assert.equal(isUnmatchedShow({}), false, "a result with no provider resolution is not listed");
+  assert.equal(isUnmatchedShow({ providerResolution: { tmdb: false, tvdb: false, status: "partially-matched" } }), false, "a judged status wins over the legacy rule");
   const shown = shownScanIssues([own("ratingKey:1"), own("ratingKey:2")], [legacy, compared]);
   assert.deepEqual(shown.map(issue => issue.id), ["catalogue-refresh:TMDB:ratingKey:2"], "the legacy Unmatched show's own entry is hidden too");
 });

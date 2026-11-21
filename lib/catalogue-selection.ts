@@ -1,6 +1,8 @@
 export type CatalogueProvider = "tmdb" | "tvdb";
 export const PROVIDERS: readonly CatalogueProvider[] = ["tmdb", "tvdb"];
 export const PROVIDER_NAME: Record<CatalogueProvider, "TMDB" | "TVDB"> = { tmdb: "TMDB", tvdb: "TVDB" };
+/** The provider a show's series can be found through when Plex reports none for this one. */
+export const OTHER_PROVIDER: Record<CatalogueProvider, CatalogueProvider> = { tmdb: "tvdb", tvdb: "tmdb" };
 /** The field a show's series ID is kept under for each provider, in saved comparisons and Coverage Issues. */
 export const PROVIDER_ID_FIELD: Record<CatalogueProvider, "tmdbId" | "tvdbId"> = { tmdb: "tmdbId", tvdb: "tvdbId" };
 

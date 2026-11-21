@@ -27,6 +27,8 @@ test("an Unmatched Shows row gives each provider's cause", () => {
 
   const tmdbOnly = text(renderToStaticMarkup(createElement(UnmatchedShowReport, { shows: [{ ...show, tvdbId: undefined, providerResolution: { tmdb: false, tvdb: false, status: "unmatched", providers: { tmdb: show.providerResolution!.providers!.tmdb, tvdb: { state: "total-failure", catalogue: "none", cause: "No TVDB series ID from Plex or TMDB" } } } }] })));
   assert.match(tmdbOnly, /TVDB lookup No TVDB series ID from Plex or TMDB/);
+  const notLookedUp = text(renderToStaticMarkup(createElement(UnmatchedShowReport, { shows: [{ ...show, tvdbId: undefined, providerResolution: { tmdb: false, tvdb: false, status: "unmatched", providers: { tmdb: show.providerResolution!.providers!.tmdb, tvdb: { state: "not-looked-up", cause: "Not looked up: the TMDB catalogue, which names the TVDB series, could not be loaded" } } } }] })));
+  assert.match(notLookedUp, /TVDB lookup Not looked up: the TMDB catalogue, which names the TVDB series, could not be loaded/);
 
   const gone = text(renderToStaticMarkup(createElement(UnmatchedShowReport, { shows: [{ ...show, providerResolution: { tmdb: false, tvdb: false, status: "unmatched", providers: { tmdb: { state: "total-failure", catalogue: "gone", cause: "404 — record not found" }, tvdb: show.providerResolution!.providers!.tvdb } } }] })));
   assert.match(gone, /TMDB lookup Gone provider record: 404 — record not found; its saved catalogue is kept but no longer compared/);

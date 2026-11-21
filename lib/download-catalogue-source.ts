@@ -151,7 +151,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
       return { outcome: "reused", ...savedTmdbCatalogue(saved) };
     }
     const downloaded = await requestingSeries("tmdb", id, () => requests.tmdbShow(id));
-    if (!downloaded) return { outcome: "no-series" };
+    if (!downloaded) return { outcome: "empty-show" };
     const { episodes, malformed = [] } = await requests.tmdbEpisodes(downloaded);
     const record = { version: 1 as const, downloadedAt: new Date().toISOString(), show: downloaded, episodes, ...(malformed.length ? { malformed } : {}) };
     inputs.tmdb[String(downloaded.id)] = record;

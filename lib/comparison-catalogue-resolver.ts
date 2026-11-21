@@ -1,6 +1,6 @@
 import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
-import { catalogueIssueIds, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { catalogueIssueIds, OTHER_PROVIDER, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
@@ -42,11 +42,11 @@ export type SeriesAssociationSettings = {
  * One load attempt's outcome. Download and reuse report the original download time; reuse never renews it.
  * A TMDB catalogue reports the TVDB series it names, if any, as `associatedTvdbId`.
  *
- * `no-series`: the provider answered with an empty show for this ID (TMDB `null`), so there is no
- * catalogue to compare. The resolver treats it like a 404 (Andrew, 2026-11-21): a failed load whose
- * saved copy is not kept, so the provider is a Total Provider Lookup Failure with no catalogue and the
- * show is compared with the other provider. It is not a series-request 404, so it never counts
- * toward the series' 404 days.
+ * `empty-show`: the provider answered with an empty show for this ID (TMDB `null`), so there is no
+ * catalogue to compare. The resolver treats it like a 404 (ADR-0006): a failed load whose saved copy
+ * is not kept, so the provider is a Total Provider Lookup Failure with no catalogue and the show is
+ * compared with the other provider. It is not a series-request 404, so it never counts toward the
+ * series' 404 days.
  */
 export type CatalogueLoad<T> =
   | {
@@ -54,7 +54,7 @@ export type CatalogueLoad<T> =
       /** The lookup provenance of the series loaded, when the load extended it; the provider's identity then reports it. */
       lookupSource?: LookupSourceStep[];
     }
-  | { outcome: "no-series" }
+  | { outcome: "empty-show" }
   | {
       outcome: "failed";
       error: unknown;
@@ -128,16 +128,17 @@ export type PriorSelection = {
  * after a failed attempt (`saved`), with nothing usable (`none`), or whose series is a Gone provider
  * record (`gone`: its saved catalogue is kept but never compared); `cause` is its catalogue-refresh
  * Coverage Issue's cause; a missing ID (no Plex ID and none found through the other provider) and an
- * empty show are Total Provider Lookup Failures with no catalogue (Andrew, 2026-11-21). `no-series`:
- * nothing to look up and no failure recorded: a show Plex reports no ID at all for, or a cached
- * recheck of a provider the last scan recorded no status for. `pending`: saved evidence cannot
- * resolve the series yet.
+ * empty show are Total Provider Lookup Failures with no catalogue (ADR-0006). `not-looked-up`: the
+ * provider was never asked and no failure is recorded: a show Plex reports no ID at all for, a TVDB
+ * series whose ID could only come from a TMDB catalogue that could not be loaded (`cause` says so),
+ * or a cached recheck of a provider the last scan recorded no status for. `pending`: saved evidence
+ * cannot resolve the series yet.
  * Candidates not tried never count as failing.
  */
 export type ProviderLookupStatus =
   | { state: "working" }
   | { state: "total-failure"; catalogue: "saved" | "none" | "gone"; cause: string }
-  | { state: "no-series" }
+  | { state: "not-looked-up"; cause?: string }
   | { state: "pending" };
 
 /**
@@ -221,8 +222,8 @@ export type ProviderResolution<T> = {
   status: ProviderLookupStatus;
 };
 
-/** A provider's resolution before its status is judged. */
-type ProviderChoice<T> = Omit<ProviderResolution<T>, "status">;
+/** A provider's resolution before its status is judged; `notLookedUpCause` says why a provider never asked was not looked up. */
+type ProviderChoice<T> = Omit<ProviderResolution<T>, "status"> & { notLookedUpCause?: string };
 
 export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
   /**
@@ -276,6 +277,9 @@ export class ProgressPersistenceError extends Error {
   }
 }
 
+/** Why TVDB was not looked up for a show whose TMDB catalogue, which names the TVDB series, could not be loaded. */
+const TVDB_NOT_LOOKED_UP = "Not looked up: the TMDB catalogue, which names the TVDB series, could not be loaded";
+
 /** The warning for a live-scanned show Plex reports no TMDB or TVDB ID for. */
 const NO_PLEX_IDS_WARNING = "No TMDB or TVDB ID was exposed by Plex.";
 
@@ -328,7 +332,7 @@ function judged<T>(request: ComparisonCatalogueRequest, provider: CatalogueProvi
   const failure = choice.issues.find(action => action.action === "set" && (action.issue.id === refreshId || action.issue.id === fallbackId));
   const cause = failure?.action === "set" ? failure.issue.cause : undefined;
   if (choice.catalogue) return { ...choice, status: choice.catalogue.origin === "saved" && cause !== undefined ? { state: "total-failure", catalogue: "saved", cause } : { state: "working" } };
-  return { ...choice, status: cause !== undefined ? { state: "total-failure", catalogue: choice.gone ? "gone" : "none", cause } : { state: "no-series" } };
+  return { ...choice, status: cause !== undefined ? { state: "total-failure", catalogue: choice.gone ? "gone" : "none", cause } : { state: "not-looked-up", ...(choice.notLookedUpCause ? { cause: choice.notLookedUpCause } : {}) } };
 }
 
 /** A provider's progress as the progress sink receives it. */
@@ -358,10 +362,10 @@ type Failure = Extract<CatalogueLoad<unknown>, { outcome: "failed" }>;
 
 /** What a catalogue-refresh Coverage Issue says was requested. */
 type RequestedKind = "show" | "series" | "TVDB ID search";
-/** Per provider: what a series request is called, the other provider, and the warning for a failure that has no message. */
-const PROVIDER_TERMS: Record<CatalogueProvider, { requestedKind: RequestedKind; other: CatalogueProvider; lookupFailed: string }> = {
-  tmdb: { requestedKind: "show", other: "tvdb", lookupFailed: "TMDB lookup failed." },
-  tvdb: { requestedKind: "series", other: "tmdb", lookupFailed: "Provider lookup failed." },
+/** Per provider: what a series request is called, and the warning for a failure that has no message. */
+const PROVIDER_TERMS: Record<CatalogueProvider, { requestedKind: RequestedKind; lookupFailed: string }> = {
+  tmdb: { requestedKind: "show", lookupFailed: "TMDB lookup failed." },
+  tvdb: { requestedKind: "series", lookupFailed: "Provider lookup failed." },
 };
 
 /**
@@ -409,17 +413,26 @@ async function singleIdCatalogue<P extends CataloguePayloads, K extends Catalogu
   const { request, source, identities } = resolving;
   const providerRequest = request[provider];
   const load = await loadSingleCatalogue(source, provider, id, providerRequest.refreshObligation);
-  if (load.outcome !== "failed" && load.outcome !== "no-series") return {
+  if (load.outcome !== "failed" && load.outcome !== "empty-show") return {
     identity: load.id, lookupSource: load.lookupSource ?? providerRequest.lookupSource, catalogue: comparedFrom(load, load.outcome),
     use: { action: "set", use: singleIdUse(load.id, load.downloadedAt) },
     obligation: loadedObligation(providerRequest, id, load), issues: resolvedIssues(provider, request),
   };
-  // Shares the derived series' failure: the saved catalogue at any age, else unavailable. An empty show keeps none.
-  const gone = goneRecord(source, provider, id, request.resolvedAt);
-  const saved = gone || load.outcome === "no-series" ? undefined : source.savedCatalogue(provider, id);
-  const use: CatalogueUseProposal = { action: "set", use: failedSingleIdUse(id, saved?.downloadedAt, request.resolvedAt) };
-  const failure = load.outcome === "no-series" ? emptySeriesFailure(provider, id) : load;
-  return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, failure, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, saved, use, downloadedAt: source.savedRecordDownloadedAt(provider, id), gone });
+  const { failure, kept } = failedSingleLoad(source, provider, id, load, request.resolvedAt);
+  const use: CatalogueUseProposal = { action: "set", use: failedSingleIdUse(id, kept.saved?.downloadedAt, request.resolvedAt) };
+  return singleCatalogueFailure(provider, request, { ...identities, [provider]: id }, failure, { kind: PROVIDER_TERMS[provider].requestedKind, id }, { lookupSource: providerRequest.lookupSource, use, ...kept });
+}
+
+/**
+ * A single Plex ID's or derived series' failed or empty load: the failure to report, and what is kept
+ * of the series: its saved catalogue at any age (ADR-0003), none for a Gone provider record or an
+ * empty show (ADR-0006), with its saved record's download time and gone state for the Coverage Issue.
+ */
+function failedSingleLoad<P extends CataloguePayloads, K extends CatalogueProvider>(source: ComparisonCatalogueSource<P>, provider: K, id: number, load: Failure | { outcome: "empty-show" }, resolvedAt: string) {
+  const gone = goneRecord(source, provider, id, resolvedAt);
+  const empty = load.outcome === "empty-show";
+  const saved = gone || empty ? undefined : source.savedCatalogue(provider, id);
+  return { failure: empty ? emptySeriesFailure(provider, id) : load, kept: { saved, downloadedAt: source.savedRecordDownloadedAt(provider, id), gone } };
 }
 
 /** Both catalogue issues resolved: the provider's catalogue loaded, or it has no series. */
@@ -477,7 +490,7 @@ const failureWarning = (failure: Failure, fallback: string) => failure.error ins
 /**
  * No series to derive: Plex reports no ID for the provider and none was found through the other
  * provider. It compares nothing and its recorded use is cleared. In a scan that is a Total Provider
- * Lookup Failure for a missing ID (Andrew, 2026-11-21): one catalogue-refresh issue naming the missing
+ * Lookup Failure for a missing ID (ADR-0006): one catalogue-refresh issue naming the missing
  * ID and the search that found nothing, if any. It adds no result warning or obligation, since there
  * is nothing to retry. A show Plex reports no ID at all for has no other provider to search: it stays
  * an Unmatched show under its one no-Plex-IDs warning, with no catalogue issue for either provider.
@@ -488,7 +501,7 @@ function noDerivedSeries(provider: CatalogueProvider, request: ComparisonCatalog
   if (request.context.kind === "cached-recheck") return { ...unchanged, issues: preservedIssues(provider, request) };
   if (!request.tmdb.candidates.length && !request.tvdb.candidates.length) return { ...unchanged, issues: resolvedIssues(provider, request) };
   const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
-  const name = PROVIDER_NAME[provider], other = PROVIDER_NAME[PROVIDER_TERMS[provider].other];
+  const name = PROVIDER_NAME[provider], other = PROVIDER_NAME[OTHER_PROVIDER[provider]];
   const ids = { ...identities, [provider]: undefined };
   const issue: CoverageIssue = {
     id: refreshId, operation: "catalogue-refresh", provider: name, scope: "show", show: { ...request.show, tmdbId: ids.tmdb, tvdbId: ids.tvdb }, category: "Provider Lookup",
@@ -499,7 +512,7 @@ function noDerivedSeries(provider: CatalogueProvider, request: ComparisonCatalog
   return { ...unchanged, issues: [{ action: "set", issue }, { action: "resolve", id: fallbackId }], unavailableCause: refreshId };
 }
 
-/** A series the provider answered with an empty show for: a failed load, treated like a 404 but never a counted one (Andrew, 2026-11-21). */
+/** A series the provider answered with an empty show for: a failed load, treated like a 404 but never a counted one (ADR-0006). */
 const emptySeriesFailure = (provider: CatalogueProvider, id: number): Failure =>
   ({ outcome: "failed", error: new Error(`${PROVIDER_NAME[provider]} returned no ${PROVIDER_TERMS[provider].requestedKind} ${id}.`) });
 
@@ -508,19 +521,19 @@ async function deriveTvdb<P extends CataloguePayloads>(resolving: Resolving<P>):
   const { request, source } = resolving;
   const compared = resolving.resolved.tmdb?.catalogue;
   const tvdbId = compared?.associatedTvdbId;
+  // TVDB's ID could only come from the TMDB catalogue: with none loaded, TVDB was never asked, so it is not failing.
+  if (!compared && request.context.kind === "live-scan" && request.tmdb.candidates.length) return { lookupSource: [], use: { action: "clear" }, obligation: NO_CHANGE, issues: resolvedIssues("tvdb", request), notLookedUpCause: TVDB_NOT_LOOKED_UP };
   if (!compared || tvdbId === undefined) return noDerivedSeries("tvdb", request, resolving.identities, [], undefined, request.tmdb.lookupSource);
   const lookupSource: LookupSourceStep[] = [...request.tmdb.lookupSource, { provider: "TMDB", kind: "external TVDB ID", id: tvdbId, cached: compared.origin !== "downloaded" }];
   const derivedUse = (downloadedAt?: string): CatalogueUseProposal => ({ action: "set", use: { usingId: tvdbId, state: "derived", derivedFrom: compared.id, ...(downloadedAt ? { usingDownloadedAt: downloadedAt } : {}) } });
   const identities = { tmdb: compared.id, tvdb: tvdbId };
   const load = request.context.kind === "cached-recheck" ? readSaved(source, "tvdb", tvdbId, request.resolvedAt) : await loadSingleCatalogue(source, "tvdb", tvdbId, request.tvdb.refreshObligation);
   if (!load) return missingFromSaved(resolving, "tvdb", tvdbId, lookupSource);
-  if (load.outcome !== "failed" && load.outcome !== "no-series")
+  if (load.outcome !== "failed" && load.outcome !== "empty-show")
     return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, tvdbId, load), issues: loadedIssues("tvdb", request) };
-  // A derived series whose load fails keeps its saved catalogue at any age, as a single Plex ID does; an empty show keeps none.
-  const gone = goneRecord(source, "tvdb", tvdbId, request.resolvedAt);
-  const saved = gone || load.outcome === "no-series" ? undefined : source.savedCatalogue("tvdb", tvdbId);
-  const failure = load.outcome === "no-series" ? emptySeriesFailure("tvdb", tvdbId) : load;
-  return singleCatalogueFailure("tvdb", request, identities, failure, { kind: "series", id: tvdbId }, { lookupSource, saved, use: derivedUse(saved?.downloadedAt), downloadedAt: source.savedRecordDownloadedAt("tvdb", tvdbId), gone });
+  // A derived series whose load fails is kept as a single Plex ID's is.
+  const { failure, kept } = failedSingleLoad(source, "tvdb", tvdbId, load, request.resolvedAt);
+  return singleCatalogueFailure("tvdb", request, identities, failure, { kind: "series", id: tvdbId }, { lookupSource, use: derivedUse(kept.saved?.downloadedAt), ...kept });
 }
 
 /**
@@ -565,7 +578,7 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
   const load = request.context.kind === "cached-recheck" ? readSaved(source, "tmdb", association.id, request.resolvedAt) : await loadSingleCatalogue(source, "tmdb", association.id, request.tmdb.refreshObligation);
   if (!load) return missingFromSaved(resolving, "tmdb", association.id, lookupSource);
   // An empty show is treated like a failed load, but the series last compared is not kept in its place.
-  if (load.outcome === "no-series")
+  if (load.outcome === "empty-show")
     return singleCatalogueFailure("tmdb", request, { tmdb: association.id, tvdb: tvdbId }, emptySeriesFailure("tmdb", association.id), { kind: "show", id: association.id }, { lookupSource, saved: undefined, use: { action: "set", use: { usingId: association.id, state: "derived", derivedFrom: tvdbId } }, downloadedAt: source.savedRecordDownloadedAt("tmdb", association.id), gone: goneRecord(source, "tmdb", association.id, request.resolvedAt) });
   if (load.outcome !== "failed") return {
     identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome),
@@ -657,7 +670,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
       // A specific requirement applies to whichever candidate is attempted, before its reuse decision.
       const load = await source.loadCatalogue(provider, id, { mandatory: requiresDownload(obligation, attempted(id)), refreshAfter: MULTIPLE_ID_REFRESH_AGE });
       if (load.outcome === "failed") throw new FailedLoad(load);
-      if (load.outcome === "no-series") throw new FailedLoad(emptySeriesFailure(provider, id));
+      if (load.outcome === "empty-show") throw new FailedLoad(emptySeriesFailure(provider, id));
       if (id === preferredId) preferredProvenance = load.lookupSource;
       return { value: comparedFrom(load, load.outcome), downloadedAt: load.downloadedAt };
     },
@@ -724,7 +737,7 @@ function resolveCachedProvider<P extends CataloguePayloads, K extends CatalogueP
   const providerRequest = request[provider];
   const previous = request.previousComparison;
   if (!providerRequest.candidates.length) {
-    const followedProvider = PROVIDER_TERMS[provider].other;
+    const followedProvider = OTHER_PROVIDER[provider];
     const followed = resolved[followedProvider];
     const followedId = previous?.[`${followedProvider}Id`];
     // Unchanged (or not yet chosen) selected IDs keep their saved derived identity without new evidence.

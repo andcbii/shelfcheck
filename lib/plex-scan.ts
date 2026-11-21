@@ -1050,10 +1050,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   await runTrackedWorkerPool(queue, PLEX_SCAN_WORKERS, activeWork, (group) => ({ key: group.identity, show: group.records[0]?.title || "Unknown show" }), async (group) => {
     const primary = group.records[0];
     const ratingKey = group.identity;
-    /** Keep the show's last-good result; `judged` replaces its provider status with this scan's, which is never republished. */
-    const retainComparison = (message: string, judged?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
+    /** Keep the show's last-good result; `scanStatus` replaces its provider status with this scan's, which is never republished. */
+    const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
       const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
-      results.push({...(previous || {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[]}),...judged,warning:message});
+      results.push({...(previous || {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[]}),...scanStatus,warning:message});
       if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];
       processed += 1;
       run.progress(processed, candidates.length);
@@ -1227,14 +1227,16 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       }
     };
     // This scan's provider status, recorded with whatever result the show ends with.
-    const judged = {providerResolution: providerResolutionOf(resolution), ...(tmdbId ? {tmdbId} : {}), ...(tvdbId ? {tvdbId} : {})};
+    const scanStatus = {providerResolution: providerResolutionOf(resolution), ...(tmdbId ? {tmdbId} : {}), ...(tvdbId ? {tvdbId} : {})};
     // Compared with whatever catalogues are usable: only an Unmatched show, or one whose series cannot be resolved yet, is not compared.
     if (resolution.outcome !== "comparable") {
-      const cause = `Episode comparison could not be checked because complete provider catalogue inputs are unavailable. ${savedComparison?.complete ? "Last-good comparison results were retained." : "No previous comparison results are available."}`;
-      setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action:"Run a Plex scan to refresh the missing provider catalogue inputs; check any reported lookup failure first."});
+      const reason = resolution.outcome === "unmatched" ? "no provider has a usable catalogue for this show" : "a provider's series could not be resolved yet";
+      const cause = `Episode comparison could not be checked because ${reason}. ${savedComparison?.complete ? "Last-good comparison results were retained." : "No previous comparison results are available."}`;
+      const action = resolution.outcome === "unmatched" ? "Check each provider's reported lookup failure, fix the show's Plex match if an ID is wrong or missing, then run a Plex scan." : "Run a Plex scan to resolve the provider's series.";
+      setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action});
       if (savedComparison) { inputs.comparisons[ratingKey] = {...savedComparison,refresh}; savePlexComparison(ratingKey,inputs.comparisons[ratingKey]); }
       publishCatalogueUse(false);
-      retainComparison(warning || cause, judged);
+      retainComparison(warning || cause, scanStatus);
       return;
     }
     resolveCoverageIssue(`comparison-inputs:${ratingKey}`);
@@ -1259,7 +1261,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
       reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords);
       for (const record of malformedRecords) logger.warn("plex.show.catalogue-record-unusable", { ratingKey, ...record });
-      results.push({...compared.result,providerResolution:judged.providerResolution,...(warning ? {warning} : {})});
+      results.push({...compared.result,providerResolution:scanStatus.providerResolution,...(warning ? {warning} : {})});
       inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? retainedComparison(savedComparison) : {group,details,localMetadata,tmdbId,tvdbId,relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
       savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
     }));
@@ -1270,7 +1272,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       setCoverageIssue({id:`comparison-failure:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry this comparison; run a Plex scan if saved inputs are incomplete."});
       if (savedComparison) {inputs.comparisons[ratingKey] = retainedComparison(savedComparison);savePlexComparison(ratingKey,inputs.comparisons[ratingKey]);}
       publishCatalogueUse(false);
-      retainComparison(cause, judged);
+      retainComparison(cause, scanStatus);
       return;
     }
     const fingerprint = plexFingerprint(group);

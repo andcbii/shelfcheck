@@ -288,10 +288,6 @@ const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) &&
 function crosswalkLookup(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
   return crosswalk === "IMDb" ? providerLookup.tvdbEpisodeExtended(tvdbEpisodeId) : crosswalk === "Trakt" ? providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId) : providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
 }
-/** The saved relationship key of one TVDB episode's crosswalk request. */
-function crosswalkRelationshipKey(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
-  return lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId));
-}
 function readableTmdbCrosswalk(value: unknown) {
   try { responseRecords("TMDB", value, "tv_episode_results"); return true; } catch { return false; }
 }
@@ -313,7 +309,7 @@ type TmdbCrosswalkScan = {startedAt: string; forced: boolean; requested: Set<num
 function tmdbCrosswalkNeedsRequest(tvdbEpisodeId: number, scan: TmdbCrosswalkScan) {
   const relationships = relationshipScope.getStore();
   if (!relationships) return false;
-  const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
+  const key = lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId));
   const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
   const received = Date.parse(shared?.receivedAt || "");
   const current = Number.isFinite(received) && !shared!.invalidatedAt && (scan.forced ? scan.requested.has(tvdbEpisodeId) : new Date(received).toISOString().slice(0, 10) >= scan.startedAt.slice(0, 10));
@@ -338,7 +334,7 @@ function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
   const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
   const outcomeAt = Date.parse(shared?.receivedAt || shared?.rejectedAt || "");
   if (!relationships || !shared || !Number.isFinite(outcomeAt)) return;
-  const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
+  const key = lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId));
   if (!Object.hasOwn(relationships, key)) {
     const issueId = episodeIdentityIssueId(comparisonIssueScope.getStore()?.ratingKey, key);
     const failedAt = Date.parse(getCoverageIssue(issueId)?.failedAt || "");
@@ -362,7 +358,7 @@ function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
  * never current and never grants coverage.
  */
 function rejectTmdbCrosswalk(tvdbEpisodeId: number) {
-  const saved = relationshipScope.getStore()?.[crosswalkRelationshipKey("TMDB", tvdbEpisodeId)];
+  const saved = relationshipScope.getStore()?.[lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId))];
   if (saved) delete saved.receivedAt;
 }
 /**
@@ -402,7 +398,7 @@ async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | nul
  * are requested again instead of reused. `validationFailures` are failed validation lookups.
  */
 async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, traktAuth: ProviderAuth, tmdbToken: string, retry = false) {
-  const cached = relationshipIsReusable(crosswalkRelationshipKey("Trakt", tvdbEpisodeId));
+  const cached = relationshipIsReusable(lookupKey(crosswalkLookup("Trakt", tvdbEpisodeId)));
   const results = await traktJson<unknown>(crosswalkLookup("Trakt", tvdbEpisodeId), traktAuth);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
@@ -693,7 +689,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           crosswalkFailures.push(failure);
           return failure;
         };
-        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: crosswalkRelationshipKey(crosswalk, tvdbEpisodeId) }]);
+        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId)) }]);
         /** Run one crosswalk per TVDB episode; a failure is recorded against its episode only. */
         const settleCrosswalks = async <T,>(crosswalk: EpisodeCrosswalk, ids: number[], lookup: (tvdbEpisodeId: number) => Promise<T>) => {
           const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, () => lookup(tvdbEpisodeId)); }));
@@ -715,7 +711,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         const recordedCrosswalkFailures = recordedEpisodeCrosswalkFailures(ratingKey);
         const retryCrosswalks = new Set(recordedCrosswalkFailures.map(({ crosswalk, tvdbEpisodeId }) => `${crosswalk}:${tvdbEpisodeId}`));
         if (!replayScope.getStore()) for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) {
-          delete relationshipScope.getStore()?.[crosswalkRelationshipKey(crosswalk, tvdbEpisodeId)];
+          delete relationshipScope.getStore()?.[lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId))];
           if (crosswalk === "IMDb") delete cachedTvdbEpisodeImdbIds[String(tvdbEpisodeId)];
         }
         if (tvdbId) {
@@ -802,7 +798,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             if (traktFailed) recordWarning(`${traktFailed} Trakt episode identity ${traktFailed === 1 ? "lookup" : "lookups"} failed; ${traktFailed === 1 ? "it is" : "they are"} requested again on the next scan.`);
           }
           const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], (tvdbEpisodeId) => {
-            if (!replayScope.getStore()) input.checkedTmdbCrosswalks?.add(crosswalkRelationshipKey("TMDB", tvdbEpisodeId));
+            if (!replayScope.getStore()) input.checkedTmdbCrosswalks?.add(lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId)));
             const scan = input.tmdbCrosswalkScan;
             if (replayScope.getStore()) replayedTmdbCrosswalk(tvdbEpisodeId);
             else if (scan && tmdbCrosswalkNeedsRequest(tvdbEpisodeId, {...scan, forced: scan.forced || retryCrosswalks.has(`TMDB:${tvdbEpisodeId}`)})) {

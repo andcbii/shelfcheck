@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { flag, harness, type Episode } from "./report-missing-harness";
+import { api, flag, harness, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const changes = await import("../lib/manual-match-changes");
 const store = await import("../lib/manual-coverage");
-const { plexSavedState } = await import("../lib/plex-scan");
+const { plexSavedState, requestCatalogueRecheck } = await import("../lib/plex-scan");
 const { scanRuns } = await import("../lib/scan-run");
 hook.deregister();
 
@@ -245,4 +245,127 @@ test("missing saved inventory or comparison inputs keep last results with a pend
   assert.deepEqual(await h.results(), last);
   assert.equal(store.coverageState().pending, 1);
   assert.ok(store.coverageState().issues.some(issue => issue.id === "comparison-inputs:ratingKey:target" && /inventory/.test(issue.cause)));
+});
+
+/**
+ * Makes the next cached recheck reject: at its `start`, before it writes any
+ * refresh obligation, or when it `publish`es results, after its comparisons.
+ */
+function recheckFaults(t: test.TestContext) {
+  const read = plexSavedState.report.read.bind(plexSavedState.report);
+  const write = plexSavedState.report.write.bind(plexSavedState.report);
+  let fault: "start" | "publish" | undefined;
+  const injected = () => { fault = undefined; throw new Error("Injected cached recheck failure."); };
+  t.mock.method(plexSavedState.report, "read", () => fault === "start" ? injected() : read());
+  t.mock.method(plexSavedState.report, "write", (report: Parameters<typeof write>[0]) => fault === "publish" ? injected() : write(report));
+  return (at: "start" | "publish") => { fault = at; };
+}
+/** The saved refresh obligations of a show's comparison. */
+const obligations = (show: "target" | "other") => {
+  const row = database().prepare("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").get(`comparison:ratingKey:${show}`) as { payload: string };
+  return JSON.parse(row.payload).refresh ?? {};
+};
+const comparisonPending = (label: string) => {
+  const state = store.coverageState();
+  assert.equal(state.pending, 1, label);
+  assert.ok(state.issues.some(issue => issue.id === "comparison-pending"), label);
+};
+
+test("a committed save, edit, flag-only edit or delete whose cached recheck fails reports the committed change with the comparison pending", async (t) => {
+  const h = await setup(t);
+  const failNextRecheck = recheckFaults(t);
+  const last = await h.results();
+
+  failNextRecheck("publish");
+  const created = await h.reviewedSave([tmdbA, otherTvdb]);
+  assert.equal(created.created, true);
+  assert.deepEqual(store.listCoverageMappings().map(mapping => mapping.id), [created.mapping.id]);
+  comparisonPending("create");
+  assert.deepEqual(await h.results(), last, "The last results stay");
+  // This recheck failed after its obligations were written: both affected shows are marked for a fresh download.
+  assert.deepEqual(obligations("target"), { tmdb: true, tvdb: true });
+  assert.deepEqual(obligations("other"), { tmdb: true, tvdb: true });
+
+  failNextRecheck("publish");
+  const edited = await h.reviewedSave([tmdbA, tvdbA], { edit: { id: created.mapping.id, revision: created.mapping.revision } });
+  assert.equal(edited.created, false);
+  assert.deepEqual(store.listCoverageMappings()[0].members.map(m => `${m.provider}:${m.id}`), ["TMDB:101", "TVDB:201"]);
+  comparisonPending("edit");
+
+  failNextRecheck("publish");
+  const flagged = await changes.saveManualMatch({ id: edited.mapping.id, revision: edited.mapping.revision, reportMissing: [flag(tmdbA), flag(tvdbA)] });
+  assert.equal(flagged.created, false);
+  assert.equal(store.listCoverageMappings()[0].members.filter(m => m.reportMissing).length, 2);
+  comparisonPending("flag-only edit");
+  assert.deepEqual(await h.results(), last, "No failed recheck published results");
+
+  failNextRecheck("publish");
+  assert.deepEqual(await changes.deleteManualMatches({ ids: [flagged.mapping.id] }), { deleted: [flagged.mapping.id], missing: [] });
+  assert.deepEqual(store.listCoverageMappings(), []);
+  comparisonPending("delete");
+  assert.deepEqual(await h.results(), last);
+});
+
+test("a cached recheck that fails before writing any refresh obligation keeps the change pending, and later queued rechecks still run", async (t) => {
+  const h = await setup(t);
+  const inTarget = (await h.reviewedSave([tmdbA, tvdbA])).mapping;
+  // A Plex scan downloads fresh catalogues, so no refresh obligation remains.
+  await h.rerun();
+  assert.deepEqual(obligations("target"), {});
+  const last = await h.results();
+  const failNextRecheck = recheckFaults(t);
+
+  failNextRecheck("start");
+  const saving = changes.saveManualMatch({ id: inTarget.id, revision: inTarget.revision, reportMissing: [flag(tmdbA), flag(tvdbA)] });
+  // A catalogue override recheck queued behind the failing recheck.
+  const catalogueRecheck = requestCatalogueRecheck("ratingKey:target", "tmdb");
+  const saved = await saving;
+  assert.equal(saved.created, false);
+  assert.deepEqual(store.listCoverageMappings()[0].members.filter(m => m.reportMissing).map(m => `${m.provider}:${m.id}`), ["TMDB:101", "TVDB:201"]);
+  await catalogueRecheck;
+  // The failed recheck wrote no obligation; the catalogue override recheck ran and wrote its own.
+  assert.deepEqual(obligations("target"), { tmdb: true });
+  // A catalogue override recheck never completes the Manual Match comparison.
+  comparisonPending("after the failed recheck and the catalogue override recheck");
+
+  // A later Manual Match change rechecks from the current Manual Matches and completes the comparison.
+  const current = store.listCoverageMappings()[0];
+  await changes.saveManualMatch({ id: current.id, revision: current.revision, reportMissing: [flag(tmdbA)] });
+  assert.equal(store.coverageState().pending, 0);
+  assert.ok(!store.coverageState().issues.some(issue => issue.id === "comparison-pending"));
+  assert.deepEqual(obligations("target"), { tmdb: true, tvdb: true });
+  assert.deepEqual((await h.results()).target, { ...last.target, "TMDB:101": "reported-missing" });
+});
+
+test("the Manual Match route answers a committed change whose cached recheck fails as saved, with the comparison pending", async (t) => {
+  const h = await setup(t);
+  const failNextRecheck = recheckFaults(t);
+  const last = await h.results();
+  const pendingBody = (body: { pending: number; issues: { id: string }[] }, label: string) => {
+    assert.equal(body.pending, 1, label);
+    assert.ok(body.issues.some(issue => issue.id === "comparison-pending"), label);
+    assert.ok(!JSON.stringify(body).includes("provider-unavailable"), label);
+  };
+
+  failNextRecheck("start");
+  const created = await h.save([tmdbA, otherTvdb]);
+  assert.equal(created.status, 201, await created.clone().text());
+  const createdBody = await created.json();
+  assert.deepEqual(createdBody.mapping.members.map((m: Episode) => `${m.provider}:${m.id}`), ["TMDB:101", "TVDB:211"]);
+  pendingBody(createdBody, "create");
+
+  failNextRecheck("publish");
+  const edited = await h.post({ action: "save", id: createdBody.mapping.id, revision: createdBody.mapping.revision, reportMissing: [flag(tmdbA), flag(otherTvdb)] });
+  assert.equal(edited.status, 200, await edited.clone().text());
+  const editedBody = await edited.json();
+  assert.equal(editedBody.mapping.id, createdBody.mapping.id);
+  pendingBody(editedBody, "flag-only edit");
+
+  failNextRecheck("publish");
+  const deleted = await api.DELETE(new Request(`http://localhost/api/plex/manual-coverage?id=${createdBody.mapping.id}`, { method: "DELETE" }));
+  assert.equal(deleted.status, 200, await deleted.clone().text());
+  const deletedBody = await deleted.json();
+  assert.deepEqual([deletedBody.deleted, deletedBody.missing], [[createdBody.mapping.id], []]);
+  pendingBody(deletedBody, "delete");
+  assert.deepEqual(await h.results(), last, "The last results stay");
 });

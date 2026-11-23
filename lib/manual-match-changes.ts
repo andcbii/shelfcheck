@@ -1,6 +1,6 @@
 import "server-only";
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
-import { requestCoverageRecheck } from "@/lib/plex-scan";
+import { requestCoverageRecheck, type CoverageImpact } from "@/lib/plex-scan";
 import { assertCoverageMutationAllowed, deleteCoverageMapping, deleteCoverageMappings, saveCoverageMapping } from "@/lib/manual-coverage";
 import type { CoverageMapping } from "@/lib/manual-coverage-model";
 
@@ -26,7 +26,7 @@ export async function saveManualMatch(request: ManualMatchSave): Promise<{ mappi
   if (request.preview === undefined && edit && request.reportMissing !== undefined) {
     // Changing only Report Missing keeps the saved members, so it needs no provider review.
     const { mapping, affectedMembers } = saveCoverageMapping(undefined, edit, request.reportMissing);
-    await requestCoverageRecheck({ members: affectedMembers });
+    await recheckCommitted({ members: affectedMembers });
     return { mapping, created: false };
   }
   // Fail fast before contacting providers; the store's check inside its transaction stays authoritative.
@@ -36,7 +36,7 @@ export async function saveManualMatch(request: ManualMatchSave): Promise<{ mappi
   // different TMDB record since preview, but must never replace that identity.
   await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
   const { mapping, affectedMembers } = saveCoverageMapping(reviewed, edit, request.reportMissing);
-  await requestCoverageRecheck({ members: affectedMembers });
+  await recheckCommitted({ members: affectedMembers });
   return { mapping, created: !edit };
 }
 
@@ -47,6 +47,23 @@ export async function saveManualMatch(request: ManualMatchSave): Promise<{ mappi
  */
 export async function deleteManualMatches(target: { id: string } | { ids: unknown }): Promise<{ deleted: string[]; missing: string[] }> {
   const { deleted, missing, affectedMembers } = "id" in target ? deleteCoverageMapping(target.id) : deleteCoverageMappings(target.ids);
-  if (deleted.length) await requestCoverageRecheck({ members: affectedMembers });
+  if (deleted.length) await recheckCommitted({ members: affectedMembers });
   return { deleted, missing };
+}
+
+/**
+ * The cached recheck after a committed change. A rejected recheck never undoes
+ * the commit: the change and the pending comparison its transaction set stay,
+ * so the command still reports the committed change. Only a successful recheck
+ * marks the comparison complete, so the Plex page keeps the last results with
+ * the comparison pending notice until a later recheck or Plex scan succeeds.
+ * Known limit: a recheck that fails early may not yet have written every
+ * affected show's refresh obligation; a later recheck or scan writes them.
+ */
+async function recheckCommitted(impact: CoverageImpact): Promise<void> {
+  try {
+    await requestCoverageRecheck(impact);
+  } catch (error) {
+    console.error("Shelfcheck saved the change but could not recheck Plex results; the comparison stays pending.", error);
+  }
 }

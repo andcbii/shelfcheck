@@ -18,11 +18,6 @@ export type ProviderCatalogue<T> = { version: 1; downloadedAt: string; show: T; 
 export function usableProviderCatalogue<T extends {id:number}>(catalogue: ProviderCatalogue<T> | undefined): catalogue is ProviderCatalogue<T> {
   return catalogue?.version === 1 && Number.isFinite(catalogue.show?.id) && Array.isArray(catalogue.episodes) && Number.isFinite(Date.parse(catalogue.downloadedAt));
 }
-/**
- * The relationship record key a scan saves TMDB's answer to "what has this TVDB ID" under: a TVDB
- * series' TMDB association, or a TVDB episode's TMDB crosswalk.
- */
-export const tmdbFindRelationshipKey = (tvdbId: number) => `TMDB:https://api.themoviedb.org/3/find/${tvdbId}?external_source=tvdb_id`;
 
 export type SavedPlexComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];

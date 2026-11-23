@@ -116,10 +116,11 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   assert.equal(missingInput.category,undefined);
   assert.match(missingInput.action,/Plex scan.*saved comparison inputs/);
   assert.ok(incomplete.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-inputs:ratingKey:12"));
-  assert.ok(!incomplete.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-pending"));
+  assert.ok(incomplete.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-pending"),"The save's show was not compared, so its members stay carried and the comparison pending");
   const repaired=await rerun();
   assert.deepEqual(repaired.report.shows.find((show:{tmdbId:number})=>show.tmdbId===12).missing,[]);
   assert.ok(!repaired.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-inputs:ratingKey:12"));
+  assert.ok(!repaired.coverage.issues.some((issue:{id:string})=>issue.id==="comparison-pending"),"The full scan compared it");
   const racePreview=await preview(10,[202]);
   const beforeRace=await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   blockSave=true;

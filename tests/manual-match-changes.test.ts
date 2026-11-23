@@ -236,7 +236,8 @@ test("missing saved inventory or comparison inputs keep last results with a pend
   let requests = await h.requestsDuring(() => changes.saveManualMatch({ edit: { id: inTarget.id, revision: inTarget.revision }, reportMissing: [flag(tmdbA), flag(tvdbA)] }));
   assert.deepEqual(requests, []);
   assert.deepEqual(await h.results(), last);
-  assert.deepEqual(store.coverageState().issues.map(issue => issue.id), ["comparison-inputs:ratingKey:target"]);
+  // Target was not compared, so its carried members keep the comparison pending.
+  assert.deepEqual(store.coverageState().issues.map(issue => issue.id), ["comparison-inputs:ratingKey:target", "comparison-pending"]);
 
   database().prepare("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key='inventory'").run();
   const current = store.listCoverageMappings()[0];

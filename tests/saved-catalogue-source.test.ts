@@ -10,7 +10,7 @@ hook.deregister();
 const RECEIVED = "2026-05-01T08:00:00.000Z";
 /** TMDB's answer to "which TMDB series is this TVDB series", as a scan persists it. */
 const persistedFind = (tvdbId: number, tvResults: unknown[]) => ({
-  [`TMDB:https://api.themoviedb.org/3/find/${tvdbId}?external_source=tvdb_id`]: { provider: "TMDB", value: { movie_results: [], tv_results: tvResults, tv_episode_results: [] }, receivedAt: RECEIVED },
+  [`tmdb-series-by-tvdb:${tvdbId}`]: { provider: "TMDB", value: { movie_results: [], tv_results: tvResults, tv_episode_results: [] }, receivedAt: RECEIVED },
 });
 const noCatalogues = { tmdb: {}, tvdb: {} };
 const noHistory = { countedDays: () => 0 };

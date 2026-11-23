@@ -49,7 +49,7 @@ A show's durable, per-provider requirement to download catalogues instead of reu
 _Avoid_: Refresh flag, pending refresh
 
 **Cached recheck**:
-A comparison of affected shows run immediately after a Manual Match or catalogue override change, using only saved catalogues and saved library inventory. It downloads nothing, enumerates nothing in Plex, and never satisfies a refresh obligation or renews any catalogue's age.
+A comparison of affected shows run immediately after a Manual Match or catalogue override change, using only saved catalogues, saved library inventory and saved evidence. It downloads nothing, enumerates nothing in Plex, and never satisfies a refresh obligation or renews any catalogue's age.
 _Avoid_: Offline recheck, local recheck
 
 **Fifth-scan safeguard**:
@@ -112,6 +112,21 @@ An association between provider show records that identifies related catalogues 
 **Episode crosswalk**:
 A lookup that relates a TVDB episode to another identity for the same episode (its IMDb ID, Trakt's episode search, or TMDB's external-ID search) so that ownership can be matched when provider numbering differs. It is automatic matching evidence and never creates a Manual Match.
 
+**Provider relationship**:
+Evidence from a provider lookup about show or episode identities, such as a series association, series summary or episode crosswalk. Shelfcheck can save it for a comparison or share a crosswalk outcome across comparisons. It does not by itself establish library ownership or create a Manual Match.
+_Avoid_: Provider cache, lookup result
+
+**Evidence source**:
+Where one show comparison gets its provider relationships: live evidence in a scan run, or saved evidence in a cached recheck. A comparison uses exactly one.
+
+**Live evidence**:
+The provider relationships a scan run's comparison obtains, either reusing a saved answer the freshness rules still allow or asking the provider again. Each answer received is saved for later cached rechecks.
+_Avoid_: Live mode
+
+**Saved evidence**:
+The provider relationships a cached recheck compares from: the comparison's saved copies, newer shared crosswalk evidence, and what its saved catalogues already say about the show. It never asks a provider; a missing saved answer leaves that episode or show unresolved instead.
+_Avoid_: Replay mode, offline evidence
+
 **Episode crosswalk freshness**:
 The rule that a saved TMDB external-ID crosswalk response, whether a match or a valid empty answer, is reused only on the UTC date it was actually received. A live scan that reaches that matching step requests it again when the response is missing, undated, or received before the scan's starting UTC date. Reuse, cached rechecks and restarts never renew the receipt time, and the rule is independent of TMDB's show change feed and of provider catalogue freshness.
 _Avoid_: Crosswalk expiry job, daily cache clear
@@ -121,7 +136,7 @@ A saved TMDB external-ID crosswalk response whose required refresh in a live sca
 _Avoid_: Stale fallback, expired match
 
 **Shared crosswalk evidence**:
-The latest outcome of one TVDB episode's TMDB external-ID crosswalk, shared by every show comparison that needs that lookup: a usable response with its receipt time, or a rejection. It is a provider relationship, not an ownership decision; each comparison still decides coverage against current library inventory. A later outcome in one comparison, a replacement or a rejection, applies to every other comparison and cached recheck that saved the older answer. A usable response received after a comparison's own request for the lookup failed also reaches that comparison's cached recheck, which has no saved copy; the recheck saves it as that comparison's own copy and then resolves that failed request. Clearing one show's cache never lets a cached recheck revive an older copy: a usable response is only marked not current for live scans, and a rejection is kept.
+The latest outcome of one TVDB episode's TMDB external-ID crosswalk, shared by every show comparison that needs that lookup: a usable response with its receipt time, or a rejection. It is a provider relationship, not an ownership decision; each comparison still decides coverage against current library inventory. A later outcome in one comparison, a replacement or a rejection, applies to every other comparison and cached recheck that saved the older answer. A usable response received after a comparison's own request for the lookup failed also reaches that comparison's cached recheck, which has no saved copy; the recheck saves it as that comparison's own copy and then resolves that failed request. Clearing one show's cache marks as not current only the TMDB external-ID crosswalks that show saved for its TVDB episodes; a series association never marks an episode with the same numeric ID. The show's other provider relationships are still cleared with its cache. Clearing never lets a cached recheck revive an older copy: a usable response is only marked not current for live scans, and a rejection is kept.
 _Avoid_: Crosswalk cache, shared match
 
 **Report Missing**:

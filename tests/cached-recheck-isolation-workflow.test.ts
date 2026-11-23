@@ -82,7 +82,7 @@ test("a missing saved episode relationship stays with its episode during a cache
   state.bodies.set("/3/find/301", found(tmdb1));
   state.bodies.set("/3/find/302", found(tmdb2));
   assert.deepEqual(missingKeys(await rerun()), ["TMDB:9003", "TVDB:303"]);
-  dropSavedRelationships("ratingKey:target", relationship => relationship.includes("/find/301?"));
+  dropSavedRelationships("ratingKey:target", relationship => relationship === "tmdb-episode-by-tvdb:301");
 
   // An unrelated Manual Match edit rechecks the show offline.
   const saved = await save([tmdb3, tvdb3]);
@@ -113,7 +113,7 @@ test("a missing saved show-level relationship is a shared-input failure: the rec
   state.bodies.set("/3/find/301", found(tmdb1));
   state.bodies.set("/3/find/302", found(tmdb2));
   const scanned = await rerun();
-  dropSavedRelationships("ratingKey:target", relationship => relationship.endsWith("/v4/series/20"));
+  dropSavedRelationships("ratingKey:target", relationship => relationship === "tvdb-series:20");
   const saved = await save([tmdb3, tvdb3]);
   assert.ok(saved.ok, await saved.clone().text());
   const before = requests.length;
@@ -129,7 +129,7 @@ test("Report Missing keeps its precedence over a complete-set Manual Match when 
   state.bodies.set("/3/find/301", found(tmdb1));
   state.bodies.set("/3/find/302", found(tmdb2));
   await rerun();
-  dropSavedRelationships("ratingKey:target", relationship => /\/find\/30[12]\?/.test(relationship));
+  dropSavedRelationships("ratingKey:target", relationship => /^tmdb-episode-by-tvdb:30[12]$/.test(relationship));
   const saved = await save([tmdb1, tvdb1]);
   assert.ok(saved.ok, await saved.clone().text());
   const mappingId = (await saved.json()).mapping.id as string;

@@ -342,6 +342,30 @@ test("an offline recheck replays a later shared outcome instead of its older cop
   assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
 });
 
+test("an offline recheck whose shared crosswalk evidence cannot be read fails only that episode's check, not the show comparison", async t => {
+  const { rerun, save, status } = await sharedDayOne(t);
+  await rerun();
+  // Fault injection: reading TVDB 301's shared crosswalk evidence from SQLite throws.
+  const db = (globalThis as typeof globalThis & { __shelfcheckDatabase?: import("node:sqlite").DatabaseSync }).__shelfcheckDatabase!;
+  const prepare = db.prepare.bind(db);
+  t.mock.method(db, "prepare", (sql: string) => {
+    const statement = prepare(sql);
+    if (!sql.startsWith("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?")) return statement;
+    return new Proxy(statement, { get: (target, property) => property === "get"
+      ? (key: string) => { if (key === "tmdb-crosswalk:301") throw new Error("database is locked"); return target.get(key); }
+      : (target as unknown as Record<PropertyKey, unknown>)[property] instanceof Function ? (target as unknown as Record<PropertyKey, (...args: unknown[]) => unknown>)[property].bind(target) : (target as unknown as Record<PropertyKey, unknown>)[property] });
+  });
+
+  await saveUnrelatedMatch(save);
+  const rechecked = await settled(status);
+  for (const name of ["target", "other"] as const) {
+    assert.deepEqual((rechecked as Result).coverage.issues.filter(issue => issue.id.endsWith(`:ratingKey:${name}`) && /^comparison-(inputs|failure):/.test(issue.id)), [], `${name}: the show comparison completes`);
+    assert.ok(missingKeys(rechecked, name).includes("TVDB:301"), `${name}: the unreadable crosswalk grants no coverage`);
+    assert.match(crosswalkIssues(rechecked, name).join("\n"), /^301: .*database is locked/m, `${name}: the failure stays with TVDB 301`);
+    assert.ok(missingKeys(rechecked, name).includes("TVDB:302"), `${name}: sibling episodes are still compared`);
+  }
+});
+
 for (const failure of ["a failed request", "an unreadable response"] as const) test(`clearing one show's cache keeps a rejection by ${failure} that other shows' offline rechecks depend on`, async t => {
   const { rerun, state, requests, clearCache, save, status } = await sharedDayOne(t);
   await rerun();

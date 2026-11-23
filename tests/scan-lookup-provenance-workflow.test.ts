@@ -181,7 +181,7 @@ test("episode failures explain catalogue identity sources and persist safe parse
   assert.deepEqual(authBlocked.coverage.issues.map((i:{id:string})=>i.id),["provider-authentication:TVDB"],"cached catalogues and blocked episode verification share the established authentication cause");
   assert.match(authBlocked.coverage.issues[0].impacts.join(" "),/Episode identity and coverage/);
   assert.equal(blockedEpisodeRequests,0,"known authentication failure prevents doomed episode requests");
-  const blockedIssue=savedIssues.getCoverageIssue("episode-identity:ratingKey:1:TVDB:https://api4.thetvdb.com/v4/episodes/200/extended");
+  const blockedIssue=savedIssues.getCoverageIssue("episode-identity:ratingKey:1:tvdb-episode-extended:200");
   assert.deepEqual(blockedIssue?.causedBy,["provider-authentication:TVDB"]);
   assert.ok(!JSON.stringify(authBlocked.coverage).includes("secret-"));
   assert.match(authBlocked.report.shows[0].warning,/identity.*failed/);

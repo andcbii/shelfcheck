@@ -53,7 +53,7 @@ test("opening an empty data directory creates every table at the current version
   assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.deepEqual(tables(db), EVERY_TABLE);
   });
 });
@@ -84,6 +84,12 @@ const TODAY_LAYOUT = `
   INSERT INTO shelfcheck_coverage_state(id,revision,pending) VALUES(1,7,1);
 `;
 const GENERATED_KEYS = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards", "tmdb:1", "tvdb:2", "comparison:3", "inventory", "deferred-tmdb", "pending-tvdb", "tmdb-crosswalk:4"];
+/** The generated inputs migration 6 (the lookup key reset) keeps: scan accounting, provider verification positions and pending safeguards. */
+const KEPT_GENERATED_KEYS = ["completed-full-scan", "full-scan", "pending-safeguards", "provider-verification"];
+/** Rows as migration 6 leaves them when it has no Plex scan cache, Resume point or lookup issue to clear: only the kept generated inputs remain. */
+function keptByLookupKeyReset(rows: Record<string, Record<string, unknown>[]>) {
+  return { ...rows, shelfcheck_plex_generated_inputs: rows.shelfcheck_plex_generated_inputs.filter(row => KEPT_GENERATED_KEYS.includes(row.cache_key as string)) };
+}
 
 /** Every row of every Shelfcheck table, in a stable order. */
 function everyRow(db: DatabaseSync) {
@@ -113,7 +119,7 @@ test("opening an older sparse layout adds missing tables and columns without era
   assert.equal(sqlite.savedScanState("trakt").status.read(), null, "A missing Trakt status table has no status");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.deepEqual(tables(db), EVERY_TABLE);
     assert.deepEqual(db.prepare("SELECT provider,episode_id,mapping_id,report_missing FROM shelfcheck_coverage_members").all().map(row => ({ ...row })), [{ provider: "TMDB", episode_id: 1, mapping_id: "m", report_missing: 0 }], "Older members gain Report Missing off");
     assert.deepEqual({ ...db.prepare("SELECT revision,pending FROM shelfcheck_coverage_state").get() }, { revision: 3, pending: 0 });
@@ -152,13 +158,13 @@ test("ownership-correction retirement runs once, with today's revision and pendi
 
 test("a database from a newer Shelfcheck is refused and left untouched", (t) => {
   const file = freshDatabaseFile(t);
-  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 6;");
+  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 7;");
   const before = inspect(file, db => ({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 6, newer than this Shelfcheck supports \(5\)/);
+  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 7, newer than this Shelfcheck supports \(6\)/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.deepEqual({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }, before);
   });
 });
@@ -233,7 +239,7 @@ test("a migration failing after a real schema change rolls back everything, and 
   sqlite.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.deepEqual(coverageState(db), { revision: 5, pending: 1 }, "The retry retires corrections exactly once");
   });
 });
@@ -356,7 +362,7 @@ test("no backup is written for a new database, on a later open, or beside a refu
   closeCached();
   assert.deepEqual(directoryEntries(), [], "A later open with no pending migration writes no backup");
 
-  inspect(file, db => db.exec("PRAGMA user_version = 6"));
+  inspect(file, db => db.exec("PRAGMA user_version = 7"));
   assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /newer than this Shelfcheck supports/);
   assert.deepEqual(directoryEntries(), [], "A refused newer database gets no backup");
 });
@@ -379,7 +385,7 @@ test("upgrading Plex keeps its Settings, including unknown fields, and discards 
   assert.deepEqual(sqlite.savedScanState("trakt").options.read(), { diagnostics: true }, "Trakt moves in the same open");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.equal(tables(db).includes("shelfcheck_plex_state"), false, "The old Plex table is dropped");
   });
 });
@@ -438,7 +444,7 @@ test("upgrading Trakt keeps its options, including unknown fields, and discards 
   assert.deepEqual(sqlite.savedScanState("plex").options.read(), { libraries: ["1"] }, "Plex is not touched again");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.equal(tables(db).includes("shelfcheck_states"), false, "The old Trakt state table is dropped");
     assert.equal(tables(db).includes("shelfcheck_scan_status"), false, "The old Trakt status table is dropped");
   });
@@ -545,13 +551,13 @@ for (const upgrade of UPGRADES) {
     closeCached();
 
     inspect(file, db => {
-      assert.equal(version(db), 5);
+      assert.equal(version(db), 6);
       assert.deepEqual(tables(db), EVERY_TABLE, "The old scan state tables are dropped");
       const after = everyRow(db);
       for (const name of OLD_SCAN_STATE_TABLES) { delete before[name]; delete after[name]; }
       assert.deepEqual(after.shelfcheck_series_not_found, [], "Migration 5 starts the 404 history empty");
       delete after.shelfcheck_series_not_found;
-      assert.deepEqual(after, before, "Every other table and row is kept");
+      assert.deepEqual(after, keptByLookupKeyReset(before), "Every other table and row is kept; migration 6 keeps only scan accounting, verification and safeguards");
     });
     const backups = readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
     assert.deepEqual(backups, [BACKUP_FILE_NAME], "Only the original backup exists");
@@ -610,20 +616,21 @@ for (const [name, report] of Object.entries(OLD_TRAKT_REPORTS)) {
     assert.deepEqual([trakt.report, trakt.resumePoint], [null, null], "The Trakt report and Resume point are cleared");
     assert.deepEqual(trakt.status, traktStatusV3, "Trakt scan status is kept");
     assert.deepEqual(trakt.options, traktOptionsV3, "Trakt options, Ignores and unknown fields included, are kept");
-    assert.deepEqual(sqlite.savedScanState("plex").snapshot(), { ...plexRowV3, updatedAt: "2026-01-01 00:00:00" }, "The whole Plex row is kept");
+    const plex = sqlite.savedScanState("plex").snapshot()!;
+    assert.deepEqual([plex.report, plex.resumePoint, plex.status, plex.options], [plexRowV3.report, null, plexRowV3.status, plexRowV3.options], "The Plex report, status and options are kept; migration 6 clears its Resume point");
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(requests.mock.callCount(), 0, "No scan starts by itself");
     assert.equal(scanRun.scanRuns.isActive(), false);
     closeCached();
 
     inspect(file, db => {
-      assert.equal(version(db), 5);
+      assert.equal(version(db), 6);
       const after = everyRow(db);
       delete before.shelfcheck_scan_state;
       delete after.shelfcheck_scan_state;
       assert.deepEqual(after.shelfcheck_series_not_found, [], "Migration 5 starts the 404 history empty");
       delete after.shelfcheck_series_not_found;
-      assert.deepEqual(after, before, "Every other table and row is kept");
+      assert.deepEqual(after, keptByLookupKeyReset(before), "Every other table and row is kept; migration 6 keeps only scan accounting, verification and safeguards");
     });
     const backups = readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
     assert.deepEqual(backups, [BACKUP_FILE_NAME], "No second backup is written");
@@ -637,7 +644,7 @@ test("upgrading a version 3 database with no Trakt row leaves it without one", (
   assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 5);
+    assert.equal(version(db), 6);
     assert.deepEqual(db.prepare("SELECT mode FROM shelfcheck_scan_state ORDER BY mode").all().map(row => row.mode), ["plex"]);
   });
 });
@@ -654,7 +661,7 @@ test("after migration 4, a new Trakt report and Resume point survive a reopen, s
   assert.deepEqual(trakt.report.read(), report);
   assert.deepEqual(trakt.resumePoint.read(), { ...report, savedAt: "after", resumePointVersion: 2 });
   closeCached();
-  inspect(file, db => assert.equal(version(db), 5, "The version advanced once"));
+  inspect(file, db => assert.equal(version(db), 6, "The version advanced once"));
 });
 
 test("a failure after migration 4 clears the Trakt results rolls back the clear and the version together", (t) => {
@@ -673,4 +680,182 @@ test("a failure after migration 4 clears the Trakt results rolls back the clear 
   });
 
   assert.equal(sqlite.savedScanState("trakt").report.read(), null, "A retry clears them");
+});
+
+// Migration 6: the lookup key cutover (SHELFCHECK-40). Generated scan data and lookup Coverage Issues
+// saved under URL-shaped keys are cleared once, so no build reads them as lookup keys.
+const DISCARDED_LOG = "Shelfcheck cleared its saved Plex scan data for the new provider lookup keys. Run a full Plex scan to download provider catalogues again; Manual Matches, Report Missing flags, Ignores, catalogue choices and settings were kept.";
+const EMPTY_LOG = "Shelfcheck moved to the new provider lookup keys; there was no saved Plex scan data to clear.";
+const OLD_KEY = "TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id";
+const lookupIssue = (id: string) => ({ id, operation: "episode-identity", provider: "TMDB", scope: "episode", cause: "503 — TMDB request failed", action: "Retry the Plex scan after TMDB availability recovers." });
+const lookupIssue301 = `episode-identity:ratingKey:1:${OLD_KEY}`;
+const lookupIssue20 = "episode-identity:ratingKey:1:TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id";
+const crosswalkIssue = "episode-check:ratingKey:1:episode-crosswalk:TMDB:TVDB:301";
+const titleIssue = "episode-check:ratingKey:1:title-recovery:TVDB:401";
+const missingTitleIssue = "episode-check:ratingKey:1:missing-title:TVDB:401";
+/** Coverage Issues of a version 5 database, by ID: lookup issues, and every kind of issue that links to them or not. */
+const issuesV5: Record<string, { id: string; causedBy?: string[] } & Record<string, unknown>> = {
+  [lookupIssue301]: lookupIssue(lookupIssue301),
+  [lookupIssue20]: { ...lookupIssue(lookupIssue20), scope: "show", causedBy: ["provider-authentication:TVDB"] },
+  // A child whose only parent is removed.
+  [crosswalkIssue]: { id: crosswalkIssue, operation: "episode-crosswalk", scope: "episode", cause: "c", action: "a", causedBy: [lookupIssue301], impacts: ["kept"] },
+  // A child with a removed and a surviving parent.
+  "comparison-inputs:ratingKey:1": { id: "comparison-inputs:ratingKey:1", operation: "comparison", scope: "show", cause: "c", action: "a", causedBy: [lookupIssue20, "provider-authentication:TVDB"] },
+  // An unaffected title issue, and a dependent of it.
+  [titleIssue]: { id: titleIssue, operation: "title-recovery", scope: "episode", cause: "c", action: "a", causedBy: ["provider-authentication:TVDB"] },
+  [missingTitleIssue]: { id: missingTitleIssue, operation: "missing-title", scope: "episode", cause: "c", action: "a", causedBy: [titleIssue] },
+  "provider-authentication:TVDB": { id: "provider-authentication:TVDB", operation: "provider-authentication", scope: "library", cause: "c", action: "a" },
+  // Names the family without starting with its prefix: kept.
+  "member-verification:m:episode-identity:1": { id: "member-verification:m:episode-identity:1", operation: "member-verification", scope: "episode", cause: "c", action: "a" },
+};
+const plexScanCacheV5 = { target: { tmdbId: 10, tvdbId: 20, tvdbEpisodeImdbIds: { 301: ["tt1"] }, lastCheckedAt: "2026-11-01T00:00:00.000Z" } };
+const plexReportV5 = { shows: [{ ratingKey: "target" }], lastScan: "2026-11-01T00:00:00.000Z", scanCache: plexScanCacheV5, cacheVersion: 12, autoCompoundEpisodes: false };
+const plexResumePointV5 = { shows: [], scanCache: plexScanCacheV5, cacheVersion: 12, savedAt: "2026-11-01T00:00:00.000Z" };
+const traktRowV5 = { report: { shows: [], missing: [], lastScan: "x", scanCache: { 2: { lastCheckedAt: "x" } } }, resumePoint: { savedAt: "x" }, status: { status: "completed" }, options: traktLegacyOptions };
+
+/**
+ * A version 5 database, as the release before the lookup key cutover left it: saved Plex scan data,
+ * lookup issues, decisions and a 404 history. Today's open builds the layout; stepping user_version
+ * back is that release's database, since migration 6 changes no schema.
+ */
+function versionFive(file: string, seed?: (db: DatabaseSync) => void) {
+  sqlite.savedScanState("plex").snapshot();
+  closeCached();
+  inspect(file, db => {
+    db.exec("PRAGMA user_version = 5");
+    seedUnrelated(db);
+    db.prepare("UPDATE shelfcheck_plex_generated_inputs SET payload = ? WHERE cache_key = 'comparison:3'").run(JSON.stringify({ relationships: { [OLD_KEY]: { provider: "TMDB", value: {} } }, tvdbEpisodeImdbIds: { 301: ["tt1"] } }));
+    for (const issue of Object.values(issuesV5)) db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?)").run(issue.id, JSON.stringify(issue));
+    db.exec("INSERT INTO shelfcheck_series_not_found VALUES('tmdb', 7, 2, '2026-11-01')");
+    db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('plex',?,?,?,?,'2026-11-01 00:00:00')")
+      .run(JSON.stringify(plexReportV5), JSON.stringify(plexResumePointV5), JSON.stringify({ status: "completed" }), JSON.stringify(plexLegacySettings));
+    db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('trakt',?,?,?,?,'2026-11-02 00:00:00')")
+      .run(...[traktRowV5.report, traktRowV5.resumePoint, traktRowV5.status, traktRowV5.options].map(value => JSON.stringify(value)));
+    seed?.(db);
+  });
+}
+const issueRows = (db: DatabaseSync) => Object.fromEntries((db.prepare("SELECT id, payload FROM shelfcheck_coverage_issues ORDER BY id").all() as { id: string; payload: string }[]).map(row => [row.id, JSON.parse(row.payload)]));
+const logged = (info: { mock: { calls: { arguments: unknown[] }[] } }) => info.mock.calls.map(call => call.arguments);
+
+test("upgrading a version 5 database clears generated scan data, the Plex scan cache and Resume point and lookup issues once, keeping every decision", async (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  versionFive(file);
+  info.mock.resetCalls();
+  const before = inspect(file, everyRow);
+  const requests = t.mock.method(globalThis, "fetch", async () => { throw new Error("The upgrade made a provider request"); });
+
+  const plex = sqlite.savedScanState("plex").snapshot()!;
+  const reportWithoutCache: Partial<typeof plexReportV5> = { ...plexReportV5 };
+  delete reportWithoutCache.scanCache;
+  assert.deepEqual([plex.report, plex.resumePoint, plex.status, plex.options], [reportWithoutCache, null, { status: "completed" }, plexLegacySettings], "The Plex report loses only its scan cache; status and options are kept");
+  assert.notEqual(plex.updatedAt, "2026-11-01 00:00:00", "The Plex saved state changed");
+  assert.deepEqual(sqlite.savedScanState("trakt").snapshot(), { ...traktRowV5, updatedAt: "2026-11-02 00:00:00" }, "The whole Trakt row is kept");
+  assert.deepEqual(logged(info), [[DISCARDED_LOG]], "One log line says a cache was discarded");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.mock.callCount(), 0, "No scan starts by itself");
+  assert.equal(scanRun.scanRuns.isActive(), false);
+  closeCached();
+
+  inspect(file, db => {
+    assert.equal(version(db), 6);
+    const crosswalkWithoutCause = { ...issuesV5[crosswalkIssue] };
+    delete crosswalkWithoutCause.causedBy;
+    assert.deepEqual(issueRows(db), {
+      "comparison-inputs:ratingKey:1": { ...issuesV5["comparison-inputs:ratingKey:1"], causedBy: ["provider-authentication:TVDB"] },
+      [crosswalkIssue]: crosswalkWithoutCause,
+      [missingTitleIssue]: issuesV5[missingTitleIssue],
+      [titleIssue]: issuesV5[titleIssue],
+      i: { id: "i" },
+      "member-verification:m:episode-identity:1": issuesV5["member-verification:m:episode-identity:1"],
+      "provider-authentication:TVDB": issuesV5["provider-authentication:TVDB"],
+    }, "Only lookup issues are removed, and only links to them; surviving causes and every other issue are kept");
+    const after = everyRow(db);
+    for (const name of ["shelfcheck_coverage_issues", "shelfcheck_scan_state"]) { delete before[name]; delete after[name]; }
+    assert.deepEqual(after.shelfcheck_series_not_found, [{ provider: "tmdb", series_id: 7, counted_days: 2, last_counted_day: "2026-11-01" }], "The 404 history is kept");
+    assert.deepEqual(after, keptByLookupKeyReset(before), "Manual Matches, Report Missing flags, catalogue choices, previews and the four kept generated inputs are unchanged");
+  });
+});
+
+test("a new database is created at the latest version without a reset log line", (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  assert.equal(sqlite.savedScanState("plex").snapshot(), null);
+  assert.deepEqual(logged(info), [], "Nothing was upgraded, so nothing is logged");
+  closeCached();
+  inspect(file, db => assert.equal(version(db), 6));
+});
+
+test("an upgraded database with no saved Plex scan data logs that there was nothing to clear", (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  fixture(file, TODAY_LAYOUT);
+  assert.equal(sqlite.savedScanState("plex").snapshot(), null);
+  assert.deepEqual(logged(info), [[EMPTY_LOG]]);
+});
+
+test("a version 5 database holding only kept data upgrades without changing anything", (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  sqlite.savedScanState("plex").options.patch({ libraries: ["1"] });
+  closeCached();
+  inspect(file, db => {
+    db.exec("PRAGMA user_version = 5");
+    for (const key of KEPT_GENERATED_KEYS) db.prepare("INSERT INTO shelfcheck_plex_generated_inputs VALUES(?,?)").run(key, "{}");
+    db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES('provider-authentication:TVDB','{}')").run();
+  });
+  const before = inspect(file, everyRow);
+  info.mock.resetCalls();
+  sqlite.savedScanState("plex").snapshot();
+  assert.deepEqual(logged(info), [[EMPTY_LOG]]);
+  closeCached();
+  inspect(file, db => assert.deepEqual(everyRow(db), before));
+});
+
+test("a failure after migration 6 cleared the cache rolls back the cache, the issues and the version together, and logs nothing", (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  // The trigger fires on the issue-link rewrite, after the generated inputs, scan state and lookup issues were cleared.
+  versionFive(file, db => db.exec(`CREATE TRIGGER forced_failure AFTER UPDATE ON shelfcheck_coverage_issues
+    BEGIN SELECT RAISE(FAIL, 'forced migration failure'); END;`));
+  info.mock.resetCalls();
+  const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
+
+  assert.throws(() => sqlite.savedScanState("plex").snapshot(), /forced migration failure/);
+  assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
+  assert.equal(info.mock.callCount(), 0, "No reset is logged when it rolls back");
+  inspect(file, db => {
+    assert.equal(version(db), 5);
+    assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before, "Generated inputs, scan state and Coverage Issues are as they were");
+    db.exec("DROP TRIGGER forced_failure");
+  });
+
+  assert.equal(sqlite.savedScanState("plex").resumePoint.read(), null, "A retry clears them");
+  assert.deepEqual(logged(info), [[DISCARDED_LOG]]);
+});
+
+test("after migration 6, evidence saved under lookup keys survives a reopen, so the reset happens once", (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  versionFive(file);
+  sqlite.savedScanState("plex").snapshot();
+  const comparison = { relationships: { "tmdb-episode-by-tvdb:301": { provider: "TMDB", value: { tv_episode_results: [] }, receivedAt: "2026-11-22T00:00:00.000Z" } } };
+  const shared = { value: { tv_episode_results: [] }, receivedAt: "2026-11-22T00:00:00.000Z" };
+  sqlite.writePlexGeneratedInputs("comparison:target", comparison);
+  sqlite.writePlexGeneratedInputs("tmdb-crosswalk:301", shared);
+  const issue = lookupIssue("episode-identity:target:tmdb-episode-by-tvdb:302");
+  inspect(file, db => db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?)").run(issue.id, JSON.stringify(issue)));
+  sqlite.savedScanState("plex").resumePoint.write({ savedAt: "after", scanCache: plexScanCacheV5 });
+  closeCached();
+  info.mock.resetCalls();
+
+  assert.deepEqual(sqlite.readPlexGeneratedInputs("comparison:target"), comparison);
+  assert.deepEqual(sqlite.readPlexGeneratedInputs("tmdb-crosswalk:301"), shared);
+  assert.deepEqual(sqlite.savedScanState("plex").resumePoint.read(), { savedAt: "after", scanCache: plexScanCacheV5 });
+  assert.equal(info.mock.callCount(), 0, "No second reset is logged");
+  closeCached();
+  inspect(file, db => {
+    assert.equal(version(db), 6, "The version advanced once");
+    assert.deepEqual(issueRows(db)[issue.id], issue);
+  });
 });

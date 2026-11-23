@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Shelfcheck now saves what TMDB, TVDB and Trakt said about a show or episode
+  by the lookup it answered rather than by the web address it was requested
+  from. Saved data in the old format cannot be read, so the first start after
+  upgrading clears the saved Plex scan data once: downloaded provider
+  catalogues, the saved library inventory, saved comparisons with their
+  provider answers, and the Plex scan cache and Resume point. The log says
+  whether anything was cleared. Nothing is downloaded and no scan starts by
+  itself.
+
+  Run a full Plex scan after upgrading. It downloads every catalogue again and
+  asks the providers again for the episode crosswalks it needs. Until then,
+  the last Plex results stay on screen, a single-show scan asks for a full scan
+  first, and a Manual Match or catalogue override change is saved but cannot
+  be rechecked yet; Scan Issues says the saved inputs are incomplete.
+
+  Scan Issues entries for failed provider lookups from before the upgrade are
+  removed, since they name lookups in the old format; the next scan reports
+  any that still fail. Other entries keep their other causes. Some episode
+  check entries may stay on the Scan Issues page without their failed-request
+  link until the next full scan.
+
+  Kept through the upgrade: Manual Matches, Report Missing flags, Ignores,
+  catalogue overrides and selections, credentials, Plex and Trakt settings,
+  Trakt results, the record of series reported as not found, full-scan
+  counts, provider change-feed positions, pending fifth-scan safeguards and
+  every other Scan Issues entry.
+
+### Fixed
+
+- Clearing one show's cache no longer makes the next scan ask TMDB again for
+  an unrelated episode's crosswalk. A TMDB series lookup for a TVDB series and
+  a TMDB episode lookup for a TVDB episode with the same number were saved
+  under the same name, so they could also share a failure; they are now kept
+  apart.
+
 ## 2.7.0 - 2026-11-21
 
 ### Fixed

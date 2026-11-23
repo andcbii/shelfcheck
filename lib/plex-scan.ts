@@ -4,7 +4,7 @@ import { isPlexScanActive } from "@/lib/plex-scan-active";
 import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
 import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
-import { signInToTvdb } from "@/lib/tvdb-auth";
+import { signInToTvdb, type TvdbSignIn } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
@@ -132,17 +132,21 @@ async function tmdbJson<T>(request: ProviderLookup | `/${string}`, token: string
 async function tvdbJson<T>(url: string, token: string): Promise<T> {
   return scanProviderClient.json<T>(url, { headers: { Authorization: `Bearer ${token}` } }, "TVDB");
 }
+/** Sends TVDB work with the scan's sign-in token; after a failed sign-in it rejects with that sign-in's error instead. */
+function withTvdbSignIn<T>(signIn: TvdbSignIn, send: (token: string) => Promise<T>): Promise<T> {
+  return signIn.outcome === "failed" ? Promise.reject(signIn.error) : send(signIn.token);
+}
 
 /**
  * The live scan run's transport for comparison evidence: each typed lookup is sent with the run's real
  * credentials, Trakt's with the run's Trakt login, which the client refreshes once if Trakt rejects it.
  */
-function liveLookupTransport({tmdbToken, tvdbToken, traktAuth}: {tmdbToken: string; tvdbToken: string; traktAuth: ProviderAuth | null}): LookupTransport {
+function liveLookupTransport({tmdbToken, tvdbSignIn, traktAuth}: {tmdbToken: string; tvdbSignIn: TvdbSignIn; traktAuth: ProviderAuth | null}): LookupTransport {
   return (lookup) => {
     const provider = lookupProvider(lookup);
     switch (provider) {
       case "TMDB": return tmdbJson(lookup, tmdbToken);
-      case "TVDB": return tvdbJson(lookupUrl(lookup), tvdbToken);
+      case "TVDB": return withTvdbSignIn(tvdbSignIn, token => tvdbJson(lookupUrl(lookup), token));
       case "Trakt": return scanProviderClient.json(lookupUrl(lookup), { headers: { Accept: "application/json" } }, provider, traktAuth ?? undefined);
       case "Plex": throw new Error("Plex answers no typed lookup.");
     }
@@ -676,8 +680,6 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const tvdbSignIn = await signInToTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin);
   if (tvdbSignIn.outcome === "authenticated") tvdbLoginDiagnostics.resolve();
   else tvdbLoginDiagnostics.raiseFailure(tvdbSignIn.error);
-  const token = tvdbSignIn.outcome === "authenticated" ? tvdbSignIn.token : "";
-  const tvdbAuthenticationError = tvdbSignIn.outcome === "failed" ? tvdbSignIn.error : undefined;
   // Health changes move the coverage revision, so the recheck ends before this run snapshots it.
   if (mappings.length) {
     await recheckCoverageHealth(scanProviderClient, {tmdbToken: config.tmdbToken, tvdbSignIn});
@@ -719,7 +721,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // Without TVDB history, verification starts at each saved catalogue's own successful download.
   const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
   if (!targetRatingKey) {
-    tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : tvdbSignIn.outcome === "failed" ? Promise.reject(tvdbSignIn.error) : tvdbChangedShows(tvdbFeedFrom, tvdbSignIn.token)).catch((error) => {
+    tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : withTvdbSignIn(tvdbSignIn, token => tvdbChangedShows(tvdbFeedFrom, token))).catch((error) => {
       setProviderVerificationIssue("TVDB", error, tvdbSignIn.outcome === "failed" && error === tvdbSignIn.error ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
       logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
       return null;
@@ -747,7 +749,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const tvdbVerifiedChanges = tvdbChanges === null ? null : tvdbCatalogueChanges;
   // One coordinator per scan run: its comparisons share in-flight crosswalk requests and what this scan requested.
   const liveEvidence: LiveEvidenceScan = {
-    transport: liveLookupTransport({tmdbToken: config.tmdbToken, tvdbToken: token, traktAuth}),
+    transport: liveLookupTransport({tmdbToken: config.tmdbToken, tvdbSignIn, traktAuth}),
     crosswalks: tmdbCrosswalkScanRun({store: sharedTmdbCrosswalks, now: () => new Date().toISOString(), startedAt}),
     traktLogin: Boolean(traktAuth),
     traktLoginDiagnostics,
@@ -891,13 +893,13 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const tmdbCandidates = plexSelection.tmdb.candidates, tvdbCandidates = plexSelection.tvdb.candidates;
     const catalogueUse: Partial<Record<"tmdb" | "tvdb", CatalogueUse>> = {};
     const catalogueSource = downloadCatalogueSource({
-      inputs, now: startedAt, targeted: !!targetRatingKey, tmdbChanges: tmdbCatalogueChanges, tvdbChanges: tvdbCatalogueChanges, tvdbAuthenticationError,
+      inputs, now: startedAt, targeted: !!targetRatingKey, tmdbChanges: tmdbCatalogueChanges, tvdbChanges: tvdbCatalogueChanges, tvdbAuthenticationError: tvdbSignIn.outcome === "failed" ? tvdbSignIn.error : undefined,
       requests: {
         tmdbShow: id => requestTmdbShow(id, config.tmdbToken),
         tmdbShowForTvdb: tvdbId => requestTmdbShowForTvdb(tvdbId, config.tmdbToken),
         tmdbEpisodes: show => tmdbEpisodes(show, config.tmdbToken),
-        tvdbSeries: (id, showTitle) => tvdbSeries(id, token, undefined, showTitle),
-        tvdbEnglishTitle: tvdbEpisodeId => scanProviderClient.json(`${TVDB_API}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
+        tvdbSeries: (id, showTitle) => withTvdbSignIn(tvdbSignIn, token => tvdbSeries(id, token, undefined, showTitle)),
+        tvdbEnglishTitle: tvdbEpisodeId => withTvdbSignIn(tvdbSignIn, token => scanProviderClient.json(`${TVDB_API}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB")),
       },
       show: { ratingKey, title: primary.title },
       previousComparison: savedComparison,
@@ -1021,7 +1023,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     // Without an evidence source nothing was checked, so the last-good relationships stay as saved.
     const retainedComparison = (saved: SavedPlexComparison) => ({...saved,relationships:evidence ? evidence.changes().retained(saved.relationships) : {...saved.relationships},refresh});
     try {
-      const show = {ratingKey,title:primary.title,tmdbId,tvdbId,tvdbSource,providerEpisodes,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError};
+      const show = {ratingKey,title:primary.title,tmdbId,tvdbId,tvdbSource,providerEpisodes,tvdbCached:tvdbCatalogueReused,tvdbAuthenticationError:tvdbSignIn.outcome === "failed" ? tvdbSignIn.error : undefined};
       evidence = liveComparisonEvidence({
         scan: liveEvidence, show, failures: lookupFailureRecord(ratingKey), diagnostics: lookupDiagnostics(show),
         saved: {relationships, tvdbEpisodeImdbIds: cachedTvdbEpisodeImdbIds, reuseImdbIds: Boolean(tvdbId && tvdbVerifiedChanges !== null && !tvdbVerifiedChanges.has(tvdbId))},

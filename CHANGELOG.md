@@ -77,13 +77,18 @@
   with every Manual Match TVDB episode it blocked folded under it, also after
   a restart or a later scan failure. Those Manual Matches stay saved and
   pending, no TVDB episode request is sent for them, and their TMDB episodes
-  are still checked. Before, the recheck signed in on its own before reading
-  Plex: a failed recheck sign-in left its member issues pointing at a sign-in
-  issue that was never recorded, or that a second, successful sign-in later
-  cleared, so they showed one by one; and only a refused login grouped them.
+  are still checked. The TVDB sign-in issue now says Manual Match episodes
+  could not be verified as well.
+
+  Before, the recheck signed in on its own before reading Plex: a failed
+  recheck sign-in left its member issues pointing at a sign-in issue that was
+  never recorded, or that a second, successful sign-in later cleared, so they
+  showed one by one; and they were grouped only when the sign-in failed with
+  an HTTP error.
+
   A scan that fails reading Plex now sends no TVDB sign-in and leaves earlier
-  Scan Issues as they were. The TVDB sign-in issue now says Manual Match
-  episodes could not be verified as well.
+  TVDB sign-in and Manual Match member issues as they were; the scan failure
+  itself is still recorded.
 
 - An Ignore whose save fails no longer applies to the running scan: the scan
   is marked only once the rule and the removal of its saved results are both

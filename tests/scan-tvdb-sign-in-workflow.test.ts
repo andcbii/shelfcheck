@@ -262,6 +262,27 @@ test("a single-show scan signs in once and still rechecks every Manual Match", a
   await assertFoldedAfterReload(f);
 });
 
+test("a single-show scan after a successful TVDB sign-in sends member requests with its token and clears the earlier sign-in issue", async (t) => {
+  const f = await fixture(t);
+  f.signIn = [refused];
+  await f.fullScan();
+  assert.ok(savedIssues.getCoverageIssue(SIGN_IN));
+  // TVDB refuses each member on its own, so both matches stay pending and the single-show scan keeps its report revision.
+  f.signIn = [signedIn("scan-token"), signedIn("second")];
+  f.member = url => url.pathname.startsWith("/v4/episodes/") ? Response.json({}, { status: 403 }) : undefined;
+  await f.showScan();
+  assert.equal(f.tvdbPaths().filter(pathname => pathname === "/v4/login").length, 1, "one sign-in");
+  const memberRequests = f.requests.filter(request => request.url.pathname.startsWith("/v4/episodes/"));
+  assert.deepEqual(memberRequests.map(request => request.url.pathname).sort(), ["/v4/episodes/201/extended", "/v4/episodes/202/extended"], "TVDB members are requested after a good sign-in");
+  assert.ok(memberRequests.every(request => request.authorization === "Bearer scan-token"), "with the scan's sign-in token");
+  assert.equal(savedIssues.getCoverageIssue(SIGN_IN), undefined, "the earlier sign-in issue is cleared");
+  for (const [mapping, id] of [[f.first, 201], [f.second, 202]] as const) {
+    const issue = f.memberIssue(mapping.id, "TVDB", id);
+    assert.ok(issue, `TVDB ${id} has its own issue`);
+    assert.equal(issue.causedBy, undefined, `TVDB ${id} no longer points at the sign-in issue`);
+  }
+});
+
 test("a scan without Manual Matches still signs in to TVDB once", async (t) => {
   const f = await fixture(t, { matches: false });
   f.signIn = [signedIn("only"), signedIn("second")];
@@ -283,5 +304,18 @@ test("a recheck that changes a Manual Match's health keeps the scan's own report
   assert.ok(state.coverage.revision > revision, "the recheck changed Manual Match health");
   assert.equal(state.report?.coverageRevision, state.coverage.revision, "the scan commits its own report at the new revision");
   assert.deepEqual((state.report as unknown as { shows: { title: string }[] }).shows.map(show => show.title), ["Target"], "the show is compared again, not resumed");
+  assert.ok(f.requests.some(request => request.url.pathname === "/3/tv/10/season/1"), "its catalogue was read for this revision");
+});
+
+test("a recheck that changes a Manual Match's health does not reuse a Plex report saved before the change as current", async (t) => {
+  const f = await fixture(t);
+  const revision = store.coverageState().revision;
+  // A usable saved report of the Plex show at the current coverage revision, with no Resume point.
+  ignoreResults.savedScanState("plex").report.write({ shows: [{ ratingKey: "ratingKey:1", title: "Saved before the change", plexEpisodes: 0, missing: [] }], scanCache: { "ratingKey:1": {} }, cacheVersion: PLEX_CACHE_VERSION, autoCompoundEpisodes: true, lastScan: "2020-01-01T00:00:00.000Z", coverageRevision: revision });
+  f.signIn = [refused];
+  const state = await f.fullScan();
+  assert.ok(state.coverage.revision > revision, "the recheck changed Manual Match health");
+  assert.equal(state.report?.coverageRevision, state.coverage.revision, "the new report is saved at the new revision");
+  assert.deepEqual((state.report as unknown as { shows: { title: string }[] }).shows.map(show => show.title), ["Target"], "the show is compared again, not taken from the saved report");
   assert.ok(f.requests.some(request => request.url.pathname === "/3/tv/10/season/1"), "its catalogue was read for this revision");
 });

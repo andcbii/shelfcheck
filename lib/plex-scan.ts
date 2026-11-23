@@ -621,9 +621,15 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // What a committed full scan covered: its saved inputs, and the shows it kept last-good results for.
   let scanInputs: PlexGeneratedInputs | undefined;
   const uncompared = new Set<string>();
-  /** The carried members a committed full scan covered: none without a complete inventory, else those of every show it compared. */
+  let scanIgnored: ReadonlySet<string> = new Set();
+  /**
+   * The carried members a committed full scan covered: none without a complete inventory, else
+   * those of every show it compared. Every show of its inventory it did not ignore was compared
+   * (saving its comparison) or is in `uncompared`, so a member still without a saved comparison
+   * belongs to no compared show and is covered unless an uncompared show has no saved comparison.
+   */
   const coveredByFullScan = () => scanInputs?.inventory?.complete
-    ? coveredCarriedMembers(scanInputs, carriedMembers().filter(entry => entry.revision <= coverageRevision), uncompared)
+    ? coveredCarriedMembers(scanInputs, carriedMembers().filter(entry => entry.revision <= coverageRevision), uncompared, scanInputs.inventory.groups.map(group => group.identity).filter(key => !scanIgnored.has(key)))
     : [];
   return scanRuns.run(owner, plexScanMode, {
     fullRun: !targetRatingKey,
@@ -664,6 +670,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const physicalShows = libraries.flatMap((library) => library.MediaContainer?.Metadata || []);
   const allShows = groupPlexShows(physicalShows);
   const ignoredKeys = ignoredPlexKeys(settings.ignoredShows, Date.parse(startedAt));
+  scanIgnored = ignoredKeys;
   const shows = allShows.filter((show) => !ignoredKeys.has(show.identity));
   if (targetRatingKey && !shows.some((show) => show.identity === targetRatingKey)) throw new Error("That show is not available in the current Plex libraries.");
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
@@ -1196,10 +1203,12 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
 /**
  * The carried members a comparison covered: those none of whose saved show comparisons is in
  * `uncompared`. A member with no saved show comparison is covered only when every uncompared
- * show has one, since otherwise it could belong to an uncompared show that has none.
+ * show and every `current` show (the comparison's library inventory and report, less ignored
+ * shows) has one: then the member belongs to no show that can affect a result. Otherwise it
+ * could belong to a show with no saved comparison, which this comparison could not compare.
  */
-function coveredCarriedMembers(inputs: PlexGeneratedInputs, carried: CarriedMember[], uncompared: ReadonlySet<string>) {
-  const unplaced=[...uncompared].some(key=>!inputs.comparisons[key]);
+function coveredCarriedMembers(inputs: PlexGeneratedInputs, carried: CarriedMember[], uncompared: ReadonlySet<string>, current: Iterable<string>) {
+  const unplaced=[...uncompared,...current].some(key=>!inputs.comparisons[key]);
   return carried.filter(({member})=>{
     const shows=Object.entries(inputs.comparisons).filter(([,input])=>memberInComparison(inputs,input,member)).map(([key])=>key);
     return shows.length ? !shows.some(key=>uncompared.has(key)) : !unplaced;
@@ -1258,7 +1267,8 @@ async function recheckCoverage(impact: CoverageImpact) {
   }
   resolveCoverageIssue("comparison-inputs:initial");
   plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
-  completeCoverageComparison(revision,coveredCarriedMembers(inputs,carried,uncompared));
+  const current=[...inputs.inventory.groups.map(group=>group.identity),...results.map(show=>show.ratingKey)].filter(key=>!ignored.has(key));
+  completeCoverageComparison(revision,coveredCarriedMembers(inputs,carried,uncompared,current));
 }
 
 type SavedComparisonContext = {

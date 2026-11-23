@@ -6,6 +6,7 @@ const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? 
 const { plexSavedState, requestCatalogueRecheck, requestCoverageRecheck } = await import("../lib/plex-scan");
 const { deleteCoverageMapping } = await import("../lib/manual-coverage");
 const { readPlexInputs, savePlexComparison, savePlexInventory } = await import("../lib/plex-catalogues");
+const { database } = await import("../lib/sqlite");
 hook.deregister();
 
 // The Manual Match change sequence through the routes: save, edit, flag-only
@@ -344,4 +345,65 @@ test("a catalogue override recheck never completes the comparison while carried 
   state = await h.status() as Status;
   assert.deepEqual(results(h, state).other, { [key(c)]: "missing" }, "The carried members are still compared by the next cached recheck");
   assert.equal(state.coverage.pending, 0);
+});
+
+/** Removes Other's saved comparison, as if it were lost; returns the restore. */
+function dropOtherComparison() {
+  const saved = readPlexInputs().comparisons["ratingKey:other"]!;
+  database().prepare("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").run("comparison:ratingKey:other");
+  assert.equal(readPlexInputs().comparisons["ratingKey:other"], undefined);
+  return () => savePlexComparison("ratingKey:other", saved);
+}
+
+test("a cached recheck keeps the carried members of a show whose saved comparison is missing until a later recheck compares it", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  // Other is still in the saved inventory and report, but nothing saved says which carried members it holds.
+  const restore = dropOtherComparison();
+  await requestCoverageRecheck({ members: [] });
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "Other was not compared, so the comparison stays pending");
+  assert.deepEqual(results(h, state).other, {}, "Other keeps its last results");
+
+  restore();
+  await requestCoverageRecheck({ members: [] });
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" }, "The carried members were kept and are now compared");
+  assert.equal(state.coverage.pending, 0);
+});
+
+test("a completed full Plex scan covers the carried members of a show whose saved comparison was missing", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  dropOtherComparison();
+  await requestCoverageRecheck({ members: [] });
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "Other was not compared, so the comparison stays pending");
+
+  state = await h.rerun() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" });
+  assert.equal(state.coverage.pending, 0, "The full scan compared every show of its complete inventory");
+});
+
+test("a cached recheck covers a carried member that belongs to no show in the saved inventory or report", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  // Other has left the library: no saved comparison, inventory group or report result holds its members.
+  dropOtherComparison();
+  const inventory = readPlexInputs().inventory!;
+  savePlexInventory({ ...inventory, groups: inventory.groups.filter(group => group.identity !== "ratingKey:other") });
+  const report = plexSavedState.report.read()!;
+  plexSavedState.report.write({ ...report, shows: report.shows.filter(show => show.ratingKey !== "ratingKey:other") });
+  await requestCoverageRecheck({ members: [] });
+  const state = await h.status() as Status;
+  assert.equal(state.coverage.pending, 0, "Other's carried members cannot affect any result");
 });

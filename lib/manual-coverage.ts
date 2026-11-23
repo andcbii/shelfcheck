@@ -262,14 +262,16 @@ export function carriedMembers(): CarriedMember[] {
 }
 
 /**
- * Complete a comparison of coverage `revision`: drop the carried members it
- * rechecked, each only as carried when the recheck read it (a change committed
- * since carries it again at a newer revision, and keeps it), then clear pending
- * only when `revision` is still current and no carried member remains.
+ * Complete a comparison (a cached recheck or a Plex scan run) of coverage
+ * `revision`: uncarry the carried members it `covered` (compared and published
+ * every show of), each only as carried when the comparison read it (a change
+ * committed since carries it again at a newer revision, and keeps it), then
+ * clear pending only when `revision` is still current and no carried member
+ * remains. Members it did not cover stay carried and pending.
  */
-export function completeCoverageRecheck(revision: number, rechecked: CarriedMember[] = []) {
+export function completeCoverageComparison(revision: number, covered: CarriedMember[] = []) {
   completeComparison(revision, db => {
-    for (const { member, revision: carried } of rechecked)
+    for (const { member, revision: carried } of covered)
       db.prepare("DELETE FROM shelfcheck_coverage_carried WHERE provider=? AND episode_id=? AND show_id=? AND revision<=?").run(member.provider, member.id, member.showId, carried);
   });
 }

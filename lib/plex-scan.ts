@@ -6,7 +6,7 @@ import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageRecheck, completeFullCoverageScan, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison, completeFullCoverageScan, listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -634,7 +634,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,
       // Only a committed full scan compared every show, so only it covers every carried member; a single-show scan covers none.
-      committed: () => targetRatingKey ? completeCoverageRecheck(coverageRevision) : completeFullCoverageScan(coverageRevision),
+      committed: () => targetRatingKey ? completeCoverageComparison(coverageRevision) : completeFullCoverageScan(coverageRevision),
       succeeded: () => resolveCoverageIssue("scan-failure"),
       failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
       failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
@@ -1184,9 +1184,21 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
     pending(error instanceof PendingSavedComparison ? error.message : `The new catalogue selection could not be compared from saved inputs: ${coverageIssueCause(error)} Last-good results were kept.`);
   }
 }
+/**
+ * The carried members a comparison covered: those none of whose saved show comparisons is in
+ * `uncompared`. A member with no saved show comparison is covered only when every uncompared
+ * show has one, since otherwise it could belong to an uncompared show that has none.
+ */
+function coveredCarriedMembers(inputs: PlexGeneratedInputs, carried: CarriedMember[], uncompared: ReadonlySet<string>) {
+  const unplaced=[...uncompared].some(key=>!inputs.comparisons[key]);
+  return carried.filter(({member})=>{
+    const shows=Object.entries(inputs.comparisons).filter(([,input])=>memberInComparison(inputs,input,member)).map(([key])=>key);
+    return shows.length ? !shows.some(key=>uncompared.has(key)) : !unplaced;
+  });
+}
 async function recheckCoverage(impact: CoverageImpact) {
-  // Every carried member is rechecked too, with this change's: a failed or interrupted
-  // earlier recheck leaves its members carried until a recheck or full scan succeeds.
+  // Every carried member is rechecked too, with this change's. Only the members whose shows
+  // this recheck compares and publishes are uncarried; the rest stay carried and pending.
   const carried=carriedMembers(), revision=coverageState().revision;
   const members=[...impact.members,...carried.map(entry=>entry.member)];
   const inputs=readPlexInputs(), prior=getPlexReport();
@@ -1209,13 +1221,15 @@ async function recheckCoverage(impact: CoverageImpact) {
     const keys=targets.size ? [...targets] : [undefined];
     for (const key of keys) setCoverageIssue({id:key ? `comparison-inputs:${key}` : "comparison-inputs:initial",operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
     if (prior) plexSavedState.report.write({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
-    completeCoverageRecheck(revision,carried);
+    // Nothing was compared, so every carried member stays carried.
+    completeCoverageComparison(revision);
     return;
   }
   const context=savedComparisonContext(inputs,settings,ignored);
   const results=[...prior.shows];
   // One recheck time for every 60-day usability decision.
   const now=new Date().toISOString();
+  const uncompared=new Set<string>();
   for (const key of targets) {
     if (ignored.has(key)) continue;
     const input=inputs.comparisons[key];
@@ -1225,6 +1239,7 @@ async function recheckCoverage(impact: CoverageImpact) {
       const index=results.findIndex(show=>show.ratingKey===key);
       if (index>=0) results[index]=compared.result; else results.push(compared.result);
     } catch (error) {
+      uncompared.add(key);
       // A cached recheck cannot reevaluate a failed download. Preserve the
       // dependency established by that scan until its inputs can be evaluated.
       const previous = getCoverageIssue(`comparison-inputs:${key}`);
@@ -1234,7 +1249,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   }
   resolveCoverageIssue("comparison-inputs:initial");
   plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
-  completeCoverageRecheck(revision,carried);
+  completeCoverageComparison(revision,coveredCarriedMembers(inputs,carried,uncompared));
 }
 
 type SavedComparisonContext = {

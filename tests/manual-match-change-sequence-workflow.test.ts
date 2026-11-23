@@ -3,8 +3,9 @@ import { registerHooks } from "node:module";
 import test from "node:test";
 import { api, harness as workflow, key, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
-const { plexSavedState, requestCoverageRecheck } = await import("../lib/plex-scan");
+const { plexSavedState, requestCatalogueRecheck, requestCoverageRecheck } = await import("../lib/plex-scan");
 const { deleteCoverageMapping } = await import("../lib/manual-coverage");
+const { readPlexInputs, savePlexComparison, savePlexInventory } = await import("../lib/plex-catalogues");
 hook.deregister();
 
 // The Manual Match change sequence through the routes: save, edit, flag-only
@@ -241,5 +242,53 @@ test("a change committed while a cached recheck runs stays pending and carried u
   await requestCoverageRecheck({ members: [] });
   state = await h.status() as Status;
   assert.deepEqual(results(h, state).target, { [key(whole)]: `incomplete because ${key(a)}`, [key(keptTvdb)]: "missing" });
+  assert.equal(state.coverage.pending, 0);
+});
+
+/** Marks Other's saved comparison incomplete, so a cached recheck fails for Other alone; returns the restore. */
+function breakOtherComparison() {
+  const saved = readPlexInputs().comparisons["ratingKey:other"]!;
+  savePlexComparison("ratingKey:other", { ...saved, complete: false });
+  return () => savePlexComparison("ratingKey:other", saved);
+}
+
+test("a cached recheck that fails for one show keeps that show's carried members pending until a later recheck compares it", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  // The next recheck compares Target but cannot compare Other.
+  const restore = breakOtherComparison();
+  await requestCoverageRecheck({ members: [] });
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "Other was not compared, so the comparison stays pending");
+  assert.deepEqual(results(h, state).other, {}, "Other keeps its last results");
+
+  // Other's members are still carried, across a restart: a later recheck of no change compares Other.
+  restore();
+  h.restart();
+  await requestCoverageRecheck({ members: [] });
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" }, "The failed edit's removed member is missing again in Other");
+  assert.equal(state.coverage.pending, 0);
+});
+
+test("a cached recheck without a complete saved inventory compares nothing and keeps every carried member", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  const inventory = readPlexInputs().inventory!;
+  savePlexInventory({ ...inventory, complete: false });
+  await requestCoverageRecheck({ members: [] });
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "Nothing was compared, so the comparison stays pending");
+
+  savePlexInventory(inventory);
+  await requestCoverageRecheck({ members: [] });
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" }, "The carried members were kept and are now compared");
   assert.equal(state.coverage.pending, 0);
 });

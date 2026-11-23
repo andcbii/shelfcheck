@@ -1,31 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
 import { registerHooks } from "node:module";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
-import test, { type TestContext } from "node:test";
+import test from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const { legacySavedComparisonEvidence } = await import("../lib/legacy-saved-comparison-evidence");
 const { CrosswalkResponseError, SavedRelationshipUnavailableError } = await import("../lib/comparison-evidence");
-const { getCoverageIssue, setCoverageIssue } = await import("../lib/coverage-issues");
 hook.deregister();
+import { inMemoryLookupIssues } from "./in-memory-lookup-issues";
+import { providerLookup } from "../lib/provider-lookup";
 import type { SharedCrosswalkRecord } from "../lib/tmdb-crosswalk-policy";
-
-const NOW = "2026-11-12T10:00:00.000Z";
-const global = globalThis as typeof globalThis & {__shelfcheckDatabase?: DatabaseSync};
-/** Coverage Issues (the read port's store) in a temporary database, with a fixed clock. */
-function temporaryDatabase(t: TestContext) {
-  const dir = mkdtempSync(path.join(tmpdir(),"legacy-saved-evidence-"));
-  const previous = process.env.SHELFCHECK_DATA_DIR;
-  process.env.SHELFCHECK_DATA_DIR = dir;
-  t.mock.timers.enable({apis: ["Date"], now: Date.parse(NOW)});
-  t.after(() => {
-    global.__shelfcheckDatabase?.close(); delete global.__shelfcheckDatabase;
-    if (previous === undefined) delete process.env.SHELFCHECK_DATA_DIR; else process.env.SHELFCHECK_DATA_DIR = previous;
-    rmSync(dir,{recursive:true,force:true});
-  });
-}
 
 /** Today's relationship keys (Story 1 baseline), spelled out independently of the code. */
 const keys = {
@@ -42,14 +24,14 @@ const issueId = (key: string) => `episode-identity:target:${key}`;
 const MATCH = {tv_episode_results: [{id: 901, show_id: 10, season_number: 2, episode_number: 3}]};
 const TRAKT = [{type: "episode", episode: {season: 2, number: 3, ids: {tvdb: 303, tmdb: 901}}, show: {ids: {tmdb: 10, tvdb: 20}}}];
 const saved = (provider: string, value: unknown, receivedAt = "2026-11-01T00:00:00.000Z") => ({provider, value, receivedAt});
+const validation = () => providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 2, 3);
 
 type Options = Parameters<typeof legacySavedComparisonEvidence>[0];
 function source(options: Partial<Options> = {}) {
-  return legacySavedComparisonEvidence({ratingKey: "target", relationships: {}, reuseImdbIds: true, shared: () => undefined, ...options});
+  return legacySavedComparisonEvidence({ratingKey: "target", relationships: {}, reuseImdbIds: true, shared: () => undefined, failures: inMemoryLookupIssues().failures, ...options});
 }
 
-test("a cached recheck answers every lookup kind from saved relationships and reports nothing missing", async t => {
-  temporaryDatabase(t);
+test("a cached recheck answers every lookup kind from saved relationships and reports nothing missing", async () => {
   const evidence = source({relationships: {
     [keys.tmdbCrosswalk303]: saved("TMDB", MATCH), [keys.trakt303]: saved("Trakt", TRAKT),
     [keys.tvdbExtended303]: saved("TVDB", {data: {remoteIds: [{id: "TT0303"}]}}), [keys.tmdbValidation]: saved("TMDB", {id: 901}),
@@ -59,7 +41,7 @@ test("a cached recheck answers every lookup kind from saved relationships and re
   assert.equal(evidence.traktAvailable, true);
   assert.deepEqual(await evidence.tmdbEpisodeByTvdb(303), MATCH.tv_episode_results);
   assert.deepEqual(await evidence.traktEpisodeSearch(303), {results: TRAKT, cached: true});
-  assert.deepEqual(await evidence.tmdbEpisodeDetails({tmdbShowId: 10, season: 2, episode: 3}, {tvdbEpisodeId: 303, tmdbEpisodeId: 901, cached: true}), {id: 901});
+  assert.deepEqual(await evidence.tmdbEpisodeDetails(validation(), {tvdbEpisodeId: 303, tmdbEpisodeId: 901, cached: true}), {id: 901});
   assert.deepEqual([...await evidence.tvdbEpisodeExtended(303)], ["tt0303"]);
   assert.deepEqual(await evidence.tmdbSeriesByTvdb(20), [{id: 10}]);
   assert.deepEqual(await evidence.tmdbSeriesSummary(10), {id: 10, name: "Basic"});
@@ -69,12 +51,12 @@ test("a cached recheck answers every lookup kind from saved relationships and re
   assert.deepEqual(evidence.missing(), []);
 });
 
-test("a missing episode answer fails that episode only; a missing series answer is listed as missing saved input", async t => {
-  temporaryDatabase(t);
+test("a missing episode answer fails that episode only, naming its provider; a missing series answer is listed as missing saved input", async () => {
   const evidence = source();
-  for (const lookup of [evidence.tmdbEpisodeByTvdb(303), evidence.traktEpisodeSearch(303), evidence.tvdbEpisodeExtended(303),
-    evidence.tmdbEpisodeDetails({tmdbShowId: 10, season: 2, episode: 3}, {tvdbEpisodeId: 303, tmdbEpisodeId: 901, cached: false})]) {
-    await assert.rejects(lookup, SavedRelationshipUnavailableError);
+  for (const [provider, lookup] of [["TMDB", evidence.tmdbEpisodeByTvdb(303)], ["Trakt", evidence.traktEpisodeSearch(303)], ["TVDB", evidence.tvdbEpisodeExtended(303)],
+    ["TMDB", evidence.tmdbEpisodeDetails(validation(), {tvdbEpisodeId: 303, tmdbEpisodeId: 901, cached: false})]] as const) {
+    await assert.rejects(lookup, error => error instanceof SavedRelationshipUnavailableError
+      && error.message === `The saved ${provider} response for this episode is not available to the offline recheck; no request was made.`);
   }
   assert.deepEqual(evidence.missing(), []);
   await assert.rejects(evidence.tmdbSeriesByTvdb(20), /Saved provider identity relationship is missing/);
@@ -84,30 +66,27 @@ test("a missing episode answer fails that episode only; a missing series answer 
   assert.deepEqual(evidence.missing(), [keys.tmdbSeriesByTvdb20, keys.tmdbSummary10, keys.tmdbSummaryWithIds10, keys.tvdbSummary20]);
 });
 
-test("a recorded failed request never stops the recheck reusing a saved answer, and it raises or resolves no issue", async t => {
-  temporaryDatabase(t);
-  setCoverageIssue({id: issueId(keys.trakt303), operation: "episode-identity", provider: "Trakt", scope: "episode", cause: "503", action: "Retry."});
-  const evidence = source({relationships: {[keys.trakt303]: saved("Trakt", "not a list")}});
+test("a recorded failed request never stops the recheck reusing a saved answer", async () => {
+  const issues = inMemoryLookupIssues();
+  issues.open.set(keys.trakt303, {});
+  const evidence = source({failures: issues.failures, relationships: {[keys.trakt303]: saved("Trakt", "not a list")}});
   await assert.rejects(evidence.traktEpisodeSearch(303), CrosswalkResponseError);
-  assert.ok(getCoverageIssue(issueId(keys.trakt303)));
   assert.equal(source().traktAvailable, false);
 });
 
-test("a TMDB crosswalk missing after the show's failed request is recovered from newer shared evidence: saved first, then resolved", async t => {
-  temporaryDatabase(t);
-  setCoverageIssue({id: issueId(keys.tmdbCrosswalk303), operation: "episode-identity", provider: "TMDB", scope: "episode", cause: "503", action: "Retry.", failedAt: "2026-11-10T00:00:00.000Z"});
+test("a TMDB crosswalk missing after the show's failed request is recovered from newer shared evidence: saved first, then resolved", async () => {
+  const issues = inMemoryLookupIssues();
+  issues.open.set(keys.tmdbCrosswalk303, {failedAt: "2026-11-10T00:00:00.000Z"});
   const shared: SharedCrosswalkRecord = {value: MATCH, receivedAt: "2026-11-11T00:00:00.000Z"};
-  const evidence = source({shared: id => id === 303 ? shared : undefined});
+  const evidence = source({failures: issues.failures, shared: id => id === 303 ? shared : undefined});
   assert.deepEqual(await evidence.tmdbEpisodeByTvdb(303), MATCH.tv_episode_results);
   const copy = {provider: "TMDB", value: MATCH, receivedAt: "2026-11-11T00:00:00.000Z"};
+  // The adapter only reports the recovery: the caller resolves the failed request once it is saved.
   assert.deepEqual(evidence.changes().recovered, {relationships: {[keys.tmdbCrosswalk303]: copy}, resolves: [issueId(keys.tmdbCrosswalk303)]});
   assert.deepEqual(evidence.changes().relationships, {[keys.tmdbCrosswalk303]: copy});
-  // The adapter only reports the recovery: the caller resolves the failed request once it is saved.
-  assert.ok(getCoverageIssue(issueId(keys.tmdbCrosswalk303)));
 });
 
-test("a newer shared TMDB outcome replaces the saved copy in memory only; a rejection without a payload drops it", async t => {
-  temporaryDatabase(t);
+test("a newer shared TMDB outcome replaces the saved copy in memory only; a rejection without a payload drops it", async () => {
   const relationships = {[keys.tmdbCrosswalk303]: saved("TMDB", {tv_episode_results: []})};
   const replaced = source({relationships, shared: () => ({value: MATCH, receivedAt: "2026-11-11T00:00:00.000Z"})});
   assert.deepEqual(await replaced.tmdbEpisodeByTvdb(303), MATCH.tv_episode_results);
@@ -117,8 +96,7 @@ test("a newer shared TMDB outcome replaces the saved copy in memory only; a reje
   assert.deepEqual(dropped.changes().relationships, {});
 });
 
-test("saved IMDb results are reused only while allowed; otherwise the saved extended record answers", async t => {
-  temporaryDatabase(t);
+test("saved IMDb results are reused only while allowed; otherwise the saved extended record answers", async () => {
   const relationships = {[keys.tvdbExtended303]: saved("TVDB", {data: {remoteIds: [{id: "tt0303"}]}})};
   const reused = source({relationships: {}, tvdbEpisodeImdbIds: {"303": ["tt9999"]}});
   assert.deepEqual([...await reused.tvdbEpisodeExtended(303)], ["tt9999"]);
@@ -127,8 +105,7 @@ test("saved IMDb results are reused only while allowed; otherwise the saved exte
   assert.deepEqual(reread.changes().tvdbEpisodeImdbIds, {"303": ["tt0303"]});
 });
 
-test("an invalid identity is a rejected lookup, never a synchronous throw", async t => {
-  temporaryDatabase(t);
+test("an invalid identity is a rejected lookup, never a synchronous throw", async () => {
   const evidence = source();
   await assert.rejects(evidence.tmdbEpisodeByTvdb(0), RangeError);
   await assert.rejects(evidence.tmdbSeriesSummary(-1), RangeError);

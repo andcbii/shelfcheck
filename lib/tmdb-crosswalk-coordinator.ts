@@ -107,17 +107,19 @@ export function tmdbCrosswalkScanRun({ store, now, startedAt }: { store: SharedC
   };
 }
 
+/** One live scan run's TMDB external-ID crosswalks. */
+export type TmdbCrosswalkScanRun = ReturnType<typeof tmdbCrosswalkScanRun>;
 /** One comparison's view of its scan run's TMDB external-ID crosswalks. */
-export type TmdbCrosswalkComparison = ReturnType<ReturnType<typeof tmdbCrosswalkScanRun>["comparison"]>;
+export type TmdbCrosswalkComparison = ReturnType<TmdbCrosswalkScanRun["comparison"]>;
 
 /**
- * An offline recheck's recovered crosswalk answers (see the policy's `recover` decision), by relationship
+ * A cached recheck's recovered crosswalk answers (see the policy's `recover` decision), by relationship
  * key, and the failed-request Coverage Issues they resolve once saved.
  */
 export type RecoveredCrosswalks = { relationships: CrosswalkRelationships; resolves: string[] };
 
 /**
- * Saves an offline recheck's recovered answers as the comparison's own copies first, and only then
+ * Saves a cached recheck's recovered answers as the comparison's own copies first, and only then
  * resolves their failed requests, so a failed save leaves them open and the answers recoverable by a
  * later recheck.
  */
@@ -130,7 +132,7 @@ export function saveRecoveredTmdbCrosswalks({ relationships, resolves }: Recover
 /**
  * Clearing one show's cache: each usable shared answer among the show's cleared relationships is
  * marked not current for live scans, so its next lookup is requested again. It keeps its original
- * receipt time, and rejections are kept unchanged, so offline rechecks cannot revive an older copy.
+ * receipt time, and rejections are kept unchanged, so cached rechecks cannot revive an older copy.
  */
 export function invalidateShowTmdbCrosswalks({ store, now }: { store: SharedCrosswalkStore; now: () => string }, clearedRelationshipKeys: Iterable<string>) {
   for (const key of clearedRelationshipKeys) {

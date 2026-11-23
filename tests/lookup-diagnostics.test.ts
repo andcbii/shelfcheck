@@ -117,6 +117,20 @@ test("a failed TMDB episode validation names the TMDB episode Trakt expected and
   }));
 });
 
+test("a source chain given with one failure describes that failure only, as if it were the comparison's", t => {
+  temporaryDatabase(t);
+  const lookupSource = [{provider: "Trakt" as const, kind: "external TMDB episode ID", id: 9002, cached: true}];
+  const diagnostics = lookupDiagnostics(target);
+  diagnostics.raiseFailure(providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 1, 2), new ProviderHttpError("TMDB", 404), lookupSource);
+  diagnostics.raiseFailure(providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 1, 3), new ProviderHttpError("TMDB", 404));
+  const given = JSON.parse(storedIssue(ids.tmdbValidation)!);
+  assert.deepEqual(given.lookup.source, lookupSource);
+  assert.deepEqual(given.episode, {provider: "TMDB", id: 9002, showId: 10, season: 1, episode: 2});
+  const own = JSON.parse(storedIssue(ids.tmdbValidation.replace("episode/2", "episode/3"))!);
+  assert.deepEqual(own.lookup.source, []);
+  assert.deepEqual(own.episode, {provider: "TMDB", showId: 10, season: 1, episode: 3});
+});
+
 test("series summary failures raise no lookup issue", t => {
   temporaryDatabase(t);
   const diagnostics = lookupDiagnostics(target);

@@ -1,14 +1,13 @@
 import "server-only";
 import type { LookupSourceStep } from "@/lib/coverage-issues";
-import { lookupDiagnostics, type LookupComparisonContext } from "@/lib/lookup-diagnostics";
-import { traktLoginDiagnostics } from "@/lib/provider-login-diagnostics";
-import { lookupFailureRecord } from "@/lib/lookup-failure-record";
+import type { LookupComparisonContext, LookupDiagnostics } from "@/lib/lookup-diagnostics";
+import type { LookupFailureRecord } from "@/lib/lookup-failure-record";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import type { EpisodeCrosswalk } from "@/lib/plex-comparison";
 import { isProviderLoginFailure } from "@/lib/provider-client";
-import { isProviderId, lookupKey, lookupProvider, providerLookup, type ProviderLookup } from "@/lib/provider-lookup";
+import { isProviderId, lookupKey, lookupProvider, providerLookup, type ProviderLookup, type TmdbEpisodeLookup } from "@/lib/provider-lookup";
 import type { ProviderName } from "@/lib/provider-policy";
-import { tmdbCrosswalkResults, type CrosswalkRelationships, type RecoveredCrosswalks, type tmdbCrosswalkScanRun } from "@/lib/tmdb-crosswalk-coordinator";
+import { tmdbCrosswalkResults, type CrosswalkRelationships, type RecoveredCrosswalks, type TmdbCrosswalkScanRun } from "@/lib/tmdb-crosswalk-coordinator";
 import { isRecord, responseRecordList } from "@/lib/value-guards";
 
 /**
@@ -35,11 +34,12 @@ export class TraktLoginUnavailableError extends Error {
   constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
 }
 /**
- * An offline replay found no saved response for one episode's crosswalk. No request was
+ * A cached recheck found no saved response for one episode's crosswalk lookup. No request was
  * attempted; the failure stays with that episode instead of discarding the show comparison.
  */
 export class SavedRelationshipUnavailableError extends Error {
-  constructor(readonly relationship: string) { super(`The saved ${relationship.slice(0, relationship.indexOf(":"))} response for this episode is not available to the offline recheck; no request was made.`); }
+  // The message is stored as the episode failure's reason, so its wording stays as it was.
+  constructor(readonly lookup: ProviderLookup) { super(`The saved ${lookupProvider(lookup)} response for this episode is not available to the offline recheck; no request was made.`); }
 }
 
 /** A TMDB series record usable as a series: one with a numeric ID. */
@@ -63,8 +63,6 @@ export type TraktEpisodeSearch = { results: TraktEpisodeSearchResult[]; cached: 
  * episode, that TMDB episode ID, and whether the Trakt answer was reused.
  */
 export type TraktValidationProvenance = { tvdbEpisodeId: number; tmdbEpisodeId: number; cached: boolean };
-/** One TMDB episode by its show, season and episode number. */
-export type TmdbEpisodeCoordinate = { tmdbShowId: number; season: number; episode: number };
 
 /** The series lookups of a comparison evidence source. */
 export type SeriesEvidence = {
@@ -103,7 +101,7 @@ export type ComparisonEvidence = SeriesEvidence & {
   /** Trakt's episode search for one TVDB episode. */
   traktEpisodeSearch(tvdbEpisodeId: number): Promise<TraktEpisodeSearch>;
   /** One TMDB episode record, validating a Trakt answer. */
-  tmdbEpisodeDetails(episode: TmdbEpisodeCoordinate, provenance: TraktValidationProvenance): Promise<Record<string, unknown>>;
+  tmdbEpisodeDetails(lookup: TmdbEpisodeLookup, provenance: TraktValidationProvenance): Promise<Record<string, unknown>>;
   /** The IMDb episode IDs of one TVDB episode's extended record: its IMDb crosswalk. */
   tvdbEpisodeExtended(tvdbEpisodeId: number): Promise<Set<string>>;
   /** This comparison could not use a TMDB crosswalk answer: its copy never grants coverage. */
@@ -119,22 +117,24 @@ export type LookupAnswer = { value: unknown; cached: boolean };
  * each lookup kind's answer (`answeredEvidence`); only how the answers are found differs.
  */
 export type EvidenceAnswers = {
-  traktAvailable: boolean;
   /** One lookup's answer. `validation`: a TMDB episode validation's Trakt provenance. */
   answer(lookup: ProviderLookup, validation?: TraktValidationProvenance): Promise<LookupAnswer>;
   /** One TVDB episode's TMDB external-ID crosswalk answer. */
   tmdbEpisodeCrosswalk(tvdbEpisodeId: number): Promise<unknown>;
-  /** IMDb episode IDs by TVDB episode ID: reused when present, and set from each extended record read. */
-  imdbIds: Record<string, string[]>;
-  rejectTmdbEpisodeCrosswalk(tvdbEpisodeId: number): void;
-  changes(): ComparisonEvidenceChanges;
 };
 
-/** The comparison evidence interface over a source's answers: each lookup kind's response is read one way. */
-export function answeredEvidence(answers: EvidenceAnswers): ComparisonEvidence {
-  const { answer, imdbIds } = answers;
-  return {
-    traktAvailable: answers.traktAvailable,
+/** The lookup methods of the comparison evidence interface. */
+export type EvidenceLookups = Omit<ComparisonEvidence, "traktAvailable" | "rejectTmdbEpisodeCrosswalk" | "changes">;
+
+/**
+ * The lookup methods over a source's answers: each lookup kind's response is read one way. It owns
+ * the comparison's IMDb episode IDs: it starts from `keptImdbIds` (copied), answers from them before
+ * any extended record, sets each record it reads, and `tvdbEpisodeImdbIds()` is their snapshot.
+ */
+export function answeredEvidence(answers: EvidenceAnswers, keptImdbIds: Record<string, string[]>): { lookups: EvidenceLookups; tvdbEpisodeImdbIds(): Record<string, string[]> } {
+  const { answer } = answers;
+  const imdbIds: Record<string, string[]> = { ...keptImdbIds };
+  const lookups: EvidenceLookups = {
     async tmdbEpisodeByTvdb(tvdbEpisodeId) {
       return interpretedRecords<TmdbFindEpisode>("TMDB", tmdbCrosswalkResults(await answers.tmdbEpisodeCrosswalk(tvdbEpisodeId)));
     },
@@ -143,8 +143,8 @@ export function answeredEvidence(answers: EvidenceAnswers): ComparisonEvidence {
       if (!Array.isArray(value)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
       return { results: value.filter(isRecord) as TraktEpisodeSearchResult[], cached };
     },
-    async tmdbEpisodeDetails({ tmdbShowId, season, episode }, provenance) {
-      const { value } = await answer(providerLookup.tmdbEpisodeByShowSeasonEpisode(tmdbShowId, season, episode), provenance);
+    async tmdbEpisodeDetails(lookup, provenance) {
+      const { value } = await answer(lookup, provenance);
       if (!isRecord(value)) throw new CrosswalkResponseError("TMDB", "the validating episode record is not an object");
       return value;
     },
@@ -179,33 +179,37 @@ export function answeredEvidence(answers: EvidenceAnswers): ComparisonEvidence {
       const data = isRecord(value) ? value.data as { id?: number; name?: string; slug?: string; year?: string } | undefined : undefined;
       return data ? { id: data.id || tvdbSeriesId, name: data.name, slug: data.slug, year: data.year } : null;
     },
-    rejectTmdbEpisodeCrosswalk: (tvdbEpisodeId) => answers.rejectTmdbEpisodeCrosswalk(tvdbEpisodeId),
-    changes: () => answers.changes(),
   };
+  return { lookups, tvdbEpisodeImdbIds: () => structuredClone(imdbIds) };
 }
 
 /** Sends one typed lookup with the scan run's real credentials. */
 export type LookupTransport = (lookup: ProviderLookup) => Promise<unknown>;
 
+/** The scan run's Trakt login issue: one library issue for a login that cannot be recovered. */
+export type TraktLoginDiagnostics = { raiseFailure(error: unknown): void; resolve(): void };
+
 /** What one live scan run shares with every comparison's live source. */
 export type LiveEvidenceScan = {
   transport: LookupTransport;
   /** The scan run's one TMDB crosswalk coordinator. */
-  crosswalks: ReturnType<typeof tmdbCrosswalkScanRun>;
+  crosswalks: TmdbCrosswalkScanRun;
   /** Whether the run has a Trakt login. */
   traktLogin: boolean;
+  traktLoginDiagnostics: TraktLoginDiagnostics;
   now?: () => string;
 };
 
 /**
  * The live evidence source of one show comparison in a live scan. Bound at construction: the show
- * (its identity and lookup provenance, which also bind its read port and diagnostics), its saved
- * evidence and whether its TMDB crosswalks are forced. It reuses saved relationships while no failed
- * request is recorded for them, requests the rest through the scan's transport, and answers TMDB
- * external-ID crosswalks through the scan run's coordinator. Catalogue downloads (the TVDB slug read
- * included) are not lookups of this source and are never answered from its saved evidence.
+ * (its identity and lookup provenance), its saved evidence, whether its TMDB crosswalks are forced,
+ * the show's Coverage Issue read port and its lookup diagnostics adapter. It reuses saved
+ * relationships while no failed request is recorded for them, requests the rest through the scan's
+ * transport, and answers TMDB external-ID crosswalks through the scan run's coordinator. Catalogue
+ * downloads (the TVDB slug read included) are not lookups of this source and are never answered from
+ * its saved evidence.
  */
-export function liveComparisonEvidence({ scan, show, saved, forced }: {
+export function liveComparisonEvidence({ scan, show, saved, forced, failures, diagnostics }: {
   scan: LiveEvidenceScan;
   show: LookupComparisonContext;
   /**
@@ -216,45 +220,44 @@ export function liveComparisonEvidence({ scan, show, saved, forced }: {
   saved: { relationships: CrosswalkRelationships; tvdbEpisodeImdbIds?: Record<string, string[]>; reuseImdbIds: boolean };
   /** The show's TMDB relationships cannot be reused: every TMDB crosswalk is requested in this scan. */
   forced: boolean;
+  /** The show's recorded lookup failures. */
+  failures: LookupFailureRecord;
+  /** Raises and resolves the show's failed-request Coverage Issues. */
+  diagnostics: LookupDiagnostics;
 }): ComparisonEvidence {
   const now = scan.now || (() => new Date().toISOString());
-  const failures = lookupFailureRecord(show.ratingKey);
-  const diagnostics = lookupDiagnostics(show);
   const relationships: CrosswalkRelationships = { ...saved.relationships };
-  const imdbIds: Record<string, string[]> = saved.reuseImdbIds ? { ...saved.tvdbEpisodeImdbIds } : {};
+  const keptImdbIds: Record<string, string[]> = saved.reuseImdbIds ? { ...saved.tvdbEpisodeImdbIds } : {};
   // A recorded crosswalk failure is retried: its saved answers are requested again.
   const retried = new Set<string>();
   for (const { crosswalk, tvdbEpisodeId } of failures.episodeCrosswalkFailures()) {
     if (!isProviderId(tvdbEpisodeId)) continue;
     retried.add(`${crosswalk}:${tvdbEpisodeId}`);
     delete relationships[lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId))];
-    if (crosswalk === "IMDb") delete imdbIds[String(tvdbEpisodeId)];
+    if (crosswalk === "IMDb") delete keptImdbIds[String(tvdbEpisodeId)];
   }
   const crosswalks = scan.crosswalks.comparison({ relationships, forced });
 
   /** Sends one lookup, raising or resolving its failed-request issue. */
   async function request(lookup: ProviderLookup, send: () => Promise<unknown>, lookupSource?: LookupSourceStep[]) {
     const provider = lookupProvider(lookup);
-    const described = lookupSource ? lookupDiagnostics({ ...show, lookupSource }) : diagnostics;
     let value: unknown;
     try {
       if (provider === "TVDB" && show.tvdbAuthenticationError) throw show.tvdbAuthenticationError;
       value = await send();
     } catch (error) {
       // A login that cannot be recovered is one library issue, not a failure of each lookup it stops.
-      if (provider === "Trakt" && isProviderLoginFailure("Trakt", error)) { traktLoginDiagnostics.raiseFailure(error); throw new TraktLoginUnavailableError(error); }
-      described.raiseFailure(lookup, error);
+      if (provider === "Trakt" && isProviderLoginFailure("Trakt", error)) { scan.traktLoginDiagnostics.raiseFailure(error); throw new TraktLoginUnavailableError(error); }
+      diagnostics.raiseFailure(lookup, error, lookupSource);
       throw error;
     }
-    described.resolve(lookup);
+    diagnostics.resolve(lookup);
     // Only a successful Trakt lookup shows the login works again.
-    if (provider === "Trakt") traktLoginDiagnostics.resolve();
+    if (provider === "Trakt") scan.traktLoginDiagnostics.resolve();
     return value;
   }
 
-  return answeredEvidence({
-    traktAvailable: scan.traktLogin,
-    imdbIds,
+  const { lookups, tvdbEpisodeImdbIds } = answeredEvidence({
     /** A saved answer while no failed request is recorded for it, else a new one, saved as the comparison's relationship. */
     async answer(lookup, validation) {
       if (lookupProvider(lookup) === "Trakt" && !scan.traktLogin) throw new TraktLoginUnavailableError(undefined);
@@ -275,12 +278,17 @@ export function liveComparisonEvidence({ scan, show, saved, forced }: {
       const lookup = providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
       return request(lookup, () => crosswalks.lookup(tvdbEpisodeId, () => scan.transport(lookup), { forced: retried.has(`TMDB:${tvdbEpisodeId}`) }));
     },
+  }, keptImdbIds);
+
+  return {
+    ...lookups,
+    traktAvailable: scan.traktLogin,
     rejectTmdbEpisodeCrosswalk: (tvdbEpisodeId) => crosswalks.rejectCopy(tvdbEpisodeId),
     changes: () => ({
       relationships: structuredClone(relationships),
-      tvdbEpisodeImdbIds: structuredClone(imdbIds),
+      tvdbEpisodeImdbIds: tvdbEpisodeImdbIds(),
       recovered: { relationships: {}, resolves: [] },
       retained: (savedRelationships) => crosswalks.retained(savedRelationships),
     }),
-  });
+  };
 }

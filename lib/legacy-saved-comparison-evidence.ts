@@ -1,7 +1,7 @@
 import "server-only";
 import { answeredEvidence, SavedRelationshipUnavailableError, type ComparisonEvidence } from "@/lib/comparison-evidence";
 import { lookupFailureIssueId } from "@/lib/lookup-diagnostics";
-import { lookupFailureRecord } from "@/lib/lookup-failure-record";
+import type { LookupFailureRecord } from "@/lib/lookup-failure-record";
 import { lookupKey, providerLookup, type ProviderLookup } from "@/lib/provider-lookup";
 import type { CrosswalkRelationships, SharedCrosswalkStore } from "@/lib/tmdb-crosswalk-coordinator";
 import { replayedTmdbCrosswalkDecision } from "@/lib/tmdb-crosswalk-policy";
@@ -20,7 +20,7 @@ const EPISODE_LOOKUPS = new Set<ProviderLookup["kind"]>(["tmdb-episode-by-tvdb-e
  *   a recovered answer is reported in `changes().recovered`, for the caller to save before resolving.
  * - Trakt searches are available when the saved relationships hold any Trakt answer.
  */
-export function legacySavedComparisonEvidence({ ratingKey, relationships: saved, tvdbEpisodeImdbIds, reuseImdbIds, shared }: {
+export function legacySavedComparisonEvidence({ ratingKey, relationships: saved, tvdbEpisodeImdbIds, reuseImdbIds, shared, failures }: {
   ratingKey: string;
   /** The comparison's saved relationships, with the series summaries the recheck supplies. */
   relationships: CrosswalkRelationships;
@@ -29,10 +29,10 @@ export function legacySavedComparisonEvidence({ ratingKey, relationships: saved,
   reuseImdbIds: boolean;
   /** Shared crosswalk evidence, read only. */
   shared: SharedCrosswalkStore["read"];
+  /** The show's recorded lookup failures. */
+  failures: LookupFailureRecord;
 }): ComparisonEvidence & { missing(): string[] } {
   const relationships: CrosswalkRelationships = { ...saved };
-  const imdbIds: Record<string, string[]> = reuseImdbIds ? { ...tvdbEpisodeImdbIds } : {};
-  const failures = lookupFailureRecord(ratingKey);
   const missing = new Set<string>();
   /** Recovered crosswalk relationship keys, with the failed-request issue each resolves once saved. */
   const recovered = new Map<string, string>();
@@ -40,14 +40,12 @@ export function legacySavedComparisonEvidence({ ratingKey, relationships: saved,
   async function answer(lookup: ProviderLookup) {
     const key = lookupKey(lookup);
     if (Object.hasOwn(relationships, key)) return { value: relationships[key].value, cached: true };
-    if (EPISODE_LOOKUPS.has(lookup.kind)) throw new SavedRelationshipUnavailableError(key);
+    if (EPISODE_LOOKUPS.has(lookup.kind)) throw new SavedRelationshipUnavailableError(lookup);
     missing.add(key);
     throw new Error(`Saved provider identity relationship is missing: ${key}`);
   }
 
-  const evidence = answeredEvidence({
-    traktAvailable: Object.values(saved).some((relationship) => relationship.provider === "Trakt"),
-    imdbIds,
+  const { lookups, tvdbEpisodeImdbIds: imdbIds } = answeredEvidence({
     answer,
     async tmdbEpisodeCrosswalk(tvdbEpisodeId) {
       const lookup = providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
@@ -58,13 +56,17 @@ export function legacySavedComparisonEvidence({ ratingKey, relationships: saved,
       if (decision.action === "drop") delete relationships[key];
       return (await answer(lookup)).value;
     },
+  }, reuseImdbIds ? { ...tvdbEpisodeImdbIds } : {});
+  return {
+    ...lookups,
+    traktAvailable: Object.values(saved).some((relationship) => relationship.provider === "Trakt"),
     rejectTmdbEpisodeCrosswalk() {},
     changes: () => ({
       relationships: structuredClone(relationships),
-      tvdbEpisodeImdbIds: structuredClone(imdbIds),
+      tvdbEpisodeImdbIds: imdbIds(),
       recovered: { relationships: structuredClone(Object.fromEntries([...recovered.keys()].map((key) => [key, relationships[key]]))), resolves: [...recovered.values()] },
       retained: (savedRelationships) => ({ ...savedRelationships }),
     }),
-  });
-  return { ...evidence, missing: () => [...missing] };
+    missing: () => [...missing],
+  };
 }

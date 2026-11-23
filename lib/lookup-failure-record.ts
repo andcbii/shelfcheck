@@ -17,15 +17,21 @@ export type RecordedEpisodeCrosswalkFailure = { crosswalk: EpisodeCrosswalk; tvd
  * Read port for one show's recorded lookup failures. It reports facts only: it decides no
  * freshness or replay, persists no recovery and resolves no issue.
  */
-export function lookupFailureRecord(ratingKey: string) {
+export type LookupFailureRecord = {
+  /** The show's open failed-request issue for this lookup, or none. */
+  failure(lookup: ProviderLookup): RecordedLookupFailure | undefined;
+  /** The show's recorded episode crosswalk failures: retried on the next live scan, carried when not checked again. */
+  episodeCrosswalkFailures(): RecordedEpisodeCrosswalkFailure[];
+};
+
+/** The read port over one show's Coverage Issues. */
+export function lookupFailureRecord(ratingKey: string): LookupFailureRecord {
   return {
-    /** The show's open failed-request issue for this lookup, or none. */
-    failure(lookup: ProviderLookup): RecordedLookupFailure | undefined {
+    failure(lookup) {
       const issue = getCoverageIssue(lookupFailureIssueId(ratingKey, lookup));
       return issue ? { open: true, ...(issue.failedAt !== undefined ? { failedAt: issue.failedAt } : {}) } : undefined;
     },
-    /** The show's recorded episode crosswalk failures: retried on the next live scan, carried when not checked again. */
-    episodeCrosswalkFailures(): RecordedEpisodeCrosswalkFailure[] {
+    episodeCrosswalkFailures() {
       return recordedEpisodeCrosswalkFailures(ratingKey);
     },
   };

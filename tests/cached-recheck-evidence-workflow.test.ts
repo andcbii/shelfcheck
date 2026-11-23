@@ -5,6 +5,7 @@ import { catalogues, plexScan } from "./catalogue-override-harness";
 import { harness, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const config = await import("../lib/server-config");
+const coverageIssues = await import("../lib/coverage-issues");
 hook.deregister();
 const connectTrakt = () => config.writeTraktCredentials({ clientId: "client", clientSecret: "secret", accessToken: "access", refreshToken: "refresh", expiresAt: Date.now() + 86400_000, redirectUri: "http://localhost/callback" });
 
@@ -164,4 +165,174 @@ test("a cached recheck does not use Trakt when the saved comparison has no Trakt
   assert.deepEqual(autoMatches(rechecked), autoMatches(scanned));
   assert.deepEqual(traktIssues(rechecked), [], "no Trakt crosswalk is looked for, so none is unavailable");
   assert.deepEqual(issuesOf(rechecked).filter(issue => issue.operation === "episode-crosswalk"), []);
+});
+
+// --- Shared crosswalk evidence replay ---------------------------------------------------
+
+// "Target" (TMDB 10 / TVDB 20) and "Other" (TMDB 11 / TVDB 21) both list TVDB episode 301 at a
+// coordinate neither owns, so each comparison reaches TVDB 301's TMDB external-ID crosswalk.
+const tmdbOther: Episode = { provider: "TMDB", id: 9101, season: 1, episode: 1, name: "Pilot", show: "other" };
+const sharedCatalogue = [tmdb1, tmdb3, tmdbOther, tvdb1, tvdb3, { ...tvdb1, show: "other" as const }];
+const matched = "Matched via TMDB External ID: TVDB 301 = TMDB 9001";
+const T0 = Date.parse("2026-11-12T10:00:00Z");
+const at = (ms: number) => new Date(T0 + ms).toISOString();
+/** A cached recheck of both shows, as a Manual Match change of TVDB 301 runs it. */
+const recheckBoth = () => plexScan.requestCoverageRecheck({ members: [{ provider: "TVDB", id: tvdb1.id, showId: 21, show: "Other", title: "One", season: 2, episode: 1, url: "" }] });
+
+/** Day one at T0: one scan saves TVDB 301's match for both shows, with the same receipt time. */
+async function sharedMatch(t: test.TestContext) {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(T0) });
+  const h = await harness(t, sharedCatalogue, [tmdb1, tmdbOther]);
+  h.state.bodies.set("/3/find/301", found(tmdb1));
+  const first = await h.rerun();
+  for (const name of ["target", "other"] as const) assert.deepEqual(autoMatches(first, name), [matched]);
+  assert.equal(catalogues.readSharedTmdbCrosswalk(301)?.receivedAt, at(0));
+  /** Target's single-show rescan at `ms` after T0: its forced lookup replaces the shared outcome. */
+  const rescanTarget = async (ms: number) => { t.mock.timers.setTime(T0 + ms); return h.rerun("ratingKey:target"); };
+  /** An offline recheck of both shows; asserts it made no request. */
+  const recheck = async () => {
+    h.requests.length = 0;
+    await recheckBoth();
+    const result = await settled(h.status);
+    assert.deepEqual(h.requests, [], "the cached recheck performs no HTTP");
+    return result;
+  };
+  return { ...h, rescanTarget, recheck };
+}
+
+for (const later of [0, 1]) test(`a shared outcome received ${later ? "after" : "at the same time as"} Other's saved copy ${later ? "replaces it in the recheck" : "leaves the comparison copy in use"}, in memory only`, async t => {
+  const { state, rescanTarget, recheck } = await sharedMatch(t);
+  state.bodies.set("/3/find/301", empty);
+  assert.deepEqual(autoMatches(await rescanTarget(later), "target"), []);
+  assert.equal(catalogues.readSharedTmdbCrosswalk(301)?.receivedAt, at(later));
+  const saved = savedRelationships("other");
+
+  const rechecked = await recheck();
+  assert.deepEqual(showInputIssues(rechecked), []);
+  assert.deepEqual(autoMatches(rechecked, "other"), later ? [] : [matched]);
+  assert.equal(missingKeys(rechecked, "other").includes("TVDB:301"), Boolean(later));
+  assert.deepEqual(episodeIssues(rechecked, "other", 301), [], "a replayed valid empty answer is not a Coverage Issue");
+  assert.deepEqual(savedRelationships("other"), saved, "the replay replacement is not saved");
+});
+
+test("an undated saved copy is older than any dated shared outcome; without a dated one it is replayed", async t => {
+  const { state, rescanTarget, recheck, writeUndatedRelationships } = await sharedMatch(t);
+  // Releases before receipt times saved undated copies and no shared crosswalk evidence.
+  writeUndatedRelationships();
+  assert.ok(!catalogues.readSharedTmdbCrosswalk(301));
+  assert.deepEqual(autoMatches(await recheck(), "other"), [matched], "with no shared outcome the undated copy is replayed");
+
+  state.bodies.set("/3/find/301", empty);
+  await rescanTarget(-60_000);
+  const saved = savedRelationships("other");
+  const rechecked = await recheck();
+  assert.deepEqual(autoMatches(rechecked, "other"), [], "a shared outcome even older than the undated copy's scan replaces it");
+  assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+  assert.deepEqual(savedRelationships("other"), saved, "the replay replacement is not saved");
+});
+
+const rejections: { kind: string; serve: (state: Awaited<ReturnType<typeof harness>>["state"]) => void; cause: RegExp }[] = [
+  { kind: "a failed request", serve: state => state.statuses.set("/3/find/301", 404), cause: /The saved TMDB response for this episode is not available to the offline recheck/ },
+  { kind: "an unreadable response", serve: state => state.bodies.set("/3/find/301", { tv_episode_results: "unreadable" }), cause: /could not be interpreted/ },
+];
+for (const rejection of rejections) test(`a newer shared rejection by ${rejection.kind} grants Other's saved copy nothing in the recheck`, async t => {
+  const { state, rescanTarget, recheck, restart } = await sharedMatch(t);
+  rejection.serve(state);
+  await rescanTarget(1);
+  assert.equal(catalogues.readSharedTmdbCrosswalk(301)?.rejectedAt, at(1));
+  const saved = savedRelationships("other");
+
+  for (const restarting of [false, true]) {
+    if (restarting) restart();
+    const rechecked = await recheck();
+    assert.deepEqual(showInputIssues(rechecked), [], "the episode's failure never fails the show");
+    assert.deepEqual(autoMatches(rechecked, "other"), []);
+    assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+    const [issue, ...others] = episodeIssues(rechecked, "other", 301);
+    assert.deepEqual(others, []);
+    assert.equal(issue.operation, "episode-crosswalk");
+    assert.match(issue.cause, rejection.cause);
+    assert.deepEqual(savedRelationships("other"), saved, "the saved copy is kept, so a later shared outcome can still replace it");
+  }
+});
+
+// --- Recovery after the comparison's own failed request ---------------------------------
+
+/** Other's rescan at T0+1s fails TVDB 301's lookup, leaving no saved copy and a dated failed request. */
+async function otherFailed(t: test.TestContext) {
+  const h = await sharedMatch(t);
+  h.state.statuses.set("/3/find/301", 404);
+  t.mock.timers.setTime(T0 + 1000);
+  const failed = await h.rerun("ratingKey:other");
+  assert.deepEqual(autoMatches(failed, "other"), []);
+  const [request] = episodeIssues(failed, "other", 301).filter(issue => issue.operation === "episode-identity");
+  assert.equal(request.failedAt, at(1000));
+  h.state.statuses.delete("/3/find/301");
+  return { ...h, request };
+}
+
+test("a shared answer received strictly after the comparison's own failed request is recovered, saved, then resolves that request, and stays", async t => {
+  const { rescanTarget, recheck, restart, request } = await otherFailed(t);
+  assert.deepEqual(autoMatches(await rescanTarget(2000), "target"), [matched]);
+  const before = savedRelationships("other");
+
+  const rechecked = await recheck();
+  assert.deepEqual(autoMatches(rechecked, "other"), [matched]);
+  assert.deepEqual(episodeIssues(rechecked, "other", 301), [], "the failed request is resolved");
+  assert.equal(coverageIssues.getCoverageIssue(request.id), undefined);
+  const after = savedRelationships("other");
+  const added = Object.keys(after).filter(key => !Object.hasOwn(before, key));
+  assert.equal(added.length, 1, "exactly the recovered answer is saved");
+  assert.deepEqual(after[added[0]], { provider: "TMDB", value: found(tmdb1), receivedAt: at(2000) }, "with the shared answer's original receipt time");
+  for (const key of Object.keys(before)) assert.deepEqual(after[key], before[key]);
+
+  // Later rechecks and restarts keep the recovery.
+  for (const restarting of [false, true]) {
+    if (restarting) restart();
+    const again = await recheck();
+    assert.deepEqual(autoMatches(again, "other"), [matched]);
+    assert.deepEqual(episodeIssues(again, "other", 301), []);
+    assert.deepEqual(savedRelationships("other"), after);
+  }
+});
+
+const noRecovery: { kind: string; arrange: (h: Awaited<ReturnType<typeof otherFailed>>) => Promise<void> }[] = [
+  { kind: "received at the same time as the failed request", arrange: async h => { await h.rescanTarget(1000); } },
+  { kind: "when the failed request has no failure time", arrange: async h => { await h.rescanTarget(2000); const { failedAt: _, ...undated } = coverageIssues.getCoverageIssue(h.request.id)!; coverageIssues.setCoverageIssue(undated); } },
+  { kind: "when no failed request is recorded", arrange: async h => { await h.rescanTarget(2000); coverageIssues.resolveCoverageIssue(h.request.id); } },
+];
+for (const variant of noRecovery) test(`a shared answer ${variant.kind} is not recovered into the comparison`, async t => {
+  const h = await otherFailed(t);
+  await variant.arrange(h);
+  const before = savedRelationships("other");
+  const issue = coverageIssues.getCoverageIssue(h.request.id);
+
+  const rechecked = await h.recheck();
+  assert.deepEqual(showInputIssues(rechecked), []);
+  assert.deepEqual(autoMatches(rechecked, "other"), [], "the missing copy stays unavailable");
+  assert.ok(missingKeys(rechecked, "other").includes("TVDB:301"));
+  assert.deepEqual(coverageIssues.getCoverageIssue(h.request.id), issue, "the failed request is left as it was");
+  assert.deepEqual(savedRelationships("other"), before, "nothing is saved");
+});
+
+test("a recovered answer that cannot be saved leaves the failed request open, and a later recheck recovers it", async t => {
+  const { rescanTarget, recheck, request } = await otherFailed(t);
+  await rescanTarget(2000);
+  const before = savedRelationships("other");
+  // Saving Other's comparison with changed relationships fails; other saves succeed.
+  const db = (globalThis as typeof globalThis & { __shelfcheckDatabase?: import("node:sqlite").DatabaseSync }).__shelfcheckDatabase!;
+  db.exec(`CREATE TRIGGER fail_recovery_save BEFORE UPDATE ON shelfcheck_plex_generated_inputs
+    WHEN NEW.cache_key='comparison:ratingKey:other' AND json_extract(NEW.payload,'$.relationships') IS NOT json_extract(OLD.payload,'$.relationships')
+    BEGIN SELECT RAISE(ABORT,'disk full'); END`);
+
+  const failed = await recheck();
+  assert.deepEqual(coverageIssues.getCoverageIssue(request.id)?.failedAt, request.failedAt, "the failed request stays open");
+  assert.deepEqual(savedRelationships("other"), before);
+  assert.deepEqual(showInputIssues(failed), ["comparison-inputs:ratingKey:other"], "the show keeps last-good results");
+
+  db.exec("DROP TRIGGER fail_recovery_save");
+  const recovered = await recheck();
+  assert.deepEqual(autoMatches(recovered, "other"), [matched]);
+  assert.equal(coverageIssues.getCoverageIssue(request.id), undefined);
+  assert.deepEqual(showInputIssues(recovered), []);
 });

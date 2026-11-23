@@ -217,9 +217,8 @@ test("a request that throws before returning is a failed request: its rejection 
 
 test("a recheck saves its recovered answers as the comparison's own copies before resolving their failed requests", () => {
   const events: string[] = [];
-  const recovered = new Map([[KEY_301, "episode-identity:ratingKey:other:301"]]);
-  const replayed = { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT }, other: { provider: "TMDB", value: {} } };
-  saveRecoveredTmdbCrosswalks(recovered, replayed, {
+  const replayed = { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT } };
+  saveRecoveredTmdbCrosswalks({ relationships: replayed, resolves: ["episode-identity:ratingKey:other:301"] }, {
     save: (copies) => events.push(`save ${JSON.stringify(copies)}`),
     resolveFailedRequest: (issueId) => events.push(`resolve ${issueId}`),
   });
@@ -228,7 +227,7 @@ test("a recheck saves its recovered answers as the comparison's own copies befor
 
 test("a recovered answer that cannot be saved leaves its failed request open", () => {
   const resolved: string[] = [];
-  assert.throws(() => saveRecoveredTmdbCrosswalks(new Map([[KEY_301, "issue"]]), { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT } }, {
+  assert.throws(() => saveRecoveredTmdbCrosswalks({ relationships: { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT } }, resolves: ["issue"] }, {
     save: () => { throw new Error("disk full"); },
     resolveFailedRequest: (issueId) => resolved.push(issueId),
   }), /disk full/);
@@ -236,7 +235,7 @@ test("a recovered answer that cannot be saved leaves its failed request open", (
 });
 
 test("a recheck that recovered nothing saves nothing", () => {
-  saveRecoveredTmdbCrosswalks(new Map(), {}, { save: () => assert.fail("no save"), resolveFailedRequest: () => assert.fail("no resolve") });
+  saveRecoveredTmdbCrosswalks({ relationships: {}, resolves: [] }, { save: () => assert.fail("no save"), resolveFailedRequest: () => assert.fail("no resolve") });
 });
 
 /** The saved relationship key of TVDB episode 302's TMDB external-ID crosswalk. */

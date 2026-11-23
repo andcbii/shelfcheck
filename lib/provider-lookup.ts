@@ -24,6 +24,9 @@ export type ProviderLookup =
   /** Trakt's episode search for one TVDB episode: its Trakt crosswalk. */
   | { kind: "trakt-episode-search-by-tvdb-episode"; tvdbEpisodeId: number };
 
+/** One TMDB episode by its show, season and episode number. */
+export type TmdbEpisodeLookup = Extract<ProviderLookup, { kind: "tmdb-episode-by-show-season-episode" }>;
+
 /** Whether a value is a provider ID a lookup accepts: a positive safe integer. */
 export const isProviderId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
 /** Whether a value is a season or episode number a lookup accepts: a non-negative safe integer. */
@@ -42,7 +45,7 @@ function coordinate(value: number, name: string) {
 export const providerLookup = {
   tmdbEpisodeByTvdbEpisode: (tvdbEpisodeId: number): ProviderLookup => ({ kind: "tmdb-episode-by-tvdb-episode", tvdbEpisodeId: providerId(tvdbEpisodeId, "TVDB episode ID") }),
   tmdbSeriesByTvdbSeries: (tvdbSeriesId: number): ProviderLookup => ({ kind: "tmdb-series-by-tvdb-series", tvdbSeriesId: providerId(tvdbSeriesId, "TVDB series ID") }),
-  tmdbEpisodeByShowSeasonEpisode: (tmdbShowId: number, season: number, episode: number): ProviderLookup => ({ kind: "tmdb-episode-by-show-season-episode", tmdbShowId: providerId(tmdbShowId, "TMDB show ID"), season: coordinate(season, "Season number"), episode: coordinate(episode, "Episode number") }),
+  tmdbEpisodeByShowSeasonEpisode: (tmdbShowId: number, season: number, episode: number): TmdbEpisodeLookup => ({ kind: "tmdb-episode-by-show-season-episode", tmdbShowId: providerId(tmdbShowId, "TMDB show ID"), season: coordinate(season, "Season number"), episode: coordinate(episode, "Episode number") }),
   tmdbSeriesSummary: (tmdbShowId: number): ProviderLookup => ({ kind: "tmdb-series-summary", tmdbShowId: providerId(tmdbShowId, "TMDB show ID") }),
   tmdbSeriesSummaryWithExternalIds: (tmdbShowId: number): ProviderLookup => ({ kind: "tmdb-series-summary-with-external-ids", tmdbShowId: providerId(tmdbShowId, "TMDB show ID") }),
   tvdbSeriesSummary: (tvdbSeriesId: number): ProviderLookup => ({ kind: "tvdb-series-summary", tvdbSeriesId: providerId(tvdbSeriesId, "TVDB series ID") }),

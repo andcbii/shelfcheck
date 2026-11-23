@@ -66,14 +66,25 @@ function raisesLookupIssue(lookup: ProviderLookup) {
   return lookup.kind !== "tmdb-series-summary" && lookup.kind !== "tmdb-series-summary-with-external-ids" && lookup.kind !== "tvdb-series-summary";
 }
 
+/** One show comparison's lookup Coverage Issues, as an evidence source raises and resolves them. */
+export type LookupDiagnostics = {
+  /**
+   * Records a failed request for a lookup. The error is only described, never replaced.
+   * `lookupSource`: the source chain that led to this lookup, when it is not the comparison's own.
+   */
+  raiseFailure(lookup: ProviderLookup, error: unknown, lookupSource?: LookupSourceStep[]): void;
+  /** A successful response resolves the lookup's failed request, whatever its answer then means. */
+  resolve(lookup: ProviderLookup): void;
+};
+
 /**
  * Lookup Coverage Issues for one show comparison: the one place that raises and resolves a typed
  * lookup's failed-request issue. Plain transport has no typed lookup and never reaches it.
  */
-export function lookupDiagnostics(context: LookupComparisonContext) {
+export function lookupDiagnostics(comparison: LookupComparisonContext): LookupDiagnostics {
   return {
-    /** Records a failed request for a lookup. The error is only described, never replaced. */
-    raiseFailure(lookup: ProviderLookup, error: unknown) {
+    raiseFailure(lookup, error, lookupSource = comparison.lookupSource) {
+      const context = {...comparison, lookupSource};
       const described = failureDescription(lookup, context);
       if (!described) return;
       const provider = lookupProvider(lookup);
@@ -88,9 +99,8 @@ export function lookupDiagnostics(context: LookupComparisonContext) {
       };
       setCoverageIssue(issue);
     },
-    /** A successful response resolves the lookup's failed request, whatever its answer then means. */
-    resolve(lookup: ProviderLookup) {
-      if (raisesLookupIssue(lookup)) resolveCoverageIssue(lookupFailureIssueId(context.ratingKey, lookup));
+    resolve(lookup) {
+      if (raisesLookupIssue(lookup)) resolveCoverageIssue(lookupFailureIssueId(comparison.ratingKey, lookup));
     },
   };
 }

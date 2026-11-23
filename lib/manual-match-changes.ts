@@ -115,9 +115,10 @@ function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
 /**
  * The cached recheck after a committed change. A rejected recheck never undoes
  * the commit: the change and the pending comparison its transaction set stay,
- * so the command still reports the committed change. Only a successful recheck
- * marks the comparison complete, so the Plex page keeps the last results with
- * the comparison pending notice until a later recheck or Plex scan succeeds.
+ * so the command still reports the committed change. The store's transaction
+ * also carried the affected members, so every later recheck compares their
+ * shows too, and the Plex page keeps the last results with the comparison
+ * pending notice until a recheck or completed full Plex scan covers them.
  * Known limit: a recheck that fails early may not yet have written every
  * affected show's refresh obligation; a later recheck or scan writes them.
  */

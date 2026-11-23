@@ -40,13 +40,20 @@
   pending notice and keeps the last results until a later recheck or Plex
   scan succeeds.
 
-  Two limits remain. The pending notice is saved with the change, but the
-  note that the affected shows need fresh downloads on the next scan is
-  written by the recheck, so a recheck that failed early may not have written
-  it. Nothing reruns a failed recheck, after an error or a restart: a later
-  change that rechecks other shows clears the notice while the shows of the
-  failed change keep their last results. Run a Plex scan to bring every show
-  up to date.
+  The shows of a change whose recheck failed now stay pending until they are
+  rechecked, also after a restart. Shelfcheck saves the Manual Match episodes
+  each change affects together with the change, and every later recheck
+  compares their shows too. Before, a later change that rechecked only other
+  shows cleared the pending notice while the failed change's shows kept their
+  last results. The notice now clears only when no saved change is left
+  unrechecked, or when a full Plex scan completes; a single-show or failed
+  scan leaves it. A database upgraded with the notice already showing has no
+  such saved episodes, so its notice clears with the next recheck or full
+  Plex scan, as before.
+
+  One limit remains: the note that the affected shows need fresh downloads on
+  the next scan is written by the recheck, so a recheck that failed early may
+  not have written it until a later recheck does.
 
   During a Plex scan, a malformed Manual Match request (an invalid ID or JSON)
   is now refused as invalid rather than because a scan is running. Every

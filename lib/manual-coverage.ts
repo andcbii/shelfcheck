@@ -131,8 +131,10 @@ export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?
     for (const m of members)
       db.prepare("INSERT INTO shelfcheck_coverage_members(provider,episode_id,mapping_id,report_missing) VALUES(?,?,?,?)").run(m.provider, m.id, mapping.id, flags.has(memberKey(m)) ? 1 : 0);
     db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(mapping.revision);
+    const affectedMembers = distinctMembers([...(existing?.members || []), ...members]);
+    carryMembers(db, affectedMembers, mapping.revision);
     if (existing && !flagsOnly) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === existing.id)) resolveCoverageIssue(issue.id);
-    const saved = { mapping: withFlags(db, mapping), affectedMembers: distinctMembers([...(existing?.members || []), ...members]) };
+    const saved = { mapping: withFlags(db, mapping), affectedMembers };
     db.exec("COMMIT");
     return saved;
   } catch (error) {
@@ -168,7 +170,10 @@ export function clearReportMissingFlags(members: CoverageIdentity[], alongside: 
       db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify(mapping), id);
       impact.push(...mapping.members);
     }
-    if (affected.length) db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+    if (affected.length) {
+      db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+      carryMembers(db, impact, revision);
+    }
     alongside();
     db.exec("COMMIT");
     return impact;
@@ -209,9 +214,13 @@ export function deleteCoverageMappings(ids: unknown): ManualMatchDeletion {
       if (result.changes) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === id)) resolveCoverageIssue(issue.id);
       (result.changes ? deleted : missing).push(id);
     }
-    if (deleted.length) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+    const distinct = distinctMembers(affectedMembers);
+    if (deleted.length) {
+      db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+      carryMembers(db, distinct, coverageState().revision);
+    }
     db.exec("COMMIT");
-    return { deleted, missing, affectedMembers: distinctMembers(affectedMembers) };
+    return { deleted, missing, affectedMembers: distinct };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -229,8 +238,58 @@ export function readCoverageEvidence(): CoverageEvidence[] {
   return row ? JSON.parse(row.payload) : [];
 }
 
-export function completeCoverageRecheck(revision: number) {
-  database().prepare("UPDATE shelfcheck_coverage_state SET pending=0 WHERE id=1 AND revision=?").run(revision);
+/**
+ * A carried member: a Manual Match member (with its show placement) whose shows a
+ * committed change left for a cached recheck, and the coverage revision that carried
+ * it. Carried members survive a restart and keep the comparison pending.
+ */
+export type CarriedMember = { member: CoverageMember; revision: number };
+
+/** Carry these members at `revision`, inside the committing change's transaction. A member already carried takes the newer revision. */
+function carryMembers(db: ReturnType<typeof database>, members: CoverageMember[], revision: number) {
+  for (const member of distinctMembers(members)) {
+    const description = { ...member };
+    delete description.reportMissing;
+    db.prepare("INSERT INTO shelfcheck_coverage_carried(provider,episode_id,show_id,revision,payload) VALUES(?,?,?,?,?) ON CONFLICT(provider,episode_id,show_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload")
+      .run(member.provider, member.id, member.showId, revision, JSON.stringify(description));
+  }
+}
+
+/** Every carried member: each committed change's members until a cached recheck or completed full Plex scan covers them. */
+export function carriedMembers(): CarriedMember[] {
+  return (database().prepare("SELECT revision,payload FROM shelfcheck_coverage_carried ORDER BY rowid").all() as { revision: number; payload: string }[])
+    .map(row => ({ member: JSON.parse(row.payload), revision: row.revision }));
+}
+
+/**
+ * Complete a comparison of coverage `revision`: drop the carried members it
+ * rechecked, each only as carried when the recheck read it (a change committed
+ * since carries it again at a newer revision, and keeps it), then clear pending
+ * only when `revision` is still current and no carried member remains.
+ */
+export function completeCoverageRecheck(revision: number, rechecked: CarriedMember[] = []) {
+  completeComparison(revision, db => {
+    for (const { member, revision: carried } of rechecked)
+      db.prepare("DELETE FROM shelfcheck_coverage_carried WHERE provider=? AND episode_id=? AND show_id=? AND revision<=?").run(member.provider, member.id, member.showId, carried);
+  });
+}
+
+/** Complete a full Plex scan of coverage `revision`: it compared every show, so every member carried at or before that revision is covered. */
+export function completeFullCoverageScan(revision: number) {
+  completeComparison(revision, db => db.prepare("DELETE FROM shelfcheck_coverage_carried WHERE revision<=?").run(revision));
+}
+
+function completeComparison(revision: number, uncarry: (db: ReturnType<typeof database>) => void) {
+  const db = database();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    uncarry(db);
+    db.prepare("UPDATE shelfcheck_coverage_state SET pending=0 WHERE id=1 AND revision=? AND NOT EXISTS (SELECT 1 FROM shelfcheck_coverage_carried)").run(revision);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function beginCoverageRecheck(revision: number) {

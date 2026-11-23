@@ -19,7 +19,7 @@ const closeCached = () => { cache.__shelfcheckDatabase?.close(); delete cache.__
 
 const EVERY_TABLE = [
   "shelfcheck_catalogue_candidates", "shelfcheck_catalogue_overrides", "shelfcheck_catalogue_selections",
-  "shelfcheck_coverage_evidence", "shelfcheck_coverage_issues", "shelfcheck_coverage_mappings", "shelfcheck_coverage_members",
+  "shelfcheck_coverage_carried", "shelfcheck_coverage_evidence", "shelfcheck_coverage_issues", "shelfcheck_coverage_mappings", "shelfcheck_coverage_members",
   "shelfcheck_coverage_previews", "shelfcheck_coverage_state", "shelfcheck_plex_generated_inputs", "shelfcheck_scan_state", "shelfcheck_series_not_found",
 ];
 
@@ -53,7 +53,7 @@ test("opening an empty data directory creates every table at the current version
   assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.deepEqual(tables(db), EVERY_TABLE);
   });
 });
@@ -119,7 +119,7 @@ test("opening an older sparse layout adds missing tables and columns without era
   assert.equal(sqlite.savedScanState("trakt").status.read(), null, "A missing Trakt status table has no status");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.deepEqual(tables(db), EVERY_TABLE);
     assert.deepEqual(db.prepare("SELECT provider,episode_id,mapping_id,report_missing FROM shelfcheck_coverage_members").all().map(row => ({ ...row })), [{ provider: "TMDB", episode_id: 1, mapping_id: "m", report_missing: 0 }], "Older members gain Report Missing off");
     assert.deepEqual({ ...db.prepare("SELECT revision,pending FROM shelfcheck_coverage_state").get() }, { revision: 3, pending: 0 });
@@ -158,13 +158,13 @@ test("ownership-correction retirement runs once, with today's revision and pendi
 
 test("a database from a newer Shelfcheck is refused and left untouched", (t) => {
   const file = freshDatabaseFile(t);
-  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 7;");
+  fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 8;");
   const before = inspect(file, db => ({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 7, newer than this Shelfcheck supports \(6\)/);
+  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 8, newer than this Shelfcheck supports \(7\)/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
-    assert.equal(version(db), 7);
+    assert.equal(version(db), 8);
     assert.deepEqual({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }, before);
   });
 });
@@ -239,7 +239,7 @@ test("a migration failing after a real schema change rolls back everything, and 
   sqlite.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.deepEqual(coverageState(db), { revision: 5, pending: 1 }, "The retry retires corrections exactly once");
   });
 });
@@ -362,7 +362,7 @@ test("no backup is written for a new database, on a later open, or beside a refu
   closeCached();
   assert.deepEqual(directoryEntries(), [], "A later open with no pending migration writes no backup");
 
-  inspect(file, db => db.exec("PRAGMA user_version = 7"));
+  inspect(file, db => db.exec("PRAGMA user_version = 8"));
   assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /newer than this Shelfcheck supports/);
   assert.deepEqual(directoryEntries(), [], "A refused newer database gets no backup");
 });
@@ -385,7 +385,7 @@ test("upgrading Plex keeps its Settings, including unknown fields, and discards 
   assert.deepEqual(sqlite.savedScanState("trakt").options.read(), { diagnostics: true }, "Trakt moves in the same open");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.equal(tables(db).includes("shelfcheck_plex_state"), false, "The old Plex table is dropped");
   });
 });
@@ -444,7 +444,7 @@ test("upgrading Trakt keeps its options, including unknown fields, and discards 
   assert.deepEqual(sqlite.savedScanState("plex").options.read(), { libraries: ["1"] }, "Plex is not touched again");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.equal(tables(db).includes("shelfcheck_states"), false, "The old Trakt state table is dropped");
     assert.equal(tables(db).includes("shelfcheck_scan_status"), false, "The old Trakt status table is dropped");
   });
@@ -551,12 +551,14 @@ for (const upgrade of UPGRADES) {
     closeCached();
 
     inspect(file, db => {
-      assert.equal(version(db), 6);
+      assert.equal(version(db), 7);
       assert.deepEqual(tables(db), EVERY_TABLE, "The old scan state tables are dropped");
       const after = everyRow(db);
       for (const name of OLD_SCAN_STATE_TABLES) { delete before[name]; delete after[name]; }
       assert.deepEqual(after.shelfcheck_series_not_found, [], "Migration 5 starts the 404 history empty");
       delete after.shelfcheck_series_not_found;
+      assert.deepEqual(after.shelfcheck_coverage_carried, [], "Migration 7 starts with no carried members");
+      delete after.shelfcheck_coverage_carried;
       assert.deepEqual(after, keptByLookupKeyReset(before), "Every other table and row is kept; migration 6 keeps only scan accounting, verification and safeguards");
     });
     const backups = readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
@@ -586,7 +588,7 @@ const plexRowV3 = { report: { shows: [{ ratingKey: "kept" }] }, resumePoint: { s
 
 /**
  * A version 3 database, as the release before migration 4 left it, with its one backup beside it.
- * Today's open builds the layout; stepping user_version back and dropping the table migration 5 added is that release's database.
+ * Today's open builds the layout; stepping user_version back and dropping the tables migrations 5 and 7 added is that release's database.
  */
 function versionThree(file: string, trakt: { report: unknown } | null, seed?: (db: DatabaseSync) => void) {
   sqlite.savedScanState("plex").snapshot();
@@ -594,6 +596,7 @@ function versionThree(file: string, trakt: { report: unknown } | null, seed?: (d
   inspect(file, db => {
     db.exec("PRAGMA user_version = 3");
     db.exec("DROP TABLE shelfcheck_series_not_found");
+    db.exec("DROP TABLE shelfcheck_coverage_carried");
     db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('plex',?,?,?,?,'2026-01-01 00:00:00')")
       .run(...[plexRowV3.report, plexRowV3.resumePoint, plexRowV3.status, plexRowV3.options].map(value => JSON.stringify(value)));
     if (trakt) db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('trakt',?,?,?,?,'2026-01-02 03:04:05')")
@@ -624,12 +627,14 @@ for (const [name, report] of Object.entries(OLD_TRAKT_REPORTS)) {
     closeCached();
 
     inspect(file, db => {
-      assert.equal(version(db), 6);
+      assert.equal(version(db), 7);
       const after = everyRow(db);
       delete before.shelfcheck_scan_state;
       delete after.shelfcheck_scan_state;
       assert.deepEqual(after.shelfcheck_series_not_found, [], "Migration 5 starts the 404 history empty");
       delete after.shelfcheck_series_not_found;
+      assert.deepEqual(after.shelfcheck_coverage_carried, [], "Migration 7 starts with no carried members");
+      delete after.shelfcheck_coverage_carried;
       assert.deepEqual(after, keptByLookupKeyReset(before), "Every other table and row is kept; migration 6 keeps only scan accounting, verification and safeguards");
     });
     const backups = readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
@@ -644,7 +649,7 @@ test("upgrading a version 3 database with no Trakt row leaves it without one", (
   assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     assert.deepEqual(db.prepare("SELECT mode FROM shelfcheck_scan_state ORDER BY mode").all().map(row => row.mode), ["plex"]);
   });
 });
@@ -661,7 +666,7 @@ test("after migration 4, a new Trakt report and Resume point survive a reopen, s
   assert.deepEqual(trakt.report.read(), report);
   assert.deepEqual(trakt.resumePoint.read(), { ...report, savedAt: "after", resumePointVersion: 2 });
   closeCached();
-  inspect(file, db => assert.equal(version(db), 6, "The version advanced once"));
+  inspect(file, db => assert.equal(version(db), 7, "The version advanced once"));
 });
 
 test("a failure after migration 4 clears the Trakt results rolls back the clear and the version together", (t) => {
@@ -758,7 +763,7 @@ test("upgrading a version 5 database clears generated scan data, the Plex scan c
   closeCached();
 
   inspect(file, db => {
-    assert.equal(version(db), 6);
+    assert.equal(version(db), 7);
     const crosswalkWithoutCause = { ...issuesV5[crosswalkIssue] };
     delete crosswalkWithoutCause.causedBy;
     assert.deepEqual(issueRows(db), {
@@ -783,7 +788,7 @@ test("a new database is created at the latest version without a reset log line",
   assert.equal(sqlite.savedScanState("plex").snapshot(), null);
   assert.deepEqual(logged(info), [], "Nothing was upgraded, so nothing is logged");
   closeCached();
-  inspect(file, db => assert.equal(version(db), 6));
+  inspect(file, db => assert.equal(version(db), 7));
 });
 
 test("an upgraded database with no saved Plex scan data logs that there was nothing to clear", (t) => {
@@ -855,7 +860,33 @@ test("after migration 6, evidence saved under lookup keys survives a reopen, so 
   assert.equal(info.mock.callCount(), 0, "No second reset is logged");
   closeCached();
   inspect(file, db => {
-    assert.equal(version(db), 6, "The version advanced once");
+    assert.equal(version(db), 7, "The version advanced once");
     assert.deepEqual(issueRows(db)[issue.id], issue);
+  });
+});
+
+// Migration 7: carried Manual Match members.
+
+test("upgrading a version 6 database adds an empty carried-member table and keeps every record, including a pending comparison", (t) => {
+  const file = freshDatabaseFile(t);
+  sqlite.savedScanState("plex").snapshot();
+  closeCached();
+  const before = inspect(file, db => {
+    db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 6");
+    db.exec("UPDATE shelfcheck_coverage_state SET revision=4,pending=1 WHERE id=1");
+    db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run("match", JSON.stringify({ id: "match", revision: 4, members: [] }));
+    return everyRow(db);
+  });
+
+  sqlite.savedScanState("plex").snapshot();
+  closeCached();
+  inspect(file, db => {
+    assert.equal(version(db), 7);
+    assert.deepEqual(tables(db), EVERY_TABLE);
+    const after = everyRow(db);
+    assert.deepEqual(after.shelfcheck_coverage_carried, [], "No members are carried: a pending comparison stays library-wide until a recheck or full scan completes it");
+    delete after.shelfcheck_coverage_carried;
+    assert.deepEqual(after, before, "Every existing record is kept");
+    assert.deepEqual(coverageState(db), { revision: 4, pending: 1 });
   });
 });

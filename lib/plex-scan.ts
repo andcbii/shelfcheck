@@ -6,7 +6,7 @@ import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageRecheck, completeFullCoverageScan, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -633,7 +633,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       },
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,
-      committed: () => completeCoverageRecheck(coverageRevision),
+      // Only a committed full scan compared every show, so only it covers every carried member; a single-show scan covers none.
+      committed: () => targetRatingKey ? completeCoverageRecheck(coverageRevision) : completeFullCoverageScan(coverageRevision),
       succeeded: () => resolveCoverageIssue("scan-failure"),
       failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
       failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
@@ -1184,12 +1185,16 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
   }
 }
 async function recheckCoverage(impact: CoverageImpact) {
-  const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
+  // Every carried member is rechecked too, with this change's: a failed or interrupted
+  // earlier recheck leaves its members carried until a recheck or full scan succeeds.
+  const carried=carriedMembers(), revision=coverageState().revision;
+  const members=[...impact.members,...carried.map(entry=>entry.member)];
+  const inputs=readPlexInputs(), prior=getPlexReport();
   const settings=readPlexPreferences();
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {
-    if (impact.members.some(member=>memberInComparison(inputs,input,member))) targets.add(key);
+    if (members.some(member=>memberInComparison(inputs,input,member))) targets.add(key);
   }
   // Persist obligations first. A failed local comparison must never consume them.
   for (const key of targets) {
@@ -1204,7 +1209,7 @@ async function recheckCoverage(impact: CoverageImpact) {
     const keys=targets.size ? [...targets] : [undefined];
     for (const key of keys) setCoverageIssue({id:key ? `comparison-inputs:${key}` : "comparison-inputs:initial",operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
     if (prior) plexSavedState.report.write({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
-    completeCoverageRecheck(revision);
+    completeCoverageRecheck(revision,carried);
     return;
   }
   const context=savedComparisonContext(inputs,settings,ignored);
@@ -1229,7 +1234,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   }
   resolveCoverageIssue("comparison-inputs:initial");
   plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
-  completeCoverageRecheck(revision);
+  completeCoverageRecheck(revision,carried);
 }
 
 type SavedComparisonContext = {

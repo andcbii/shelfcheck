@@ -16,6 +16,7 @@ const migrations: ((db: DatabaseSync) => string | void)[] = [
   clearTraktResultsBeforeAirDates,
   seriesNotFoundHistory,
   lookupKeyReset,
+  carriedCoverageMembers,
 ];
 
 export const SCHEMA_VERSION = migrations.length;
@@ -395,4 +396,22 @@ function lookupKeyReset(db: DatabaseSync) {
   return generated || scanState || removed.size
     ? "Shelfcheck cleared its saved Plex scan data for the new provider lookup keys. Run a full Plex scan to download provider catalogues again; Manual Matches, Report Missing flags, Ignores, catalogue choices and settings were kept."
     : "Shelfcheck moved to the new provider lookup keys; there was no saved Plex scan data to clear.";
+}
+
+/**
+ * Migration 7: carried Manual Match members (SHELFCHECK-154). Each committed Manual Match change
+ * records the members whose shows need a cached recheck, one row per member and show placement,
+ * with the coverage revision that recorded it. A successful cached recheck or a completed full Plex
+ * scan removes them. Only a new table: every existing record is kept, and a database upgraded with
+ * a pending comparison keeps it, without carried members, until a recheck or full scan completes it.
+ */
+function carriedCoverageMembers(db: DatabaseSync) {
+  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_coverage_carried(
+    provider TEXT NOT NULL,
+    episode_id INTEGER NOT NULL,
+    show_id INTEGER NOT NULL,
+    revision INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY(provider, episode_id, show_id)
+  )`);
 }

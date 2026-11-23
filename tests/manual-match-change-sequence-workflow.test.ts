@@ -3,7 +3,8 @@ import { registerHooks } from "node:module";
 import test from "node:test";
 import { api, harness as workflow, key, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
-const { plexSavedState } = await import("../lib/plex-scan");
+const { plexSavedState, requestCoverageRecheck } = await import("../lib/plex-scan");
+const { deleteCoverageMapping } = await import("../lib/manual-coverage");
 hook.deregister();
 
 // The Manual Match change sequence through the routes: save, edit, flag-only
@@ -120,4 +121,125 @@ test("save, edit, flag-only edit, delete and Ignore through the routes, with one
   assert.deepEqual((await h.mappings()).map(mapping => ({ id: mapping.id, members: mapping.members.map(key), flagged: mapping.members.filter(member => member.reportMissing).map(key) })), [
     { id: crossShow.id, members: [whole, a, b].map(key), flagged: [] },
   ]);
+});
+
+/** Makes the next cached recheck reject part-way, at its report write after its refresh obligations and comparisons, once. */
+function failNextRecheckWrite(t: test.TestContext) {
+  const write = plexSavedState.report.write.bind(plexSavedState.report);
+  const fault = { armed: true };
+  t.mock.method(plexSavedState.report, "write", (...args: Parameters<typeof write>) => {
+    if (!fault.armed) return write(...args);
+    fault.armed = false;
+    throw new Error("Injected cached recheck failure.");
+  });
+  return fault;
+}
+
+/** Edits the cross-show Manual Match to drop Part C (an Other episode), with its cached recheck failing as it starts. */
+async function failedEditDroppingPartC(t: test.TestContext, h: Harness, crossShow: { id: string; revision: number }) {
+  const fault = failNextRecheck(t);
+  const resolved = await h.post({ action: "resolve", id: crossShow.id, urls: [`tmdb:${whole.id} show:10 season:${whole.season} episode:${whole.episode}`, `tvdb:${a.id}`, `tvdb:${b.id}`] });
+  assert.equal(resolved.status, 200, await resolved.clone().text());
+  const edited = await h.post({ action: "save", id: crossShow.id, revision: crossShow.revision, preview: (await resolved.json()).preview });
+  assert.equal(edited.status, 200, await edited.clone().text());
+  assert.equal(fault.armed, false, "The cached recheck failed");
+}
+
+test("a failed edit's shows stay pending across restarts and a second failure, and the next successful unrelated change rechecks them", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  const oneToOne = (await (await h.save([kept, keptTvdb])).json()).mapping;
+  let state = await h.status() as Status;
+  assert.deepEqual(results(h, state), { target: {}, other: {} });
+
+  await failedEditDroppingPartC(t, h, crossShow);
+  h.restart();
+
+  // An unrelated change in Target only, whose cached recheck fails part-way.
+  const partWay = failNextRecheckWrite(t);
+  const flagged = await h.setFlags(oneToOne.id, [keptTvdb]);
+  assert.deepEqual(flagged.members.filter(member => member.reportMissing).map(key), [key(keptTvdb)]);
+  assert.equal(partWay.armed, false, "The second cached recheck failed too");
+  state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "Both changes' shows stay pending");
+  assert.deepEqual(results(h, state), { target: {}, other: {} }, "The last results stay");
+  h.restart();
+
+  // A later, unrelated successful change in Target also rechecks Other for the failed edit.
+  const deleted = await remove(oneToOne.id);
+  assert.equal(deleted.status, 200, await deleted.clone().text());
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state), {
+    target: { [key(keptTvdb)]: "missing" },
+    other: { [key(c)]: "missing" },
+  }, "The failed edit's removed member is missing again in Other");
+  assert.equal(state.coverage.pending, 0, "The comparison completes only once every carried show is rechecked");
+  assert.ok(!(await manualMatchReport()).issues.some(issue => issue.id === "comparison-pending"));
+});
+
+test("only a completed full Plex scan completes a failed edit's pending comparison; a single-show or failed scan keeps it", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  // The saved report is older than the edit, so a single-show scan is refused and completes nothing.
+  await assert.rejects(h.rerun("ratingKey:target"), /Run a full Plex search/);
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "The refused single-show scan leaves the failed edit's shows pending");
+  assert.deepEqual(results(h, state).other, {}, "Other keeps its last results");
+
+  h.state.statuses.set("/library/sections", 500);
+  await assert.rejects(h.rerun(), "The full scan fails");
+  h.state.statuses.delete("/library/sections");
+  state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "A failed full scan leaves them pending");
+
+  h.restart();
+  state = await h.rerun() as Status;
+  assert.deepEqual(results(h, state), { target: { [key(keptTvdb)]: "missing" }, other: { [key(c)]: "missing" } });
+  assert.equal(state.coverage.pending, 0, "A completed full scan completes the comparison");
+
+  // A recheck that saves its report but stops before completing (as a crash would)
+  // leaves its members carried; a single-show scan does not compare them all.
+  const write = plexSavedState.report.write.bind(plexSavedState.report);
+  let stop = true;
+  t.mock.method(plexSavedState.report, "write", (...args: Parameters<typeof write>) => {
+    write(...args);
+    if (stop) { stop = false; throw new Error("Injected stop after the report write."); }
+  });
+  await h.setFlags(crossShow.id, [a]);
+  assert.equal(stop, false, "The recheck stopped after its report write");
+  state = await h.rerun("ratingKey:target") as Status;
+  assert.ok(pendingIn(state.coverage), "A completed single-show scan keeps the other carried members pending");
+  state = await h.rerun() as Status;
+  assert.equal(state.coverage.pending, 0);
+});
+
+test("a change committed while a cached recheck runs stays pending and carried until a later recheck covers it, even across a restart", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  const oneToOne = (await (await h.save([kept, keptTvdb])).json()).mapping;
+
+  // While the flag edit's recheck runs, a delete commits; the process stops before the delete's own recheck.
+  const write = plexSavedState.report.write.bind(plexSavedState.report);
+  let commitDuring = true;
+  t.mock.method(plexSavedState.report, "write", (...args: Parameters<typeof write>) => {
+    if (commitDuring) { commitDuring = false; deleteCoverageMapping(oneToOne.id); }
+    return write(...args);
+  });
+  await h.setFlags(crossShow.id, [a]);
+  assert.equal(commitDuring, false);
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "The earlier recheck's success does not complete the newer change");
+  assert.deepEqual(results(h, state).target, { [key(whole)]: `incomplete because ${key(a)}` }, "The delete is not yet compared");
+  h.restart();
+
+  // The next cached recheck, whatever its own change, also rechecks the delete's show.
+  await requestCoverageRecheck({ members: [] });
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state).target, { [key(whole)]: `incomplete because ${key(a)}`, [key(keptTvdb)]: "missing" });
+  assert.equal(state.coverage.pending, 0);
 });

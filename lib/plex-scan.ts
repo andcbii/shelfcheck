@@ -43,6 +43,7 @@ import { invalidateShowTmdbCrosswalks, saveRecoveredTmdbCrosswalks, tmdbCrosswal
 import { replayedTmdbCrosswalkDecision } from "@/lib/tmdb-crosswalk-policy";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
+import { CrosswalkResponseError, crosswalkLookup, interpretedRecords, SavedRelationshipUnavailableError, TraktLoginUnavailableError, type TmdbShow, type TraktEpisodeSearchResult, type TvdbShow } from "@/lib/comparison-evidence";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
 export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; heartbeatAt?: string };
@@ -69,11 +70,7 @@ export type PlexReport = { shows: PlexShowResult[]; coverageGroups?: CoverageGro
 type PlexCheckpoint = { shows: PlexShowResult[]; scanCache: Record<string, PlexCacheEntry>; cacheVersion: number; savedAt: string; autoCompoundEpisodes?: boolean; coverageRevision?: number };
 
 type PlexContainer = { MediaContainer?: { size?: number; Directory?: PlexMetadata[]; Metadata?: PlexMetadata[] } };
-type TmdbShow = { id: number; name?: string; first_air_date?: string | null; seasons?: { season_number: number }[]; external_ids?: { tvdb_id?: number | null } };
-type TvdbShow = { id: number; name?: string; slug?: string; year?: string };
 type TmdbEpisodeFindResult = TmdbFindEpisode;
-type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
-type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };
 
 const CACHE_VERSION = PLEX_CACHE_VERSION;
 
@@ -116,7 +113,6 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
 type ProviderRequestTarget = {provider: ProviderName; url: string; key: string; lookup?: ProviderLookup};
 const lookupRequest = (lookup: ProviderLookup): ProviderRequestTarget => ({provider: lookupProvider(lookup), url: lookupUrl(lookup), key: lookupKey(lookup), lookup});
 const plainRequest = (provider: ProviderName, url: string): ProviderRequestTarget => ({provider, url, key: `${provider}:${url}`});
-function relationshipProvider(key: string) { return key.slice(0, key.indexOf(":")); }
 
 const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
@@ -128,13 +124,6 @@ const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
 const replayScope = new AsyncLocalStorage<{missing:Set<string>; recovered:Map<string,string>}>();
 /** Set while one TVDB episode's crosswalk lookup runs: its saved relationships are episode-scoped. */
 const crosswalkLookupScope = new AsyncLocalStorage<true>();
-/**
- * An offline replay found no saved response for one episode's crosswalk. No request was
- * attempted; the failure stays with that episode instead of discarding the show comparison.
- */
-class SavedRelationshipUnavailableError extends Error {
-  constructor(readonly relationship: string) { super(`The saved ${relationshipProvider(relationship)} response for this episode is not available to the offline recheck; no request was made.`); }
-}
 const relationshipScope = new AsyncLocalStorage<SavedPlexComparison["relationships"]>();
 /**
  * The comparing show's open failed-request issue for a typed lookup, read through the read port.
@@ -147,10 +136,6 @@ function recordedLookupFailure(lookup: ProviderLookup | undefined): RecordedLook
 function relationshipIsReusable({key, lookup}: ProviderRequestTarget) {
   const relationships = relationshipScope.getStore();
   return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !recordedLookupFailure(lookup)));
-}
-/** Thrown for a Trakt lookup skipped because the run's Trakt login cannot be recovered; it is not a failure of that lookup. */
-class TraktLoginUnavailableError extends Error {
-  constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
 }
 
 /**
@@ -255,23 +240,7 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCa
   return usableCatalogue("TMDB", show.id, catalogue);
 }
 
-/**
- * A successful identity/crosswalk response that cannot be interpreted. Distinct from a
- * rejected request: the request policy succeeded, so it is never a provider outage.
- */
-class CrosswalkResponseError extends Error {
-  constructor(readonly provider: ProviderName, detail: string) { super(`${provider} returned a successful response that could not be interpreted (${detail}).`); }
-}
-/** The records of a successful response, or the reason it cannot be interpreted as an error. */
-function interpretedRecords<T>(provider: ProviderName, list: ReturnType<typeof responseRecordList>): T[] {
-  if ("unreadable" in list) throw new CrosswalkResponseError(provider, list.unreadable);
-  return list.records as T[];
-}
 const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
-/** The typed lookup of one TVDB episode's crosswalk. */
-function crosswalkLookup(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
-  return crosswalk === "IMDb" ? providerLookup.tvdbEpisodeExtended(tvdbEpisodeId) : crosswalk === "Trakt" ? providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId) : providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
-}
 /**
  * An offline recheck applies the ADR-0004 replay decision for one TVDB episode's TMDB external-ID
  * crosswalk to this comparison's saved relationships. A recovered answer is resolved against this

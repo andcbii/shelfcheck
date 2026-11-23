@@ -36,7 +36,7 @@ import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
-import { isEpisodeCoordinate, lookupKey, lookupProvider, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey, type ProviderLookup } from "@/lib/provider-lookup";
+import { isEpisodeCoordinate, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, tmdbEpisodeCrosswalkOfKey, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
@@ -71,8 +71,6 @@ type TmdbEpisodeFindResult = TmdbFindEpisode;
 type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
 type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };
 
-const TMDB = "https://api.themoviedb.org/3";
-const TVDB = "https://api4.thetvdb.com/v4";
 const CACHE_VERSION = PLEX_CACHE_VERSION;
 
 /**
@@ -233,7 +231,7 @@ async function plexJson(path: string, url: string, token: string): Promise<PlexC
 
 /** A TMDB typed lookup, or a plain transport path such as a catalogue season page. */
 async function tmdbJson<T>(request: ProviderLookup | `/${string}`, token: string, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}): Promise<T> {
-  return checkedJson<T>(typeof request === "string" ? plainRequest("TMDB", `${TMDB}${request}`) : lookupRequest(request), { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, episodeIdentity);
+  return checkedJson<T>(typeof request === "string" ? plainRequest("TMDB", `${TMDB_API}${request}`) : lookupRequest(request), { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, episodeIdentity);
 }
 
 /** Offline rechecks answer every Trakt lookup from saved relationships, so they never send this login. */
@@ -432,11 +430,11 @@ async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set
 
 async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<NormalisedCatalogue & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
-  const series = cachedSlug ? null : await checkedJson<{ data?: { slug?: string; name?: string } }>(plainRequest("TVDB", `${TVDB}/series/${seriesId}`), { headers: { Authorization: `Bearer ${token}` } });
+  const series = cachedSlug ? null : await checkedJson<{ data?: { slug?: string; name?: string } }>(plainRequest("TVDB", `${TVDB_API}/series/${seriesId}`), { headers: { Authorization: `Bearer ${token}` } });
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
   while (page < 100) {
-    const body = await checkedJson<{ data?: { episodes?: unknown[] }; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB}/series/${seriesId}/episodes/default?page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
+    const body = await checkedJson<{ data?: { episodes?: unknown[] }; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB_API}/series/${seriesId}/episodes/default?page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
     // Specials (season 0) are kept so Report Missing can be evaluated on them; the
     // comparator still ignores unflagged specials, as before.
@@ -492,7 +490,7 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
   let page = 0;
   let complete = false;
   while (page < 500) {
-    const body = await checkedJson<{ data?: { entityType?: string; recordId?: number; seriesId?: number }[]; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB}/updates?since=${timestamp}&page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
+    const body = await checkedJson<{ data?: { entityType?: string; recordId?: number; seriesId?: number }[]; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB_API}/updates?since=${timestamp}&page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
     if (!Array.isArray(body.data)) throw new Error("TVDB returned an incomplete update feed.");
     for (const update of body.data) {
       if (update.seriesId) changed.add(update.seriesId);
@@ -1135,7 +1133,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         tmdbShowForTvdb: tvdbId => requestTmdbShowForTvdb(tvdbId, config.tmdbToken),
         tmdbEpisodes: show => tmdbEpisodes(show, config.tmdbToken),
         tvdbSeries: (id, showTitle) => tvdbSeries(id, token, undefined, showTitle),
-        tvdbEnglishTitle: tvdbEpisodeId => scanProviderClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
+        tvdbEnglishTitle: tvdbEpisodeId => scanProviderClient.json(`${TVDB_API}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
       },
       show: { ratingKey, title: primary.title },
       previousComparison: savedComparison,

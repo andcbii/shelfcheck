@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { isEpisodeCoordinate, isProviderId, lookupKey, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey } from "../lib/provider-lookup";
 
-// Today's exact stored relationship keys (and lookup Coverage Issue ID suffixes). Story 5 changes them.
+// Today's exact stored relationship keys (and lookup Coverage Issue ID suffixes). SHELFCHECK-141 (Story SHELFCHECK-128) changes them.
 const todaysKeys = [
   [providerLookup.tmdbEpisodeByTvdbEpisode(301), "TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id"],
   [providerLookup.tmdbSeriesByTvdbSeries(20), "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id"],

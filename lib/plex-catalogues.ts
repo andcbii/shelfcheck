@@ -7,6 +7,7 @@ import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
 import { PROVIDERS } from "@/lib/catalogue-selection";
 import { EVERY_ATTEMPTED_REQUIRED, patchSavedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
 import type { SharedCrosswalkStore } from "@/lib/tmdb-crosswalk-coordinator";
+import type { SharedCrosswalkRecord } from "@/lib/tmdb-crosswalk-policy";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
@@ -143,10 +144,9 @@ export function savePlexInputs(inputs: PlexGeneratedInputs) {
  * match or a valid empty answer) has `receivedAt`, the time it was actually received. A
  * rejected one has `rejectedAt` instead, and keeps an unreadable payload only so offline
  * rechecks can explain the failure. It records a provider relationship, never ownership.
+ * Its stored shape is the crosswalk policy's `SharedCrosswalkRecord`.
  */
-export type SharedTmdbCrosswalk = {value?: unknown; receivedAt?: string; rejectedAt?: string;
-  /** When clearing one show's cache made this usable response not current for live scans; offline rechecks still replay it. */
-  invalidatedAt?: string};
+export type SharedTmdbCrosswalk = SharedCrosswalkRecord;
 const sharedTmdbCrosswalkKey = (tvdbEpisodeId: number) => `tmdb-crosswalk:${tvdbEpisodeId}`;
 export function readSharedTmdbCrosswalk(tvdbEpisodeId: number) {
   return readPlexGeneratedInputs<SharedTmdbCrosswalk>(sharedTmdbCrosswalkKey(tvdbEpisodeId));

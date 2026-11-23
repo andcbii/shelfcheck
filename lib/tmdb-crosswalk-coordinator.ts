@@ -4,9 +4,10 @@
  * (saved here), a comparison's acceptance of it (`rejectCopy`), and the checked marker (`retained`).
  * Coverage Issue state stays with the caller.
  */
+import type { SavedPlexComparison } from "@/lib/plex-catalogues";
 import { liveTmdbCrosswalkDecision, type SharedCrosswalkRecord } from "@/lib/tmdb-crosswalk-policy";
 import { lookupKey, providerLookup, tmdbEpisodeCrosswalkOfKey } from "@/lib/provider-lookup";
-import { isRecord } from "@/lib/value-guards";
+import { responseRecordList } from "@/lib/value-guards";
 
 /** Where shared crosswalk evidence is kept, by TVDB episode. */
 export type SharedCrosswalkStore = {
@@ -15,17 +16,14 @@ export type SharedCrosswalkStore = {
 };
 
 /** A comparison's saved provider relationships, by relationship key. */
-export type CrosswalkRelationships = Record<string, { provider: string; value: unknown; receivedAt?: string }>;
+export type CrosswalkRelationships = SavedPlexComparison["relationships"];
 
-/** One lookup's answer for a comparison; `reused` when it came from current shared evidence without a request. */
-export type CrosswalkLookupResult = { value: unknown; reused: boolean };
-
-/** A successful crosswalk response the scan can interpret: an object whose `tv_episode_results`, when present, is a list of records. */
-function readableTmdbCrosswalk(value: unknown) {
-  if (!isRecord(value)) return false;
-  const results = value.tv_episode_results;
-  return results === undefined || results === null || (Array.isArray(results) && results.every(isRecord));
-}
+/**
+ * The episode results of a successful crosswalk response, or why they cannot be interpreted. The one
+ * rule for both the shared outcome (readable or rejected) and the comparison's interpretation.
+ */
+export const tmdbCrosswalkResults = (value: unknown) => responseRecordList(value, "tv_episode_results");
+const readableTmdbCrosswalk = (value: unknown) => "records" in tmdbCrosswalkResults(value);
 
 const crosswalkKey = (tvdbEpisodeId: number) => lookupKey(providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId));
 
@@ -55,29 +53,34 @@ export function tmdbCrosswalkScanRun({ store, now, startedAt }: { store: SharedC
   }
 
   return {
-    /** One comparison's view of the run: its saved relationships, and whether its lookups are forced. */
+    /**
+     * One comparison's view of the run: its saved relationships, and whether its lookups are forced.
+     * `relationships` is the caller's own map, mutated in place: each lookup sets, replaces or removes the
+     * comparison's crosswalk copy there, and `rejectCopy` strips a copy's receipt time.
+     */
     comparison({ relationships, forced }: { relationships: CrosswalkRelationships; forced: boolean }) {
       /** The crosswalks this comparison has reached, marked before any request, failures included. */
       const checked = new Set<string>();
       return {
         /**
-         * Reaches one TVDB episode's crosswalk: reuses current shared evidence (the caller then resolves the
-         * comparison's failed request for it), or discards the comparison's copy and requests the lookup, joining
-         * the request already in flight. `forced` also forces this lookup alone, as a retry of its failed request does.
+         * Reaches one TVDB episode's crosswalk and returns its answer: reuses current shared evidence, or discards
+         * the comparison's copy and requests the lookup, joining the request already in flight. Either answer
+         * resolves the comparison's failed request for it; the caller does that. `forced` also forces this lookup
+         * alone, as a retry of its failed request does.
          */
-        async lookup(tvdbEpisodeId: number, request: () => Promise<unknown>, options: { forced?: boolean } = {}): Promise<CrosswalkLookupResult> {
+        async lookup(tvdbEpisodeId: number, request: () => Promise<unknown>, options: { forced?: boolean } = {}): Promise<unknown> {
           const key = crosswalkKey(tvdbEpisodeId);
           checked.add(key);
           const decision = liveTmdbCrosswalkDecision({ shared: store.read(tvdbEpisodeId), scanStartedAt: startedAt, forced: forced || !!options.forced, requestedInThisScan: requested.has(tvdbEpisodeId) });
           if (decision.action === "reuse") {
             relationships[key] = { provider: "TMDB", ...decision.copy };
-            return { value: decision.copy.value, reused: true };
+            return decision.copy.value;
           }
           delete relationships[key];
           const { value, receivedAt } = await shareRequest(tvdbEpisodeId, request);
           // An unreadable answer is kept only to explain the failure: without a receipt time it is never current.
           relationships[key] = readableTmdbCrosswalk(value) ? { provider: "TMDB", value, receivedAt } : { provider: "TMDB", value };
-          return { value, reused: false };
+          return value;
         },
         /**
          * This comparison could not use the crosswalk (a failed request, an unreadable answer or an
@@ -106,6 +109,18 @@ export function tmdbCrosswalkScanRun({ store, now, startedAt }: { store: SharedC
 
 /** One comparison's view of its scan run's TMDB external-ID crosswalks. */
 export type TmdbCrosswalkComparison = ReturnType<ReturnType<typeof tmdbCrosswalkScanRun>["comparison"]>;
+
+/**
+ * An offline recheck's recovered crosswalk answers (relationship key to the failed-request Coverage Issue
+ * each resolves; see the policy's `recover` decision), taken from its replayed relationships. They are
+ * saved as the comparison's own copies first, and only then resolve those failed requests, so a failed
+ * save leaves them open and the answers recoverable by a later recheck.
+ */
+export function saveRecoveredTmdbCrosswalks(recovered: ReadonlyMap<string, string>, replayed: CrosswalkRelationships, { save, resolveFailedRequest }: { save(copies: CrosswalkRelationships): void; resolveFailedRequest(issueId: string): void }) {
+  if (!recovered.size) return;
+  save(Object.fromEntries([...recovered.keys()].map((key) => [key, replayed[key]])));
+  for (const issueId of recovered.values()) resolveFailedRequest(issueId);
+}
 
 /**
  * Clearing one show's cache: each usable shared answer among the show's cleared relationships is

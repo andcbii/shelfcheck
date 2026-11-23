@@ -49,6 +49,10 @@ for (const [label, scanStartedAt, shared, mode, expected] of [
   });
 }
 
+for (const scanStartedAt of ["2026-06-02T01:30:00.000+02:00", "2026-06-01", "not a time"]) test(`live scan: a scan start that is not a UTC ISO time (${scanStartedAt}) is refused, since its date would not be the UTC date`, () => {
+  assert.throws(() => liveTmdbCrosswalkDecision({ shared: usable("2026-06-01T01:00:00.000Z"), scanStartedAt, ...ordinary }), RangeError);
+});
+
 const OWN = { tv_episode_results: [{ id: 800, show_id: 10 }] };
 const UNREADABLE = { tv_episode_results: "not a list" };
 const T = (hhmm: string) => `2026-06-01T${hhmm}:00.000Z`;

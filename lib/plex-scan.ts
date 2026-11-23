@@ -35,9 +35,9 @@ import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
-import { isRecord } from "@/lib/value-guards";
+import { isRecord, responseRecordList } from "@/lib/value-guards";
 import { isEpisodeCoordinate, isProviderId, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
-import { invalidateShowTmdbCrosswalks, tmdbCrosswalkScanRun, type TmdbCrosswalkComparison } from "@/lib/tmdb-crosswalk-coordinator";
+import { invalidateShowTmdbCrosswalks, saveRecoveredTmdbCrosswalks, tmdbCrosswalkResults, tmdbCrosswalkScanRun, type TmdbCrosswalkComparison } from "@/lib/tmdb-crosswalk-coordinator";
 import { replayedTmdbCrosswalkDecision } from "@/lib/tmdb-crosswalk-policy";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
@@ -158,7 +158,13 @@ function raiseTraktLoginIssue(error: unknown) {
  */
 type LiveTmdbCrosswalk = {crosswalks: TmdbCrosswalkComparison; tvdbEpisodeId: number; forced: boolean};
 
-async function checkedJson<T>({provider, url, key}: ProviderRequestTarget, init: RequestInit, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}, auth?: ProviderAuth, liveCrosswalk?: LiveTmdbCrosswalk): Promise<T> {
+/**
+ * `episodeIdentity`: the episode a matching lookup identifies, for its failure diagnostics. `auth`: the
+ * login the provider client sends and recovers. `liveCrosswalk`: a live scan's TMDB crosswalk lookup.
+ */
+type CheckedJsonOptions = {episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}; auth?: ProviderAuth; liveCrosswalk?: LiveTmdbCrosswalk};
+
+async function checkedJson<T>({provider, url, key}: ProviderRequestTarget, init: RequestInit, {episodeIdentity, auth, liveCrosswalk}: CheckedJsonOptions = {}): Promise<T> {
   const relationships = relationshipScope.getStore();
   const show = comparisonIssueScope.getStore();
   const issueId = episodeIdentityIssueId(show?.ratingKey, key);
@@ -177,7 +183,7 @@ async function checkedJson<T>({provider, url, key}: ProviderRequestTarget, init:
   let receivedAt: string | undefined;
   try {
     if (provider === "TVDB" && show?.tvdbAuthenticationError) throw show.tvdbAuthenticationError;
-    if (liveCrosswalk) value = (await liveCrosswalk.crosswalks.lookup(liveCrosswalk.tvdbEpisodeId, () => scanProviderClient.json<T>(url, init, provider), {forced: liveCrosswalk.forced})).value as T;
+    if (liveCrosswalk) value = (await liveCrosswalk.crosswalks.lookup(liveCrosswalk.tvdbEpisodeId, () => scanProviderClient.json<T>(url, init, provider), {forced: liveCrosswalk.forced})) as T;
     else { value = await scanProviderClient.json<T>(url, init, provider, auth); receivedAt = new Date().toISOString(); }
   }
   catch (error) {
@@ -218,8 +224,8 @@ async function plexJson(path: string, url: string, token: string): Promise<PlexC
 }
 
 /** A TMDB typed lookup, or a plain transport path such as a catalogue season page. */
-async function tmdbJson<T>(request: ProviderLookup | `/${string}`, token: string, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}, liveCrosswalk?: LiveTmdbCrosswalk): Promise<T> {
-  return checkedJson<T>(typeof request === "string" ? plainRequest("TMDB", `${TMDB_API}${request}`) : lookupRequest(request), { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, episodeIdentity, undefined, liveCrosswalk);
+async function tmdbJson<T>(request: ProviderLookup | `/${string}`, token: string, options: Omit<CheckedJsonOptions, "auth"> = {}): Promise<T> {
+  return checkedJson<T>(typeof request === "string" ? plainRequest("TMDB", `${TMDB_API}${request}`) : lookupRequest(request), { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, options);
 }
 
 /** Offline rechecks answer every Trakt lookup from saved relationships, so they never send this login. */
@@ -231,7 +237,7 @@ const savedRelationshipsOnly: ProviderAuth = {
 
 /** A Trakt request with the run's Trakt login, which the client refreshes once if Trakt rejects it. */
 async function traktJson<T>(lookup: ProviderLookup, traktAuth: ProviderAuth): Promise<T> {
-  return checkedJson<T>(lookupRequest(lookup), { headers: { Accept: "application/json" } }, undefined, traktAuth);
+  return checkedJson<T>(lookupRequest(lookup), { headers: { Accept: "application/json" } }, {auth: traktAuth});
 }
 
 async function requestTmdbShow(tmdbId: number, token: string): Promise<TmdbShow | null> {
@@ -263,13 +269,10 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCa
 class CrosswalkResponseError extends Error {
   constructor(readonly provider: ProviderName, detail: string) { super(`${provider} returned a successful response that could not be interpreted (${detail}).`); }
 }
-/** An optional list of records in a successful response; absent means none. */
-function responseRecords<T>(provider: ProviderName, body: unknown, field: string): T[] {
-  if (!isRecord(body)) throw new CrosswalkResponseError(provider, "the response is not an object");
-  const list = body[field];
-  if (list === undefined || list === null) return [];
-  if (!Array.isArray(list) || !list.every(isRecord)) throw new CrosswalkResponseError(provider, `${field} is not a list of records`);
-  return list as T[];
+/** The records of a successful response, or the reason it cannot be interpreted as an error. */
+function interpretedRecords<T>(provider: ProviderName, list: ReturnType<typeof responseRecordList>): T[] {
+  if ("unreadable" in list) throw new CrosswalkResponseError(provider, list.unreadable);
+  return list.records as T[];
 }
 const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
 /** The typed lookup of one TVDB episode's crosswalk. */
@@ -303,13 +306,13 @@ const crosswalkFailureKinds: EpisodeCheckFailure["kind"][] = ["request-failed", 
 
 /** `live`: a live scan's crosswalks, and whether this lookup retries the show's failed crosswalk; absent in an offline replay. */
 async function findTmdbEpisodeByTvdbId(tvdbEpisodeId: number, token: string, live?: {crosswalks: TmdbCrosswalkComparison; forced: boolean}): Promise<TmdbEpisodeFindResult[]> {
-  const found = await tmdbJson<unknown>(crosswalkLookup("TMDB", tvdbEpisodeId), token, {provider:"TVDB",id:tvdbEpisodeId}, live && {...live, tvdbEpisodeId});
-  return responseRecords<TmdbEpisodeFindResult>("TMDB", found, "tv_episode_results");
+  const found = await tmdbJson<unknown>(crosswalkLookup("TMDB", tvdbEpisodeId), token, {episodeIdentity: {provider:"TVDB",id:tvdbEpisodeId}, liveCrosswalk: live && {...live, tvdbEpisodeId}});
+  return interpretedRecords<TmdbEpisodeFindResult>("TMDB", tmdbCrosswalkResults(found));
 }
 
 async function tmdbShowsForTvdbId(tvdbShowId: number, token: string): Promise<TmdbShow[]> {
   const found = await tmdbJson<unknown>(providerLookup.tmdbSeriesByTvdbSeries(tvdbShowId), token);
-  return responseRecords<TmdbShow>("TMDB", found, "tv_results").filter(usableTmdbShow);
+  return interpretedRecords<TmdbShow>("TMDB", responseRecordList(found, "tv_results")).filter(usableTmdbShow);
 }
 
 async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | null> {
@@ -1550,12 +1553,10 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
   if (replay.missing.size) throw new Error(`Saved provider identity relationships are incomplete (${[...replay.missing].join(", ")}).`);
   // The recheck saves only the answers it recovered after this show's own failed lookup; its other
   // replay changes stay in memory, so a later shared recovery remains adoptable offline.
-  if (replay.recovered.size) {
-    const savedRelationships={...input.relationships};
-    for (const relationship of replay.recovered.keys()) savedRelationships[relationship]=relationships[relationship];
-    savePlexComparison(key,{...input,relationships:savedRelationships});
-    for (const issueId of replay.recovered.values()) resolveCoverageIssue(issueId);
-  }
+  saveRecoveredTmdbCrosswalks(replay.recovered,relationships,{
+    save:copies=>savePlexComparison(key,{...input,relationships:{...input.relationships,...copies}}),
+    resolveFailedRequest:resolveCoverageIssue,
+  });
   reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
   resolveCoverageIssue(`comparison-inputs:${key}`);
   resolveCoverageIssue(`comparison-failure:${key}`);

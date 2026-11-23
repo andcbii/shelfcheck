@@ -1,7 +1,8 @@
 import { PROVIDER_NAME, type CatalogueProvider } from "@/lib/catalogue-selection";
 import type { CatalogueLoad, ComparisonCatalogueSource, SavedCatalogue, SeriesAssociation } from "@/lib/comparison-catalogue-resolver";
 import type { SeriesNotFoundHistory } from "@/lib/series-not-found-history";
-import { tmdbFindRelationshipKey, usableProviderCatalogue, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { lookupKey, providerLookup } from "@/lib/provider-lookup";
+import { usableProviderCatalogue, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 
 /** The saved catalogue records a cached recheck compares, per provider. */
 export type SavedCataloguePayloads = { tmdb: PlexGeneratedInputs["tmdb"][string]; tvdb: PlexGeneratedInputs["tvdb"][string] };
@@ -38,7 +39,7 @@ export function savedCatalogueSource(
     seriesNotFoundDays: (provider, id) => seriesNotFound.countedDays(provider, id),
     /** From saved evidence only: a mandatory association cannot be requested, so it is missing. */
     async tmdbSeriesForTvdb(tvdbId, { mandatory }): Promise<SeriesAssociation> {
-      const saved = mandatory ? undefined : comparison.relationships[tmdbFindRelationshipKey(tvdbId)];
+      const saved = mandatory ? undefined : comparison.relationships[lookupKey(providerLookup.tmdbSeriesByTvdbSeries(tvdbId))];
       if (!saved) return { outcome: "missing" };
       // As the scan reads it: TMDB's first TV result, and a saved answer naming none is a valid empty one.
       const id = (saved.value as { tv_results?: { id?: unknown }[] } | null)?.tv_results?.[0]?.id;

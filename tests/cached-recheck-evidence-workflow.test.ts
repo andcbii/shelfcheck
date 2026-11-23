@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
-import { catalogues, plexScan } from "./catalogue-override-harness";
+import { catalogues, day, fixture, plexScan, scan as scanRoute } from "./catalogue-override-harness";
 import { harness, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const config = await import("../lib/server-config");
@@ -335,4 +335,130 @@ test("a recovered answer that cannot be saved leaves the failed request open, an
   assert.deepEqual(autoMatches(recovered, "other"), [matched]);
   assert.equal(coverageIssues.getCoverageIssue(request.id), undefined);
   assert.deepEqual(showInputIssues(recovered), []);
+});
+
+test("independent Manual Match coverage in a cached recheck does not resolve a failed crosswalk", async t => {
+  const { rerun, state, requests, save, status, restart } = await harness(t, catalogue, owned);
+  state.statuses.set("/3/find/301", 404);
+  state.bodies.set("/3/find/302", found(tmdb2));
+  const scanned = await rerun();
+  const [request] = episodeIssues(scanned, "target", 301).filter(issue => issue.operation === "episode-identity");
+  assert.ok(request.failedAt);
+  const before = savedRelationships();
+
+  const manual = await save([tmdb1, tvdb1]);
+  assert.ok(manual.ok, await manual.clone().text());
+  for (const restarting of [false, true]) {
+    if (restarting) { restart(); await recheckTarget(); }
+    requests.length = 0;
+    const rechecked = await settled(status);
+    assert.deepEqual(requests, []);
+    assert.ok(!missingKeys(rechecked).includes("TVDB:301"), "the Manual Match collects TVDB 301");
+    assert.equal(coverageIssues.getCoverageIssue(request.id)?.failedAt, request.failedAt, "the failed request stays open with its failure time");
+    assert.match(episodeIssues(rechecked, "target", 301).find(issue => issue.id === request.id)!.impacts!.join(" "), /A complete-set Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+    assert.deepEqual(savedRelationships(), before, "no crosswalk answer is saved for it");
+  }
+});
+
+// --- Missing saved answers --------------------------------------------------------------
+
+/**
+ * Fault injection: removes saved provider relationships whose key `matches` (today's keys name
+ * the provider request) from a show's saved comparison, and optionally its saved IMDb identities.
+ */
+function dropSaved(matches: (key: string) => boolean, imdbOf?: number) {
+  const saved = catalogues.readPlexInputs().comparisons["ratingKey:target"]!;
+  assert.equal(saved.complete, true, "the scan saved complete comparison inputs");
+  const dropped = Object.keys(saved.relationships).filter(matches);
+  assert.ok(dropped.length, "a saved relationship was removed");
+  for (const key of dropped) delete saved.relationships[key];
+  if (imdbOf) { assert.ok(saved.tvdbEpisodeImdbIds?.[String(imdbOf)]); delete saved.tvdbEpisodeImdbIds![String(imdbOf)]; }
+  catalogues.savePlexComparison("ratingKey:target", saved);
+}
+const traktValidated = (state: Awaited<ReturnType<typeof harness>>["state"]) => state.bodies.set("/search/tvdb/301", [traktMapping]);
+// `providers`: each crosswalk of TVDB 301 left without a saved answer. When an earlier method
+// collected the episode in the scan, the TMDB external-ID fallback was never requested, so the
+// recheck that reaches it finds no saved answer for it either.
+const episodeAnswers: { kind: string; trakt?: boolean; arrange: (state: Awaited<ReturnType<typeof harness>>["state"]) => void; drop: (key: string) => boolean; imdb?: number; providers: string[] }[] = [
+  { kind: "TMDB external-ID crosswalk", arrange: state => state.bodies.set("/3/find/301", found(tmdb1)), drop: key => key.includes("/find/301?"), providers: ["TMDB"] },
+  { kind: "Trakt episode search", trakt: true, arrange: traktValidated, drop: key => key.includes("/search/tvdb/301?"), providers: ["TMDB", "Trakt"] },
+  { kind: "TMDB episode validating a Trakt crosswalk", trakt: true, arrange: traktValidated, drop: key => key.endsWith("/tv/10/season/1/episode/1"), providers: ["TMDB", "Trakt"] },
+  { kind: "TVDB episode record (IMDb crosswalk)", arrange: state => { state.imdb.set(tmdb1.id, "tt1"); state.bodies.set("/v4/episodes/301/extended", { data: { id: 301, seriesId: 20, seasonNumber: 2, number: 1, name: "One", remoteIds: [{ id: "tt1", sourceName: "IMDB" }] } }); }, drop: key => key.includes("/episodes/301/extended"), imdb: 301, providers: ["TMDB", "TVDB"] },
+];
+for (const answer of episodeAnswers) test(`a missing saved ${answer.kind} answer is an episode-scoped failure in a cached recheck`, async t => {
+  const { rerun, state, requests, status } = await harness(t, catalogue, owned);
+  if (answer.trakt) await connectTrakt();
+  answer.arrange(state);
+  state.bodies.set("/3/find/302", found(tmdb2));
+  const scanned = await rerun();
+  assert.deepEqual(missingKeys(scanned), ["TMDB:9003", "TVDB:303"], "the answer collected TVDB 301");
+  dropSaved(answer.drop, answer.imdb);
+
+  requests.length = 0;
+  await recheckTarget();
+  const rechecked = await settled(status);
+  assert.deepEqual(requests, [], "the cached recheck performs no HTTP");
+  assert.deepEqual(showInputIssues(rechecked), [], "one unavailable episode answer does not reject the show");
+  assert.deepEqual(missingKeys(rechecked), ["TMDB:9003", "TVDB:301", "TVDB:303"], "no coverage is guessed for TVDB 301; TVDB 302 is still collected");
+  const issues = episodeIssues(rechecked, "target", 301);
+  assert.deepEqual(issues.map(issue => issue.provider).sort(), answer.providers);
+  for (const issue of issues) {
+    assert.equal(issue.operation, "episode-crosswalk");
+    assert.equal(issue.scope, "episode");
+    assert.match(issue.cause, /response for this episode is not available to the offline recheck; no request was made\./);
+  }
+});
+
+const showAnswers: { kind: string; drop: (key: string) => boolean }[] = [
+  { kind: "TVDB series summary", drop: key => key.endsWith("/v4/series/20") },
+  { kind: "TMDB series association", drop: key => key.includes("/find/20?") },
+];
+for (const answer of showAnswers) test(`a missing saved ${answer.kind} answer leaves a cached recheck incomplete with last-good results kept`, async t => {
+  const { rerun, state, requests, status } = await harness(t, catalogue, owned);
+  state.bodies.set("/3/find/301", found(tmdb1));
+  const scanned = await rerun();
+  dropSaved(answer.drop);
+
+  requests.length = 0;
+  await recheckTarget();
+  const rechecked = await settled(status);
+  assert.deepEqual(requests, [], "the cached recheck performs no HTTP");
+  assert.deepEqual(showInputIssues(rechecked), ["comparison-inputs:ratingKey:target"]);
+  assert.match(issuesOf(rechecked).find(issue => issue.id === "comparison-inputs:ratingKey:target")!.cause, /Saved provider identity relationships are incomplete/);
+  assert.deepEqual(showOf(rechecked), showOf(scanned), "last-good results are kept");
+  assert.deepEqual(issuesOf(rechecked).filter(issue => issue.operation === "episode-crosswalk"), []);
+});
+
+// --- Alternative TVDB candidates --------------------------------------------------------
+
+test("a cached recheck switching to another TVDB candidate uses that candidate's saved TMDB series association, kept by later scans that never read it", async t => {
+  const f = await fixture(t);
+  f.plex.tmdb = []; f.plex.tvdb = [1, 3];
+  f.find[1] = 10; f.find[3] = 11;
+  let show = await f.run();
+  assert.deepEqual([show.tmdbId, show.tvdbId], [10, 1]);
+  await f.select({ identity: f.identity, provider: "tvdb", seriesId: 3 });
+  // TMDB now associates TVDB 1 with another series; scans comparing TVDB 3, ordinary and forced, never ask.
+  f.find[1] = 12;
+  f.at(day(2)); show = await f.run();
+  assert.deepEqual([show.tmdbId, show.tvdbId], [11, 3]);
+  f.at(day(3));
+  f.requests.length = 0;
+  await scanRoute.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify({ ratingKey: f.identity }) }));
+  for (let i = 0; i < 500 && (await f.state()).scan.status === "running"; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal((await f.state()).scan.status, "completed");
+  assert.ok(f.requests.includes("/3/find/3"), "the single-show rescan requested its own association again");
+  f.at(day(4)); await f.run();
+  assert.ok(!f.requests.includes("/3/find/1"));
+
+  for (const restarting of [false, true]) {
+    if (restarting) { f.restart(); await f.select({ identity: f.identity, provider: "tvdb", seriesId: 3 }); }
+    f.requests.length = 0;
+    const cleared = await f.select({ identity: f.identity, provider: "tvdb", seriesId: null });
+    assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+    assert.deepEqual(f.requests, [], "no provider request");
+    show = await f.show();
+    assert.deepEqual([show.tmdbId, show.tvdbId], [10, 1], "TVDB 1's day-one association, saved while TVDB 3 was compared");
+    assert.ok(!(await f.issues()).some(issue => issue.id === `comparison-inputs:${f.identity}`));
+  }
 });

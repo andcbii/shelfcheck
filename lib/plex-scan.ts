@@ -612,9 +612,9 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           return failure;
         };
         const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId)) }]);
-        /** Run one crosswalk per TVDB episode; a failure is recorded against its episode only. */
+        /** Run one crosswalk per TVDB episode; a failure, even one thrown before the lookup returns, is recorded against its episode only. */
         const settleCrosswalks = async <T,>(crosswalk: EpisodeCrosswalk, ids: number[], lookup: (tvdbEpisodeId: number) => Promise<T>) => {
-          const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, () => lookup(tvdbEpisodeId)); }));
+          const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, async () => lookup(tvdbEpisodeId)); }));
           const fulfilled: { tvdbEpisodeId: number; value: T }[] = [];
           const requestFailures: string[] = [];
           settled.forEach((result, index) => {
@@ -720,7 +720,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             });
             if (traktFailed) recordWarning(`${traktFailed} Trakt episode identity ${traktFailed === 1 ? "lookup" : "lookups"} failed; ${traktFailed === 1 ? "it is" : "they are"} requested again on the next scan.`);
           }
-          const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], (tvdbEpisodeId) => {
+          const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], async (tvdbEpisodeId) => {
             if (replayScope.getStore()) replayTmdbCrosswalk(tvdbEpisodeId);
             const live = input.tmdbCrosswalks && {crosswalks: input.tmdbCrosswalks, forced: retryCrosswalks.has(`TMDB:${tvdbEpisodeId}`)};
             return findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken, live);

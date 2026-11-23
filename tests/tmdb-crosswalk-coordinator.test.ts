@@ -204,6 +204,16 @@ test("a forced lookup joining a request in flight is not marked requested before
   assert.deepEqual(relationships, { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: NOW } });
 });
 
+test("a request that throws before returning is a failed request: its rejection is saved and the lookup counts as requested", async () => {
+  const { store, records } = inMemoryStore();
+  const run = scanRun(store);
+  const throwing = (): Promise<unknown> => { throw new Error("bad request URL"); };
+  await assert.rejects(run.comparison({ relationships: {}, forced: true }).lookup(301, throwing), /bad request URL/);
+  assert.deepEqual(records.get(301), { rejectedAt: NOW });
+  records.set(301, { value: MATCH, receivedAt: "2026-06-01T23:45:00.000Z" });
+  assert.deepEqual(await run.comparison({ relationships: {}, forced: true }).lookup(301, () => assert.fail("no request")), { value: MATCH, reused: true });
+});
+
 /** The saved relationship key of TVDB episode 302's TMDB external-ID crosswalk. */
 const KEY_302 = "TMDB:https://api.themoviedb.org/3/find/302?external_source=tvdb_id";
 const SERIES_KEY = "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id";

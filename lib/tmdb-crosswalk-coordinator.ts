@@ -41,7 +41,8 @@ export function tmdbCrosswalkScanRun({ store, now, startedAt }: { store: SharedC
   function shareRequest(tvdbEpisodeId: number, request: () => Promise<unknown>) {
     const pending = inFlight.get(tvdbEpisodeId);
     if (pending) return pending;
-    const started = request().then((value) => {
+    // A request that throws before returning a promise is a failed request like any other.
+    const started = Promise.resolve().then(request).then((value) => {
       const receivedAt = now();
       store.save(tvdbEpisodeId, readableTmdbCrosswalk(value) ? { value, receivedAt } : { value, rejectedAt: receivedAt });
       return { value, receivedAt };

@@ -91,6 +91,19 @@ export function missingPartsOf(members: (CoverageIdentity & { reportMissing?: bo
   return members.filter(part => part.provider !== member.provider && part.reportMissing).map(({ provider, id }) => ({ provider, id }));
 }
 
+/**
+ * Whether a Manual Match member is missing because of saved Report Missing
+ * flags: reported missing by its own flag, incomplete because flagged split
+ * episodes leave it an incomplete combined episode, or neither (undefined).
+ * Reported wins over incomplete. Plex results and the comparison both decide
+ * this here, so they cannot disagree.
+ */
+export function reportedOrIncomplete(members: (CoverageIdentity & { reportMissing?: boolean })[], member: CoverageIdentity): { status: "reported-missing" } | { status: "incomplete"; missingParts: CoverageIdentity[] } | undefined {
+  if (members.some(item => item.provider === member.provider && item.id === member.id && item.reportMissing)) return { status: "reported-missing" };
+  const missingParts = missingPartsOf(members, member);
+  return missingParts.length ? { status: "incomplete", missingParts } : undefined;
+}
+
 /** A Manual Match member's status in Plex results. */
 export type MemberStatus = CoverageGroup["members"][number]["status"];
 
@@ -98,6 +111,7 @@ export type MemberStatus = CoverageGroup["members"][number]["status"];
  * The status a Manual Match member shows in Plex results, highest first:
  * Reported missing, Incomplete, Directly owned, Missing, Satisfied
  * automatically, Covered by complete alternative set, then Alternative.
+ * `member` is one of `members`, whose saved flags decide the first two levels.
  * `direct` says whether a Plex item owns the member directly; `matched` holds
  * the comparison outcomes for this member. Missing parts appear only on an
  * incomplete combined episode.
@@ -109,9 +123,8 @@ export function memberStatus({ member, members, direct, matched }: {
   matched: Pick<CoverageOutcome, "status">[];
 }): { status: MemberStatus; missingParts?: CoverageIdentity[] } {
   // Explicit and derived missing status outrank direct ownership and every collected outcome.
-  if (member.reportMissing) return { status: "reported-missing" };
-  const missingParts = missingPartsOf(members, member);
-  if (missingParts.length) return { status: "incomplete", missingParts };
+  const flagged = reportedOrIncomplete(members, member);
+  if (flagged) return flagged;
   if (direct) return { status: "direct" };
   for (const status of ["missing", "automatic", "manual"] as const) if (matched.some(outcome => outcome.status === status)) return { status };
   return { status: "alternative" };

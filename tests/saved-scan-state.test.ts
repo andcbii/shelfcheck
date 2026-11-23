@@ -187,25 +187,73 @@ test("an Ignore change prunes the saved report and Resume point, and Restore doe
   assert.deepEqual((trakt.report.read() as Results).shows.map(row => row.show!.ids.trakt), [2], "The Trakt row prunes by its own Ignores");
 });
 
-test("an Ignore save the store rejects still marks the running scan, as before (the guard-before-save gap stays for SHELFCHECK-42)", (t) => {
+// Each mode ignores its first show; its second show is already in the running scan's guard.
+const ignoreCases = [
+  { mode: "plex" as const, ignore: { ratingKey: "one", title: "one" }, guarded: { ratingKey: "two", title: "two" }, results: plexResults, key: (row: Row) => row.ratingKey, first: "one" },
+  { mode: "trakt" as const, ignore: { title: "Show 1", ids: { trakt: 1 } }, guarded: { title: "Show 2", ids: { trakt: 2 } }, results: traktResults, key: (row: Row) => String(row.show!.ids.trakt), first: "1" },
+];
+
+test("an Ignore save whose options write or later pruning fails changes nothing and does not mark the running scan; earlier guard keys stay", (t) => {
   freshDatabase(t);
-  const cases = [
-    { mode: "plex" as const, ignore: { ratingKey: "one", title: "one" }, results: plexResults, key: (row: Row) => row.ratingKey, kept: "two" },
-    { mode: "trakt" as const, ignore: { title: "Show 1", ids: { trakt: 1 } }, results: traktResults, key: (row: Row) => String(row.show!.ids.trakt), kept: "2" },
-  ];
-  for (const { mode, ignore, results, key, kept } of cases) {
+  for (const failing of ["OF options", "OF report, resume_point"]) {
+    for (const { mode, ignore, guarded, results, key, first } of ignoreCases) {
+      const store = ignoreResults.savedScanState(mode);
+      // The second show is ignored when the scan starts, then Restored: the guard keeps it.
+      store.options.patch({ ignoredShows: [guarded], diagnosticsEnabled: true });
+      const finish = ignoreResults.trackScanIgnores(mode);
+      try {
+        store.options.patch({ ignoredShows: [] });
+        store.report.write(results());
+        store.resumePoint.write(results("resume"));
+        const before = store.snapshot()!;
+        assert.deepEqual((before.report as Results).shows.map(key), [first], `${mode}: the guard drops the Restored show`);
+
+        rejectUpdates(failing);
+        assert.throws(() => store.options.patch({ ignoredShows: [ignore] }), /saved state unavailable/, `${mode} ${failing}: the save fails`);
+        allowUpdates();
+        assert.deepEqual(store.snapshot(), before, `${mode} ${failing}: options, report, Resume point and timestamp are unchanged`);
+        // The failed Ignore did not reach the guard, so the running scan may still save that show; the earlier key still blocks.
+        store.report.write(results());
+        assert.deepEqual((store.report.read() as Results).shows.map(key), [first], `${mode} ${failing}: no new guard key, the earlier one stays`);
+      } finally { finish(); }
+    }
+  }
+});
+
+test("a successful Ignore save marks the running scan once both its options write and pruning succeed", (t) => {
+  freshDatabase(t);
+  for (const { mode, ignore, results, key, first } of ignoreCases) {
     const store = ignoreResults.savedScanState(mode);
-    store.options.patch({ ignoredShows: [], diagnosticsEnabled: true });
     const finish = ignoreResults.trackScanIgnores(mode);
     try {
-      rejectUpdates("OF options");
-      assert.throws(() => store.options.patch({ ignoredShows: [ignore] }), /saved state unavailable/, `${mode}: the save fails`);
-      allowUpdates();
-      assert.deepEqual(store.options.read(), { ignoredShows: [], diagnosticsEnabled: true }, `${mode}: the options are unchanged`);
-      // The running scan's guard still holds the newly supplied Ignore, so its pending results for that show are dropped.
+      store.options.patch({ ignoredShows: [ignore] });
+      store.options.patch({ ignoredShows: [] });
       store.report.write(results());
-      assert.deepEqual((store.report.read() as Results).shows.map(key), [kept], `${mode}: the guard holds the Ignore`);
+      assert.equal((store.report.read() as Results).shows.some(row => key(row) === first), false, `${mode}: the Restored show is still blocked for this scan`);
     } finally { finish(); }
+  }
+});
+
+test("accepted caveat: an outer transaction that rolls back after a successful Ignore save keeps the new guard key until the scan ends", (t) => {
+  freshDatabase(t);
+  for (const { mode, ignore, results, key, first } of ignoreCases) {
+    const store = ignoreResults.savedScanState(mode);
+    store.report.write(results());
+    const before = store.snapshot()!;
+    const finish = ignoreResults.trackScanIgnores(mode);
+    try {
+      const db = sqlite.database();
+      db.exec("BEGIN IMMEDIATE");
+      store.options.patch({ ignoredShows: [ignore] });
+      db.exec("ROLLBACK");
+      assert.deepEqual(store.snapshot(), before, `${mode}: the rollback restores options and results`);
+      // Not rollback-safe, by decision: the guard still holds the Ignore the rollback undid.
+      store.report.write(results());
+      assert.equal((store.report.read() as Results).shows.some(row => key(row) === first), false, `${mode}: the guard keeps the rolled-back key`);
+    } finally { finish(); }
+    // Once the scan ends, its guard is gone and the show saves again.
+    store.report.write(results());
+    assert.equal((store.report.read() as Results).shows.some(row => key(row) === first), true, `${mode}: no guard after the scan`);
   }
 });
 

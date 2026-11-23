@@ -136,18 +136,24 @@ function prunedForSave(raw: RawStore, mode: ScanMode, value: unknown) {
 /**
  * Merge the supplied option fields over the saved ones. Only a patch that has its own
  * ignoredShows (an empty list on Restore included) touches the report and Resume
- * point or the guard: it records the Ignores for a running scan and removes the saved
- * results of every show blocked by the patch's active Ignores plus the guard.
+ * point or the guard: it removes the saved results of every show blocked by the
+ * patch's active Ignores plus the guard, then records the Ignores for a running scan.
  */
 function patchOptions(raw: RawStore, mode: ScanMode, patch: Record<string, unknown>) {
   const options = { ...raw.readOptions(), ...patch };
   const ignoring = Object.prototype.hasOwnProperty.call(patch, "ignoredShows");
-  // The running scan is marked before the save, as before: a save that then fails
-  // still leaves the guard marked. This known guard-before-save gap is kept
-  // deliberately until SHELFCHECK-158 applies SHELFCHECK-42 decision 2.
-  if (ignoring) recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
   raw.writeOptions(options);
-  if (ignoring) pruneSavedResults(raw, mode, blockedShowKeys(mode, options.ignoredShows));
+  if (!ignoring) return;
+  // The pruning set already holds the patch's active Ignores, so the guard is not
+  // needed before the save. SHELFCHECK-42 decision 2: the running scan is marked only
+  // after the options write and pruning both succeed; if either throws, no new key is
+  // added and keys already in the guard stay. Accepted caveat: the guard is
+  // process memory, not part of the transaction. When this patch joins an outer
+  // transaction that later rolls back, or its COMMIT fails, after the patch
+  // succeeded, the new keys stay in the guard until that scan ends; the scan only
+  // drops that show's results, it never saves wrong ones.
+  pruneSavedResults(raw, mode, blockedShowKeys(mode, options.ignoredShows));
+  recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
 }
 
 export type { SavedScanStateSnapshot };

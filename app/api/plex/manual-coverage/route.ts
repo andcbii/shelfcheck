@@ -1,6 +1,6 @@
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
-import { captureCoverageImpact, requestCoverageRecheck } from "@/lib/plex-scan";
-import { assertCoverageMutationAllowed, CoverageError, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping } from "@/lib/manual-coverage";
+import { requestCoverageRecheck } from "@/lib/plex-scan";
+import { assertCoverageMutationAllowed, CoverageError, type CoverageDeletion, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, readCoverageEvidence, saveCoverageMapping } from "@/lib/manual-coverage";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 const headers = { "Cache-Control": "private, no-store" };
@@ -31,9 +31,8 @@ export async function POST(request: Request) {
       throw new CoverageError("Supply the Manual Match ID to edit.");
     if (body.preview === undefined && body.id !== undefined && body.reportMissing !== undefined) {
       // Changing only Report Missing keeps the saved members, so it needs no provider review.
-      const impact = captureCoverageImpact([body.id]);
-      const mapping = saveCoverageMapping(undefined, { id: body.id, revision: body.revision }, body.reportMissing);
-      await requestCoverageRecheck({members:[...impact.members,...mapping.members]});
+      const { mapping, affectedMembers } = saveCoverageMapping(undefined, { id: body.id, revision: body.revision }, body.reportMissing);
+      await requestCoverageRecheck({ members: affectedMembers });
       return Response.json({ mapping, ...coverageState() }, { headers });
     }
     const reviewed = reviewedCoverageMembers(body.preview);
@@ -41,9 +40,8 @@ export async function POST(request: Request) {
     // different TMDB record since preview, but must never replace that identity.
     await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
     assertCoverageMutationAllowed();
-    const impact=captureCoverageImpact(body.id ? [body.id] : []);
-    const mapping = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision }, body.reportMissing);
-    await requestCoverageRecheck({members:[...impact.members,...mapping.members]});
+    const { mapping, affectedMembers } = saveCoverageMapping(reviewed, body.id === undefined ? undefined : { id: body.id, revision: body.revision }, body.reportMissing);
+    await requestCoverageRecheck({ members: affectedMembers });
     return Response.json({ mapping, ...coverageState() }, { status: body.id === undefined ? 201 : 200, headers });
   } catch (error) {
     return failure(error);
@@ -54,18 +52,16 @@ export async function DELETE(request: Request) {
   try {
     assertCoverageMutationAllowed();
     const id = new URL(request.url).searchParams.get("id");
-    let impact=captureCoverageImpact(id ? [id] : []);
-    let result: { deleted: string[]; missing: string[] };
+    let result: CoverageDeletion;
     if (id !== null) {
-      deleteCoverageMapping(id);
-      result = { deleted: [id], missing: [] };
+      result = deleteCoverageMapping(id);
     } else {
       const body = await request.json().catch(() => { throw new CoverageError("Supply the selected Manual Match IDs as JSON."); });
-      impact=captureCoverageImpact(Array.isArray(body?.ids) ? body.ids : []);
       result = deleteCoverageMappings(body?.ids);
     }
-    if (result.deleted.length) await requestCoverageRecheck(impact);
-    return Response.json({ ...result, ...coverageState() }, { headers });
+    if (result.deleted.length) await requestCoverageRecheck({ members: result.affectedMembers });
+    // The affected members stay internal: only the public delete fields are sent.
+    return Response.json({ deleted: result.deleted, missing: result.missing, ...coverageState() }, { headers });
   } catch (error) {
     return failure(error);
   }

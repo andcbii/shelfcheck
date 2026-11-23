@@ -1122,9 +1122,6 @@ export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
 }
 
 export type CoverageImpact = {members: CoverageMember[]};
-export function captureCoverageImpact(ids: string[]): CoverageImpact {
-  return {members:listCoverageMappings().filter(mapping=>ids.includes(mapping.id)).flatMap(mapping=>mapping.members)};
-}
 function coverageGroupsForResults(results: PlexShowResult[], manualInventory: CoverageEvidence[]): CoverageGroup[] {
   return listCoverageMappings().flatMap(mapping=>{
     const outcomes=results.flatMap(show=>(show.coverageOutcomes || []).filter(outcome=>mapping.members.some(member=>member.provider===outcome.provider && member.id===outcome.id)).map(outcome=>({...outcome,showKey:show.ratingKey})));

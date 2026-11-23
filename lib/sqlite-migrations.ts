@@ -406,7 +406,7 @@ function lookupKeyReset(db: DatabaseSync) {
  * a pending comparison keeps it, without carried members, until a recheck or full scan completes it.
  */
 function carriedCoverageMembers(db: DatabaseSync) {
-  db.exec(`CREATE TABLE IF NOT EXISTS shelfcheck_coverage_carried(
+  db.exec(`CREATE TABLE shelfcheck_coverage_carried(
     provider TEXT NOT NULL,
     episode_id INTEGER NOT NULL,
     show_id INTEGER NOT NULL,

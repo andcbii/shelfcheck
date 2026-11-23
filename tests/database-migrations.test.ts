@@ -720,14 +720,14 @@ const traktRowV5 = { report: { shows: [], missing: [], lastScan: "x", scanCache:
 
 /**
  * A version 5 database, as the release before the lookup key cutover left it: saved Plex scan data,
- * lookup issues, decisions and a 404 history. Today's open builds the layout; stepping user_version
- * back is that release's database, since migration 6 changes no schema.
+ * lookup issues, decisions and a 404 history. Today's open builds the layout; dropping migration 7's
+ * table and stepping user_version back is that release's database, since migration 6 changes no schema.
  */
 function versionFive(file: string, seed?: (db: DatabaseSync) => void) {
   sqlite.savedScanState("plex").snapshot();
   closeCached();
   inspect(file, db => {
-    db.exec("PRAGMA user_version = 5");
+    db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 5");
     seedUnrelated(db);
     db.prepare("UPDATE shelfcheck_plex_generated_inputs SET payload = ? WHERE cache_key = 'comparison:3'").run(JSON.stringify({ relationships: { [OLD_KEY]: { provider: "TMDB", value: {} } }, tvdbEpisodeImdbIds: { 301: ["tt1"] } }));
     for (const issue of Object.values(issuesV5)) db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?)").run(issue.id, JSON.stringify(issue));
@@ -778,7 +778,8 @@ test("upgrading a version 5 database clears generated scan data, the Plex scan c
     const after = everyRow(db);
     for (const name of ["shelfcheck_coverage_issues", "shelfcheck_scan_state"]) { delete before[name]; delete after[name]; }
     assert.deepEqual(after.shelfcheck_series_not_found, [{ provider: "tmdb", series_id: 7, counted_days: 2, last_counted_day: "2026-11-01" }], "The 404 history is kept");
-    assert.deepEqual(after, keptByLookupKeyReset(before), "Manual Matches, Report Missing flags, catalogue choices, previews and the four kept generated inputs are unchanged");
+    // Migration 7 then adds its empty carried-member table.
+    assert.deepEqual(after, keptByLookupKeyReset({ ...before, shelfcheck_coverage_carried: [] }), "Manual Matches, Report Missing flags, catalogue choices, previews and the four kept generated inputs are unchanged");
   });
 });
 
@@ -805,7 +806,7 @@ test("a version 5 database holding only kept data upgrades without changing anyt
   sqlite.savedScanState("plex").options.patch({ libraries: ["1"] });
   closeCached();
   inspect(file, db => {
-    db.exec("PRAGMA user_version = 5");
+    db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 5");
     for (const key of KEPT_GENERATED_KEYS) db.prepare("INSERT INTO shelfcheck_plex_generated_inputs VALUES(?,?)").run(key, "{}");
     db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES('provider-authentication:TVDB','{}')").run();
   });
@@ -814,7 +815,7 @@ test("a version 5 database holding only kept data upgrades without changing anyt
   sqlite.savedScanState("plex").snapshot();
   assert.deepEqual(logged(info), [[EMPTY_LOG]]);
   closeCached();
-  inspect(file, db => assert.deepEqual(everyRow(db), before));
+  inspect(file, db => assert.deepEqual(everyRow(db), { ...before, shelfcheck_coverage_carried: [] }, "Only migration 7's empty table is added"));
 });
 
 test("a failure after migration 6 cleared the cache rolls back the cache, the issues and the version together, and logs nothing", (t) => {

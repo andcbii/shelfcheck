@@ -18,7 +18,7 @@ hook.deregister();
 // provider responses answered in memory.
 const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
 
-test("a TVDB member blocked by a refused TVDB sign-in links its member-verification issue to the sign-in issue", async (t) => {
+test("a TVDB member blocked by the scan's failed TVDB sign-in links its member-verification issue to the sign-in issue, without a TVDB request", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "manual-coverage-health-"));
   const previous = process.env.SHELFCHECK_DATA_DIR;
   process.env.SHELFCHECK_DATA_DIR = dir;
@@ -29,16 +29,20 @@ test("a TVDB member blocked by a refused TVDB sign-in links its member-verificat
     rmSync(dir, { recursive: true, force: true });
   });
   const { mapping } = store.saveCoverageMapping([episode("TMDB", 101), episode("TVDB", 201)]);
+  const requested: string[] = [];
   const client = new ProviderClient({ fetch: async input => {
     const url = new URL(String(input));
-    if (url.pathname === "/v4/login") return Response.json({ status: "failure" }, { status: 401 });
+    requested.push(url.pathname);
     if (url.pathname === "/3/tv/10/season/1/episode/101") return Response.json({ id: 101 });
     return Response.json({}, { status: 500 });
   } });
 
-  await recheckCoverageHealth(client, { tmdbToken: "tmdb", tvdbApiKey: "tvdb" });
+  // A sign-in that returned no token fails with a plain error, not an HTTP one.
+  await recheckCoverageHealth(client, { tmdbToken: "tmdb", tvdbSignIn: { outcome: "failed", error: new Error("TVDB login did not return a token.") } });
 
   const blocked = issues.getCoverageIssue(memberVerificationIssueId(mapping.id, { provider: "TVDB", id: 201 }));
   assert.deepEqual(blocked?.causedBy, ["provider-authentication:TVDB"]);
   assert.equal(issues.getCoverageIssue(memberVerificationIssueId(mapping.id, { provider: "TMDB", id: 101 })), undefined, "the TMDB member was verified");
+  assert.deepEqual(requested, ["/3/tv/10/season/1/episode/101"], "no sign-in and no TVDB member request");
+  assert.equal(store.listCoverageMappings()[0].health, "pending");
 });

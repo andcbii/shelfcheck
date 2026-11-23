@@ -4,7 +4,7 @@ import { isPlexScanActive } from "@/lib/plex-scan-active";
 import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
 import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
-import { authenticateTvdb } from "@/lib/tvdb-auth";
+import { signInToTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
@@ -659,11 +659,6 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   let processed = 0;
   const setHeartbeat = (key: string, show: string, phase: string) => activeWork.update(key, show, phase);
   const config = await readPlexProviders();
-  if (config && mappings.length) {
-    await recheckCoverageHealth(scanProviderClient, config);
-    coverageRevision = coverageState().revision;
-    mappings = listCoverageMappings();
-  }
   if (!config) throw new Error("Configure Plex, TMDB, and TVDB credentials before scanning.");
   const sections = await plexJson("/library/sections", config.plexUrl, config.plexToken);
   const showSections = (sections.MediaContainer?.Directory || []).filter((section) => section.type === "show" && section.key);
@@ -676,12 +671,19 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   if (targetRatingKey && !shows.some((show) => show.identity === targetRatingKey)) throw new Error("That show is not available in the current Plex libraries.");
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
   logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
-  let tvdbAuthenticationError: unknown;
-  const token = await authenticateTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin).then(token=>{tvdbLoginDiagnostics.resolve();return token;}).catch(error=>{
-    tvdbAuthenticationError = error;
-    tvdbLoginDiagnostics.raiseFailure(error);
-    return "";
-  });
+  // The run's one TVDB sign-in, after Plex answered. Its issue is recorded or cleared before
+  // anything uses the result: the Manual Match recheck, freshness, catalogues and title recovery.
+  const tvdbSignIn = await signInToTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin);
+  if (tvdbSignIn.outcome === "authenticated") tvdbLoginDiagnostics.resolve();
+  else tvdbLoginDiagnostics.raiseFailure(tvdbSignIn.error);
+  const token = tvdbSignIn.outcome === "authenticated" ? tvdbSignIn.token : "";
+  const tvdbAuthenticationError = tvdbSignIn.outcome === "failed" ? tvdbSignIn.error : undefined;
+  // Health changes move the coverage revision, so the recheck ends before this run snapshots it.
+  if (mappings.length) {
+    await recheckCoverageHealth(scanProviderClient, {tmdbToken: config.tmdbToken, tvdbSignIn});
+    coverageRevision = coverageState().revision;
+    mappings = listCoverageMappings();
+  }
   // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
   const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.ready(); else traktLoginDiagnostics.resolve();return credentials;}).catch((error) => {
     traktLoginDiagnostics.raiseFailure(error);
@@ -717,8 +719,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // Without TVDB history, verification starts at each saved catalogue's own successful download.
   const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
   if (!targetRatingKey) {
-    tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : tvdbChangedShows(tvdbFeedFrom, token)).catch((error) => {
-      setProviderVerificationIssue("TVDB", error, tvdbAuthenticationError && error === tvdbAuthenticationError ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
+    tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : tvdbSignIn.outcome === "failed" ? Promise.reject(tvdbSignIn.error) : tvdbChangedShows(tvdbFeedFrom, tvdbSignIn.token)).catch((error) => {
+      setProviderVerificationIssue("TVDB", error, tvdbSignIn.outcome === "failed" && error === tvdbSignIn.error ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
       logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
       return null;
     });

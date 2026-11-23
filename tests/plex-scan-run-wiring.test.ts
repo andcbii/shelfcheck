@@ -50,10 +50,13 @@ test("an Interrupted Plex scan is written once and raises the scan-failure Cover
 
 test("a failed Plex scan run records its error through the lifecycle, logs to the Plex log and releases the lock", async (t) => {
   const dir = directory(t);
+  const requests: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => { requests.push(String(input)); return Response.json({}); });
   plex.startPlexScan();
   while (scanRuns.activeScanRun()) await new Promise((resolve) => setTimeout(resolve, 5));
   const status = plex.getPlexScanStatus();
   assert.equal(status.status, "error");
+  assert.deepEqual(requests, [], "an unconfigured scan sends no TVDB sign-in or other request");
   assert.equal(status.error, "Configure Plex, TMDB, and TVDB credentials before scanning.");
   assert.equal(status.rateLimitPaused, false);
   assert.equal(status.activeShows, undefined);

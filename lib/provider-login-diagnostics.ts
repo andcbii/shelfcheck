@@ -13,7 +13,7 @@ function providerLoginDiagnostics(provider: "TVDB" | "Trakt", id: CoverageIssueI
 }
 
 /** The scan run's TVDB login: resolved when TVDB login succeeds. */
-export const tvdbLoginDiagnostics = providerLoginDiagnostics("TVDB", TVDB_AUTHENTICATION_ISSUE, "TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained.");
+export const tvdbLoginDiagnostics = providerLoginDiagnostics("TVDB", TVDB_AUTHENTICATION_ISSUE, "TVDB catalogue downloads, freshness and Manual Match episodes could not be verified. Available last-good data and saved Manual Matches were retained.");
 
 /**
  * The scan run's Trakt login: one issue for a login that cannot be recovered, not one per Trakt

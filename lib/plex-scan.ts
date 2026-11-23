@@ -20,7 +20,7 @@ import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type 
 import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
 import { lookupFailureRecord } from "@/lib/lookup-failure-record";
 import { lookupDiagnostics } from "@/lib/lookup-diagnostics";
-import { TVDB_AUTHENTICATION_ISSUE, traktLoginDiagnostics, tvdbLoginDiagnostics } from "@/lib/provider-login-diagnostics";
+import { traktLoginDiagnostics, tvdbLoginDiagnostics } from "@/lib/provider-login-diagnostics";
 import { withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
@@ -30,7 +30,7 @@ import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
-import { catalogueIssueIds, lookupFailureIssueId } from "@/lib/coverage-issue-ids";
+import { catalogueIssueIds, comparisonFailureIssueId, comparisonInputsIssueId, INITIAL_COMPARISON_INPUTS_ISSUE, inventoryDetailsIssueId, lookupFailureIssueId, plexInventoryIssueId, providerVerificationIssueId, SCAN_FAILURE_ISSUE, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePayloads, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderLookupStatus, type ProviderRequest, type ShowMatchStatus } from "@/lib/comparison-catalogue-resolver";
 import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
 import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
@@ -97,7 +97,7 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   vetoedError: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.",
   status: plexSavedState.status,
   interruptedError: (status) => `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
-  onInterrupted: (status) => setCoverageIssue({id:"scan-failure",operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
+  onInterrupted: (status) => setCoverageIssue({id:SCAN_FAILURE_ISSUE,operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
   resumePoint: {
     ...plexSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length }),
@@ -266,7 +266,7 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
 
 /** Visibly mark a provider's catalogue freshness as unverified after its change check fails. */
 function setProviderVerificationIssue(provider: "TMDB" | "TVDB", error: unknown, causedBy?: string[]) {
-  setCoverageIssue({id:`provider-verification:${provider}`,...(causedBy ? {causedBy} : {}),operation:"provider-verification",provider,scope:"library",...providerLookupContext(error,{source:[],requested:{provider,kind:provider === "TMDB" ? "show change feed" : "series update feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
+  setCoverageIssue({id:providerVerificationIssueId(provider),...(causedBy ? {causedBy} : {}),operation:"provider-verification",provider,scope:"library",...providerLookupContext(error,{source:[],requested:{provider,kind:provider === "TMDB" ? "show change feed" : "series update feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
 }
 
 /**
@@ -649,8 +649,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       veto: () => coverageState().revision !== coverageRevision,
       // Only a committed full scan covers carried members, those of the shows it compared; a single-show scan covers none.
       committed: () => completeCoverageComparison(coverageRevision, targetRatingKey ? [] : coveredByFullScan()),
-      succeeded: () => resolveCoverageIssue("scan-failure"),
-      failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
+      succeeded: () => resolveCoverageIssue(SCAN_FAILURE_ISSUE),
+      failed: (error) => setCoverageIssue({id:SCAN_FAILURE_ISSUE,operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
       failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
       ended: () => finishIgnoreTracking?.(),
     },
@@ -726,10 +726,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
   retainVerifiedChanges(inputs, tmdbChanges ?? tmdbRecovery, tvdbChanges);
   if (tmdbChanges !== null) {
-    resolveCoverageIssue("provider-verification:TMDB");
+    resolveCoverageIssue(providerVerificationIssueId("TMDB"));
     fulfilOverdueSafeguards(inputs, utcDate);
   }
-  if (tvdbChanges !== null) resolveCoverageIssue("provider-verification:TVDB");
+  if (tvdbChanges !== null) resolveCoverageIssue(providerVerificationIssueId("TVDB"));
   // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
   const safeguardChanges = safeguardDue
     ? tmdbPosition?.slice(0, 10) === utcDate ? tmdbChanges
@@ -767,7 +767,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       response: await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken),
     })));
     for (const [index,result] of responses.entries()) {
-      const issueId = `inventory:${group.identity}:${group.records[index].ratingKey}`;
+      const issueId = plexInventoryIssueId(group.identity, String(group.records[index].ratingKey));
       if (result.status === "fulfilled") {
         const { ratingKey, response } = result.value;
         if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);
@@ -838,14 +838,14 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       // A record without usable metadata falls back to its library listing, which cannot establish removed series IDs.
       metadataComplete = metadata.every(detail => Array.isArray(detail?.Guid));
       metadataLoaded = true;
-      resolveCoverageIssue(`inventory-details:${ratingKey}`);
+      resolveCoverageIssue(inventoryDetailsIssueId(ratingKey));
       if (!inputs.inventory?.complete) throw new Error("The library inventory is incomplete; coverage cannot be verified against unavailable items.");
       localResponses = group.records.map(record=>localResponsesByRatingKey.get(record.ratingKey || "")!);
     } catch (error) {
       const message = `Plex inventory could not be loaded: ${error instanceof Error ? error.message : String(error)} This show will be checked again next scan.`;
-      const causedBy = [...inventoryFailureCauses,...(!metadataLoaded ? [`inventory-details:${ratingKey}`] : [])];
-      setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...(causedBy.length ? {causedBy} : {}),cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
-      if (!metadataLoaded) setCoverageIssue({id:`inventory-details:${ratingKey}`,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"show metadata"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
+      const causedBy = [...inventoryFailureCauses,...(!metadataLoaded ? [inventoryDetailsIssueId(ratingKey)] : [])];
+      setCoverageIssue({id:comparisonInputsIssueId(ratingKey),operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...(causedBy.length ? {causedBy} : {}),cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
+      if (!metadataLoaded) setCoverageIssue({id:inventoryDetailsIssueId(ratingKey),operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"show metadata"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
       retainComparison(message);
       return;
     }
@@ -996,13 +996,13 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       const reason = resolution.outcome === "unmatched" ? "no provider has a usable catalogue for this show" : "a provider's series could not be resolved yet";
       const cause = `Episode comparison could not be checked because ${reason}. ${savedComparison?.complete ? "Last-good comparison results were retained." : "No previous comparison results are available."}`;
       const action = resolution.outcome === "unmatched" ? "Check each provider's reported lookup failure, fix the show's Plex match if an ID is wrong or missing, then run a Plex scan." : "Run a Plex scan to resolve the provider's series.";
-      setCoverageIssue({id:`comparison-inputs:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action});
+      setCoverageIssue({id:comparisonInputsIssueId(ratingKey),operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action});
       if (savedComparison) { inputs.comparisons[ratingKey] = {...savedComparison,refresh}; savePlexComparison(ratingKey,inputs.comparisons[ratingKey]); }
       publishCatalogueUse(false);
       retainComparison(warning || cause, scanStatus);
       return;
     }
-    resolveCoverageIssue(`comparison-inputs:${ratingKey}`);
+    resolveCoverageIssue(comparisonInputsIssueId(ratingKey));
     const tmdbAliases = savedComparison?.tmdbAliases || [];
     const tvdbAliases = savedComparison?.tvdbAliases || [];
     const stale = savedComparison?.staleRelationships;
@@ -1037,10 +1037,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? retainedComparison(savedComparison) : {group,details,localMetadata,tmdbId,tvdbId,relationships:changes.relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
       savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
       publishCatalogueUse(true);
-      resolveCoverageIssue(`comparison-failure:${ratingKey}`);
+      resolveCoverageIssue(comparisonFailureIssueId(ratingKey));
     } catch (error) {
       const cause = coverageIssueCause(error);
-      setCoverageIssue({id:`comparison-failure:${ratingKey}`,operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry this comparison; run a Plex scan if saved inputs are incomplete."});
+      setCoverageIssue({id:comparisonFailureIssueId(ratingKey),operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},cause,action:"Retry this comparison; run a Plex scan if saved inputs are incomplete."});
       if (savedComparison) {inputs.comparisons[ratingKey] = retainedComparison(savedComparison);savePlexComparison(ratingKey,inputs.comparisons[ratingKey]);}
       publishCatalogueUse(false);
       retainComparison(cause, scanStatus);
@@ -1064,7 +1064,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
       if (targetRatingKey) plexSavedState.report.write(report); else plexSavedState.commitReport(report);
       const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
-      if (inventoryComplete) resolveCoverageIssue("comparison-inputs:initial");
+      if (inventoryComplete) resolveCoverageIssue(INITIAL_COMPARISON_INPUTS_ISSUE);
       if (!targetRatingKey) {
         // Verified changes and recovery work were retained before processing, so isolated failures cannot hold a position back.
         saveProviderVerification({
@@ -1186,7 +1186,7 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
   const saved=inputs.comparisons[identity];
   // Persist the obligation first: the next scan downloads the newly preferred series.
   if (saved) {const refresh={...saved.refresh};patchSavedObligation(refresh,provider,PREFERRED_REQUIRED);saved.refresh=refresh;savePlexComparison(identity,saved);}
-  const pending=(cause: string) => setCoverageIssue({id:`comparison-inputs:${identity}`,operation:"comparison",scope:"show",show:{ratingKey:identity,title:saved?.group.records[0]?.title,tmdbId:saved?.tmdbId,tvdbId:saved?.tvdbId},cause,action:`Run a Plex scan to download the selected ${PROVIDER_NAME[provider]} catalogue and compare it.`});
+  const pending=(cause: string) => setCoverageIssue({id:comparisonInputsIssueId(identity),operation:"comparison",scope:"show",show:{ratingKey:identity,title:saved?.group.records[0]?.title,tmdbId:saved?.tmdbId,tvdbId:saved?.tvdbId},cause,action:`Run a Plex scan to download the selected ${PROVIDER_NAME[provider]} catalogue and compare it.`});
   if (!prior || !inputs.inventory?.complete || !saved?.complete) {
     pending("Saved comparison inputs for this show are missing or incomplete, so the new catalogue selection could not be compared. Last-good results were kept.");
     return;
@@ -1239,7 +1239,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   }
   if (!prior || !inputs.inventory?.complete) {
     const keys=targets.size ? [...targets] : [undefined];
-    for (const key of keys) setCoverageIssue({id:key ? `comparison-inputs:${key}` : "comparison-inputs:initial",operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
+    for (const key of keys) setCoverageIssue({id:key ? comparisonInputsIssueId(key) : INITIAL_COMPARISON_INPUTS_ISSUE,operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
     if (prior) plexSavedState.report.write({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
     // Nothing was compared, so every carried member stays carried.
     completeCoverageComparison(revision);
@@ -1262,12 +1262,12 @@ async function recheckCoverage(impact: CoverageImpact) {
       uncompared.add(key);
       // A cached recheck cannot reevaluate a failed download. Preserve the
       // dependency established by that scan until its inputs can be evaluated.
-      const previous = getCoverageIssue(`comparison-inputs:${key}`);
+      const previous = getCoverageIssue(comparisonInputsIssueId(key));
       if (!input?.complete && previous?.causedBy?.length && previous.causedBy.every(id=>getCoverageIssue(id))) continue;
-      setCoverageIssue({id:`comparison-inputs:${key}`,operation:"comparison",scope:"show",show:{ratingKey:key,title:input?.group.records[0]?.title,tmdbId:input?.tmdbId,tvdbId:input?.tvdbId},cause:coverageIssueCause(error),action:"Run an explicit Plex scan to rebuild saved comparison inputs."});
+      setCoverageIssue({id:comparisonInputsIssueId(key),operation:"comparison",scope:"show",show:{ratingKey:key,title:input?.group.records[0]?.title,tmdbId:input?.tmdbId,tvdbId:input?.tvdbId},cause:coverageIssueCause(error),action:"Run an explicit Plex scan to rebuild saved comparison inputs."});
     }
   }
-  resolveCoverageIssue("comparison-inputs:initial");
+  resolveCoverageIssue(INITIAL_COMPARISON_INPUTS_ISSUE);
   plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
   const current=[...inputs.inventory.groups.map(group=>group.identity),...results.map(show=>show.ratingKey)].filter(key=>!ignored.has(key));
   completeCoverageComparison(revision,coveredCarriedMembers(inputs,carried,uncompared,current));
@@ -1366,7 +1366,7 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
     resolveFailedRequest:resolveCoverageIssue,
   });
   reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
-  resolveCoverageIssue(`comparison-inputs:${key}`);
-  resolveCoverageIssue(`comparison-failure:${key}`);
+  resolveCoverageIssue(comparisonInputsIssueId(key));
+  resolveCoverageIssue(comparisonFailureIssueId(key));
   return compared;
 }

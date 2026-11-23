@@ -1,9 +1,6 @@
 import "server-only";
+import { TRAKT_AUTHENTICATION_ISSUE, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 import { providerLookupContext, resolveCoverageIssue, setCoverageIssue } from "@/lib/coverage-issues";
-
-/** The scan run's TVDB login issue: the cause linked from TVDB requests that failed because of it. */
-export const TVDB_AUTHENTICATION_ISSUE = "provider-authentication:TVDB";
-const TRAKT_AUTHENTICATION_ISSUE = "provider-authentication:Trakt";
 
 /** One provider's scan-run login issue: library-scoped, raised once however many requests it stops. */
 function providerLoginDiagnostics(provider: "TVDB" | "Trakt", id: string, impact: string) {

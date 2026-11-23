@@ -450,7 +450,7 @@ function preservedIssues(provider: CatalogueProvider, request: ComparisonCatalog
 }
 
 /** A provider's catalogue-refresh Coverage Issue value, in the shape the scan sets it. */
-function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; catalogueRefresh?: CatalogueRefreshState }): CoverageIssue {
+function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: CoverageIssueId; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; catalogueRefresh?: CatalogueRefreshState }): CoverageIssue {
   const name = PROVIDER_NAME[provider];
   const ids = { ...identities, [provider]: input.seriesId };
   return {
@@ -460,7 +460,7 @@ function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogu
     ...(input.catalogueRefresh ? { catalogueRefresh: input.catalogueRefresh } : {}),
     ...providerLookupContext(input.failure.error, { source: input.failure.lookupSource || input.source, requested: { provider: name, ...input.requested }, impact: input.impact }),
     ...(input.candidates ? { candidates: input.candidates } : {}),
-  } as CoverageIssue;
+  };
 }
 
 /** A series' catalogue age and, when its load failed with a series-request 404, its 404 progress, as of this resolution. */

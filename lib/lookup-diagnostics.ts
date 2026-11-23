@@ -2,6 +2,7 @@ import "server-only";
 import { providerLookupContext, resolveCoverageIssue, setCoverageIssue, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { lookupKey, lookupProvider, type ProviderLookup } from "@/lib/provider-lookup";
 import type { ProviderEpisode } from "@/lib/plex-comparison";
+import { TVDB_AUTHENTICATION_ISSUE } from "@/lib/provider-login-diagnostics";
 
 /**
  * The comparison a lookup belongs to, as its failure diagnostics describe it: the show's identity,
@@ -14,8 +15,6 @@ export type LookupComparisonContext = {
   lookupSource?: LookupSourceStep[]; tvdbAuthenticationError?: unknown;
 };
 
-const TVDB_AUTHENTICATION_ISSUE = "provider-authentication:TVDB";
-const TRAKT_AUTHENTICATION_ISSUE = "provider-authentication:Trakt";
 const IMPACT = "Episode identity and coverage could not be fully verified. Available last-good results were retained.";
 
 /** The `episode-identity:` Coverage Issue ID of one show's failed request for a typed lookup. */
@@ -62,6 +61,11 @@ function failureDescription(lookup: ProviderLookup, context: LookupComparisonCon
   }
 }
 
+/** Whether a lookup kind's failure raises a failed-request issue: a series summary's never does. */
+function raisesLookupIssue(lookup: ProviderLookup) {
+  return lookup.kind !== "tmdb-series-summary" && lookup.kind !== "tmdb-series-summary-with-external-ids" && lookup.kind !== "tvdb-series-summary";
+}
+
 /**
  * Lookup Coverage Issues for one show comparison: the one place that raises and resolves a typed
  * lookup's failed-request issue. Plain transport has no typed lookup and never reaches it.
@@ -86,18 +90,7 @@ export function lookupDiagnostics(context: LookupComparisonContext) {
     },
     /** A successful response resolves the lookup's failed request, whatever its answer then means. */
     resolve(lookup: ProviderLookup) {
-      if (failureDescription(lookup, context)) resolveCoverageIssue(lookupFailureIssueId(context.ratingKey, lookup));
+      if (raisesLookupIssue(lookup)) resolveCoverageIssue(lookupFailureIssueId(context.ratingKey, lookup));
     },
   };
 }
-
-/**
- * The scan run's Trakt login: one library-scoped issue for a login that cannot be recovered, not
- * one per Trakt lookup it stops; resolved only when Trakt answers again or is not configured.
- */
-export const traktLoginDiagnostics = {
-  raiseFailure(error: unknown) {
-    setCoverageIssue({id: TRAKT_AUTHENTICATION_ISSUE, operation: "provider-authentication", provider: "Trakt", scope: "library", ...providerLookupContext(error, {source: [], requested: {provider: "Trakt", kind: "authentication"}, impact: "Trakt episode identity checks could not be verified. TMDB fallback checks remain available."})});
-  },
-  resolve() { resolveCoverageIssue(TRAKT_AUTHENTICATION_ISSUE); },
-};

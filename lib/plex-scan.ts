@@ -20,7 +20,8 @@ import { episodeReference, type CompoundCoverage, type LocalCompoundEpisode } fr
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
 import { lookupFailureRecord, type RecordedLookupFailure } from "@/lib/lookup-failure-record";
-import { lookupDiagnostics, lookupFailureIssueId, traktLoginDiagnostics } from "@/lib/lookup-diagnostics";
+import { lookupDiagnostics, lookupFailureIssueId, type LookupComparisonContext } from "@/lib/lookup-diagnostics";
+import { TVDB_AUTHENTICATION_ISSUE, traktLoginDiagnostics, tvdbLoginDiagnostics } from "@/lib/provider-login-diagnostics";
 import { withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
@@ -118,7 +119,8 @@ const lookupRequest = (lookup: ProviderLookup): ProviderRequestTarget => ({provi
 const plainRequest = (provider: ProviderName, url: string): ProviderRequestTarget => ({provider, url, key: `${provider}:${url}`});
 function relationshipProvider(key: string) { return key.slice(0, key.indexOf(":")); }
 
-const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
+/** The comparing show's lookup context (its lookup source chain is scoped separately) plus its TMDB catalogue provenance. */
+const comparisonIssueScope = new AsyncLocalStorage<Omit<LookupComparisonContext, "lookupSource"> & {tmdbSource?:LookupSourceStep[];tmdbCached?:boolean}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
 /**
  * An offline recheck: the saved relationships it found missing, and the TMDB crosswalk answers it
@@ -169,7 +171,9 @@ type CheckedJsonOptions = {auth?: ProviderAuth; liveCrosswalk?: LiveTmdbCrosswal
  */
 function comparisonLookupDiagnostics(lookup: ProviderLookup | undefined) {
   const show = comparisonIssueScope.getStore();
-  return show && lookup ? lookupDiagnostics({...show, lookupSource: lookupSourceScope.getStore()}) : undefined;
+  if (!show || !lookup) return undefined;
+  const diagnostics = lookupDiagnostics({...show, lookupSource: lookupSourceScope.getStore()});
+  return {raiseFailure: (error: unknown) => diagnostics.raiseFailure(lookup, error), resolve: () => diagnostics.resolve(lookup)};
 }
 
 async function checkedJson<T>(target: ProviderRequestTarget, init: RequestInit, {auth, liveCrosswalk}: CheckedJsonOptions = {}): Promise<T> {
@@ -193,10 +197,10 @@ async function checkedJson<T>(target: ProviderRequestTarget, init: RequestInit, 
   catch (error) {
     // A login that cannot be recovered is one library issue, not a failure of each lookup it stops.
     if (provider === "Trakt" && auth && isProviderLoginFailure("Trakt", error)) { traktLoginDiagnostics.raiseFailure(error); throw new TraktLoginUnavailableError(error); }
-    if (lookup) diagnostics?.raiseFailure(lookup, error);
+    diagnostics?.raiseFailure(error);
     throw error;
   }
-  if (lookup) diagnostics?.resolve(lookup);
+  diagnostics?.resolve();
   // Only a successful Trakt lookup shows the login works again.
   if (provider === "Trakt" && auth) traktLoginDiagnostics.resolve();
   if (relationships && receivedAt !== undefined) relationships[key] = {provider, value, receivedAt};
@@ -288,8 +292,9 @@ function replayTmdbCrosswalk(tvdbEpisodeId: number) {
     failure: recordedLookupFailure(lookup),
   });
   if (decision.action === "replay-shared" || decision.action === "recover") relationships[key] = {provider: "TMDB", ...decision.copy};
-  // A recovery is replayed only after this show's own open failure, so the show is known.
-  if (decision.action === "recover") replayScope.getStore()?.recovered.set(key, lookupFailureIssueId(comparisonIssueScope.getStore()!.ratingKey, lookup));
+  // A recovery is replayed only after this show's own open failure, so the show is known; without one there is nothing to resolve.
+  const show = comparisonIssueScope.getStore();
+  if (decision.action === "recover" && show) replayScope.getStore()?.recovered.set(key, lookupFailureIssueId(show.ratingKey, lookup));
   if (decision.action === "drop") delete relationships[key];
 }
 /** A failed request or interpretation within one episode's crosswalk, with the typed lookup it concerns (absent when unknown). */
@@ -835,9 +840,9 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
   logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
   let tvdbAuthenticationError: unknown;
-  const token = await authenticateTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin).then(token=>{resolveCoverageIssue("provider-authentication:TVDB");return token;}).catch(error=>{
+  const token = await authenticateTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin).then(token=>{tvdbLoginDiagnostics.resolve();return token;}).catch(error=>{
     tvdbAuthenticationError = error;
-    setCoverageIssue({id:"provider-authentication:TVDB",operation:"provider-authentication",provider:"TVDB",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"TVDB",kind:"authentication"},impact:"TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained."})});
+    tvdbLoginDiagnostics.raiseFailure(error);
     return "";
   });
   // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
@@ -875,7 +880,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
   if (!targetRatingKey) {
     tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : tvdbAuthenticationError ? Promise.reject(tvdbAuthenticationError) : tvdbChangedShows(tvdbFeedFrom, token)).catch((error) => {
-      setProviderVerificationIssue("TVDB", error, tvdbAuthenticationError && error === tvdbAuthenticationError ? ["provider-authentication:TVDB"] : undefined);
+      setProviderVerificationIssue("TVDB", error, tvdbAuthenticationError && error === tvdbAuthenticationError ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
       logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
       return null;
     });

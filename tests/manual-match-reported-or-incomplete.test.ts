@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { reportedOrIncomplete, type CoverageIdentity } from "../lib/manual-coverage-model";
-
-type Member = CoverageIdentity & { reportMissing?: boolean };
-const episode = (provider: "TMDB" | "TVDB", id: number, reportMissing = false): Member => ({ provider, id, ...(reportMissing ? { reportMissing } : {}) });
+import { reportedOrIncomplete } from "../lib/manual-coverage-model";
+import { episode } from "./manual-match-members";
 
 // A one-to-many Manual Match: combined TMDB episode 1 maps to split TVDB episodes 11 and 12.
 const combined = episode("TMDB", 1), splitA = episode("TVDB", 11), splitB = episode("TVDB", 12);

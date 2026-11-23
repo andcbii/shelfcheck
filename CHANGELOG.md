@@ -60,6 +60,14 @@
   is now refused as invalid rather than because a scan is running. Every
   well-formed Manual Match change is still refused while a scan runs.
 
+- Ignore rules over the saved Trakt and Plex results now live in one place,
+  apart from the code that stores them. Ignoring a show still deletes its
+  saved results, so a Restore cannot bring them back, and an Ignore applied
+  during a scan still applies to that scan. Results an older version kept for
+  an ignored show are now removed when Shelfcheck first reads or changes its
+  saved scan state rather than when the database opens, so a temporary Ignore
+  that ends in between keeps those older results.
+
 ### Fixed
 
 - Clearing one show's cache no longer makes the next scan ask TMDB again for

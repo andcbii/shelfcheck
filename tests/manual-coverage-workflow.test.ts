@@ -10,6 +10,7 @@ const hook = registerHooks({ resolve(s, c, next) {
   } });
 const api = await import("../app/api/plex/manual-coverage/route");
 const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const scan = await import("../app/api/plex/scan/route");
 const { scanProviderClient } = await import("../lib/scan-provider-client");
@@ -58,7 +59,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   });
   const show = { ratingKey: "1", title: "Target", Guid: [{ id: "tmdb://10" }], updatedAt: 1 };
   const source = { ratingKey: "2", title: "Ignored source", Guid: [{ id: "tvdb://20" }], updatedAt: 1 };
-  sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
+  ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     if (u.pathname === "/v4/episodes/200/extended" && healthFailure) return Response.json({}, {status: healthFailure, headers: healthFailure === 429 ? {"Retry-After":"86400"} : undefined});
@@ -209,7 +210,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   saved.mapping = (await restored.json()).mapping;
   await wait();
   sourceId = 200;
-  sqlite.savedScanState("plex").clearReportAndResumePoint();
+  ignoreResults.savedScanState("plex").clearReportAndResumePoint();
   cache.__shelfcheckDatabase?.close();
   delete cache.__shelfcheckDatabase;
   assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 2);
@@ -420,7 +421,7 @@ test("full Plex scans withdraw complete-set Manual Match coverage when a source 
   });
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-11T12:00:00Z") });
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
-  sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:source", title: "Ignored source" }], diagnosticsEnabled: false });
+  ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:source", title: "Ignored source" }], diagnosticsEnabled: false });
   const target = { ratingKey: "target", title: "Combined target", Guid: [{ id: "tmdb://10" }] };
   const source = { ratingKey: "source", title: "Ignored source", Guid: [{ id: "tvdb://20" }] };
   let secondPart = true;

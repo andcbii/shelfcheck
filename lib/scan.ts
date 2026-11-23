@@ -3,7 +3,7 @@ import "server-only";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { createScanLogger } from "@/lib/scan-log";
 import { canCacheAirDateResult, collectedEpisodeCount, collectionFingerprint, scanReason, TRAKT_RESUME_POINT_VERSION, traktResumePointIsUsable, type ScanReason } from "@/lib/scan-cache";
-import { savedScanState, trackScanIgnores } from "@/lib/sqlite";
+import { savedScanState, trackScanIgnores } from "@/lib/ignore-results";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { ignoredTraktIds } from "@/lib/ignored-shows";
 import { compactTraktShow, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";

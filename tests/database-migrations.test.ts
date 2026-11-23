@@ -8,6 +8,7 @@ import test, { type TestContext } from "node:test";
 
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const traktScan = await import("../lib/scan");
 const plexScan = await import("../lib/plex-scan");
 const scanRun = await import("../lib/scan-run");
@@ -50,7 +51,7 @@ const tables = (db: DatabaseSync) => (db.prepare("SELECT name FROM sqlite_master
 
 test("opening an empty data directory creates every table at the current version", (t) => {
   const file = freshDatabaseFile(t);
-  assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
+  assert.equal(ignoreResults.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);
@@ -113,10 +114,10 @@ test("opening an older sparse layout adds missing tables and columns without era
     INSERT INTO shelfcheck_plex_state(user_id,report,scan_status) VALUES('single-user','{"shows":[]}','{"status":"completed"}');
   `);
 
-  assert.deepEqual(sqlite.savedScanState("plex").snapshot(), { report: null, resumePoint: null, status: null, options: {}, updatedAt: sqlite.savedScanState("plex").snapshot()!.updatedAt },
+  assert.deepEqual(ignoreResults.savedScanState("plex").snapshot(), { report: null, resumePoint: null, status: null, options: {}, updatedAt: ignoreResults.savedScanState("plex").snapshot()!.updatedAt },
     "Plex Settings missing from an older table start empty; its report and status are discarded");
-  assert.deepEqual(sqlite.savedScanState("trakt").snapshot()?.options, { diagnostics: true });
-  assert.equal(sqlite.savedScanState("trakt").status.read(), null, "A missing Trakt status table has no status");
+  assert.deepEqual(ignoreResults.savedScanState("trakt").snapshot()?.options, { diagnostics: true });
+  assert.equal(ignoreResults.savedScanState("trakt").status.read(), null, "A missing Trakt status table has no status");
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);
@@ -143,7 +144,7 @@ test("ownership-correction retirement runs once, with today's revision and pendi
   const file = freshDatabaseFile(t);
   fixture(file, CORRECTIONS_LAYOUT);
 
-  sqlite.savedScanState("plex").options.read();
+  ignoreResults.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
     assert.deepEqual(coverageState(db), { revision: 5, pending: 1 });
@@ -151,7 +152,7 @@ test("ownership-correction retirement runs once, with today's revision and pendi
     db.exec("UPDATE shelfcheck_coverage_state SET pending=0");
   });
 
-  sqlite.savedScanState("plex").options.read();
+  ignoreResults.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => assert.deepEqual(coverageState(db), { revision: 5, pending: 0 }, "A later open does not retire again"));
 });
@@ -161,7 +162,7 @@ test("a database from a newer Shelfcheck is refused and left untouched", (t) => 
   fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL, updated_at TEXT NOT NULL); PRAGMA user_version = 8;");
   const before = inspect(file, db => ({ schema: schema(db), journal: db.prepare("PRAGMA journal_mode").get() }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /schema version 8, newer than this Shelfcheck supports \(7\)/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /schema version 8, newer than this Shelfcheck supports \(7\)/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 8);
@@ -174,7 +175,7 @@ test("an incompatible unversioned schema is refused clearly and left unchanged",
   fixture(file, "CREATE TABLE shelfcheck_states (user_id TEXT PRIMARY KEY NOT NULL, data TEXT); INSERT INTO shelfcheck_states VALUES('single-user','x');");
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /cannot upgrade this database: table shelfcheck_states has no payload, updated_at columns/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /cannot upgrade this database: table shelfcheck_states has no payload, updated_at columns/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 0);
@@ -191,7 +192,7 @@ test("a table with today's column names but a different type, NOT NULL or key is
     INSERT INTO shelfcheck_states(user_id,payload) VALUES('single-user','{}');`);
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /cannot upgrade this database: table shelfcheck_states has an incompatible user_id column/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /cannot upgrade this database: table shelfcheck_states has an incompatible user_id column/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 0);
@@ -199,7 +200,7 @@ test("a table with today's column names but a different type, NOT NULL or key is
   });
 
   inspect(file, db => db.exec("DROP TABLE shelfcheck_states"));
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /table shelfcheck_coverage_previews has an incompatible expires column/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /table shelfcheck_coverage_previews has an incompatible expires column/);
   inspect(file, db => assert.equal(version(db), 0));
 });
 
@@ -211,7 +212,7 @@ test("a table with a column no Shelfcheck release created is refused and left un
     INSERT INTO shelfcheck_coverage_evidence VALUES(1,'{"e":1}',NULL);`);
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /cannot upgrade this database: table shelfcheck_coverage_evidence has an unexpected unexpected column/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /cannot upgrade this database: table shelfcheck_coverage_evidence has an unexpected unexpected column/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 0);
@@ -226,7 +227,7 @@ test("a migration failing after a real schema change rolls back everything, and 
     CREATE TRIGGER forced_failure BEFORE UPDATE ON shelfcheck_coverage_state BEGIN SELECT RAISE(ABORT, 'forced migration failure'); END;`);
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("plex").options.read(), /forced migration failure/);
+  assert.throws(() => ignoreResults.savedScanState("plex").options.read(), /forced migration failure/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 0);
@@ -234,9 +235,9 @@ test("a migration failing after a real schema change rolls back everything, and 
     db.exec("DROP TRIGGER forced_failure");
   });
 
-  sqlite.savedScanState("plex").options.read();
+  ignoreResults.savedScanState("plex").options.read();
   closeCached();
-  sqlite.savedScanState("plex").options.read();
+  ignoreResults.savedScanState("plex").options.read();
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);
@@ -246,7 +247,7 @@ test("a migration failing after a real schema change rolls back everything, and 
 
 test("a second open runs no migration but still removes ignored results at open", (t) => {
   const file = freshDatabaseFile(t);
-  sqlite.savedScanState("trakt").snapshot();
+  ignoreResults.savedScanState("trakt").snapshot();
   closeCached();
   const show = (id: number) => ({ show: { title: `Show ${id}`, ids: { trakt: id } } });
   inspect(file, db => {
@@ -256,8 +257,8 @@ test("a second open runs no migration but still removes ignored results at open"
       .run(JSON.stringify({ ignoredShows: [show(1).show] }), JSON.stringify({ shows: [show(1), show(2)] }));
   });
 
-  const report = sqlite.savedScanState("trakt").report.read() as { shows: ReturnType<typeof show>[] };
-  assert.deepEqual(report.shows.map(row => row.show.ids.trakt), [2], "Ignored results are removed at open");
+  const report = ignoreResults.savedScanState("trakt").report.read() as { shows: ReturnType<typeof show>[] };
+  assert.deepEqual(report.shows.map(row => row.show.ids.trakt), [2], "Ignored results are removed before the first saved scan state use");
   closeCached();
   inspect(file, db => {
     assert.equal(tables(db).includes("shelfcheck_coverage_corrections"), true, "Migration 1 did not run again");
@@ -286,7 +287,7 @@ test("upgrading an unversioned database first writes a complete backup, includin
     const before = { schema: schema(legacy), rows: everyRow(legacy) };
     assert.equal(before.rows.shelfcheck_states.length, 1, "The fixture's writes are committed, but only in the WAL");
 
-    sqlite.savedScanState("plex").options.read();
+    ignoreResults.savedScanState("plex").options.read();
     closeCached();
     inspectBackup(file, db => {
       assert.equal(version(db), 0, "The backup holds the old, unversioned database");
@@ -304,7 +305,7 @@ test("when the backup cannot be written, no migration runs and the open fails", 
   mkdirSync(backupOf(file));
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot());
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot());
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   assert.equal(existsSync(`${backupOf(file)}.partial`), false, "The incomplete backup is removed");
   inspect(file, db => {
@@ -320,7 +321,7 @@ for (const [kind, content] of [["an empty file", ""], ["a file that is not a dat
     writeFileSync(backupOf(file), content);
     const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-    assert.throws(() => sqlite.savedScanState("trakt").snapshot(), new RegExp(`${BACKUP_FILE_NAME.replace(/\./g, "\\.")} .*not a usable backup`));
+    assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), new RegExp(`${BACKUP_FILE_NAME.replace(/\./g, "\\.")} .*not a usable backup`));
     assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
     assert.equal(readFileSync(backupOf(file), "utf8"), content, "The file at the backup name is not overwritten");
     inspect(file, db => {
@@ -338,12 +339,12 @@ test("a retry after a failed migration keeps the original backup, and a partial 
   writeFileSync(`${backupOf(file)}.partial`, "incomplete");
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("plex").options.read(), /forced migration failure/);
+  assert.throws(() => ignoreResults.savedScanState("plex").options.read(), /forced migration failure/);
   inspectBackup(file, db => assert.deepEqual({ schema: schema(db), rows: everyRow(db) }, before, "The backup is the complete original, not the partial file"));
   const original = readFileSync(backupOf(file));
   inspect(file, db => db.exec("DROP TRIGGER forced_failure"));
 
-  sqlite.savedScanState("plex").options.read();
+  ignoreResults.savedScanState("plex").options.read();
   closeCached();
   assert.deepEqual(readFileSync(backupOf(file)), original, "The retry keeps the original backup");
   assert.deepEqual(readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db")), [path.basename(backupOf(file))], "No second backup and no partial file");
@@ -352,18 +353,18 @@ test("a retry after a failed migration keeps the original backup, and a partial 
 test("no backup is written for a new database, on a later open, or beside a refused newer database", (t) => {
   const file = freshDatabaseFile(t);
   const directoryEntries = () => readdirSync(path.dirname(file)).filter(name => !name.startsWith("shelfcheck.db"));
-  sqlite.savedScanState("trakt").snapshot();
+  ignoreResults.savedScanState("trakt").snapshot();
   closeCached();
   assert.deepEqual(directoryEntries(), [], "A database that did not exist before is not backed up");
 
-  sqlite.savedScanState("trakt").options.patch({ diagnostics: true });
+  ignoreResults.savedScanState("trakt").options.patch({ diagnostics: true });
   closeCached();
-  sqlite.savedScanState("trakt").snapshot();
+  ignoreResults.savedScanState("trakt").snapshot();
   closeCached();
   assert.deepEqual(directoryEntries(), [], "A later open with no pending migration writes no backup");
 
   inspect(file, db => db.exec("PRAGMA user_version = 8"));
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /newer than this Shelfcheck supports/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /newer than this Shelfcheck supports/);
   assert.deepEqual(directoryEntries(), [], "A refused newer database gets no backup");
 });
 
@@ -381,8 +382,8 @@ test("upgrading Plex keeps its Settings, including unknown fields, and discards 
   const settings = { ignoredShows: [{ ratingKey: "one", title: "One" }], diagnosticsEnabled: false, futureSetting: { kept: 3 } };
   versionOneWithPlex(file, JSON.stringify(settings));
 
-  assert.deepEqual(sqlite.savedScanState("plex").snapshot(), { report: null, resumePoint: null, status: null, options: settings, updatedAt: "2026-01-02 03:04:05" });
-  assert.deepEqual(sqlite.savedScanState("trakt").options.read(), { diagnostics: true }, "Trakt moves in the same open");
+  assert.deepEqual(ignoreResults.savedScanState("plex").snapshot(), { report: null, resumePoint: null, status: null, options: settings, updatedAt: "2026-01-02 03:04:05" });
+  assert.deepEqual(ignoreResults.savedScanState("trakt").options.read(), { diagnostics: true }, "Trakt moves in the same open");
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);
@@ -394,7 +395,7 @@ test("upgrading Plex Settings that are not a JSON object starts its options empt
   for (const invalid of ["not json", "[1,2]", "7"]) {
     const file = freshDatabaseFile(t);
     versionOneWithPlex(file, invalid);
-    assert.deepEqual(sqlite.savedScanState("plex").snapshot()?.options, {}, invalid);
+    assert.deepEqual(ignoreResults.savedScanState("plex").snapshot()?.options, {}, invalid);
     closeCached();
   }
 });
@@ -402,7 +403,7 @@ test("upgrading Plex Settings that are not a JSON object starts its options empt
 test("after the upgrade, new Plex state survives a close and reopen, so the wipe happens once", (t) => {
   const file = freshDatabaseFile(t);
   versionOneWithPlex(file, "{}");
-  const plex = sqlite.savedScanState("plex");
+  const plex = ignoreResults.savedScanState("plex");
   plex.report.write({ shows: [{ ratingKey: "new" }] });
   plex.resumePoint.write({ savedAt: "later" });
   plex.status.write({ status: "completed" });
@@ -416,7 +417,7 @@ test("a failing Plex migration also rolls back the baseline migration before it"
   fixture(file, `${CORRECTIONS_LAYOUT} CREATE TABLE shelfcheck_scan_state(mode TEXT, note TEXT);`);
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("plex").options.read(), /shelfcheck_scan_state already exists/);
+  assert.throws(() => ignoreResults.savedScanState("plex").options.read(), /shelfcheck_scan_state already exists/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 0);
@@ -440,8 +441,8 @@ test("upgrading Trakt keeps its options, including unknown fields, and discards 
   const file = freshDatabaseFile(t);
   versionTwoWithTrakt(file, JSON.stringify({ ...traktLegacyOptions, report: { shows: [{ show: { ids: { trakt: 2 } } }] }, checkpoint: { shows: [] }, scan: { status: "running" } }));
 
-  assert.deepEqual(sqlite.savedScanState("trakt").snapshot(), { report: null, resumePoint: null, status: null, options: traktLegacyOptions, updatedAt: "2026-01-02 03:04:05" });
-  assert.deepEqual(sqlite.savedScanState("plex").options.read(), { libraries: ["1"] }, "Plex is not touched again");
+  assert.deepEqual(ignoreResults.savedScanState("trakt").snapshot(), { report: null, resumePoint: null, status: null, options: traktLegacyOptions, updatedAt: "2026-01-02 03:04:05" });
+  assert.deepEqual(ignoreResults.savedScanState("plex").options.read(), { libraries: ["1"] }, "Plex is not touched again");
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);
@@ -454,7 +455,7 @@ test("upgrading a Trakt record that is not a JSON object starts its options empt
   for (const invalid of ["not json", "[1,2]", "7"]) {
     const file = freshDatabaseFile(t);
     versionTwoWithTrakt(file, invalid);
-    assert.deepEqual(sqlite.savedScanState("trakt").snapshot(), { report: null, resumePoint: null, status: null, options: {}, updatedAt: "2026-01-02 03:04:05" }, invalid);
+    assert.deepEqual(ignoreResults.savedScanState("trakt").snapshot(), { report: null, resumePoint: null, status: null, options: {}, updatedAt: "2026-01-02 03:04:05" }, invalid);
     closeCached();
   }
 });
@@ -462,7 +463,7 @@ test("upgrading a Trakt record that is not a JSON object starts its options empt
 test("after the upgrade, new Trakt state survives a close and reopen, so the wipe happens once", (t) => {
   const file = freshDatabaseFile(t);
   versionTwoWithTrakt(file, JSON.stringify(traktLegacyOptions));
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   trakt.report.write({ shows: [{ show: { ids: { trakt: 2 } } }] });
   trakt.resumePoint.write({ savedAt: "later" });
   trakt.status.write({ status: "completed" });
@@ -479,7 +480,7 @@ test("a failing Trakt migration also rolls back the Plex migration before it", (
     INSERT INTO fixture_trakt_reference VALUES('single-user');`));
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").options.read(), /FOREIGN KEY constraint failed/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").options.read(), /FOREIGN KEY constraint failed/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 1);
@@ -539,12 +540,12 @@ for (const upgrade of UPGRADES) {
     assert.deepEqual(traktScan.getScanStatus(), { status: "idle", processed: 0, total: 0 }, "Trakt shows idle, not the old running scan");
     assert.deepEqual(plexScan.getPlexScanStatus(), { status: "idle", processed: 0, total: 0 }, "Plex shows idle, not the old running scan");
     for (const mode of ["trakt", "plex"] as const) {
-      const saved = sqlite.savedScanState(mode).snapshot()!;
+      const saved = ignoreResults.savedScanState(mode).snapshot()!;
       const report = mode === "plex" && "plexReport" in upgrade ? upgrade.plexReport : null;
       assert.deepEqual([saved.report, saved.resumePoint, saved.status], [report, null, null], `${mode} has no Resume point or status, and only a report saved after its own wipe`);
     }
-    assert.deepEqual(sqlite.savedScanState("trakt").options.read(), traktLegacyOptions, "Trakt options, unknown fields included, are kept");
-    assert.deepEqual(sqlite.savedScanState("plex").options.read(), plexLegacySettings, "Plex options, unknown fields included, are kept");
+    assert.deepEqual(ignoreResults.savedScanState("trakt").options.read(), traktLegacyOptions, "Trakt options, unknown fields included, are kept");
+    assert.deepEqual(ignoreResults.savedScanState("plex").options.read(), plexLegacySettings, "Plex options, unknown fields included, are kept");
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(requests.mock.callCount(), 0, "No scan starts by itself");
     assert.equal(scanRun.scanRuns.isActive(), false);
@@ -567,11 +568,11 @@ for (const upgrade of UPGRADES) {
     else inspectBackup(file, db => assert.equal(version(db), 0, "The backup is the unversioned original"));
 
     // The wipe happens once: state saved after the upgrade survives a reopen.
-    sqlite.savedScanState("trakt").report.write({ shows: [], missing: [], lastScan: "after" });
-    sqlite.savedScanState("plex").resumePoint.write({ savedAt: "after" });
+    ignoreResults.savedScanState("trakt").report.write({ shows: [], missing: [], lastScan: "after" });
+    ignoreResults.savedScanState("plex").resumePoint.write({ savedAt: "after" });
     closeCached();
-    assert.deepEqual(sqlite.savedScanState("trakt").report.read(), { shows: [], missing: [], lastScan: "after" });
-    assert.deepEqual(sqlite.savedScanState("plex").resumePoint.read(), { savedAt: "after" });
+    assert.deepEqual(ignoreResults.savedScanState("trakt").report.read(), { shows: [], missing: [], lastScan: "after" });
+    assert.deepEqual(ignoreResults.savedScanState("plex").resumePoint.read(), { savedAt: "after" });
   });
 }
 
@@ -591,7 +592,7 @@ const plexRowV3 = { report: { shows: [{ ratingKey: "kept" }] }, resumePoint: { s
  * Today's open builds the layout; stepping user_version back and dropping the tables migrations 5 and 7 added is that release's database.
  */
 function versionThree(file: string, trakt: { report: unknown } | null, seed?: (db: DatabaseSync) => void) {
-  sqlite.savedScanState("plex").snapshot();
+  ignoreResults.savedScanState("plex").snapshot();
   closeCached();
   inspect(file, db => {
     db.exec("PRAGMA user_version = 3");
@@ -615,11 +616,11 @@ for (const [name, report] of Object.entries(OLD_TRAKT_REPORTS)) {
     const original = readFileSync(backupOf(file));
     const requests = t.mock.method(globalThis, "fetch", async () => { throw new Error("The upgrade made a provider request"); });
 
-    const trakt = sqlite.savedScanState("trakt").snapshot()!;
+    const trakt = ignoreResults.savedScanState("trakt").snapshot()!;
     assert.deepEqual([trakt.report, trakt.resumePoint], [null, null], "The Trakt report and Resume point are cleared");
     assert.deepEqual(trakt.status, traktStatusV3, "Trakt scan status is kept");
     assert.deepEqual(trakt.options, traktOptionsV3, "Trakt options, Ignores and unknown fields included, are kept");
-    const plex = sqlite.savedScanState("plex").snapshot()!;
+    const plex = ignoreResults.savedScanState("plex").snapshot()!;
     assert.deepEqual([plex.report, plex.resumePoint, plex.status, plex.options], [plexRowV3.report, null, plexRowV3.status, plexRowV3.options], "The Plex report, status and options are kept; migration 6 clears its Resume point");
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(requests.mock.callCount(), 0, "No scan starts by itself");
@@ -646,7 +647,7 @@ for (const [name, report] of Object.entries(OLD_TRAKT_REPORTS)) {
 test("upgrading a version 3 database with no Trakt row leaves it without one", (t) => {
   const file = freshDatabaseFile(t);
   versionThree(file, null);
-  assert.equal(sqlite.savedScanState("trakt").snapshot(), null);
+  assert.equal(ignoreResults.savedScanState("trakt").snapshot(), null);
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);
@@ -657,7 +658,7 @@ test("upgrading a version 3 database with no Trakt row leaves it without one", (
 test("after migration 4, a new Trakt report and Resume point survive a reopen, so the clear happens once", (t) => {
   const file = freshDatabaseFile(t);
   versionThree(file, { report: OLD_TRAKT_REPORTS["an old report with missing episodes"] });
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   assert.equal(trakt.report.read(), null);
   const report = { shows: [], missing: [{ show: { title: "Two", ids: { trakt: 2 } }, season: 1, episode: 3, firstAired: "2026-01-09T00:00:00.000Z" }], lastScan: "after", scanCache: {}, airingGraceDays: 0 };
   trakt.report.write(report);
@@ -676,7 +677,7 @@ test("a failure after migration 4 clears the Trakt results rolls back the clear 
     BEGIN SELECT RAISE(FAIL, 'forced migration failure'); END;`));
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("trakt").snapshot(), /forced migration failure/);
+  assert.throws(() => ignoreResults.savedScanState("trakt").snapshot(), /forced migration failure/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   inspect(file, db => {
     assert.equal(version(db), 3);
@@ -684,7 +685,7 @@ test("a failure after migration 4 clears the Trakt results rolls back the clear 
     db.exec("DROP TRIGGER forced_failure");
   });
 
-  assert.equal(sqlite.savedScanState("trakt").report.read(), null, "A retry clears them");
+  assert.equal(ignoreResults.savedScanState("trakt").report.read(), null, "A retry clears them");
 });
 
 // Migration 6: the lookup key cutover (SHELFCHECK-40). Generated scan data and lookup Coverage Issues
@@ -724,7 +725,7 @@ const traktRowV5 = { report: { shows: [], missing: [], lastScan: "x", scanCache:
  * table and stepping user_version back is that release's database, since migration 6 changes no schema.
  */
 function versionFive(file: string, seed?: (db: DatabaseSync) => void) {
-  sqlite.savedScanState("plex").snapshot();
+  ignoreResults.savedScanState("plex").snapshot();
   closeCached();
   inspect(file, db => {
     db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 5");
@@ -750,12 +751,12 @@ test("upgrading a version 5 database clears generated scan data, the Plex scan c
   const before = inspect(file, everyRow);
   const requests = t.mock.method(globalThis, "fetch", async () => { throw new Error("The upgrade made a provider request"); });
 
-  const plex = sqlite.savedScanState("plex").snapshot()!;
+  const plex = ignoreResults.savedScanState("plex").snapshot()!;
   const reportWithoutCache: Partial<typeof plexReportV5> = { ...plexReportV5 };
   delete reportWithoutCache.scanCache;
   assert.deepEqual([plex.report, plex.resumePoint, plex.status, plex.options], [reportWithoutCache, null, { status: "completed" }, plexLegacySettings], "The Plex report loses only its scan cache; status and options are kept");
   assert.notEqual(plex.updatedAt, "2026-11-01 00:00:00", "The Plex saved state changed");
-  assert.deepEqual(sqlite.savedScanState("trakt").snapshot(), { ...traktRowV5, updatedAt: "2026-11-02 00:00:00" }, "The whole Trakt row is kept");
+  assert.deepEqual(ignoreResults.savedScanState("trakt").snapshot(), { ...traktRowV5, updatedAt: "2026-11-02 00:00:00" }, "The whole Trakt row is kept");
   assert.deepEqual(logged(info), [[DISCARDED_LOG]], "One log line says a cache was discarded");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests.mock.callCount(), 0, "No scan starts by itself");
@@ -786,7 +787,7 @@ test("upgrading a version 5 database clears generated scan data, the Plex scan c
 test("a new database is created at the latest version without a reset log line", (t) => {
   const file = freshDatabaseFile(t);
   const info = t.mock.method(console, "info", () => {});
-  assert.equal(sqlite.savedScanState("plex").snapshot(), null);
+  assert.equal(ignoreResults.savedScanState("plex").snapshot(), null);
   assert.deepEqual(logged(info), [], "Nothing was upgraded, so nothing is logged");
   closeCached();
   inspect(file, db => assert.equal(version(db), 7));
@@ -796,14 +797,14 @@ test("an upgraded database with no saved Plex scan data logs that there was noth
   const file = freshDatabaseFile(t);
   const info = t.mock.method(console, "info", () => {});
   fixture(file, TODAY_LAYOUT);
-  assert.equal(sqlite.savedScanState("plex").snapshot(), null);
+  assert.equal(ignoreResults.savedScanState("plex").snapshot(), null);
   assert.deepEqual(logged(info), [[EMPTY_LOG]]);
 });
 
 test("a version 5 database holding only kept data upgrades without changing anything", (t) => {
   const file = freshDatabaseFile(t);
   const info = t.mock.method(console, "info", () => {});
-  sqlite.savedScanState("plex").options.patch({ libraries: ["1"] });
+  ignoreResults.savedScanState("plex").options.patch({ libraries: ["1"] });
   closeCached();
   inspect(file, db => {
     db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 5");
@@ -812,7 +813,7 @@ test("a version 5 database holding only kept data upgrades without changing anyt
   });
   const before = inspect(file, everyRow);
   info.mock.resetCalls();
-  sqlite.savedScanState("plex").snapshot();
+  ignoreResults.savedScanState("plex").snapshot();
   assert.deepEqual(logged(info), [[EMPTY_LOG]]);
   closeCached();
   inspect(file, db => assert.deepEqual(everyRow(db), { ...before, shelfcheck_coverage_carried: [] }, "Only migration 7's empty table is added"));
@@ -827,7 +828,7 @@ test("a failure after migration 6 cleared the cache rolls back the cache, the is
   info.mock.resetCalls();
   const before = inspect(file, db => ({ schema: schema(db), rows: everyRow(db) }));
 
-  assert.throws(() => sqlite.savedScanState("plex").snapshot(), /forced migration failure/);
+  assert.throws(() => ignoreResults.savedScanState("plex").snapshot(), /forced migration failure/);
   assert.equal(cache.__shelfcheckDatabase, undefined, "No handle is cached");
   assert.equal(info.mock.callCount(), 0, "No reset is logged when it rolls back");
   inspect(file, db => {
@@ -836,7 +837,7 @@ test("a failure after migration 6 cleared the cache rolls back the cache, the is
     db.exec("DROP TRIGGER forced_failure");
   });
 
-  assert.equal(sqlite.savedScanState("plex").resumePoint.read(), null, "A retry clears them");
+  assert.equal(ignoreResults.savedScanState("plex").resumePoint.read(), null, "A retry clears them");
   assert.deepEqual(logged(info), [[DISCARDED_LOG]]);
 });
 
@@ -844,20 +845,20 @@ test("after migration 6, evidence saved under lookup keys survives a reopen, so 
   const file = freshDatabaseFile(t);
   const info = t.mock.method(console, "info", () => {});
   versionFive(file);
-  sqlite.savedScanState("plex").snapshot();
+  ignoreResults.savedScanState("plex").snapshot();
   const comparison = { relationships: { "tmdb-episode-by-tvdb:301": { provider: "TMDB", value: { tv_episode_results: [] }, receivedAt: "2026-11-22T00:00:00.000Z" } } };
   const shared = { value: { tv_episode_results: [] }, receivedAt: "2026-11-22T00:00:00.000Z" };
   sqlite.writePlexGeneratedInputs("comparison:target", comparison);
   sqlite.writePlexGeneratedInputs("tmdb-crosswalk:301", shared);
   const issue = lookupIssue("episode-identity:target:tmdb-episode-by-tvdb:302");
   inspect(file, db => db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?)").run(issue.id, JSON.stringify(issue)));
-  sqlite.savedScanState("plex").resumePoint.write({ savedAt: "after", scanCache: plexScanCacheV5 });
+  ignoreResults.savedScanState("plex").resumePoint.write({ savedAt: "after", scanCache: plexScanCacheV5 });
   closeCached();
   info.mock.resetCalls();
 
   assert.deepEqual(sqlite.readPlexGeneratedInputs("comparison:target"), comparison);
   assert.deepEqual(sqlite.readPlexGeneratedInputs("tmdb-crosswalk:301"), shared);
-  assert.deepEqual(sqlite.savedScanState("plex").resumePoint.read(), { savedAt: "after", scanCache: plexScanCacheV5 });
+  assert.deepEqual(ignoreResults.savedScanState("plex").resumePoint.read(), { savedAt: "after", scanCache: plexScanCacheV5 });
   assert.equal(info.mock.callCount(), 0, "No second reset is logged");
   closeCached();
   inspect(file, db => {
@@ -870,7 +871,7 @@ test("after migration 6, evidence saved under lookup keys survives a reopen, so 
 
 test("upgrading a version 6 database adds an empty carried-member table and keeps every record, including a pending comparison", (t) => {
   const file = freshDatabaseFile(t);
-  sqlite.savedScanState("plex").snapshot();
+  ignoreResults.savedScanState("plex").snapshot();
   closeCached();
   const before = inspect(file, db => {
     db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 6");
@@ -879,7 +880,7 @@ test("upgrading a version 6 database adds an empty carried-member table and keep
     return everyRow(db);
   });
 
-  sqlite.savedScanState("plex").snapshot();
+  ignoreResults.savedScanState("plex").snapshot();
   closeCached();
   inspect(file, db => {
     assert.equal(version(db), 7);

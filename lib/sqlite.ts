@@ -3,22 +3,21 @@ import "server-only";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ignoredPlexKeys, ignoredTraktIds } from "@/lib/ignored-shows";
 import { backupBeforeFirstMigration, migrateDatabase, refuseNewerDatabase } from "@/lib/sqlite-migrations";
 
-type ScanMode = "trakt" | "plex";
-type DatabaseCache = typeof globalThis & {
-  __shelfcheckDatabase?: DatabaseSync;
-  __shelfcheckScanIgnoreGuards?: Partial<Record<ScanMode, Set<string>>>;
-};
+export type ScanMode = "trakt" | "plex";
+type DatabaseCache = typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
 
 // Every saved scan state statement names its columns here; callers never supply column names.
 const SAVED_STATE_SQL = {
-  allRows: "SELECT mode, report, resume_point, options FROM shelfcheck_scan_state",
   row: "SELECT report, resume_point, status, options, state_updated_at FROM shelfcheck_scan_state WHERE mode = ?",
   options: "SELECT options FROM shelfcheck_scan_state WHERE mode = ?",
   /** Parameters: report, Resume point, mode. Leaves the state timestamp alone. */
   savedResults: "UPDATE shelfcheck_scan_state SET report = ?, resume_point = ? WHERE mode = ?",
+  /** Parameters: report, mode. Leaves the state timestamp alone. */
+  savedReport: "UPDATE shelfcheck_scan_state SET report = ? WHERE mode = ?",
+  /** Parameters: Resume point, mode. Leaves the state timestamp alone. */
+  savedResumePoint: "UPDATE shelfcheck_scan_state SET resume_point = ? WHERE mode = ?",
   writeReport: `INSERT INTO shelfcheck_scan_state(mode, report, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(mode) DO UPDATE SET report = excluded.report, state_updated_at = CURRENT_TIMESTAMP`,
   writeResumePoint: `INSERT INTO shelfcheck_scan_state(mode, resume_point, state_updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
@@ -33,55 +32,6 @@ const SAVED_STATE_SQL = {
   clearReportAndResumePoint: "UPDATE shelfcheck_scan_state SET report = NULL, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = ?",
 } as const;
 
-function scanIgnoreGuards() {
-  const cache = globalThis as DatabaseCache;
-  return cache.__shelfcheckScanIgnoreGuards ||= {};
-}
-
-/** Each mode's actively ignored show keys, as the strings its saved results are keyed by. */
-const activeIgnoreKeys: Record<ScanMode, (ignoredShows: unknown, now?: number) => string[]> = {
-  trakt: (ignoredShows, now) => [...ignoredTraktIds(ignoredShows, now)].map(String),
-  plex: (ignoredShows, now) => [...ignoredPlexKeys(ignoredShows, now)],
-};
-
-// An ignore applied during a scan invalidates that scan's result even if the
-// user restores the show before its pending provider requests finish.
-export function trackScanIgnores(mode: ScanMode, now = Date.now()): () => void {
-  const guard = new Set(activeIgnoreKeys[mode](savedOptions(mode).ignoredShows, now));
-  scanIgnoreGuards()[mode] = guard;
-  return () => {
-    if (scanIgnoreGuards()[mode] === guard) delete scanIgnoreGuards()[mode];
-  };
-}
-
-function recordScanIgnores(mode: ScanMode, ignored: Iterable<string>) {
-  const guard = scanIgnoreGuards()[mode];
-  if (guard) for (const key of ignored) guard.add(key);
-}
-
-function blockedShowKeys(mode: ScanMode, ignoredShows: unknown) {
-  return new Set([...activeIgnoreKeys[mode](ignoredShows), ...(scanIgnoreGuards()[mode] || [])]);
-}
-
-function pruneIgnoredResults<T>(value: T, mode: ScanMode, blocked: Set<string>): T {
-  if (!value || typeof value !== "object" || !blocked.size) return value;
-  const report = value as Record<string, unknown>;
-  const isVisible = (item: unknown) => {
-    if (!item || typeof item !== "object") return true;
-    const row = item as { ratingKey?: string; show?: { ids?: { trakt?: number } } };
-    const key = mode === "plex" ? row.ratingKey : String(row.show?.ids?.trakt);
-    return key === undefined || !blocked.has(key);
-  };
-  return {
-    ...report,
-    ...(Array.isArray(report.shows) ? { shows: report.shows.filter(isVisible) } : {}),
-    ...(Array.isArray(report.missing) ? { missing: report.missing.filter(isVisible) } : {}),
-    ...(report.scanCache && typeof report.scanCache === "object" ? {
-      scanCache: Object.fromEntries(Object.entries(report.scanCache).filter(([key]) => !blocked.has(key))),
-    } : {}),
-  } as T;
-}
-
 function parseStoredJson<T>(payload: string | null | undefined, fallback: T): T {
   if (!payload) return fallback;
   try {
@@ -89,37 +39,6 @@ function parseStoredJson<T>(payload: string | null | undefined, fallback: T): T 
     return value !== null && typeof value === "object" ? value as T : fallback;
   } catch {
     return fallback;
-  }
-}
-
-type SavedResultsRow = { report: string | null; resume_point: string | null };
-
-/**
- * Remove blocked shows from a mode's saved report and Resume point, writing back
- * only when something changed. It uses only the handle it is given.
- */
-function pruneSavedResults(db: DatabaseSync, mode: ScanMode, row: SavedResultsRow, blocked: Set<string>) {
-  const report = parseStoredJson<Record<string, unknown> | null>(row.report, null);
-  const point = parseStoredJson<Record<string, unknown> | null>(row.resume_point, null);
-  const prunedReport = pruneIgnoredResults(report, mode, blocked);
-  const prunedPoint = pruneIgnoredResults(point, mode, blocked);
-  if (JSON.stringify(prunedReport) === JSON.stringify(report) && JSON.stringify(prunedPoint) === JSON.stringify(point)) return;
-  db.prepare(SAVED_STATE_SQL.savedResults).run(
-    prunedReport === null ? row.report : JSON.stringify(prunedReport),
-    prunedPoint === null ? row.resume_point : JSON.stringify(prunedPoint),
-    mode,
-  );
-}
-
-// Runs once per opened handle, after migrations, because whether an Ignore is
-// active depends on the current time. It uses only the handle it is given.
-function normalizeStoredIgnores(db: DatabaseSync) {
-  // Older versions retained results when Ignore was applied. Remove those
-  // results before any read or Restore can expose them.
-  const savedRows = db.prepare(SAVED_STATE_SQL.allRows).all() as (SavedResultsRow & { mode: ScanMode; options: string | null })[];
-  for (const row of savedRows) {
-    const options = parseStoredJson<Record<string, unknown>>(row.options, {});
-    pruneSavedResults(db, row.mode, row, blockedShowKeys(row.mode, options.ignoredShows));
   }
 }
 
@@ -137,7 +56,6 @@ function openDatabase(file: string) {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA foreign_keys = ON");
     migrateDatabase(db);
-    normalizeStoredIgnores(db);
     db.exec("PRAGMA optimize");
     return db;
   } catch (error) {
@@ -168,132 +86,81 @@ export type SavedScanStateSnapshot<R, P, S, O> = {
   updatedAt: string | null;
 };
 
-/**
- * The saved scan state of one scan mode: its report, Resume point, scan status and
- * options. Options are the mode's Settings and Ignore Preferences, kept together in one
- * JSON object. Each write changes only its own part. Report and Resume point writes
- * remove actively ignored results first; an options patch that sets ignoredShows
- * records them for a running scan and prunes the saved report and Resume point.
- * Operations join a transaction already open on the database instead of nesting one.
- */
-export type SavedScanState<R, P, S, O> = {
-  report: { read(): R | null; write(report: R): void };
-  resumePoint: { read(): P | null; write(point: P): void; clear(): void };
-  status: { read(): S | null; write(status: S): void };
-  options: { read(): O; patch(patch: Partial<O>): void };
-  /** All four parts and the state timestamp in one statement; null when the mode has no row. */
-  snapshot(): SavedScanStateSnapshot<R, P, S, O> | null;
-  /** Saves a finished report and clears its Resume point, as one write. */
-  commitReport(report: R): void;
-  /** Clears the report and its Resume point, as one write. */
-  clearReportAndResumePoint(): void;
-};
-
 type SavedStateRow = { report: string | null; resume_point: string | null; status: string | null; options: string | null; state_updated_at: string | null };
-
-/** Run `work` inside the transaction already open, or in a new one when none is. */
-function inTransaction<T>(work: () => T): T {
-  const db = database();
-  if (db.isTransaction) return work();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const result = work();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    if (db.isTransaction) db.exec("ROLLBACK");
-    throw error;
-  }
-}
-
-function savedRow(mode: ScanMode) {
-  return database().prepare(SAVED_STATE_SQL.row).get(mode) as SavedStateRow | undefined;
-}
-
-function savedOptions(mode: ScanMode): Record<string, unknown> {
-  const row = database().prepare(SAVED_STATE_SQL.options).get(mode) as { options: string | null } | undefined;
-  return parseStoredJson<Record<string, unknown>>(row?.options, {});
-}
-
-function prunedForSave(mode: ScanMode, value: unknown) {
-  return JSON.stringify(pruneIgnoredResults(value, mode, blockedShowKeys(mode, savedOptions(mode).ignoredShows)));
-}
 
 /** The statements a mode's store runs with (mode) or (mode, value). */
 type ModeWrite = "writeReport" | "writeResumePoint" | "commitReport" | "writeStatus" | "writeOptions" | "clearResumePoint" | "clearReportAndResumePoint";
 
-/** The saved scan state store bound to one mode; the caller supplies the mode's own part types. */
-export function savedScanState<
-  R = Record<string, unknown>, P = Record<string, unknown>, S = Record<string, unknown>, O extends Record<string, unknown> = Record<string, unknown>,
->(mode: ScanMode): SavedScanState<R, P, S, O> {
-  const run = (sql: ModeWrite, value?: string) => {
-    const statement = database().prepare(SAVED_STATE_SQL[sql]);
+/**
+ * The raw saved scan state of one mode on one database handle (the open one by
+ * default): it stores and loads the report, Resume point, scan status and options,
+ * and applies no rules to them. Each write changes only its own part and runs on
+ * the given handle, so it joins any transaction open there.
+ *
+ * Only the public saved scan state store (lib/ignore-results.ts) may use it; a
+ * lint rule enforces this, so no write can skip that store.
+ */
+export function rawSavedScanState(mode: ScanMode, db: DatabaseSync = database()) {
+  const run = (sql: ModeWrite, value?: unknown) => {
+    const statement = db.prepare(SAVED_STATE_SQL[sql]);
     if (value === undefined) statement.run(mode);
-    else statement.run(mode, value);
+    else statement.run(mode, JSON.stringify(value));
   };
+  const json = (value: unknown) => value === null ? null : JSON.stringify(value);
   return {
-    report: {
-      read: () => parseStoredJson<R | null>(savedRow(mode)?.report, null),
-      write: (report) => run("writeReport", prunedForSave(mode, report)),
-    },
-    resumePoint: {
-      read: () => parseStoredJson<P | null>(savedRow(mode)?.resume_point, null),
-      write: (point) => run("writeResumePoint", prunedForSave(mode, point)),
-      clear: () => run("clearResumePoint"),
-    },
-    status: {
-      read: () => parseStoredJson<S | null>(savedRow(mode)?.status, null),
-      write: (status) => run("writeStatus", JSON.stringify(status)),
-    },
-    options: {
-      read: () => savedOptions(mode) as O,
-      patch: (patch) => inTransaction(() => patchOptions(mode, patch)),
-    },
-    snapshot: () => {
-      const row = savedRow(mode);
+    /** The handle this store runs on. */
+    db,
+    /** All four parts and the state timestamp in one statement; null when the mode has no row. A part that is not a JSON object reads as null. */
+    read(): SavedScanStateSnapshot<unknown, unknown, unknown, Record<string, unknown>> | null {
+      const row = db.prepare(SAVED_STATE_SQL.row).get(mode) as SavedStateRow | undefined;
       return row ? {
-        report: parseStoredJson<R | null>(row.report, null),
-        resumePoint: parseStoredJson<P | null>(row.resume_point, null),
-        status: parseStoredJson<S | null>(row.status, null),
-        options: row.options === null ? null : parseStoredJson<O>(row.options, {} as O),
+        report: parseStoredJson<unknown>(row.report, null),
+        resumePoint: parseStoredJson<unknown>(row.resume_point, null),
+        status: parseStoredJson<unknown>(row.status, null),
+        options: row.options === null ? null : parseStoredJson<Record<string, unknown>>(row.options, {}),
         updatedAt: row.state_updated_at,
       } : null;
     },
-    commitReport: (report) => run("commitReport", prunedForSave(mode, report)),
+    /** The saved options; empty when none are saved. */
+    readOptions(): Record<string, unknown> {
+      const row = db.prepare(SAVED_STATE_SQL.options).get(mode) as { options: string | null } | undefined;
+      return parseStoredJson<Record<string, unknown>>(row?.options, {});
+    },
+    writeReport: (report: unknown) => run("writeReport", report),
+    writeResumePoint: (point: unknown) => run("writeResumePoint", point),
+    /** Saves a finished report and clears its Resume point, as one write. */
+    commitReport: (report: unknown) => run("commitReport", report),
+    writeStatus: (status: unknown) => run("writeStatus", status),
+    writeOptions: (options: Record<string, unknown>) => run("writeOptions", options),
+    clearResumePoint: () => run("clearResumePoint"),
     clearReportAndResumePoint: () => run("clearReportAndResumePoint"),
+    /**
+     * Maintenance update: replace the given parts of the saved report and Resume point
+     * in one statement. Null clears a part; an omitted part is kept exactly as stored.
+     * It never creates a row, never touches options or status, and never moves the
+     * state timestamp, so maintenance does not look like a new result.
+     */
+    replaceResults(parts: { report?: unknown; resumePoint?: unknown }) {
+      const report = Object.prototype.hasOwnProperty.call(parts, "report");
+      const point = Object.prototype.hasOwnProperty.call(parts, "resumePoint");
+      if (report && point) db.prepare(SAVED_STATE_SQL.savedResults).run(json(parts.report), json(parts.resumePoint), mode);
+      else if (report) db.prepare(SAVED_STATE_SQL.savedReport).run(json(parts.report), mode);
+      else if (point) db.prepare(SAVED_STATE_SQL.savedResumePoint).run(json(parts.resumePoint), mode);
+    },
+    /** Run `work` inside the transaction already open on this handle, or in a new one when none is. */
+    inTransaction<T>(work: () => T): T {
+      if (db.isTransaction) return work();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = work();
+        db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    },
   };
-}
-
-/**
- * Maintenance update: replace a mode's saved report and Resume point together, in one
- * statement on `db` (so it joins any transaction open there). Null clears a part. It
- * never creates a row, never touches options or status, and never moves the state
- * timestamp, so maintenance such as pruning does not look like a new result. Unlike
- * the store's writes it applies no Ignore filtering; callers own that.
- */
-export function replaceSavedResults<R = Record<string, unknown>, P = Record<string, unknown>>(
-  mode: ScanMode, results: { report: R | null; resumePoint: P | null }, db: DatabaseSync = database(),
-) {
-  const json = (value: unknown) => value === null ? null : JSON.stringify(value);
-  db.prepare(SAVED_STATE_SQL.savedResults).run(json(results.report), json(results.resumePoint), mode);
-}
-
-/**
- * Merge the supplied option fields over the saved ones. Only a patch that sets
- * ignoredShows touches the report and Resume point: it records the Ignores for a
- * running scan and, while any show is blocked, removes that show's saved results.
- */
-function patchOptions(mode: ScanMode, patch: Record<string, unknown>) {
-  const options = { ...savedOptions(mode), ...patch };
-  const ignoring = Object.prototype.hasOwnProperty.call(patch, "ignoredShows");
-  // The running scan is marked before the save, as before: a save that then fails
-  // still leaves the guard marked. This known guard-before-save gap is kept
-  // deliberately until SHELFCHECK-42 decides that policy.
-  if (ignoring) recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
-  database().prepare(SAVED_STATE_SQL.writeOptions).run(mode, JSON.stringify(options));
-  if (!ignoring) return;
-  const row = savedRow(mode);
-  if (row) pruneSavedResults(database(), mode, row, blockedShowKeys(mode, options.ignoredShows));
 }
 
 export function readPlexGeneratedInputs<T>(key: string): T | null {

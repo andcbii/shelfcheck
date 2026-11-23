@@ -11,7 +11,7 @@ const scan = await import("../app/api/scan/route");
 const scanRuns = await import("../app/api/scan-runs/route");
 const state = await import("../app/api/state/route");
 const config = await import("../lib/server-config");
-const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const plex = await import("../lib/plex-scan");
 const issues = await import("../lib/coverage-issues");
 const lifecycle = await import("../lib/scan-run");
@@ -297,7 +297,7 @@ const status = async () => (await (await scan.GET()).json() as { scan: ScanStatu
 
 test("a Trakt scan run with no heartbeat for more than 90 seconds and no live owner is an Interrupted scan, written once", async (t) => {
   await fixture(t);
-  sqlite.savedScanState("trakt").status.write({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
+  ignoreResults.savedScanState("trakt").status.write({ status: "running", processed: 1, total: 3, startedAt: new Date(Date.now() - 200_000).toISOString(), heartbeatAt: new Date(Date.now() - 90_000).toISOString() });
   assert.equal((await status()).status, "running", "exactly 90 seconds without a heartbeat is still running");
   t.mock.timers.tick(1);
   const first = await status();
@@ -371,7 +371,7 @@ const rateLimitedResponse = (scope: AsyncResource) => scope.runInAsyncScope(() =
 const observe = async () => ({
   lock: ((await (await scanRuns.GET()).json()) as { activeScanRun: unknown }).activeScanRun,
   trakt: { status: await status(), log: await (await logs.GET()).text(), resumePoint: await storedResumePoint() },
-  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: sqlite.savedScanState("plex").resumePoint.read() },
+  plex: { status: ((await (await plexScan.GET()).json()) as { scan: unknown }).scan, log: await (await plexLogs.GET()).text(), resumePoint: ignoreResults.savedScanState("plex").resumePoint.read() },
 });
 
 test("a late 429 for a request of a settled Trakt scan run changes nothing in a following Trakt or Plex scan run", async (t) => {
@@ -453,7 +453,7 @@ async function seedResumePoint(f: Awaited<ReturnType<typeof fixture>>, fields: (
   const now = Date.now();
   const point: Record<string, unknown> = { ...report, missing: report!.missing.filter((episode) => episode.show.title === "Bravo" && episode.episode === 2), savedAt: new Date(now - HOUR).toISOString(), resumePointVersion: 2, airingGraceDays: 0, ...fields(now) };
   for (const [key, value] of Object.entries(point)) if (value === undefined) delete point[key];
-  sqlite.savedScanState("trakt").resumePoint.write(point);
+  ignoreResults.savedScanState("trakt").resumePoint.write(point);
   return report!;
 }
 
@@ -746,7 +746,7 @@ test("after migration 4 the next Trakt scan rechecks every show, though the old 
   // list, and a Resume point in the current format, both saved before episodes inside the delay were kept.
   const f = await fixture(t, (dir) => {
     const global = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
-    sqlite.savedScanState("trakt").snapshot();
+    ignoreResults.savedScanState("trakt").snapshot();
     global.__shelfcheckDatabase?.close();
     delete global.__shelfcheckDatabase;
     const older = new DatabaseSync(path.join(dir, "shelfcheck.db"));

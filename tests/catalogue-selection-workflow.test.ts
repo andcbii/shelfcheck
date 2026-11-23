@@ -7,7 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const scan = await import("../app/api/plex/scan/route");
-const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const selections = await import("../lib/catalogue-selection-store");
 hook.deregister();
@@ -21,7 +21,7 @@ test("scans compare the lowest Plex series ID or the saved override, reconciling
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
+  ignoreResults.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
   const identity = "ratingKey:1";
   let guids = ["tmdb://10","tvdb://21","tmdb://9","tvdb://20","tmdb://9"];

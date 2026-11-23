@@ -8,7 +8,7 @@ import type { EpisodeCrosswalk } from "@/lib/plex-comparison";
 import { isProviderLoginFailure } from "@/lib/provider-client";
 import { isProviderId, lookupKey, lookupProvider, providerLookup, type ProviderLookup } from "@/lib/provider-lookup";
 import type { ProviderName } from "@/lib/provider-policy";
-import { tmdbCrosswalkResults, type CrosswalkRelationships, type tmdbCrosswalkScanRun } from "@/lib/tmdb-crosswalk-coordinator";
+import { tmdbCrosswalkResults, type CrosswalkRelationships, type RecoveredCrosswalks, type tmdbCrosswalkScanRun } from "@/lib/tmdb-crosswalk-coordinator";
 import { isRecord, responseRecordList } from "@/lib/value-guards";
 
 /**
@@ -89,7 +89,7 @@ export type ComparisonEvidenceChanges = {
   /** IMDb episode IDs by TVDB episode ID, as received or reused. */
   tvdbEpisodeImdbIds: Record<string, string[]>;
   /** Evidence recovered after this show's failed requests, and the failed-request issues it resolves once saved. */
-  recovered: { relationships: CrosswalkRelationships; resolves: string[] };
+  recovered: RecoveredCrosswalks;
   /** A last-good comparison's relationships with this comparison's checked TMDB crosswalk outcomes. */
   retained(saved: CrosswalkRelationships): CrosswalkRelationships;
 };
@@ -110,6 +110,79 @@ export type ComparisonEvidence = SeriesEvidence & {
   rejectTmdbEpisodeCrosswalk(tvdbEpisodeId: number): void;
   changes(): ComparisonEvidenceChanges;
 };
+
+/** A source's answer to one lookup, and whether it was reused from saved evidence. */
+export type LookupAnswer = { value: unknown; cached: boolean };
+
+/**
+ * How one evidence source finds answers, before interpretation. Every source shares the reading of
+ * each lookup kind's answer (`answeredEvidence`); only how the answers are found differs.
+ */
+export type EvidenceAnswers = {
+  traktAvailable: boolean;
+  /** One lookup's answer. `validation`: a TMDB episode validation's Trakt provenance. */
+  answer(lookup: ProviderLookup, validation?: TraktValidationProvenance): Promise<LookupAnswer>;
+  /** One TVDB episode's TMDB external-ID crosswalk answer. */
+  tmdbEpisodeCrosswalk(tvdbEpisodeId: number): Promise<unknown>;
+  /** IMDb episode IDs by TVDB episode ID: reused when present, and set from each extended record read. */
+  imdbIds: Record<string, string[]>;
+  rejectTmdbEpisodeCrosswalk(tvdbEpisodeId: number): void;
+  changes(): ComparisonEvidenceChanges;
+};
+
+/** The comparison evidence interface over a source's answers: each lookup kind's response is read one way. */
+export function answeredEvidence(answers: EvidenceAnswers): ComparisonEvidence {
+  const { answer, imdbIds } = answers;
+  return {
+    traktAvailable: answers.traktAvailable,
+    async tmdbEpisodeByTvdb(tvdbEpisodeId) {
+      return interpretedRecords<TmdbFindEpisode>("TMDB", tmdbCrosswalkResults(await answers.tmdbEpisodeCrosswalk(tvdbEpisodeId)));
+    },
+    async traktEpisodeSearch(tvdbEpisodeId) {
+      const { value, cached } = await answer(providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId));
+      if (!Array.isArray(value)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
+      return { results: value.filter(isRecord) as TraktEpisodeSearchResult[], cached };
+    },
+    async tmdbEpisodeDetails({ tmdbShowId, season, episode }, provenance) {
+      const { value } = await answer(providerLookup.tmdbEpisodeByShowSeasonEpisode(tmdbShowId, season, episode), provenance);
+      if (!isRecord(value)) throw new CrosswalkResponseError("TMDB", "the validating episode record is not an object");
+      return value;
+    },
+    async tvdbEpisodeExtended(tvdbEpisodeId) {
+      const lookup = providerLookup.tvdbEpisodeExtended(tvdbEpisodeId);
+      const kept = imdbIds[String(tvdbEpisodeId)];
+      if (kept) return new Set(kept);
+      const { value: body } = await answer(lookup);
+      if (!isRecord(body) || !isRecord(body.data)) throw new CrosswalkResponseError("TVDB", "the episode record is missing");
+      const remoteIds = body.data.remoteIds;
+      if (remoteIds !== undefined && remoteIds !== null && !Array.isArray(remoteIds)) throw new CrosswalkResponseError("TVDB", "remoteIds is not a list");
+      // Remote IDs of other sources may use other shapes; only IMDb episode IDs are read.
+      const ids = new Set(((remoteIds || []) as unknown[]).flatMap((remote) => isRecord(remote) && typeof remote.id === "string" && /^tt\d+$/i.test(remote.id) ? [remote.id.toLowerCase()] : []));
+      imdbIds[String(tvdbEpisodeId)] = [...ids];
+      return ids;
+    },
+    async tmdbSeriesByTvdb(tvdbSeriesId) {
+      const { value } = await answer(providerLookup.tmdbSeriesByTvdbSeries(tvdbSeriesId));
+      return interpretedRecords<TmdbShow>("TMDB", responseRecordList(value, "tv_results")).filter(usableTmdbShow);
+    },
+    // The basic and external-ID summaries are separate lookups: neither ever answers the other.
+    async tmdbSeriesSummary(tmdbShowId) {
+      const { value } = await answer(providerLookup.tmdbSeriesSummary(tmdbShowId));
+      return usableTmdbShow(value) ? value : undefined;
+    },
+    async tmdbSeriesSummaryWithExternalIds(tmdbShowId) {
+      const { value } = await answer(providerLookup.tmdbSeriesSummaryWithExternalIds(tmdbShowId));
+      return usableTmdbShow(value) ? value : undefined;
+    },
+    async tvdbSeriesSummary(tvdbSeriesId) {
+      const { value } = await answer(providerLookup.tvdbSeriesSummary(tvdbSeriesId));
+      const data = isRecord(value) ? value.data as { id?: number; name?: string; slug?: string; year?: string } | undefined : undefined;
+      return data ? { id: data.id || tvdbSeriesId, name: data.name, slug: data.slug, year: data.year } : null;
+    },
+    rejectTmdbEpisodeCrosswalk: (tvdbEpisodeId) => answers.rejectTmdbEpisodeCrosswalk(tvdbEpisodeId),
+    changes: () => answers.changes(),
+  };
+}
 
 /** Sends one typed lookup with the scan run's real credentials. */
 export type LookupTransport = (lookup: ProviderLookup) => Promise<unknown>;
@@ -178,71 +251,29 @@ export function liveComparisonEvidence({ scan, show, saved, forced }: {
     if (provider === "Trakt") traktLoginDiagnostics.resolve();
     return value;
   }
-  /** A saved answer while no failed request is recorded for it, else a new one, saved as the comparison's relationship. */
-  async function relationship(lookup: ProviderLookup, lookupSource?: LookupSourceStep[]) {
-    const key = lookupKey(lookup);
-    if (Object.hasOwn(relationships, key) && !failures.failure(lookup)) return { value: relationships[key].value, cached: true };
-    const value = await request(lookup, () => scan.transport(lookup), lookupSource);
-    relationships[key] = { provider: lookupProvider(lookup), value, receivedAt: now() };
-    return { value, cached: false };
-  }
 
-  return {
+  return answeredEvidence({
     traktAvailable: scan.traktLogin,
-    async tmdbEpisodeByTvdb(tvdbEpisodeId) {
-      const lookup = providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
-      const found = await request(lookup, () => crosswalks.lookup(tvdbEpisodeId, () => scan.transport(lookup), { forced: retried.has(`TMDB:${tvdbEpisodeId}`) }));
-      return interpretedRecords<TmdbFindEpisode>("TMDB", tmdbCrosswalkResults(found));
-    },
-    async traktEpisodeSearch(tvdbEpisodeId) {
-      const lookup = providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId);
-      if (!scan.traktLogin) throw new TraktLoginUnavailableError(undefined);
-      const { value, cached } = await relationship(lookup);
-      if (!Array.isArray(value)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
-      return { results: value.filter(isRecord) as TraktEpisodeSearchResult[], cached };
-    },
-    async tmdbEpisodeDetails({ tmdbShowId, season, episode }, { tvdbEpisodeId, tmdbEpisodeId, cached }) {
-      const lookup = providerLookup.tmdbEpisodeByShowSeasonEpisode(tmdbShowId, season, episode);
+    imdbIds,
+    /** A saved answer while no failed request is recorded for it, else a new one, saved as the comparison's relationship. */
+    async answer(lookup, validation) {
+      if (lookupProvider(lookup) === "Trakt" && !scan.traktLogin) throw new TraktLoginUnavailableError(undefined);
+      const key = lookupKey(lookup);
       // Retrying a failed Trakt crosswalk requests its validations again.
-      if (retried.has(`Trakt:${tvdbEpisodeId}`)) delete relationships[lookupKey(lookup)];
-      const { value } = await relationship(lookup, [
-        ...(show.tvdbSource || []), { provider: "TVDB", kind: "catalogue episode", id: tvdbEpisodeId, cached: show.tvdbCached },
-        { provider: "Trakt", kind: "external TMDB show ID", id: tmdbShowId, cached },
-        { provider: "Trakt", kind: "external TMDB episode ID", id: tmdbEpisodeId, cached },
-      ]);
-      if (!isRecord(value)) throw new CrosswalkResponseError("TMDB", "the validating episode record is not an object");
-      return value;
+      if (validation && retried.has(`Trakt:${validation.tvdbEpisodeId}`)) delete relationships[key];
+      if (Object.hasOwn(relationships, key) && !failures.failure(lookup)) return { value: relationships[key].value, cached: true };
+      const lookupSource: LookupSourceStep[] | undefined = validation && lookup.kind === "tmdb-episode-by-show-season-episode" ? [
+        ...(show.tvdbSource || []), { provider: "TVDB", kind: "catalogue episode", id: validation.tvdbEpisodeId, cached: show.tvdbCached },
+        { provider: "Trakt", kind: "external TMDB show ID", id: lookup.tmdbShowId, cached: validation.cached },
+        { provider: "Trakt", kind: "external TMDB episode ID", id: validation.tmdbEpisodeId, cached: validation.cached },
+      ] : undefined;
+      const value = await request(lookup, () => scan.transport(lookup), lookupSource);
+      relationships[key] = { provider: lookupProvider(lookup), value, receivedAt: now() };
+      return { value, cached: false };
     },
-    async tvdbEpisodeExtended(tvdbEpisodeId) {
-      const lookup = providerLookup.tvdbEpisodeExtended(tvdbEpisodeId);
-      const kept = imdbIds[String(tvdbEpisodeId)];
-      if (kept) return new Set(kept);
-      const { value: body } = await relationship(lookup);
-      if (!isRecord(body) || !isRecord(body.data)) throw new CrosswalkResponseError("TVDB", "the episode record is missing");
-      const remoteIds = body.data.remoteIds;
-      if (remoteIds !== undefined && remoteIds !== null && !Array.isArray(remoteIds)) throw new CrosswalkResponseError("TVDB", "remoteIds is not a list");
-      // Remote IDs of other sources may use other shapes; only IMDb episode IDs are read.
-      const ids = new Set(((remoteIds || []) as unknown[]).flatMap((remote) => isRecord(remote) && typeof remote.id === "string" && /^tt\d+$/i.test(remote.id) ? [remote.id.toLowerCase()] : []));
-      imdbIds[String(tvdbEpisodeId)] = [...ids];
-      return ids;
-    },
-    async tmdbSeriesByTvdb(tvdbSeriesId) {
-      const { value } = await relationship(providerLookup.tmdbSeriesByTvdbSeries(tvdbSeriesId));
-      return interpretedRecords<TmdbShow>("TMDB", responseRecordList(value, "tv_results")).filter(usableTmdbShow);
-    },
-    // The basic and external-ID summaries are separate lookups: neither ever answers the other.
-    async tmdbSeriesSummary(tmdbShowId) {
-      const { value } = await relationship(providerLookup.tmdbSeriesSummary(tmdbShowId));
-      return usableTmdbShow(value) ? value : undefined;
-    },
-    async tmdbSeriesSummaryWithExternalIds(tmdbShowId) {
-      const { value } = await relationship(providerLookup.tmdbSeriesSummaryWithExternalIds(tmdbShowId));
-      return usableTmdbShow(value) ? value : undefined;
-    },
-    async tvdbSeriesSummary(tvdbSeriesId) {
-      const { value } = await relationship(providerLookup.tvdbSeriesSummary(tvdbSeriesId));
-      const data = isRecord(value) ? value.data as { id?: number; name?: string; slug?: string; year?: string } | undefined : undefined;
-      return data ? { id: data.id || tvdbSeriesId, name: data.name, slug: data.slug, year: data.year } : null;
+    tmdbEpisodeCrosswalk(tvdbEpisodeId) {
+      const lookup = providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
+      return request(lookup, () => crosswalks.lookup(tvdbEpisodeId, () => scan.transport(lookup), { forced: retried.has(`TMDB:${tvdbEpisodeId}`) }));
     },
     rejectTmdbEpisodeCrosswalk: (tvdbEpisodeId) => crosswalks.rejectCopy(tvdbEpisodeId),
     changes: () => ({
@@ -251,5 +282,5 @@ export function liveComparisonEvidence({ scan, show, saved, forced }: {
       recovered: { relationships: {}, resolves: [] },
       retained: (savedRelationships) => crosswalks.retained(savedRelationships),
     }),
-  };
+  });
 }

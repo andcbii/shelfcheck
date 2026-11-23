@@ -118,6 +118,77 @@ test("report and Resume point writes keep options; status writes keep every othe
   assert.notEqual(plex.snapshot()!.updatedAt, "2020-01-01 00:00:00", "A real state write does");
 });
 
+const backdate = () => cache.__shelfcheckDatabase!.exec("UPDATE shelfcheck_scan_state SET state_updated_at = '2020-01-01 00:00:00'");
+
+test("replacing saved results changes the report and Resume point together, keeping options, status and the state timestamp", (t) => {
+  freshDatabase(t);
+  const plex = sqlite.savedScanState("plex");
+  const trakt = sqlite.savedScanState("trakt");
+  plex.options.patch({ diagnosticsEnabled: false, futureOption: { kept: true } });
+  plex.report.write(plexResults());
+  plex.resumePoint.write(plexResults("resume"));
+  plex.status.write({ status: "running" });
+  trakt.report.write(traktResults());
+  backdate();
+
+  sqlite.replaceSavedResults("plex", { report: plexResults("pruned"), resumePoint: plexResults("pruned resume") });
+  assert.deepEqual(plex.snapshot(), {
+    report: plexResults("pruned"), resumePoint: plexResults("pruned resume"), status: { status: "running" },
+    options: { diagnosticsEnabled: false, futureOption: { kept: true } }, updatedAt: "2020-01-01 00:00:00",
+  });
+  assert.deepEqual(trakt.report.read(), traktResults(), "The other mode is untouched");
+
+  sqlite.replaceSavedResults("plex", { report: null, resumePoint: null });
+  assert.deepEqual([plex.report.read(), plex.resumePoint.read(), plex.snapshot()!.updatedAt], [null, null, "2020-01-01 00:00:00"]);
+});
+
+test("replacing saved results creates no row, leaves a status-only row without options, and is rejected as one write", (t) => {
+  freshDatabase(t);
+  const plex = sqlite.savedScanState("plex");
+  const trakt = sqlite.savedScanState("trakt");
+  sqlite.replaceSavedResults("plex", { report: plexResults(), resumePoint: plexResults("resume") });
+  assert.equal(plex.snapshot(), null, "A mode with no row gains none");
+
+  trakt.status.write({ status: "completed" });
+  sqlite.replaceSavedResults("trakt", { report: traktResults(), resumePoint: null });
+  assert.deepEqual(trakt.snapshot(), { report: traktResults(), resumePoint: null, status: { status: "completed" }, options: null, updatedAt: null }, "Options stay null and the timestamp unset");
+
+  trakt.resumePoint.write(traktResults("resume"));
+  rejectUpdates("OF resume_point");
+  assert.throws(() => sqlite.replaceSavedResults("trakt", { report: traktResults("new"), resumePoint: traktResults("new resume") }), /saved state unavailable/);
+  allowUpdates();
+  assert.deepEqual([trakt.report.read(), trakt.resumePoint.read()], [traktResults(), traktResults("resume")], "Neither part changes alone");
+});
+
+test("replacing saved results joins a transaction already open, so its rollback undoes it", (t) => {
+  freshDatabase(t);
+  const plex = sqlite.savedScanState("plex");
+  plex.report.write(plexResults());
+  plex.resumePoint.write(plexResults("resume"));
+  const db = sqlite.database();
+  db.exec("BEGIN IMMEDIATE");
+  sqlite.replaceSavedResults("plex", { report: plexResults("new"), resumePoint: null });
+  assert.deepEqual(plex.report.read(), plexResults("new"), "The change is visible inside the transaction");
+  db.exec("ROLLBACK");
+  assert.deepEqual([plex.report.read(), plex.resumePoint.read()], [plexResults(), plexResults("resume")]);
+});
+
+test("ordinary report, Resume point and commit report writes still move the state timestamp", (t) => {
+  freshDatabase(t);
+  const plex = sqlite.savedScanState("plex");
+  plex.options.patch({ diagnosticsEnabled: false });
+  const writes = [
+    () => plex.report.write(plexResults()),
+    () => plex.resumePoint.write(plexResults("resume")),
+    () => plex.commitReport(plexResults("new")),
+  ];
+  for (const write of writes) {
+    backdate();
+    write();
+    assert.notEqual(plex.snapshot()!.updatedAt, "2020-01-01 00:00:00");
+  }
+});
+
 test("a status-only row has no saved options, distinct from empty options", (t) => {
   freshDatabase(t);
   const trakt = sqlite.savedScanState("trakt");

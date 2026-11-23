@@ -265,6 +265,20 @@ export function savedScanState<
 }
 
 /**
+ * Maintenance update: replace a mode's saved report and Resume point together, in one
+ * statement on `db` (so it joins any transaction open there). Null clears a part. It
+ * never creates a row, never touches options or status, and never moves the state
+ * timestamp, so maintenance such as pruning does not look like a new result. Unlike
+ * the store's writes it applies no Ignore filtering; callers own that.
+ */
+export function replaceSavedResults<R = Record<string, unknown>, P = Record<string, unknown>>(
+  mode: ScanMode, results: { report: R | null; resumePoint: P | null }, db: DatabaseSync = database(),
+) {
+  const json = (value: unknown) => value === null ? null : JSON.stringify(value);
+  db.prepare(SAVED_STATE_SQL.savedResults).run(json(results.report), json(results.resumePoint), mode);
+}
+
+/**
  * Merge the supplied option fields over the saved ones. Only a patch that sets
  * ignoredShows touches the report and Resume point: it records the Ignores for a
  * running scan and, while any show is blocked, removes that show's saved results.

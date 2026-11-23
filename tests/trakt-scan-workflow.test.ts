@@ -755,8 +755,9 @@ test("after migration 4 the next Trakt scan rechecks every show, though the old 
     const resumePoint = { ...report, savedAt: new Date(Date.parse(NOW) - 3_600_000).toISOString(), resumePointVersion: 2 };
     older.prepare("INSERT INTO shelfcheck_scan_state(mode, report, resume_point, options) VALUES('trakt', ?, ?, ?)").run(JSON.stringify(report), JSON.stringify(resumePoint), JSON.stringify({ airingGraceDays: 0, diagnosticsEnabled: false }));
     older.exec("PRAGMA user_version = 3");
-    // Migration 5's table did not exist at version 3.
+    // Migration 5's and 7's tables did not exist at version 3.
     older.exec("DROP TABLE shelfcheck_series_not_found");
+    older.exec("DROP TABLE shelfcheck_coverage_carried");
     older.close();
   });
 

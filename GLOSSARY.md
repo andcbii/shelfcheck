@@ -49,8 +49,12 @@ A show's durable, per-provider requirement to download catalogues instead of reu
 _Avoid_: Refresh flag, pending refresh
 
 **Cached recheck**:
-A comparison of affected shows run immediately after a Manual Match or catalogue override change, using only saved catalogues, saved library inventory and saved evidence. It downloads nothing, enumerates nothing in Plex, and never satisfies a refresh obligation or renews any catalogue's age.
+A comparison of affected shows run immediately after a Manual Match or catalogue override change, or after an Ignore that clears Report Missing flags, using only saved catalogues, saved library inventory and saved evidence. After a Manual Match change or such an Ignore, it also compares the shows of every carried member. It downloads nothing, enumerates nothing in Plex, and never satisfies a refresh obligation or renews any catalogue's age.
 _Avoid_: Offline recheck, local recheck
+
+**Carried member**:
+An episode of a saved Manual Match change, in one show, whose show has not yet been compared since the change. Carried members outlast failed rechecks and restarts, and keep the comparison pending. A member stops being carried only when a cached recheck or a completed full scan compares its shows; a failed comparison of its show keeps it carried.
+_Avoid_: Pending member, dirty member
 
 **Fifth-scan safeguard**:
 On a UTC day's fifth, tenth, and every later fifth completed full scan, the refresh of TMDB catalogues for library shows in that day's TMDB change list, bypassing same-day reuse. It never forces TVDB refreshes.

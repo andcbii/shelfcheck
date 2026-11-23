@@ -31,6 +31,35 @@
   counts, provider change-feed positions, pending fifth-scan safeguards and
   every other Scan Issues entry.
 
+- Saving, editing or deleting a Manual Match, changing only its Report
+  Missing flags, and applying an Ignore that clears Report Missing flags now
+  show as saved when the change was saved but the recheck of the Plex results
+  from saved data then failed. Before, a Manual Match change showed "provider
+  unavailable" and an Ignore showed an error, although the change was saved
+  and no provider was contacted. The Plex page now shows the comparison
+  pending notice and keeps the last results until a later recheck or Plex
+  scan succeeds.
+
+  The shows of a change whose recheck failed now stay pending until they are
+  rechecked, also after a restart. Shelfcheck saves the Manual Match episodes
+  each change affects together with the change, and every later recheck
+  compares their shows too. Before, a later change that rechecked only other
+  shows cleared the pending notice while the failed change's shows kept their
+  last results. The notice now clears only when no saved change is left
+  unrechecked. A recheck or full Plex scan that could not compare one of a
+  change's shows, or ran without a complete library inventory, keeps that
+  change unrechecked; a single-show or failed scan leaves the notice. A database upgraded with the notice already showing has no
+  such saved episodes, so its notice clears with the next recheck or full
+  Plex scan, as before.
+
+  One limit remains: the note that the affected shows need fresh downloads on
+  the next scan is written by the recheck, so a recheck that failed early may
+  not have written it until a later recheck does.
+
+  During a Plex scan, a malformed Manual Match request (an invalid ID or JSON)
+  is now refused as invalid rather than because a scan is running. Every
+  well-formed Manual Match change is still refused while a scan runs.
+
 ### Fixed
 
 - Clearing one show's cache no longer makes the next scan ask TMDB again for

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
 import test from "node:test";
-import { flag, harness as workflow, key, type Episode, type Identity } from "./report-missing-harness";
+import { api, flag, harness as workflow, key, preferences, type Episode, type Identity } from "./report-missing-harness";
+const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
+const { plexSavedState, requestCatalogueRecheck } = await import("../lib/plex-scan");
+hook.deregister();
 
 // Two Plex shows: "Target" (TMDB 10 / TVDB 20) and "Other" (TMDB 11 / TVDB 21).
 // A cross-show one-to-many Manual Match: Target's combined TMDB episode is the
@@ -207,4 +211,77 @@ test("a saved-state failure during Ignore cleanup rolls back both the rule and t
   await ignore(h, { ignoredShows: [forever("ratingKey:other", "Other")] });
   assert.deepEqual(await h.flags(crossShow.id), [], "The flag deletion is committed");
   assert.deepEqual((await settings()).ignoredShows.map((show: { ratingKey: string }) => show.ratingKey), ["ratingKey:other"], "The rule is committed");
+});
+
+/**
+ * Makes the cached recheck that next publishes results reject, once; `then`
+ * runs as it fails, while that recheck still holds the shared queue.
+ */
+function failNextRecheck(t: test.TestContext, then: () => void = () => {}) {
+  const write = plexSavedState.report.write.bind(plexSavedState.report);
+  const fault = { armed: true };
+  t.mock.method(plexSavedState.report, "write", (report: Parameters<typeof write>[0]) => {
+    if (!fault.armed) return write(report);
+    fault.armed = false;
+    then();
+    throw new Error("Injected cached recheck failure.");
+  });
+  return fault;
+}
+type Coverage = { revision: number; pending: number; issues: { id: string }[] };
+type Status = Awaited<ReturnType<Harness["status"]>> & { coverage: Coverage };
+const pendingIn = (coverage: Coverage) => coverage.pending === 1 && coverage.issues.some(issue => issue.id === "comparison-pending");
+
+test("an Ignore that cleared flags and whose cached recheck fails is reported as saved, with the comparison pending and the last results kept", async t => {
+  const h = await harness(t);
+  const { crossShow, oneToOne } = await setup(h);
+  const last = await h.status();
+  const fault = failNextRecheck(t);
+
+  // No flags in scope: no recheck runs, so the injected failure stays armed and nothing is reloaded.
+  const untouched = await h.patchSettings({ ignoredSeasons: [{ ...forever("ratingKey:target", "Target"), seasons: [9] }] });
+  assert.equal(untouched.status, 200);
+  assert.deepEqual(await untouched.json(), { saved: true });
+  assert.equal(fault.armed, true, "No cached recheck ran");
+
+  const cleaned = await h.patchSettings({ ignoredShows: [forever("ratingKey:other", "Other")] });
+  assert.equal(fault.armed, false, "The cached recheck failed");
+  assert.equal(cleaned.status, 200);
+  const body = await cleaned.json();
+  const state = await h.status() as Status;
+  assert.deepEqual(body, { saved: true, coverageRevision: state.coverage.revision }, "Saved, with the committed coverage revision and no other fields");
+
+  const settings = (await (await preferences.GET()).json()).settings;
+  assert.deepEqual(settings.ignoredShows.map((show: { ratingKey: string }) => show.ratingKey), ["ratingKey:other"], "The Ignore stays saved");
+  assert.deepEqual(settings.ignoredSeasons.map((show: { seasons: number[] }) => show.seasons), [[9]]);
+  assert.deepEqual(await h.flags(crossShow.id), [], "The cleared flag stays cleared");
+  assert.deepEqual(await h.flags(oneToOne.id), [key(kept)]);
+
+  assert.ok(pendingIn(state.coverage), "The Plex state shows the comparison pending notice");
+  const report = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json() as Coverage;
+  assert.ok(pendingIn(report), "The Manual Match report shows it too");
+  assert.equal(report.revision, body.coverageRevision);
+  assert.deepEqual(h.missing(state), h.missing(last), "The last results stay");
+});
+
+test("work queued behind an Ignore's failed cached recheck still runs, and a later Plex scan completes the comparison", async t => {
+  const h = await harness(t);
+  const { crossShow } = await setup(h);
+  assert.deepEqual(h.missing(await h.status()), { [key(whole)]: `incomplete because ${key(c)}`, [key(kept)]: "reported-missing" });
+  const queued: Promise<void>[] = [];
+  const fault = failNextRecheck(t, () => { queued.push(requestCatalogueRecheck("ratingKey:target", "tmdb")); });
+
+  await ignore(h, { ignoredShows: [forever("ratingKey:other", "Other")] });
+  assert.equal(fault.armed, false, "The cached recheck failed");
+  assert.equal(queued.length, 1);
+  await queued[0];
+  let state = await h.status() as Status;
+  assert.deepEqual(h.missing(state), { [key(kept)]: "reported-missing" }, "The catalogue recheck queued behind the failure ran and compared without the cleared flag");
+  assert.ok(pendingIn(state.coverage), "A catalogue recheck never completes the Manual Match comparison");
+
+  state = await h.rerun() as Status;
+  assert.equal(state.coverage.pending, 0);
+  assert.ok(!state.coverage.issues.some(issue => issue.id === "comparison-pending"));
+  assert.deepEqual(h.missing(state), { [key(kept)]: "reported-missing" });
+  assert.deepEqual(await h.flags(crossShow.id), []);
 });

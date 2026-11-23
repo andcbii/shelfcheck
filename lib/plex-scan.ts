@@ -6,8 +6,8 @@ import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
-import { missingPartsOf, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
+import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
+import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
@@ -618,6 +618,19 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const settings = readPlexPreferences();
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
   let finishIgnoreTracking: (() => void) | undefined;
+  // What a committed full scan covered: its saved inputs, and the shows it kept last-good results for.
+  let scanInputs: PlexGeneratedInputs | undefined;
+  const uncompared = new Set<string>();
+  let scanIgnored: ReadonlySet<string> = new Set();
+  /**
+   * The carried members a committed full scan covered: none without a complete inventory, else
+   * those of every show it compared. Every show of its inventory it did not ignore was compared
+   * (saving its comparison) or is in `uncompared`, so a member still without a saved comparison
+   * belongs to no compared show and is covered unless an uncompared show has no saved comparison.
+   */
+  const coveredByFullScan = () => scanInputs?.inventory?.complete
+    ? coveredCarriedMembers(scanInputs, carriedMembers().filter(entry => entry.revision <= coverageRevision), uncompared, scanInputs.inventory.groups.map(group => group.identity).filter(key => !scanIgnored.has(key)))
+    : [];
   return scanRuns.run(owner, plexScanMode, {
     fullRun: !targetRatingKey,
     createLogger: () => createScanLogger(settings.diagnosticsEnabled !== false, "shelfcheck-plex"),
@@ -633,7 +646,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       },
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,
-      committed: () => completeCoverageRecheck(coverageRevision),
+      // Only a committed full scan covers carried members, those of the shows it compared; a single-show scan covers none.
+      committed: () => completeCoverageComparison(coverageRevision, targetRatingKey ? [] : coveredByFullScan()),
       succeeded: () => resolveCoverageIssue("scan-failure"),
       failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
       failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
@@ -656,6 +670,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const physicalShows = libraries.flatMap((library) => library.MediaContainer?.Metadata || []);
   const allShows = groupPlexShows(physicalShows);
   const ignoredKeys = ignoredPlexKeys(settings.ignoredShows, Date.parse(startedAt));
+  scanIgnored = ignoredKeys;
   const shows = allShows.filter((show) => !ignoredKeys.has(show.identity));
   if (targetRatingKey && !shows.some((show) => show.identity === targetRatingKey)) throw new Error("That show is not available in the current Plex libraries.");
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
@@ -674,6 +689,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   });
   logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktAuth), tmdbFallback: true });
   const inputs = readPlexInputs();
+  scanInputs = inputs;
   const utcDate = startedAt.slice(0, 10);
   // A scan belongs to its planned UTC start date, even when it finishes after midnight.
   const upcomingFullScan = {utcDate, count: (inputs.completedFullScans?.utcDate === utcDate ? inputs.completedFullScans.count : 0) + 1};
@@ -797,6 +813,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const ratingKey = group.identity;
     /** Keep the show's last-good result; `scanStatus` replaces its provider status with this scan's, which is never republished. */
     const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
+      uncompared.add(ratingKey);
       const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
       results.push({...(previous || {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[]}),...scanStatus,warning:message});
       if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];
@@ -1122,9 +1139,6 @@ export function startPlexScan(targetRatingKey?: string): PlexScanStatus {
 }
 
 export type CoverageImpact = {members: CoverageMember[]};
-export function captureCoverageImpact(ids: string[]): CoverageImpact {
-  return {members:listCoverageMappings().filter(mapping=>ids.includes(mapping.id)).flatMap(mapping=>mapping.members)};
-}
 function coverageGroupsForResults(results: PlexShowResult[], manualInventory: CoverageEvidence[]): CoverageGroup[] {
   return listCoverageMappings().flatMap(mapping=>{
     const outcomes=results.flatMap(show=>(show.coverageOutcomes || []).filter(outcome=>mapping.members.some(member=>member.provider===outcome.provider && member.id===outcome.id)).map(outcome=>({...outcome,showKey:show.ratingKey})));
@@ -1133,10 +1147,7 @@ function coverageGroupsForResults(results: PlexShowResult[], manualInventory: Co
     return [{mappingId:mapping.id,health:mapping.health,missing,members:mapping.members.map(member=>{
       const direct=manualInventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
       const matched=outcomes.filter(outcome=>outcome.provider===member.provider && outcome.id===member.id);
-      // Explicit and derived missing status outrank direct ownership and every collected outcome.
-      const missingParts=missingPartsOf(mapping.members,member);
-      const status=member.reportMissing ? "reported-missing" : missingParts.length ? "incomplete" : direct ? "direct" : matched.some(o=>o.status==="missing") ? "missing" : matched.some(o=>o.status==="automatic") ? "automatic" : matched.some(o=>o.status==="manual") ? "manual" : "alternative";
-      return {...member,status,...(status==="incomplete" ? {missingParts} : {})};
+      return {...member,...memberStatus({member,members:mapping.members,direct,matched})};
     })}];
   });
 }
@@ -1145,54 +1156,6 @@ function memberInComparison(inputs: PlexGeneratedInputs, input: SavedPlexCompari
   return member.provider==="TMDB"
     ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || Boolean(input.tmdbEpisodeAliases?.includes(member.showId)) || Boolean(inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
     : input.tvdbId===member.showId || input.tvdbAliases.includes(member.showId) || Boolean(inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
-}
-
-/** A newly applied Plex Ignore: a whole show, or only the selected seasons of it. */
-export type IgnoreScope = {ratingKey: string; seasons?: number[]};
-
-/**
- * Manual Match members inside an Ignore scope. A member belongs to the ignored
- * show when that show's saved comparison lists its provider show or episode, or
- * when one of the show's Plex items carries its identity. A season Ignore also
- * requires the member's provider season (from the saved catalogue, else the
- * saved member) to be one of the selected seasons.
- */
-function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
-  if (!scopes.length) return [];
-  const inputs=readPlexInputs();
-  // Provider season of every catalogued episode, built once per cleanup.
-  const seasons=new Map<string,number>();
-  for (const [provider,catalogues] of [["TMDB",inputs.tmdb],["TVDB",inputs.tvdb]] as const)
-    for (const catalogue of Object.values(catalogues)) for (const episode of catalogue.episodes)
-      if (episode.providerEpisodeId) seasons.set(`${provider}:${episode.providerEpisodeId}`,episode.season);
-  // The member's own provider show only, not aliases or Plex GUIDs, so a
-  // mis-tagged item or shared alias never reaches another show's flags.
-  const ownShow=(input: SavedPlexComparison, member: CoverageMember) => member.provider==="TMDB"
-    ? input.tmdbId===member.showId || Boolean(input.tmdbId && inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
-    : input.tvdbId===member.showId || Boolean(input.tvdbId && inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
-  return listCoverageMappings().flatMap(mapping=>mapping.members).filter(member=>scopes.some(scope=>{
-    const input=inputs.comparisons[scope.ratingKey];
-    // Without a saved comparison, fall back to the show's own Plex items.
-    const inShow=input ? ownShow(input,member)
-      : Boolean(inputs.inventory?.evidence.some(item=>item.showKey===scope.ratingKey && item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id)));
-    return inShow && (!scope.seasons || scope.seasons.includes(seasons.get(`${member.provider}:${member.id}`) ?? member.season));
-  }));
-}
-
-/**
- * Apply Ignore authoritatively over Report Missing. Deletes explicit flags of
- * Manual Match members inside the newly ignored scopes, saves the Ignore rule
- * (`save`) in the same transaction, then rechecks the affected cached shows so
- * derived effects elsewhere are withdrawn immediately. Flags outside the scopes
- * and every other mapping are preserved. Restore or expiry never recreates them.
- * Rejects while a Plex scan is running only when there are flags to delete.
- */
-export async function applyIgnoreReportMissingCleanup(scopes: IgnoreScope[], save: () => void): Promise<number | undefined> {
-  const impact=clearReportMissingFlags(membersInIgnoreScopes(scopes),save);
-  if (!impact.length) return undefined;
-  await requestCoverageRecheck({members:impact});
-  // The coverage revision whose rechecked report the client must display.
-  return coverageState().revision;
 }
 
 let coverageRecheckQueue: Promise<void> = Promise.resolve();
@@ -1237,13 +1200,32 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
     pending(error instanceof PendingSavedComparison ? error.message : `The new catalogue selection could not be compared from saved inputs: ${coverageIssueCause(error)} Last-good results were kept.`);
   }
 }
+/**
+ * The carried members a comparison covered: those none of whose saved show comparisons is in
+ * `uncompared`. Nothing is covered while any uncompared or `current` show (the comparison's
+ * library inventory and report, less ignored shows) has no saved comparison: that show could
+ * hold any carried member, even one another saved comparison also matches through an alias,
+ * and this comparison could not compare it. A member no saved comparison holds is otherwise
+ * covered: it belongs to no show that can affect a result.
+ */
+function coveredCarriedMembers(inputs: PlexGeneratedInputs, carried: CarriedMember[], uncompared: ReadonlySet<string>, current: Iterable<string>) {
+  // A current or uncompared show without a saved comparison could hold any carried member, even
+  // one another comparison also matches (aliases overlap), so then nothing is covered.
+  if ([...uncompared,...current].some(key=>!inputs.comparisons[key])) return [];
+  return carried.filter(({member})=>
+    !Object.entries(inputs.comparisons).some(([key,input])=>uncompared.has(key) && memberInComparison(inputs,input,member)));
+}
 async function recheckCoverage(impact: CoverageImpact) {
-  const inputs=readPlexInputs(), prior=getPlexReport(), revision=coverageState().revision;
+  // Every carried member is rechecked too, with this change's. Only the members whose shows
+  // this recheck compares and publishes are uncarried; the rest stay carried and pending.
+  const carried=carriedMembers(), revision=coverageState().revision;
+  const members=[...impact.members,...carried.map(entry=>entry.member)];
+  const inputs=readPlexInputs(), prior=getPlexReport();
   const settings=readPlexPreferences();
   const ignored=ignoredPlexKeys(settings.ignoredShows,Date.now());
   const targets=new Set<string>();
   for (const [key,input] of Object.entries(inputs.comparisons)) {
-    if (impact.members.some(member=>memberInComparison(inputs,input,member))) targets.add(key);
+    if (members.some(member=>memberInComparison(inputs,input,member))) targets.add(key);
   }
   // Persist obligations first. A failed local comparison must never consume them.
   for (const key of targets) {
@@ -1258,13 +1240,15 @@ async function recheckCoverage(impact: CoverageImpact) {
     const keys=targets.size ? [...targets] : [undefined];
     for (const key of keys) setCoverageIssue({id:key ? `comparison-inputs:${key}` : "comparison-inputs:initial",operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
     if (prior) plexSavedState.report.write({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
-    completeCoverageRecheck(revision);
+    // Nothing was compared, so every carried member stays carried.
+    completeCoverageComparison(revision);
     return;
   }
   const context=savedComparisonContext(inputs,settings,ignored);
   const results=[...prior.shows];
   // One recheck time for every 60-day usability decision.
   const now=new Date().toISOString();
+  const uncompared=new Set<string>();
   for (const key of targets) {
     if (ignored.has(key)) continue;
     const input=inputs.comparisons[key];
@@ -1274,6 +1258,7 @@ async function recheckCoverage(impact: CoverageImpact) {
       const index=results.findIndex(show=>show.ratingKey===key);
       if (index>=0) results[index]=compared.result; else results.push(compared.result);
     } catch (error) {
+      uncompared.add(key);
       // A cached recheck cannot reevaluate a failed download. Preserve the
       // dependency established by that scan until its inputs can be evaluated.
       const previous = getCoverageIssue(`comparison-inputs:${key}`);
@@ -1283,7 +1268,8 @@ async function recheckCoverage(impact: CoverageImpact) {
   }
   resolveCoverageIssue("comparison-inputs:initial");
   plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
-  completeCoverageRecheck(revision);
+  const current=[...inputs.inventory.groups.map(group=>group.identity),...results.map(show=>show.ratingKey)].filter(key=>!ignored.has(key));
+  completeCoverageComparison(revision,coveredCarriedMembers(inputs,carried,uncompared,current));
 }
 
 type SavedComparisonContext = {

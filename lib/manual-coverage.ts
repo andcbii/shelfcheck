@@ -4,6 +4,9 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { database } from "@/lib/sqlite";
 import { memberKey, reportMissingSelectionProblem, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+/** The open Shelfcheck database handle. */
+type Database = ReturnType<typeof database>;
+
 export class CoverageError extends Error {
   constructor(message: string, public status = 400, public code = "validation", public mappingId?: string) {
     super(message);
@@ -18,7 +21,7 @@ export function coverageState() {
 }
 
 // Mapping payloads describe members; Report Missing flags live on the membership rows.
-function flaggedMembers(db: ReturnType<typeof database>, mappingId?: string): Set<string> {
+function flaggedMembers(db: Database, mappingId?: string): Set<string> {
   const rows = (mappingId === undefined
     ? db.prepare("SELECT mapping_id,provider,episode_id FROM shelfcheck_coverage_members WHERE report_missing=1").all()
     : db.prepare("SELECT mapping_id,provider,episode_id FROM shelfcheck_coverage_members WHERE mapping_id=? AND report_missing=1").all(mappingId)) as { mapping_id: string; provider: string; episode_id: number }[];
@@ -29,7 +32,7 @@ export const MISSING_MEMBER_MESSAGE = "A provider episode record was not found. 
 // The same message as saved before it said Manual Match. Rechecks skip needs-review matches, so it
 // stays stored until the match is repaired; reading shows the current wording instead.
 const LEGACY_MISSING_MEMBER_MESSAGE = "A provider episode record was not found. Resolve and review replacements to repair this mapping.";
-function withFlags(db: ReturnType<typeof database>, mapping: CoverageMapping, flagged = flaggedMembers(db, mapping.id)): CoverageMapping {
+function withFlags(db: Database, mapping: CoverageMapping, flagged = flaggedMembers(db, mapping.id)): CoverageMapping {
   if (mapping.healthMessage === LEGACY_MISSING_MEMBER_MESSAGE) mapping = { ...mapping, healthMessage: MISSING_MEMBER_MESSAGE };
   return { ...mapping, members: mapping.members.map(member => ({ ...member, reportMissing: flagged.has(`${mapping.id}|${memberKey(member)}`) })) };
 }
@@ -55,25 +58,55 @@ function requestedFlags(value: unknown, members: CoverageMember[]): Set<string> 
   return new Set(value.map(memberKey));
 }
 
+/** The saved payload of one Manual Match (without its Report Missing flags), or undefined when there is none. */
+function savedManualMatch(db: Database, id: string): CoverageMapping | undefined {
+  const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(id) as { payload: string } | undefined;
+  return row && JSON.parse(row.payload);
+}
+
+/**
+ * The Manual Match an edit changes, and the revision its editor opened. The
+ * revision is as the request sent it; the store checks it inside its transaction.
+ */
+export type ManualMatchEdit = { id: string; revision: unknown };
+
+/**
+ * Members a Manual Match change affects, each once per show: their shows need a
+ * cached recheck. An edit can keep an episode ID but move it to another show, so
+ * the former and the new show placement are both kept.
+ */
+function distinctMembers(members: CoverageMember[]): CoverageMember[] {
+  const seen = new Map<string, CoverageMember>();
+  for (const member of members) {
+    const key = `${memberKey(member)}:${member.showId}`;
+    if (!seen.has(key)) seen.set(key, member);
+  }
+  return [...seen.values()];
+}
+
 /**
  * Save reviewed members, or with `members` undefined change only the saved
  * Report Missing flags of an existing mapping without new provider review.
+ * Returns the saved mapping with its flags, and the members the save affects
+ * (the former and the new members; every member for a flag-only edit), both
+ * read inside the save's transaction. The scan check inside that transaction
+ * is authoritative.
  */
-export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?: { id: string; revision: number }, reportMissing?: unknown): CoverageMapping {
-  assertCoverageMutationAllowed();
-  if (members && (!members.some(m => m.provider === "TMDB") || !members.some(m => m.provider === "TVDB") || new Set(members.map(memberKey)).size !== members.length))
-    throw new CoverageError("Review nonempty complete sets of distinct TMDB and TVDB episodes.");
-  if (!members && (!edit || reportMissing === undefined))
-    throw new CoverageError("Resolve and review both episode records before saving.");
+export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?: ManualMatchEdit, reportMissing?: unknown): { mapping: CoverageMapping; affectedMembers: CoverageMember[] } {
   const db = database();
   db.exec("BEGIN IMMEDIATE");
   try {
+    assertCoverageMutationAllowed();
+    if (members && (!members.some(m => m.provider === "TMDB") || !members.some(m => m.provider === "TVDB") || new Set(members.map(memberKey)).size !== members.length))
+      throw new CoverageError("Review nonempty complete sets of distinct TMDB and TVDB episodes.");
+    if (!members && (!edit || reportMissing === undefined))
+      throw new CoverageError("Resolve and review both episode records before saving.");
     let existing: CoverageMapping | undefined;
     if (edit) {
-      const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(edit.id) as { payload: string } | undefined;
-      if (!row) throw new CoverageError("This Manual Match was deleted. Reload the page.", 404, "not-found", edit.id);
-      existing = withFlags(db, JSON.parse(row.payload));
-      if (!Number.isInteger(edit.revision) || edit.revision !== existing!.revision)
+      const saved = savedManualMatch(db, edit.id);
+      if (!saved) throw new CoverageError("This Manual Match was deleted. Reload the page.", 404, "not-found", edit.id);
+      existing = withFlags(db, saved);
+      if (!Number.isInteger(edit.revision) || edit.revision !== existing.revision)
         throw new CoverageError("This Manual Match changed since you opened it. Reopen it and review the latest records.", 409, "stale-revision", edit.id);
     }
     const flagsOnly = !members;
@@ -100,10 +133,12 @@ export function saveCoverageMapping(members: CoverageMember[] | undefined, edit?
     if (existing) db.prepare("DELETE FROM shelfcheck_coverage_members WHERE mapping_id=?").run(existing.id);
     for (const m of members)
       db.prepare("INSERT INTO shelfcheck_coverage_members(provider,episode_id,mapping_id,report_missing) VALUES(?,?,?,?)").run(m.provider, m.id, mapping.id, flags.has(memberKey(m)) ? 1 : 0);
-    db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(mapping.revision);
+    const affectedMembers = distinctMembers([...(existing?.members || []), ...members]);
+    commitCoverageChange(db, mapping.revision, affectedMembers);
     if (existing && !flagsOnly) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === existing.id)) resolveCoverageIssue(issue.id);
+    const saved = { mapping: withFlags(db, mapping), affectedMembers };
     db.exec("COMMIT");
-    return withFlags(db, mapping);
+    return saved;
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -133,12 +168,12 @@ export function clearReportMissingFlags(members: CoverageIdentity[], alongside: 
     for (const member of flagged) db.prepare("UPDATE shelfcheck_coverage_members SET report_missing=0 WHERE provider=? AND episode_id=?").run(member.provider, member.id);
     const impact: CoverageMember[] = [];
     for (const id of affected) {
-      const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(id) as { payload: string };
-      const mapping: CoverageMapping = { ...JSON.parse(row.payload), revision };
+      const mapping: CoverageMapping = { ...savedManualMatch(db, id)!, revision };
       db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify(mapping), id);
       impact.push(...mapping.members);
     }
-    if (affected.length) db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+    // Each episode belongs to one Manual Match, so every member is listed once.
+    if (affected.length) commitCoverageChange(db, revision, impact);
     alongside();
     db.exec("COMMIT");
     return impact;
@@ -148,29 +183,41 @@ export function clearReportMissingFlags(members: CoverageIdentity[], alongside: 
   }
 }
 
-export function deleteCoverageMapping(id: string) {
+export type ManualMatchDeletion = { deleted: string[]; missing: string[]; affectedMembers: CoverageMember[] };
+
+/** Delete one Manual Match; a missing one is "not found" and changes nothing. */
+export function deleteCoverageMapping(id: string): ManualMatchDeletion {
   const result = deleteCoverageMappings([id]);
   if (!result.deleted.length) throw new CoverageError("Manual Match not found.", 404, "not-found");
-  return id;
+  return result;
 }
 
-export function deleteCoverageMappings(ids: unknown): { deleted: string[]; missing: string[] } {
-  assertCoverageMutationAllowed();
-  if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== "string" || !id.trim()))
-    throw new CoverageError("Select the Manual Matches to delete.");
+/**
+ * Delete each listed Manual Match once. Returns the deleted and missing IDs and
+ * the members of the Manual Matches actually deleted, read inside the delete's
+ * transaction before their rows go. The scan check inside that transaction is
+ * authoritative.
+ */
+export function deleteCoverageMappings(ids: unknown): ManualMatchDeletion {
   const db = database();
   db.exec("BEGIN IMMEDIATE");
   try {
+    assertCoverageMutationAllowed();
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== "string" || !id.trim()))
+      throw new CoverageError("Select the Manual Matches to delete.");
     const deleted: string[] = [];
     const missing: string[] = [];
+    const deletedMembers: CoverageMember[] = [];
     for (const id of new Set<string>(ids)) {
+      deletedMembers.push(...(savedManualMatch(db, id)?.members || []));
       const result = db.prepare("DELETE FROM shelfcheck_coverage_mappings WHERE id=?").run(id);
       if (result.changes) for (const issue of listCoverageIssues().filter(issue=>issue.mappingId === id)) resolveCoverageIssue(issue.id);
       (result.changes ? deleted : missing).push(id);
     }
-    if (deleted.length) db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1,pending=1 WHERE id=1");
+    const affectedMembers = distinctMembers(deletedMembers);
+    if (deleted.length) commitCoverageChange(db, coverageState().revision + 1, affectedMembers);
     db.exec("COMMIT");
-    return { deleted, missing };
+    return { deleted, missing, affectedMembers };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
@@ -188,8 +235,55 @@ export function readCoverageEvidence(): CoverageEvidence[] {
   return row ? JSON.parse(row.payload) : [];
 }
 
-export function completeCoverageRecheck(revision: number) {
-  database().prepare("UPDATE shelfcheck_coverage_state SET pending=0 WHERE id=1 AND revision=?").run(revision);
+/**
+ * A carried member: a Manual Match member (with its show placement) whose shows a
+ * committed change left for a cached recheck, and the coverage revision that carried
+ * it. Carried members survive a restart and keep the comparison pending.
+ */
+export type CarriedMember = { member: CoverageMember; revision: number };
+
+/**
+ * Record a Manual Match change inside its own transaction, as every committing
+ * change must: the new coverage `revision`, a pending comparison, and the
+ * change's affected `members` (each listed once per show) carried at that
+ * revision. A member already carried takes the newer revision.
+ */
+function commitCoverageChange(db: Database, revision: number, members: CoverageMember[]) {
+  db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+  for (const member of members) {
+    const description = { ...member };
+    delete description.reportMissing;
+    db.prepare("INSERT INTO shelfcheck_coverage_carried(provider,episode_id,show_id,revision,payload) VALUES(?,?,?,?,?) ON CONFLICT(provider,episode_id,show_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload")
+      .run(member.provider, member.id, member.showId, revision, JSON.stringify(description));
+  }
+}
+
+/** Every carried member: each committed change's members until a cached recheck or committed full Plex scan run compares every show of it. */
+export function carriedMembers(): CarriedMember[] {
+  return (database().prepare("SELECT revision,payload FROM shelfcheck_coverage_carried ORDER BY rowid").all() as { revision: number; payload: string }[])
+    .map(row => ({ member: JSON.parse(row.payload), revision: row.revision }));
+}
+
+/**
+ * Complete a comparison (a cached recheck or a Plex scan run) of coverage
+ * `revision`: uncarry the carried members it `covered` (compared and published
+ * every show of), each only as carried when the comparison read it (a change
+ * committed since carries it again at a newer revision, and keeps it), then
+ * clear pending only when `revision` is still current and no carried member
+ * remains. Members it did not cover stay carried and pending.
+ */
+export function completeCoverageComparison(revision: number, covered: CarriedMember[] = []) {
+  const db = database();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const { member, revision: carried } of covered)
+      db.prepare("DELETE FROM shelfcheck_coverage_carried WHERE provider=? AND episode_id=? AND show_id=? AND revision<=?").run(member.provider, member.id, member.showId, carried);
+    db.prepare("UPDATE shelfcheck_coverage_state SET pending=0 WHERE id=1 AND revision=? AND NOT EXISTS (SELECT 1 FROM shelfcheck_coverage_carried)").run(revision);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 export function beginCoverageRecheck(revision: number) {
@@ -201,8 +295,7 @@ export function updateCoverageHealth(snapshot: CoverageMapping, health: NonNulla
   const db = database();
   db.exec("BEGIN IMMEDIATE");
   try {
-    const row = db.prepare("SELECT payload FROM shelfcheck_coverage_mappings WHERE id=?").get(snapshot.id) as {payload:string} | undefined;
-    const current: CoverageMapping | undefined = row && JSON.parse(row.payload);
+    const current = savedManualMatch(db, snapshot.id);
     if (current && current.revision === snapshot.revision && ((current.health || "healthy") !== health || current.healthMessage !== healthMessage)) {
       const revision = coverageState().revision + 1;
       db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify({...current, health, healthMessage, revision}), current.id);

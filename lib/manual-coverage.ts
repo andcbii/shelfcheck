@@ -276,11 +276,6 @@ export function completeCoverageComparison(revision: number, covered: CarriedMem
   });
 }
 
-/** Complete a full Plex scan of coverage `revision`: it compared every show, so every member carried at or before that revision is covered. */
-export function completeFullCoverageScan(revision: number) {
-  completeComparison(revision, db => db.prepare("DELETE FROM shelfcheck_coverage_carried WHERE revision<=?").run(revision));
-}
-
 function completeComparison(revision: number, uncarry: (db: ReturnType<typeof database>) => void) {
   const db = database();
   db.exec("BEGIN IMMEDIATE");

@@ -6,7 +6,7 @@ import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison, completeFullCoverageScan, listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -618,6 +618,13 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const settings = readPlexPreferences();
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
   let finishIgnoreTracking: (() => void) | undefined;
+  // What a committed full scan covered: its saved inputs, and the shows it kept last-good results for.
+  let scanInputs: PlexGeneratedInputs | undefined;
+  const uncompared = new Set<string>();
+  /** The carried members a committed full scan covered: none without a complete inventory, else those of every show it compared. */
+  const coveredByFullScan = () => scanInputs?.inventory?.complete
+    ? coveredCarriedMembers(scanInputs, carriedMembers().filter(entry => entry.revision <= coverageRevision), uncompared)
+    : [];
   return scanRuns.run(owner, plexScanMode, {
     fullRun: !targetRatingKey,
     createLogger: () => createScanLogger(settings.diagnosticsEnabled !== false, "shelfcheck-plex"),
@@ -633,8 +640,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       },
       // Only the coverage revision this run snapshotted may be committed, as a report or a Resume point.
       veto: () => coverageState().revision !== coverageRevision,
-      // Only a committed full scan compared every show, so only it covers every carried member; a single-show scan covers none.
-      committed: () => targetRatingKey ? completeCoverageComparison(coverageRevision) : completeFullCoverageScan(coverageRevision),
+      // Only a committed full scan covers carried members, those of the shows it compared; a single-show scan covers none.
+      committed: () => completeCoverageComparison(coverageRevision, targetRatingKey ? [] : coveredByFullScan()),
       succeeded: () => resolveCoverageIssue("scan-failure"),
       failed: (error) => setCoverageIssue({id:"scan-failure",operation:"inventory",provider:"Plex",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"library inventory"},impact:"Library inventory and episode coverage could not be verified. Available last-good results were retained."})}),
       failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
@@ -675,6 +682,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   });
   logger.info("plex.crosswalk.providers", { traktConfigured: Boolean(traktAuth), tmdbFallback: true });
   const inputs = readPlexInputs();
+  scanInputs = inputs;
   const utcDate = startedAt.slice(0, 10);
   // A scan belongs to its planned UTC start date, even when it finishes after midnight.
   const upcomingFullScan = {utcDate, count: (inputs.completedFullScans?.utcDate === utcDate ? inputs.completedFullScans.count : 0) + 1};
@@ -798,6 +806,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const ratingKey = group.identity;
     /** Keep the show's last-good result; `scanStatus` replaces its provider status with this scan's, which is never republished. */
     const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
+      uncompared.add(ratingKey);
       const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
       results.push({...(previous || {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[]}),...scanStatus,warning:message});
       if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];

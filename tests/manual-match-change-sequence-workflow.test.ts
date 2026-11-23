@@ -292,3 +292,56 @@ test("a cached recheck without a complete saved inventory compares nothing and k
   assert.deepEqual(results(h, state).other, { [key(c)]: "missing" }, "The carried members were kept and are now compared");
   assert.equal(state.coverage.pending, 0);
 });
+
+test("a completed full Plex scan keeps the carried members of a show it could not compare", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  // Other's Plex details fail: the scan completes with Other's last results kept.
+  h.state.statuses.set("/library/metadata/other", 404);
+  let state = await h.rerun() as Status;
+  h.state.statuses.delete("/library/metadata/other");
+  assert.deepEqual(results(h, state).other, {}, "Other keeps its last results");
+  assert.ok(pendingIn(state.coverage), "Other was not compared, so the comparison stays pending");
+
+  // Other's members are still carried: a recheck of no change compares Other.
+  await requestCoverageRecheck({ members: [] });
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" });
+  // Other's failed Plex details stay a Coverage Issue until a scan, but no carried change is left.
+  assert.ok(!state.coverage.issues.some(issue => issue.id === "comparison-pending"));
+});
+
+test("a completed full Plex scan with an incomplete library inventory keeps every carried member", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  h.state.statuses.set("/library/metadata/other/allLeaves", 404);
+  let state = await h.rerun() as Status;
+  h.state.statuses.delete("/library/metadata/other/allLeaves");
+  assert.ok(pendingIn(state.coverage), "No show was compared, so the comparison stays pending");
+
+  state = await h.rerun() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" });
+  assert.equal(state.coverage.pending, 0, "The next complete full scan covers them");
+});
+
+test("a catalogue override recheck never completes the comparison while carried members remain", async t => {
+  const h = await harness(t);
+  await h.rerun();
+  const crossShow = (await (await h.save([whole, a, b, c])).json()).mapping;
+  await failedEditDroppingPartC(t, h, crossShow);
+
+  await requestCatalogueRecheck("ratingKey:target", "tmdb");
+  let state = await h.status() as Status;
+  assert.ok(pendingIn(state.coverage), "The catalogue recheck leaves the failed edit's shows pending");
+
+  await requestCoverageRecheck({ members: [] });
+  state = await h.status() as Status;
+  assert.deepEqual(results(h, state).other, { [key(c)]: "missing" }, "The carried members are still compared by the next cached recheck");
+  assert.equal(state.coverage.pending, 0);
+});

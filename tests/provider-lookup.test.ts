@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lookupKey, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey } from "../lib/provider-lookup";
+import { isEpisodeCoordinate, isProviderId, lookupKey, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey } from "../lib/provider-lookup";
 
-// Today's exact stored relationship keys (and lookup Coverage Issue ID suffixes). Story 5 changes them.
+// Today's exact stored relationship keys (and lookup Coverage Issue ID suffixes). SHELFCHECK-141 (Story SHELFCHECK-128) changes them.
 const todaysKeys = [
   [providerLookup.tmdbEpisodeByTvdbEpisode(301), "TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id"],
   [providerLookup.tmdbSeriesByTvdbSeries(20), "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id"],
@@ -48,6 +48,9 @@ test("lookup inputs are validated", () => {
   assert.doesNotThrow(() => providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 0, 0));
   assert.throws(() => providerLookup.tmdbEpisodeByShowSeasonEpisode(10, -1, 1), RangeError);
   assert.throws(() => providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 1, 1.5), RangeError);
+  // Callers check provider answers with the same rules before building a lookup.
+  assert.deepEqual([1, 0, -1, 1.5, "1", Number.NaN].map(isEpisodeCoordinate), [true, true, false, false, false, false]);
+  assert.deepEqual([1, 0, -1, 1.5, "1", Number.NaN].map(isProviderId), [true, false, false, false, false, false]);
 });
 
 test("the per-show clear finds the TVDB episode whose TMDB crosswalk a stored key names", () => {

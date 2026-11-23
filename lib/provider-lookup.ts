@@ -24,12 +24,17 @@ export type ProviderLookup =
   /** Trakt's episode search for one TVDB episode: its Trakt crosswalk. */
   | { kind: "trakt-episode-search-by-tvdb-episode"; tvdbEpisodeId: number };
 
+/** Whether a value is a provider ID a lookup accepts: a positive safe integer. */
+export const isProviderId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
+/** Whether a value is a season or episode number a lookup accepts: a non-negative safe integer. */
+export const isEpisodeCoordinate = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+
 function providerId(value: number, name: string) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer, not ${value}.`);
+  if (!isProviderId(value)) throw new RangeError(`${name} must be a positive integer, not ${value}.`);
   return value;
 }
 function coordinate(value: number, name: string) {
-  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative integer, not ${value}.`);
+  if (!isEpisodeCoordinate(value)) throw new RangeError(`${name} must be a non-negative integer, not ${value}.`);
   return value;
 }
 
@@ -45,26 +50,36 @@ export const providerLookup = {
   traktEpisodeSearchByTvdbEpisode: (tvdbEpisodeId: number): ProviderLookup => ({ kind: "trakt-episode-search-by-tvdb-episode", tvdbEpisodeId: providerId(tvdbEpisodeId, "TVDB episode ID") }),
 };
 
-const TMDB = "https://api.themoviedb.org/3";
-const TVDB = "https://api4.thetvdb.com/v4";
-const TRAKT = "https://api.trakt.tv";
+/** Provider API base URLs, shared by typed lookups and plain transport. */
+export const TMDB_API = "https://api.themoviedb.org/3";
+export const TVDB_API = "https://api4.thetvdb.com/v4";
+const TRAKT_API = "https://api.trakt.tv";
 
 /** The provider that answers a lookup. */
 export function lookupProvider(lookup: ProviderLookup): ProviderName {
-  return lookup.kind.startsWith("tmdb-") ? "TMDB" : lookup.kind.startsWith("tvdb-") ? "TVDB" : "Trakt";
+  switch (lookup.kind) {
+    case "tmdb-episode-by-tvdb-episode":
+    case "tmdb-series-by-tvdb-series":
+    case "tmdb-episode-by-show-season-episode":
+    case "tmdb-series-summary":
+    case "tmdb-series-summary-with-external-ids": return "TMDB";
+    case "tvdb-series-summary":
+    case "tvdb-episode-extended": return "TVDB";
+    case "trakt-episode-search-by-tvdb-episode": return "Trakt";
+  }
 }
 
 /** The request URL that asks a lookup's provider for it. Only transport sends it. */
 export function lookupUrl(lookup: ProviderLookup): string {
   switch (lookup.kind) {
-    case "tmdb-episode-by-tvdb-episode": return `${TMDB}/find/${lookup.tvdbEpisodeId}?external_source=tvdb_id`;
-    case "tmdb-series-by-tvdb-series": return `${TMDB}/find/${lookup.tvdbSeriesId}?external_source=tvdb_id`;
-    case "tmdb-episode-by-show-season-episode": return `${TMDB}/tv/${lookup.tmdbShowId}/season/${lookup.season}/episode/${lookup.episode}`;
-    case "tmdb-series-summary": return `${TMDB}/tv/${lookup.tmdbShowId}`;
-    case "tmdb-series-summary-with-external-ids": return `${TMDB}/tv/${lookup.tmdbShowId}?append_to_response=external_ids`;
-    case "tvdb-series-summary": return `${TVDB}/series/${lookup.tvdbSeriesId}`;
-    case "tvdb-episode-extended": return `${TVDB}/episodes/${lookup.tvdbEpisodeId}/extended`;
-    case "trakt-episode-search-by-tvdb-episode": return `${TRAKT}/search/tvdb/${lookup.tvdbEpisodeId}?type=episode`;
+    case "tmdb-episode-by-tvdb-episode": return `${TMDB_API}/find/${lookup.tvdbEpisodeId}?external_source=tvdb_id`;
+    case "tmdb-series-by-tvdb-series": return `${TMDB_API}/find/${lookup.tvdbSeriesId}?external_source=tvdb_id`;
+    case "tmdb-episode-by-show-season-episode": return `${TMDB_API}/tv/${lookup.tmdbShowId}/season/${lookup.season}/episode/${lookup.episode}`;
+    case "tmdb-series-summary": return `${TMDB_API}/tv/${lookup.tmdbShowId}`;
+    case "tmdb-series-summary-with-external-ids": return `${TMDB_API}/tv/${lookup.tmdbShowId}?append_to_response=external_ids`;
+    case "tvdb-series-summary": return `${TVDB_API}/series/${lookup.tvdbSeriesId}`;
+    case "tvdb-episode-extended": return `${TVDB_API}/episodes/${lookup.tvdbEpisodeId}/extended`;
+    case "trakt-episode-search-by-tvdb-episode": return `${TRAKT_API}/search/tvdb/${lookup.tvdbEpisodeId}?type=episode`;
   }
 }
 

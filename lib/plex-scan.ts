@@ -36,7 +36,7 @@ import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
-import { lookupKey, lookupProvider, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey, type ProviderLookup } from "@/lib/provider-lookup";
+import { isEpisodeCoordinate, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, tmdbEpisodeCrosswalkOfKey, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
@@ -71,8 +71,6 @@ type TmdbEpisodeFindResult = TmdbFindEpisode;
 type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
 type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };
 
-const TMDB = "https://api.themoviedb.org/3";
-const TVDB = "https://api4.thetvdb.com/v4";
 const CACHE_VERSION = PLEX_CACHE_VERSION;
 
 /**
@@ -233,7 +231,7 @@ async function plexJson(path: string, url: string, token: string): Promise<PlexC
 
 /** A TMDB typed lookup, or a plain transport path such as a catalogue season page. */
 async function tmdbJson<T>(request: ProviderLookup | `/${string}`, token: string, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}): Promise<T> {
-  return checkedJson<T>(typeof request === "string" ? plainRequest("TMDB", `${TMDB}${request}`) : lookupRequest(request), { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, episodeIdentity);
+  return checkedJson<T>(typeof request === "string" ? plainRequest("TMDB", `${TMDB_API}${request}`) : lookupRequest(request), { headers: { Accept: "application/json", Authorization: `Bearer ${token}` } }, episodeIdentity);
 }
 
 /** Offline rechecks answer every Trakt lookup from saved relationships, so they never send this login. */
@@ -290,10 +288,6 @@ const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) &&
 function crosswalkLookup(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
   return crosswalk === "IMDb" ? providerLookup.tvdbEpisodeExtended(tvdbEpisodeId) : crosswalk === "Trakt" ? providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId) : providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId);
 }
-/** The saved relationship key of one TVDB episode's crosswalk request. */
-function crosswalkRelationshipKey(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
-  return lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId));
-}
 function readableTmdbCrosswalk(value: unknown) {
   try { responseRecords("TMDB", value, "tv_episode_results"); return true; } catch { return false; }
 }
@@ -315,7 +309,7 @@ type TmdbCrosswalkScan = {startedAt: string; forced: boolean; requested: Set<num
 function tmdbCrosswalkNeedsRequest(tvdbEpisodeId: number, scan: TmdbCrosswalkScan) {
   const relationships = relationshipScope.getStore();
   if (!relationships) return false;
-  const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
+  const key = lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId));
   const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
   const received = Date.parse(shared?.receivedAt || "");
   const current = Number.isFinite(received) && !shared!.invalidatedAt && (scan.forced ? scan.requested.has(tvdbEpisodeId) : new Date(received).toISOString().slice(0, 10) >= scan.startedAt.slice(0, 10));
@@ -340,7 +334,7 @@ function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
   const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
   const outcomeAt = Date.parse(shared?.receivedAt || shared?.rejectedAt || "");
   if (!relationships || !shared || !Number.isFinite(outcomeAt)) return;
-  const key = crosswalkRelationshipKey("TMDB", tvdbEpisodeId);
+  const key = lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId));
   if (!Object.hasOwn(relationships, key)) {
     const issueId = episodeIdentityIssueId(comparisonIssueScope.getStore()?.ratingKey, key);
     const failedAt = Date.parse(getCoverageIssue(issueId)?.failedAt || "");
@@ -364,7 +358,7 @@ function replayedTmdbCrosswalk(tvdbEpisodeId: number) {
  * never current and never grants coverage.
  */
 function rejectTmdbCrosswalk(tvdbEpisodeId: number) {
-  const saved = relationshipScope.getStore()?.[crosswalkRelationshipKey("TMDB", tvdbEpisodeId)];
+  const saved = relationshipScope.getStore()?.[lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId))];
   if (saved) delete saved.receivedAt;
 }
 /**
@@ -404,11 +398,11 @@ async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | nul
  * are requested again instead of reused. `validationFailures` are failed validation lookups.
  */
 async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, traktAuth: ProviderAuth, tmdbToken: string, retry = false) {
-  const cached = relationshipIsReusable(crosswalkRelationshipKey("Trakt", tvdbEpisodeId));
+  const cached = relationshipIsReusable(lookupKey(crosswalkLookup("Trakt", tvdbEpisodeId)));
   const results = await traktJson<unknown>(crosswalkLookup("Trakt", tvdbEpisodeId), traktAuth);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
-  const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && Number.isFinite(result.episode.season) && Number.isFinite(result.episode.number));
+  const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && isEpisodeCoordinate(result.episode.season) && isEpisodeCoordinate(result.episode.number));
   if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[], validationFailures: [] as CrosswalkCause[] };
   const validations = await Promise.allSettled(completeMappings.map(async (result) => {
     const episode = result.episode!;
@@ -432,11 +426,11 @@ async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set
 
 async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<NormalisedCatalogue & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
-  const series = cachedSlug ? null : await checkedJson<{ data?: { slug?: string; name?: string } }>(plainRequest("TVDB", `${TVDB}/series/${seriesId}`), { headers: { Authorization: `Bearer ${token}` } });
+  const series = cachedSlug ? null : await checkedJson<{ data?: { slug?: string; name?: string } }>(plainRequest("TVDB", `${TVDB_API}/series/${seriesId}`), { headers: { Authorization: `Bearer ${token}` } });
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
   while (page < 100) {
-    const body = await checkedJson<{ data?: { episodes?: unknown[] }; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB}/series/${seriesId}/episodes/default?page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
+    const body = await checkedJson<{ data?: { episodes?: unknown[] }; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB_API}/series/${seriesId}/episodes/default?page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
     // Specials (season 0) are kept so Report Missing can be evaluated on them; the
     // comparator still ignores unflagged specials, as before.
@@ -492,7 +486,7 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
   let page = 0;
   let complete = false;
   while (page < 500) {
-    const body = await checkedJson<{ data?: { entityType?: string; recordId?: number; seriesId?: number }[]; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB}/updates?since=${timestamp}&page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
+    const body = await checkedJson<{ data?: { entityType?: string; recordId?: number; seriesId?: number }[]; links?: { next?: string | null } }>(plainRequest("TVDB", `${TVDB_API}/updates?since=${timestamp}&page=${page}`), { headers: { Authorization: `Bearer ${token}` } });
     if (!Array.isArray(body.data)) throw new Error("TVDB returned an incomplete update feed.");
     for (const update of body.data) {
       if (update.seriesId) changed.add(update.seriesId);
@@ -695,7 +689,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           crosswalkFailures.push(failure);
           return failure;
         };
-        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: crosswalkRelationshipKey(crosswalk, tvdbEpisodeId) }]);
+        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId)) }]);
         /** Run one crosswalk per TVDB episode; a failure is recorded against its episode only. */
         const settleCrosswalks = async <T,>(crosswalk: EpisodeCrosswalk, ids: number[], lookup: (tvdbEpisodeId: number) => Promise<T>) => {
           const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, () => lookup(tvdbEpisodeId)); }));
@@ -717,7 +711,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         const recordedCrosswalkFailures = recordedEpisodeCrosswalkFailures(ratingKey);
         const retryCrosswalks = new Set(recordedCrosswalkFailures.map(({ crosswalk, tvdbEpisodeId }) => `${crosswalk}:${tvdbEpisodeId}`));
         if (!replayScope.getStore()) for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) {
-          delete relationshipScope.getStore()?.[crosswalkRelationshipKey(crosswalk, tvdbEpisodeId)];
+          delete relationshipScope.getStore()?.[lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId))];
           if (crosswalk === "IMDb") delete cachedTvdbEpisodeImdbIds[String(tvdbEpisodeId)];
         }
         if (tvdbId) {
@@ -804,7 +798,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             if (traktFailed) recordWarning(`${traktFailed} Trakt episode identity ${traktFailed === 1 ? "lookup" : "lookups"} failed; ${traktFailed === 1 ? "it is" : "they are"} requested again on the next scan.`);
           }
           const crosswalks = await settleCrosswalks("TMDB", [...tmdbFallbackIds], (tvdbEpisodeId) => {
-            if (!replayScope.getStore()) input.checkedTmdbCrosswalks?.add(crosswalkRelationshipKey("TMDB", tvdbEpisodeId));
+            if (!replayScope.getStore()) input.checkedTmdbCrosswalks?.add(lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId)));
             const scan = input.tmdbCrosswalkScan;
             if (replayScope.getStore()) replayedTmdbCrosswalk(tvdbEpisodeId);
             else if (scan && tmdbCrosswalkNeedsRequest(tvdbEpisodeId, {...scan, forced: scan.forced || retryCrosswalks.has(`TMDB:${tvdbEpisodeId}`)})) {
@@ -1135,7 +1129,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         tmdbShowForTvdb: tvdbId => requestTmdbShowForTvdb(tvdbId, config.tmdbToken),
         tmdbEpisodes: show => tmdbEpisodes(show, config.tmdbToken),
         tvdbSeries: (id, showTitle) => tvdbSeries(id, token, undefined, showTitle),
-        tvdbEnglishTitle: tvdbEpisodeId => scanProviderClient.json(`${TVDB}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
+        tvdbEnglishTitle: tvdbEpisodeId => scanProviderClient.json(`${TVDB_API}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB"),
       },
       show: { ratingKey, title: primary.title },
       previousComparison: savedComparison,

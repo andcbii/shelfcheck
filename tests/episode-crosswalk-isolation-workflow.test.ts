@@ -187,3 +187,16 @@ test("a failed Trakt validation is reported and retried even when another valida
   assert.deepEqual(crosswalkIssues(recovered).filter(item => item.episode?.id === 301), []);
   assert.ok(!missingKeys(recovered).includes("TVDB:301"));
 });
+
+test("a Trakt mapping to a negative or fractional TMDB season or episode is incomplete, like one with no coordinates", async t => {
+  const { rerun, state, requests } = await harness(t, catalogue, owned);
+  await connectTrakt();
+  // Trakt maps TVDB 301 to TMDB 9001 correctly, and also to coordinates no TMDB episode can have.
+  const mapping = (season: number, number: number, tmdb: number) => ({ type: "episode", episode: { season, number, ids: { tvdb: 301, tmdb } }, show: { ids: { tmdb: 10, tvdb: 20 } } });
+  state.bodies.set("/search/tvdb/301", [mapping(-1, 1, 9101), mapping(1, 1.5, 9102), mapping(1, 1, tmdb1.id)]);
+  const result = await rerun();
+  assert.deepEqual(showFailures(result), []);
+  assert.ok(!missingKeys(result).includes("TVDB:301"), "the complete mapping still validates and collects the episode");
+  assert.deepEqual(crosswalkIssues(result).filter(item => item.episode?.id === 301), [], "an unusable mapping is not a failed crosswalk");
+  assert.deepEqual(requests.filter(path => /\/season\/-1\/|\/episode\/1\.5/.test(path)), [], "no TMDB validation is requested for it");
+});

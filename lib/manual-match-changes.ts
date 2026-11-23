@@ -1,7 +1,7 @@
 import "server-only";
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
 import { requestCoverageRecheck, type CoverageImpact } from "@/lib/plex-scan";
-import { assertCoverageMutationAllowed, deleteCoverageMapping, deleteCoverageMappings, saveCoverageMapping } from "@/lib/manual-coverage";
+import { assertCoverageMutationAllowed, deleteCoverageMapping, deleteCoverageMappings, saveCoverageMapping, type ManualMatchEdit } from "@/lib/manual-coverage";
 import type { CoverageMapping } from "@/lib/manual-coverage-model";
 
 /**
@@ -14,30 +14,33 @@ import type { CoverageMapping } from "@/lib/manual-coverage-model";
 
 /**
  * A save as the Manual Match page sends it: a reviewed save of a resolved
- * `preview` (new, or an edit of `id` at `revision`), or, with no preview, a
- * Report Missing flag edit of the existing Manual Match `id`.
+ * `preview` (new, or an `edit` of an existing Manual Match), or, with no
+ * preview, a Report Missing flag edit of the existing Manual Match `edit`.
+ * The preview token is checked by the resolver, and the revision and flags by
+ * the store, which stay the authority for their errors.
  */
-export type ManualMatchSave = { id?: string; revision?: unknown; preview?: unknown; reportMissing?: unknown };
+export type ManualMatchSave = { edit?: ManualMatchEdit; preview?: unknown; reportMissing?: unknown };
 
-/** Save a Manual Match. `created` is true for a new Manual Match, false for an edit. */
-export async function saveManualMatch(request: ManualMatchSave): Promise<{ mapping: CoverageMapping; created: boolean }> {
-  // The store validates the revision inside its transaction.
-  const edit = request.id === undefined ? undefined : { id: request.id, revision: request.revision as number };
-  if (request.preview === undefined && edit && request.reportMissing !== undefined) {
+/** A saved Manual Match with its Report Missing flags; `created` is true for a new one, false for an edit. */
+export type SavedManualMatch = { manualMatch: CoverageMapping; created: boolean };
+
+/** Save a Manual Match. */
+export async function saveManualMatch({ edit, preview, reportMissing }: ManualMatchSave): Promise<SavedManualMatch> {
+  if (preview === undefined && edit && reportMissing !== undefined) {
     // Changing only Report Missing keeps the saved members, so it needs no provider review.
-    const { mapping, affectedMembers } = saveCoverageMapping(undefined, edit, request.reportMissing);
-    await recheckCommitted({ members: affectedMembers });
-    return { mapping, created: false };
+    const { mapping, affectedMembers } = saveCoverageMapping(undefined, edit, reportMissing);
+    await recheckAfterCommit({ members: affectedMembers });
+    return { manualMatch: mapping, created: false };
   }
   // Fail fast before contacting providers; the store's check inside its transaction stays authoritative.
   assertCoverageMutationAllowed();
-  const reviewed = reviewedCoverageMembers(request.preview);
+  const reviewed = reviewedCoverageMembers(preview);
   // Revalidate the exact reviewed canonical identities. Coordinates can locate a
   // different TMDB record since preview, but must never replace that identity.
   await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
-  const { mapping, affectedMembers } = saveCoverageMapping(reviewed, edit, request.reportMissing);
-  await recheckCommitted({ members: affectedMembers });
-  return { mapping, created: !edit };
+  const { mapping, affectedMembers } = saveCoverageMapping(reviewed, edit, reportMissing);
+  await recheckAfterCommit({ members: affectedMembers });
+  return { manualMatch: mapping, created: !edit };
 }
 
 /**
@@ -47,7 +50,7 @@ export async function saveManualMatch(request: ManualMatchSave): Promise<{ mappi
  */
 export async function deleteManualMatches(target: { id: string } | { ids: unknown }): Promise<{ deleted: string[]; missing: string[] }> {
   const { deleted, missing, affectedMembers } = "id" in target ? deleteCoverageMapping(target.id) : deleteCoverageMappings(target.ids);
-  if (deleted.length) await recheckCommitted({ members: affectedMembers });
+  if (deleted.length) await recheckAfterCommit({ members: affectedMembers });
   return { deleted, missing };
 }
 
@@ -60,7 +63,7 @@ export async function deleteManualMatches(target: { id: string } | { ids: unknow
  * Known limit: a recheck that fails early may not yet have written every
  * affected show's refresh obligation; a later recheck or scan writes them.
  */
-async function recheckCommitted(impact: CoverageImpact): Promise<void> {
+async function recheckAfterCommit(impact: CoverageImpact): Promise<void> {
   try {
     await requestCoverageRecheck(impact);
   } catch (error) {

@@ -28,8 +28,9 @@ export async function POST(request: Request) {
     }
     if (body.id !== undefined && (typeof body.id !== "string" || !body.id))
       throw new CoverageError("Supply the Manual Match ID to edit.");
-    const { mapping, created } = await saveManualMatch({ id: body.id, revision: body.revision, preview: body.preview, reportMissing: body.reportMissing });
-    return Response.json({ mapping, ...coverageState() }, { status: created ? 201 : 200, headers });
+    const edit = body.id === undefined ? undefined : { id: body.id, revision: body.revision };
+    const { manualMatch, created } = await saveManualMatch({ edit, preview: body.preview, reportMissing: body.reportMissing });
+    return Response.json({ mapping: manualMatch, ...coverageState() }, { status: created ? 201 : 200, headers });
   } catch (error) {
     return failure(error);
   }

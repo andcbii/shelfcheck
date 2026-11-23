@@ -1099,7 +1099,8 @@ test("a TMDB record gone after 15 counted 404 days and 60 days stops being compa
   let show = await f.run() as Judged;
   assert.deepEqual(missingTmdb(show),[1002]);
   const member = (provider: "TMDB"|"TVDB", id: number, showId: number, episode: number) => ({provider,id,showId,show:`${provider} ${showId}`,title:`Episode ${episode}`,season:1,episode,url:""});
-  manualCoverage.saveCoverageMapping([member("TMDB",1002,10,2),member("TVDB",3001,3,1)]);
+  const saved = manualCoverage.saveCoverageMapping([member("TMDB",1002,10,2),member("TVDB",3001,3,1)]);
+  assert.deepEqual(saved.mapping.members.map(m=>`${m.provider}:${m.id}`),["TMDB:1002","TVDB:3001"]);
   // 14 earlier 404 days on TMDB series 10's series request.
   for (let n = 40; n < 54; n++) seriesNotFoundHistory().recordNotFound("tmdb",10,day(n));
   const recheck = async () => {

@@ -44,9 +44,12 @@ export function providerVerificationIssueId(provider: "TMDB" | "TVDB") {
   return issueId(`provider-verification:${provider}`);
 }
 
-/** One Plex record's episode inventory in a show group, keyed by the group's identity and the record's rating key. */
-export function plexInventoryIssueId(showIdentity: string, recordRatingKey: string) {
-  return issueId(`inventory:${showIdentity}:${recordRatingKey}`);
+/**
+ * One Plex record's episode inventory in a show group, keyed by the group's identity and the record's rating key.
+ * A record without a rating key keeps the text earlier versions saved for it: `inventory:<group>:undefined`.
+ */
+export function plexInventoryIssueId(showIdentity: string, recordRatingKey: string | undefined) {
+  return issueId(`inventory:${showIdentity}:${recordRatingKey ?? "undefined"}`);
 }
 /** A show's Plex metadata (its inventory details) could not be read. */
 export function inventoryDetailsIssueId(ratingKey: string) {

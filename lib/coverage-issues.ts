@@ -80,7 +80,7 @@ function storedIssue(payload: string): CoverageIssue {
   const issue = JSON.parse(payload);
   // A payload that is not an object is returned as it was read, as before adoption.
   if (typeof issue !== "object" || issue === null || Array.isArray(issue)) return issue;
-  return { ...issue, id: adoptStoredId(issue.id), ...(Array.isArray(issue.causedBy) ? { causedBy: issue.causedBy.map(adoptStoredId) } : {}) };
+  return { ...issue, ...("id" in issue ? { id: adoptStoredId(issue.id) } : {}), ...(Array.isArray(issue.causedBy) ? { causedBy: issue.causedBy.map(adoptStoredId) } : {}) };
 }
 /**
  * The cause links of a carrier saved outside the issue table (such as a saved catalogue's title

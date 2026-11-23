@@ -66,3 +66,27 @@ test("a saved title-recovery cause of any kind still loads, and the title-recove
     assert.match(root.impacts[0], /^Show: English title recovery could not be checked: 401 — TVDB request failed\./, root.id);
   }
 });
+
+test("a saved payload without an ID reads back with exactly its saved keys", t => {
+  temporaryDatabase(t);
+  database().prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?)").run("legacy-no-id:1", JSON.stringify({operation: "legacy", scope: "library", cause: "Cause without an ID.", action: "Run a scan."}));
+  const [read] = listCoverageIssues();
+  assert.deepEqual(Object.keys(read), ["operation", "scope", "cause", "action"]);
+  assert.equal(Object.hasOwn(read, "id"), false);
+});
+
+test("a show's stored prefix query returns only that show's IDs, not those of neighbouring shows whose keys share its start", t => {
+  temporaryDatabase(t);
+  seedStoredCoverageIssues(database(),
+    issue("episode-check:ratingKey:1:title-recovery:TVDB:301"),
+    issue("episode-check:ratingKey:1:catalogue-record:TVDB:302"),
+    issue("episode-check:ratingKey:10:title-recovery:TVDB:401"),
+    issue("episode-check:ratingKey:1|tvdb:81189:title-recovery:TVDB:501"),
+  );
+  assert.deepEqual(coverageIssueIdsWithPrefix(episodeCheckShowPrefix("ratingKey:1")), [
+    "episode-check:ratingKey:1:catalogue-record:TVDB:302",
+    "episode-check:ratingKey:1:title-recovery:TVDB:301",
+  ]);
+  assert.deepEqual(coverageIssueIdsWithPrefix(episodeCheckShowPrefix("ratingKey:10")), ["episode-check:ratingKey:10:title-recovery:TVDB:401"]);
+  assert.deepEqual(coverageIssueIdsWithPrefix(episodeCheckShowPrefix("ratingKey:1|tvdb:81189")), ["episode-check:ratingKey:1|tvdb:81189:title-recovery:TVDB:501"]);
+});

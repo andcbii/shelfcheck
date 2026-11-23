@@ -50,6 +50,11 @@ const target = {
   tvdbCached: false,
   providerEpisodes: [{source: "TVDB" as const, providerEpisodeId: 303, season: 2, episode: 3, title: "Three"}],
 };
+/** The same failed-request issues as Coverage Issue IDs, for the store's lookups; their text is pinned by `ids` above. */
+const issueIds = {
+  tmdbCrosswalk303: lookupFailureIssueId(target.ratingKey, providerLookup.tmdbEpisodeByTvdbEpisode(303)),
+  tvdbExtended303: lookupFailureIssueId(target.ratingKey, providerLookup.tvdbEpisodeExtended(303)),
+};
 const impact = "Episode identity and coverage could not be fully verified. Available last-good results were retained.";
 const showOf = {ratingKey: "ratingKey:target", title: "Target", tmdbId: 10, tvdbId: 20};
 const episode303 = {provider: "TVDB", id: 303, showId: 20, season: 2, episode: 3, title: "Three"};
@@ -147,12 +152,12 @@ test("a TVDB lookup that failed because of TVDB authentication links to the auth
   const diagnostics = lookupDiagnostics({...target, tvdbAuthenticationError: authentication});
   diagnostics.raiseFailure(providerLookup.tvdbEpisodeExtended(303), authentication);
   assert.deepEqual(Object.keys(JSON.parse(storedIssue(ids.tvdbExtended303)!)).slice(0, 4), ["id", "failedAt", "causedBy", "operation"]);
-  assert.deepEqual(getCoverageIssue(lookupFailureIssueId(target.ratingKey, providerLookup.tvdbEpisodeExtended(303)))?.causedBy, ["provider-authentication:TVDB"]);
+  assert.deepEqual(getCoverageIssue(issueIds.tvdbExtended303)?.causedBy, ["provider-authentication:TVDB"]);
 
   diagnostics.raiseFailure(providerLookup.tvdbEpisodeExtended(303), new ProviderHttpError("TVDB", 503));
-  assert.equal(getCoverageIssue(lookupFailureIssueId(target.ratingKey, providerLookup.tvdbEpisodeExtended(303)))?.causedBy, undefined, "another TVDB failure has no authentication cause");
+  assert.equal(getCoverageIssue(issueIds.tvdbExtended303)?.causedBy, undefined, "another TVDB failure has no authentication cause");
   diagnostics.raiseFailure(providerLookup.tmdbEpisodeByTvdbEpisode(303), authentication);
-  assert.equal(getCoverageIssue(lookupFailureIssueId(target.ratingKey, providerLookup.tmdbEpisodeByTvdbEpisode(303)))?.causedBy, undefined, "only TVDB lookups depend on TVDB authentication");
+  assert.equal(getCoverageIssue(issueIds.tmdbCrosswalk303)?.causedBy, undefined, "only TVDB lookups depend on TVDB authentication");
 });
 
 test("a successful response resolves its lookup's failed request, which the read port then no longer reports", t => {
@@ -179,7 +184,7 @@ test("a successful response with an unreadable body resolves the failed request 
   const record = lookupFailureRecord("ratingKey:target");
   assert.equal(record.failure(lookup), undefined);
   assert.deepEqual(record.episodeCrosswalkFailures(), [{crosswalk: "TMDB", tvdbEpisodeId: 303}]);
-  assert.equal(getCoverageIssue(lookupFailureIssueId(target.ratingKey, providerLookup.tmdbEpisodeByTvdbEpisode(303))), undefined);
+  assert.equal(getCoverageIssue(issueIds.tmdbCrosswalk303), undefined);
   assert.equal(listCoverageIssues().length, 1);
 });
 

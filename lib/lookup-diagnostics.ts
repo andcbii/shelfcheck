@@ -1,9 +1,8 @@
 import "server-only";
-import { lookupFailureIssueId } from "@/lib/coverage-issue-ids";
+import { lookupFailureIssueId, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 import { providerLookupContext, resolveCoverageIssue, setCoverageIssue, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { lookupProvider, type ProviderLookup } from "@/lib/provider-lookup";
 import type { ProviderEpisode } from "@/lib/plex-comparison";
-import { TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 
 /**
  * The comparison a lookup belongs to, as its failure diagnostics describe it: the show's identity,

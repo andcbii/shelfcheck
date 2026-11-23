@@ -23,6 +23,7 @@ test("library-wide Coverage Issue IDs keep their saved text", () => {
 test("show-scoped Coverage Issue IDs keep their saved text, including rating keys with colons", () => {
   assert.equal(plexInventoryIssueId("tvdb:81189", "4412"), "inventory:tvdb:81189:4412");
   assert.equal(plexInventoryIssueId("4412", "4412"), "inventory:4412:4412");
+  assert.equal(plexInventoryIssueId("tvdb:81189", undefined), "inventory:tvdb:81189:undefined", "a record without a rating key keeps its saved text");
   assert.equal(inventoryDetailsIssueId("4412"), "inventory-details:4412");
   assert.equal(inventoryDetailsIssueId("tmdb:1396|tvdb:81189"), "inventory-details:tmdb:1396|tvdb:81189");
   assert.equal(comparisonInputsIssueId("4412"), "comparison-inputs:4412");

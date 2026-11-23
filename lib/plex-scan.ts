@@ -768,7 +768,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     })));
     for (const [index,result] of responses.entries()) {
       // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
-      const issueId = plexInventoryIssueId(group.identity, group.records[index].ratingKey ?? "undefined");
+      const issueId = plexInventoryIssueId(group.identity, group.records[index].ratingKey);
       if (result.status === "fulfilled") {
         const { ratingKey, response } = result.value;
         if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);

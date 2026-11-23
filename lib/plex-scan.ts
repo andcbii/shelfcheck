@@ -1202,17 +1202,18 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
 }
 /**
  * The carried members a comparison covered: those none of whose saved show comparisons is in
- * `uncompared`. A member with no saved show comparison is covered only when every uncompared
- * show and every `current` show (the comparison's library inventory and report, less ignored
- * shows) has one: then the member belongs to no show that can affect a result. Otherwise it
- * could belong to a show with no saved comparison, which this comparison could not compare.
+ * `uncompared`. Nothing is covered while any uncompared or `current` show (the comparison's
+ * library inventory and report, less ignored shows) has no saved comparison: that show could
+ * hold any carried member, even one another saved comparison also matches through an alias,
+ * and this comparison could not compare it. A member no saved comparison holds is otherwise
+ * covered: it belongs to no show that can affect a result.
  */
 function coveredCarriedMembers(inputs: PlexGeneratedInputs, carried: CarriedMember[], uncompared: ReadonlySet<string>, current: Iterable<string>) {
-  const unplaced=[...uncompared,...current].some(key=>!inputs.comparisons[key]);
-  return carried.filter(({member})=>{
-    const shows=Object.entries(inputs.comparisons).filter(([,input])=>memberInComparison(inputs,input,member)).map(([key])=>key);
-    return shows.length ? !shows.some(key=>uncompared.has(key)) : !unplaced;
-  });
+  // A current or uncompared show without a saved comparison could hold any carried member, even
+  // one another comparison also matches (aliases overlap), so then nothing is covered.
+  if ([...uncompared,...current].some(key=>!inputs.comparisons[key])) return [];
+  return carried.filter(({member})=>
+    !Object.entries(inputs.comparisons).some(([key,input])=>uncompared.has(key) && memberInComparison(inputs,input,member)));
 }
 async function recheckCoverage(impact: CoverageImpact) {
   // Every carried member is rechecked too, with this change's. Only the members whose shows

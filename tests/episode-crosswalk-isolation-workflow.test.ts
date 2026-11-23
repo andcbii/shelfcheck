@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import { catalogues, plexScan } from "./catalogue-override-harness";
 import { harness, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const config = await import("../lib/server-config");
@@ -199,4 +200,76 @@ test("a Trakt mapping to a negative or fractional TMDB season or episode is inco
   assert.ok(!missingKeys(result).includes("TVDB:301"), "the complete mapping still validates and collects the episode");
   assert.deepEqual(crosswalkIssues(result).filter(item => item.episode?.id === 301), [], "an unusable mapping is not a failed crosswalk");
   assert.deepEqual(requests.filter(path => /\/season\/-1\/|\/episode\/1\.5/.test(path)), [], "no TMDB validation is requested for it");
+});
+
+// An optional series lookup named by provider data (an episode crosswalk's show_id, or a saved alias of
+// one) whose ID no lookup accepts is skipped: it never fails the show comparison, and the exact owned
+// episode the crosswalk names still grants coverage.
+const recheckTarget = () => plexScan.requestCoverageRecheck({ members: [{ provider: "TVDB", id: tvdb3.id, showId: 20, show: "Target", title: "Three", season: 2, episode: 3, url: "" }] });
+const settledStatus = async <T,>(status: () => Promise<T>) => {
+  let result = await status();
+  for (let i = 0; i < 100 && pending(result); i++) { await new Promise(resolve => setTimeout(resolve, 10)); result = await status(); }
+  return result;
+};
+
+test("a TMDB crosswalk naming an unusable show ID keeps the owned episode's coverage in a live scan and a cached recheck", async t => {
+  const { rerun, state, status, requests } = await harness(t, catalogue, owned);
+  state.bodies.set("/3/find/301", { tv_episode_results: [{ id: tmdb1.id, show_id: -1, season_number: 1, episode_number: 1 }] });
+  state.statuses.set("/3/tv/-1", 404);
+  const scanned = await rerun();
+  assert.deepEqual(showFailures(scanned), [], "no show-level comparison failure");
+  assert.deepEqual(missingKeys(scanned), ["TMDB:9003", "TVDB:302", "TVDB:303"], "Plex owns the exact TMDB episode the crosswalk names, so TVDB 301 is collected");
+  assert.deepEqual(crosswalkIssues(scanned), []);
+  assert.deepEqual(requests.filter(path => path.startsWith("/3/tv/-")), [], "no series summary is requested for the unusable show ID");
+
+  requests.length = 0;
+  await recheckTarget();
+  const rechecked = await settledStatus(status);
+  assert.equal(requests.length, 0, "the cached recheck performs no HTTP");
+  assert.deepEqual(showFailures(rechecked), [], "the cached recheck does not fail the show either");
+  assert.deepEqual(missingKeys(rechecked), missingKeys(scanned));
+});
+
+test("a saved TMDB episode alias with an unusable show ID fails neither a cached recheck nor a later live scan", async t => {
+  const { rerun, state, status, requests } = await harness(t, catalogue, owned);
+  state.bodies.set("/3/find/301", found(tmdb1));
+  const scanned = await rerun();
+  assert.deepEqual(missingKeys(scanned), ["TMDB:9003", "TVDB:302", "TVDB:303"]);
+  // A comparison saved with a malformed episode alias, as older or damaged saved inputs may hold.
+  const saved = catalogues.readPlexInputs().comparisons["ratingKey:target"]!;
+  catalogues.savePlexComparison("ratingKey:target", { ...saved, tmdbEpisodeAliases: [...(saved.tmdbEpisodeAliases || []), -1] });
+
+  requests.length = 0;
+  await recheckTarget();
+  const rechecked = await settledStatus(status);
+  assert.equal(requests.length, 0, "the cached recheck performs no HTTP");
+  assert.deepEqual(showFailures(rechecked), [], "the saved malformed alias does not fail the cached recheck");
+  assert.deepEqual(missingKeys(rechecked), missingKeys(scanned));
+
+  const again = await rerun();
+  assert.deepEqual(showFailures(again), [], "nor the next live scan");
+  assert.deepEqual(missingKeys(again), missingKeys(scanned), "the owned episode's crosswalk coverage is preserved");
+  assert.deepEqual(requests.filter(path => path.startsWith("/3/tv/-")), [], "no series summary is requested for the unusable alias");
+});
+
+test("a Trakt mapping to a TMDB show ID no lookup accepts is incomplete, in a live scan and a cached recheck", async t => {
+  const { rerun, state, status, requests } = await harness(t, catalogue, owned);
+  await connectTrakt();
+  // TMDB names an unusable series for TVDB 20, so that ID counts as equivalent; Trakt maps TVDB 301 into it.
+  state.bodies.set("/3/find/20", { tv_results: [{ id: -1 }] });
+  state.bodies.set("/search/tvdb/301", [{ type: "episode", episode: { season: 1, number: 1, ids: { tvdb: 301, tmdb: tmdb1.id } }, show: { ids: { tmdb: -1, tvdb: 20 } } }]);
+  state.bodies.set("/3/find/301", found(tmdb1));
+  const scanned = await rerun();
+  assert.deepEqual(showFailures(scanned), []);
+  assert.deepEqual(crosswalkIssues(scanned), [], "an unusable mapping is not a failed crosswalk");
+  assert.deepEqual(requests.filter(path => path.startsWith("/3/tv/-")), [], "no TMDB validation is requested for it");
+  assert.deepEqual(missingKeys(scanned), ["TMDB:9003", "TVDB:302", "TVDB:303"], "the TMDB crosswalk still collects TVDB 301");
+
+  requests.length = 0;
+  await recheckTarget();
+  const rechecked = await settledStatus(status);
+  assert.equal(requests.length, 0, "the cached recheck performs no HTTP");
+  assert.deepEqual(showFailures(rechecked), []);
+  assert.deepEqual(crosswalkIssues(rechecked), []);
+  assert.deepEqual(missingKeys(rechecked), missingKeys(scanned));
 });

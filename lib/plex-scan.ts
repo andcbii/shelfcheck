@@ -36,7 +36,7 @@ import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
-import { isEpisodeCoordinate, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, tmdbEpisodeCrosswalkOfKey, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
+import { isEpisodeCoordinate, isProviderId, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, tmdbEpisodeCrosswalkOfKey, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
@@ -402,7 +402,7 @@ async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set
   const results = await traktJson<unknown>(crosswalkLookup("Trakt", tvdbEpisodeId), traktAuth);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
-  const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && isEpisodeCoordinate(result.episode.season) && isEpisodeCoordinate(result.episode.number));
+  const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && isProviderId(result.show!.ids!.tmdb) && Number.isFinite(result.episode.ids.tmdb) && isEpisodeCoordinate(result.episode.season) && isEpisodeCoordinate(result.episode.number));
   if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[], validationFailures: [] as CrosswalkCause[] };
   const validations = await Promise.allSettled(completeMappings.map(async (result) => {
     const episode = result.episode!;
@@ -724,8 +724,9 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         const extraTmdbShows = await Promise.allSettled(plexTmdbIds.filter((id) => !knownTmdbIds.has(id) && id !== tmdbShow?.id).map((id) => tmdbJson<unknown>(providerLookup.tmdbSeriesSummary(id), config.tmdbToken)));
         tmdbSeriesMatches = [...tmdbSeriesMatches, ...(tmdbShow ? [tmdbShow] : []), ...extraTmdbShows.flatMap((result) => result.status === "fulfilled" && usableTmdbShow(result.value) ? [result.value] : [])].filter((show, index, matches) => matches.findIndex((candidate) => candidate.id === show.id) === index);
         // Episode-discovered aliases describe provider relationships, independently of
-        // whether the current library still owns one of their episodes.
-        const savedAliasSummaries = await Promise.allSettled([...tmdbEpisodeAliases].filter(id => !tmdbSeriesMatches.some(show => show.id === id)).map(id => tmdbJson<unknown>(providerLookup.tmdbSeriesSummaryWithExternalIds(id), config.tmdbToken)));
+        // whether the current library still owns one of their episodes. A saved alias no series lookup
+        // accepts names no series and is skipped.
+        const savedAliasSummaries = await Promise.allSettled([...tmdbEpisodeAliases].filter(id => isProviderId(id) && !tmdbSeriesMatches.some(show => show.id === id)).map(id => tmdbJson<unknown>(providerLookup.tmdbSeriesSummaryWithExternalIds(id), config.tmdbToken)));
         tmdbSeriesMatches.push(...savedAliasSummaries.flatMap(result => result.status === "fulfilled" && usableTmdbShow(result.value) ? [result.value] : []));
         equivalentTmdbIds = tmdbShow?.id || tmdbId ? equivalentTmdbShowIds((tmdbShow?.id || tmdbId)!, tmdbSeriesMatches) : new Set<number>();
         const tvdbSummaries = await Promise.allSettled(plexTvdbIds.map((id) => tvdbShow(id, token)));
@@ -807,7 +808,8 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
             }
             return findTmdbEpisodeByTvdbId(tvdbEpisodeId, config.tmdbToken);
           });
-          const unknownTmdbShowIds = [...new Set(crosswalks.fulfilled.flatMap(({ value: matches }) => matches.flatMap((episode) => typeof episode.show_id === "number" && !equivalentTmdbIds.has(episode.show_id) ? [episode.show_id] : [])))];
+          // A show ID no series lookup accepts is not an alias; the episode match itself still counts.
+          const unknownTmdbShowIds = [...new Set(crosswalks.fulfilled.flatMap(({ value: matches }) => matches.flatMap((episode) => isProviderId(episode.show_id) && !equivalentTmdbIds.has(episode.show_id) ? [episode.show_id] : [])))];
           for (const id of unknownTmdbShowIds) tmdbEpisodeAliases.add(id);
           const aliasChecks = await Promise.allSettled(unknownTmdbShowIds.map((showId) => tmdbJson<unknown>(providerLookup.tmdbSeriesSummaryWithExternalIds(showId), config.tmdbToken)));
           for (const alias of aliasChecks) if (alias.status === "fulfilled" && usableTmdbShow(alias.value)) {
@@ -1246,7 +1248,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const reuseTvdbRelationships = !targetRatingKey && !stale?.tvdb && (tvdbVerifiedChanges === null || !tvdbAliases.some(id => tvdbVerifiedChanges.has(id)));
     const tmdbEpisodeAliases = new Set(savedComparison?.tmdbEpisodeAliases || []);
     // Another TVDB candidate's saved TMDB association is kept for an offline recheck that switches to it; this scan never reads it.
-    const otherTvdbAssociations = new Set(tvdbCandidates.filter(id => id !== tvdbId).map(id => lookupKey(providerLookup.tmdbSeriesByTvdbSeries(id))));
+    const otherTvdbAssociations = new Set(tvdbCandidates.filter(id => id !== tvdbId && isProviderId(id)).map(id => lookupKey(providerLookup.tmdbSeriesByTvdbSeries(id))));
     const relationships = Object.fromEntries(Object.entries(savedComparison?.relationships || {}).filter(([key,value]) => otherTvdbAssociations.has(key) || (value.provider === "TMDB" ? reuseTmdbRelationships : value.provider === "TVDB" ? reuseTvdbRelationships : reuseTmdbRelationships && reuseTvdbRelationships)));
     const checkedTmdbCrosswalks = new Set<string>();
     const retainedComparison = (saved: SavedPlexComparison) => ({...withLiveCrosswalkOutcomes(saved,relationships,checkedTmdbCrosswalks),refresh});

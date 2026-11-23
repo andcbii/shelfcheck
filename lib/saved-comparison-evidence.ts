@@ -1,7 +1,7 @@
 import "server-only";
 import type { CatalogueProvider } from "@/lib/catalogue-selection";
 import { answeredEvidence, isSeriesLookup, SavedRelationshipUnavailableError, type ComparisonEvidence, type LookupAnswer } from "@/lib/comparison-evidence";
-import { lookupFailureIssueId } from "@/lib/lookup-diagnostics";
+import { lookupFailureIssueId } from "@/lib/coverage-issue-ids";
 import type { LookupFailureRecord } from "@/lib/lookup-failure-record";
 import { usableProviderCatalogue, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { showProviderIds } from "@/lib/plex-inventory";

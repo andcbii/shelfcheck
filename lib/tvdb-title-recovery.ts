@@ -3,7 +3,7 @@ import { episodeReference, usableTitle } from "@/lib/compound-episodes";
 import { providerLookupContext } from "@/lib/coverage-issues";
 import { ProviderHttpError } from "@/lib/provider-client";
 import { isRecord } from "@/lib/value-guards";
-import { titleRecoveryIssueId } from "@/lib/episode-check-issues";
+import { titleRecoveryIssueId, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison";
 
 /**
@@ -55,7 +55,7 @@ export async function recoverTvdbTitles({ episodes, previous, requestEnglish, au
     } catch (error) {
       // TVDB answers 404 when the episode has no English translation: no title, not an outage.
       if (error instanceof ProviderHttpError && error.status === 404) unresolved[id] = { outcome: "no-english-title" };
-      else unresolved[id] = { outcome: "request-failed", reason: providerLookupContext(error, { source: [], impact: "" }).cause, ...(authenticationError !== undefined && error === authenticationError ? { causedBy: ["provider-authentication:TVDB"] } : {}) };
+      else unresolved[id] = { outcome: "request-failed", reason: providerLookupContext(error, { source: [], impact: "" }).cause, ...(authenticationError !== undefined && error === authenticationError ? { causedBy: [TVDB_AUTHENTICATION_ISSUE] } : {}) };
     }
   }));
   return {

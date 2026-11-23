@@ -1,4 +1,5 @@
-import { catalogueIssueIds, PROVIDERS } from "@/lib/catalogue-selection";
+import { PROVIDERS } from "@/lib/catalogue-selection";
+import { catalogueIssueIds } from "@/lib/coverage-issue-ids";
 import type { CoverageIssue } from "@/lib/coverage-issues";
 import { isUnmatchedShow } from "@/lib/plex-reporting";
 import type { PlexShowResult } from "@/lib/plex-scan";

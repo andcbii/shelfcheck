@@ -94,9 +94,11 @@ export function migrateDatabase(db: DatabaseSync) {
     // Another connection may have migrated while this one waited for the write lock.
     const found = userVersion(db);
     if (found > SCHEMA_VERSION) throw newerDatabaseError(found);
+    // A database being created has nothing to upgrade, so its migrations log nothing.
+    const created = found === 0 && !hasAnyTable(db);
     for (let next = found; next < SCHEMA_VERSION; next++) {
       const line = migrations[next](db);
-      if (line) committedLog.push(line);
+      if (line && !created) committedLog.push(line);
     }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec("COMMIT");
@@ -105,6 +107,10 @@ export function migrateDatabase(db: DatabaseSync) {
     throw error;
   }
   for (const line of committedLog) console.info(line);
+}
+
+function hasAnyTable(db: DatabaseSync) {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").get());
 }
 
 function hasTable(db: DatabaseSync, name: string) {

@@ -777,13 +777,21 @@ test("upgrading a version 5 database clears generated scan data, the Plex scan c
   });
 });
 
-test("a new database upgrades with a log saying there was no saved Plex scan data", (t) => {
+test("a new database is created at the latest version without a reset log line", (t) => {
   const file = freshDatabaseFile(t);
   const info = t.mock.method(console, "info", () => {});
   assert.equal(sqlite.savedScanState("plex").snapshot(), null);
-  assert.deepEqual(logged(info), [[EMPTY_LOG]]);
+  assert.deepEqual(logged(info), [], "Nothing was upgraded, so nothing is logged");
   closeCached();
   inspect(file, db => assert.equal(version(db), 6));
+});
+
+test("an upgraded database with no saved Plex scan data logs that there was nothing to clear", (t) => {
+  const file = freshDatabaseFile(t);
+  const info = t.mock.method(console, "info", () => {});
+  fixture(file, TODAY_LAYOUT);
+  assert.equal(sqlite.savedScanState("plex").snapshot(), null);
+  assert.deepEqual(logged(info), [[EMPTY_LOG]]);
 });
 
 test("a version 5 database holding only kept data upgrades without changing anything", (t) => {

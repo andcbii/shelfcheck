@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearAllTmdbCrosswalks, invalidateShowTmdbCrosswalks, tmdbCrosswalkScanRun, type SharedCrosswalkStore } from "../lib/tmdb-crosswalk-coordinator";
+import { invalidateShowTmdbCrosswalks, tmdbCrosswalkScanRun, type SharedCrosswalkStore } from "../lib/tmdb-crosswalk-coordinator";
 import type { SharedCrosswalkRecord } from "../lib/tmdb-crosswalk-policy";
 
 const SCAN_STARTED = "2026-06-01T23:30:00.000Z";
@@ -16,7 +16,6 @@ function inMemoryStore(initial: Record<number, SharedCrosswalkRecord> = {}) {
   const store: SharedCrosswalkStore = {
     read: (tvdbEpisodeId) => records.get(tvdbEpisodeId),
     save: (tvdbEpisodeId, record) => { saves.push({ tvdbEpisodeId, record }); records.set(tvdbEpisodeId, record); },
-    removeAll: () => records.clear(),
   };
   return { store, records, saves };
 }
@@ -256,12 +255,6 @@ test("clearing one show marks its usable shared answers not current, keeping the
   let requests = 0;
   await run.comparison({ relationships: {}, forced: false }).lookup(301, async () => { requests += 1; return MATCH; });
   assert.equal(requests, 1);
-});
-
-test("a full clear removes all shared crosswalk evidence", () => {
-  const { store, records } = inMemoryStore({ 301: { value: MATCH, receivedAt: OLD }, 302: { rejectedAt: OLD } });
-  clearAllTmdbCrosswalks(store);
-  assert.equal(records.size, 0);
 });
 
 test("a lookup is checked before its request, so retaining last-good results while it is in flight drops the older answer", () => {

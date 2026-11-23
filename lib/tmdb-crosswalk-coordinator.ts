@@ -12,8 +12,6 @@ import { isRecord } from "@/lib/value-guards";
 export type SharedCrosswalkStore = {
   read(tvdbEpisodeId: number): SharedCrosswalkRecord | undefined;
   save(tvdbEpisodeId: number, record: SharedCrosswalkRecord): void;
-  /** Removes every shared crosswalk record (a full Clear cache). */
-  removeAll(): void;
 };
 
 /** A comparison's saved provider relationships, by relationship key. */
@@ -105,6 +103,9 @@ export function tmdbCrosswalkScanRun({ store, now, startedAt }: { store: SharedC
   };
 }
 
+/** One comparison's view of its scan run's TMDB external-ID crosswalks. */
+export type TmdbCrosswalkComparison = ReturnType<ReturnType<typeof tmdbCrosswalkScanRun>["comparison"]>;
+
 /**
  * Clearing one show's cache: each usable shared answer among the show's cleared relationships is
  * marked not current for live scans, so its next lookup is requested again. It keeps its original
@@ -117,9 +118,4 @@ export function invalidateShowTmdbCrosswalks({ store, now }: { store: SharedCros
     const shared = store.read(tvdbEpisodeId);
     if (shared?.receivedAt && !shared.invalidatedAt) store.save(tvdbEpisodeId, { ...shared, invalidatedAt: now() });
   }
-}
-
-/** A full Clear cache removes all shared crosswalk evidence. */
-export function clearAllTmdbCrosswalks(store: SharedCrosswalkStore) {
-  store.removeAll();
 }

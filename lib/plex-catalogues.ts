@@ -6,6 +6,7 @@ import type { CoverageEvidence, CoverageProvider } from "@/lib/manual-coverage-m
 import type { PlexMetadata, PlexShowGroup } from "@/lib/plex-inventory";
 import { PROVIDERS } from "@/lib/catalogue-selection";
 import { EVERY_ATTEMPTED_REQUIRED, patchSavedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
+import type { SharedCrosswalkStore } from "@/lib/tmdb-crosswalk-coordinator";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
@@ -153,16 +154,15 @@ export function readSharedTmdbCrosswalk(tvdbEpisodeId: number) {
 export function saveSharedTmdbCrosswalk(tvdbEpisodeId: number, evidence: SharedTmdbCrosswalk) {
   writePlexGeneratedInputs(sharedTmdbCrosswalkKey(tvdbEpisodeId), evidence);
 }
+/** Shared crosswalk evidence as the TMDB crosswalk coordinator reads and saves it. */
+export const sharedTmdbCrosswalks: SharedCrosswalkStore = {
+  read: tvdbEpisodeId => readSharedTmdbCrosswalk(tvdbEpisodeId) ?? undefined,
+  save: saveSharedTmdbCrosswalk,
+};
 /**
- * Marks a usable shared response not current for live scans, so the next lookup is requested
- * again; it keeps its receipt time so other shows' offline rechecks cannot revive an older copy.
- * A rejection is kept unchanged for the same reason.
+ * Scan accounting, provider verification positions and pending safeguards survive a full catalogue
+ * Clear cache; everything else goes, shared crosswalk evidence included (ADR-0004).
  */
-export function invalidateSharedTmdbCrosswalk(tvdbEpisodeId: number) {
-  const shared = readSharedTmdbCrosswalk(tvdbEpisodeId);
-  if (shared?.receivedAt && !shared.invalidatedAt) saveSharedTmdbCrosswalk(tvdbEpisodeId, {...shared, invalidatedAt: new Date().toISOString()});
-}
-/** Scan accounting, provider verification positions and pending safeguards survive a full catalogue Clear cache. */
 const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards"] as const;
 /** Clears one show's saved comparison (adding the every-attempted requirement), or all generated inputs except `keptByFullClear`; returns the cleared show's relationship keys. */
 export function clearPlexInputs(ratingKey?: string): string[] {

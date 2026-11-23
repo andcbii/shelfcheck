@@ -48,6 +48,12 @@ test("show-level provider IDs keep every distinct series ID in numeric order", (
   assert.deepEqual(showProviderIds(undefined), { tmdb: [], tvdb: [] });
 });
 
+test("a show-level GUID whose number no provider lookup accepts is not a series ID", () => {
+  // 0 and a number beyond the safe integer range (here it would round to 2^53) name no series.
+  const ids = showProviderIds([{ id: "tmdb://0" }, { id: "tmdb://9007199254740993" }, { id: "tmdb://10" }, { id: "tvdb://99999999999999999999" }, { id: "tvdb://20" }]);
+  assert.deepEqual(ids, { tmdb: [10], tvdb: [20] });
+});
+
 test("grouping does not depend on Plex GUID order", () => {
   const forward: PlexMetadata = { ratingKey: "a", Guid: [{ id: "tmdb://5" }, { id: "tmdb://3" }, { id: "tvdb://9" }] };
   const reversed: PlexMetadata = { ratingKey: "b", Guid: [{ id: "tvdb://9" }, { id: "tmdb://3" }, { id: "tmdb://5" }] };

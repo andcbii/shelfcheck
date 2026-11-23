@@ -18,7 +18,8 @@ import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
-import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues, recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
+import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
+import { lookupFailureIssueId, lookupFailureRecord, type RecordedLookupFailure } from "@/lib/lookup-failure-record";
 import { withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
@@ -111,12 +112,10 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
  * One provider request: a typed lookup, saved under its projected key, or plain transport
  * (no typed lookup), saved under its provider and URL.
  */
-type ProviderRequestTarget = {provider: ProviderName; url: string; key: string};
-const lookupRequest = (lookup: ProviderLookup): ProviderRequestTarget => ({provider: lookupProvider(lookup), url: lookupUrl(lookup), key: lookupKey(lookup)});
+type ProviderRequestTarget = {provider: ProviderName; url: string; key: string; lookup?: ProviderLookup};
+const lookupRequest = (lookup: ProviderLookup): ProviderRequestTarget => ({provider: lookupProvider(lookup), url: lookupUrl(lookup), key: lookupKey(lookup), lookup});
 const plainRequest = (provider: ProviderName, url: string): ProviderRequestTarget => ({provider, url, key: `${provider}:${url}`});
 function relationshipProvider(key: string) { return key.slice(0, key.indexOf(":")); }
-/** The Provider Lookup cause of a rejected relationship request for one show. */
-function episodeIdentityIssueId(ratingKey: string | undefined, relationship: string) { return `episode-identity:${ratingKey}:${relationship}`; }
 
 const comparisonIssueScope = new AsyncLocalStorage<{ratingKey:string;title?:string;tmdbId?:number;tvdbId?:number;tmdbSource?:LookupSourceStep[];tvdbSource?:LookupSourceStep[];providerEpisodes?:ProviderEpisode[];tmdbCached?:boolean;tvdbCached?:boolean;tvdbAuthenticationError?:unknown}>();
 const lookupSourceScope = new AsyncLocalStorage<LookupSourceStep[]>();
@@ -136,10 +135,17 @@ class SavedRelationshipUnavailableError extends Error {
   constructor(readonly relationship: string) { super(`The saved ${relationshipProvider(relationship)} response for this episode is not available to the offline recheck; no request was made.`); }
 }
 const relationshipScope = new AsyncLocalStorage<SavedPlexComparison["relationships"]>();
-function relationshipIsReusable(key:string) {
-  const relationships = relationshipScope.getStore();
+/**
+ * The comparing show's open failed-request issue for a typed lookup, read through the read port.
+ * Plain transport raises no lookup issue, so it never has one.
+ */
+function recordedLookupFailure(lookup: ProviderLookup | undefined): RecordedLookupFailure | undefined {
   const show = comparisonIssueScope.getStore();
-  return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !getCoverageIssue(episodeIdentityIssueId(show?.ratingKey, key))));
+  return show && lookup ? lookupFailureRecord(show.ratingKey).failure(lookup) : undefined;
+}
+function relationshipIsReusable({key, lookup}: ProviderRequestTarget) {
+  const relationships = relationshipScope.getStore();
+  return Boolean(relationships && Object.hasOwn(relationships,key) && (replayScope.getStore() || !recordedLookupFailure(lookup)));
 }
 /** Thrown for a Trakt lookup skipped because the run's Trakt login cannot be recovered; it is not a failure of that lookup. */
 class TraktLoginUnavailableError extends Error {
@@ -158,12 +164,14 @@ function raiseTraktLoginIssue(error: unknown) {
  */
 type LiveTmdbCrosswalk = {crosswalks: TmdbCrosswalkComparison; tvdbEpisodeId: number; forced: boolean};
 
-async function checkedJson<T>({provider, url, key}: ProviderRequestTarget, init: RequestInit, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}, auth?: ProviderAuth, liveCrosswalk?: LiveTmdbCrosswalk): Promise<T> {
+async function checkedJson<T>(target: ProviderRequestTarget, init: RequestInit, episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}, auth?: ProviderAuth, liveCrosswalk?: LiveTmdbCrosswalk): Promise<T> {
+  const {provider, url, key, lookup} = target;
   const relationships = relationshipScope.getStore();
   const show = comparisonIssueScope.getStore();
-  const issueId = episodeIdentityIssueId(show?.ratingKey, key);
+  // Only typed lookups have a failed-request issue; plain transport never matches below.
+  const issueId = show && lookup ? lookupFailureIssueId(show.ratingKey, lookup) : undefined;
   // A live crosswalk's saved copy is never reused directly: the coordinator reuses or replaces it.
-  if (relationships && !liveCrosswalk && relationshipIsReusable(key)) return relationships[key].value as T;
+  if (relationships && !liveCrosswalk && relationshipIsReusable(target)) return relationships[key].value as T;
   const replay=replayScope.getStore();
   if (replay && crosswalkLookupScope.getStore()) throw new SavedRelationshipUnavailableError(key);
   if (replay) { replay.missing.add(key); throw new Error(`Saved provider identity relationship is missing: ${key}`); }
@@ -183,7 +191,7 @@ async function checkedJson<T>({provider, url, key}: ProviderRequestTarget, init:
   catch (error) {
     // A login that cannot be recovered is one library issue, not a failure of each lookup it stops.
     if (provider === "Trakt" && auth && isProviderLoginFailure("Trakt", error)) { raiseTraktLoginIssue(error); throw new TraktLoginUnavailableError(error); }
-    if (show && matching) {
+    if (show && matching && issueId) {
       const externalId = episodeIdentity?.id;
       setCoverageIssue({id:issueId,failedAt:new Date().toISOString(),...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
         ...(tvdbEpisodeId || externalId ? {episode:{provider:"TVDB" as const,id:Number(tvdbEpisodeId || externalId),showId:show.tvdbId,...((e)=>e ? {season:e.season,episode:e.episode,title:e.title} : {})(show.providerEpisodes?.find(e=>e.source === "TVDB" && e.providerEpisodeId === Number(tvdbEpisodeId || externalId)))}} : coordinate ? {episode:{provider:"TMDB" as const,...(lookupSourceScope.getStore()?.at(-1)?.kind === "external TMDB episode ID" ? {id:lookupSourceScope.getStore()!.at(-1)!.id} : {}),showId:Number(coordinate[1]),season:Number(coordinate[2]),episode:Number(coordinate[3])}} : {}),
@@ -197,7 +205,7 @@ async function checkedJson<T>({provider, url, key}: ProviderRequestTarget, init:
     }
     throw error;
   }
-  if (show && matching) resolveCoverageIssue(issueId);
+  if (show && matching && issueId) resolveCoverageIssue(issueId);
   // Only a successful Trakt lookup shows the login works again.
   if (provider === "Trakt" && auth) resolveCoverageIssue("provider-authentication:Trakt");
   if (relationships && receivedAt !== undefined) relationships[key] = {provider, value, receivedAt};
@@ -284,20 +292,20 @@ function crosswalkLookup(crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number) {
 function replayTmdbCrosswalk(tvdbEpisodeId: number) {
   const relationships = relationshipScope.getStore();
   if (!relationships) return;
-  const key = lookupKey(crosswalkLookup("TMDB", tvdbEpisodeId));
-  const issueId = episodeIdentityIssueId(comparisonIssueScope.getStore()?.ratingKey, key);
-  const failure = getCoverageIssue(issueId);
+  const lookup = crosswalkLookup("TMDB", tvdbEpisodeId);
+  const key = lookupKey(lookup);
   const decision = replayedTmdbCrosswalkDecision({
     copy: Object.hasOwn(relationships, key) ? relationships[key] : undefined,
     shared: sharedTmdbCrosswalks.read(tvdbEpisodeId),
-    failure: failure ? {open: true, failedAt: failure.failedAt} : undefined,
+    failure: recordedLookupFailure(lookup),
   });
   if (decision.action === "replay-shared" || decision.action === "recover") relationships[key] = {provider: "TMDB", ...decision.copy};
-  if (decision.action === "recover") replayScope.getStore()?.recovered.set(key, issueId);
+  // A recovery is replayed only after this show's own open failure, so the show is known.
+  if (decision.action === "recover") replayScope.getStore()?.recovered.set(key, lookupFailureIssueId(comparisonIssueScope.getStore()!.ratingKey, lookup));
   if (decision.action === "drop") delete relationships[key];
 }
-/** A failed request or interpretation within one episode's crosswalk, with the saved relationship it concerns. */
-type CrosswalkCause = { error: unknown; relationship: string };
+/** A failed request or interpretation within one episode's crosswalk, with the typed lookup it concerns (absent when unknown). */
+type CrosswalkCause = { error: unknown; lookup?: ProviderLookup };
 /** When one crosswalk has causes of several kinds, the most actionable kind names it. */
 const crosswalkFailureKinds: EpisodeCheckFailure["kind"][] = ["request-failed", "unreadable-response", "relationship-unavailable", "exception"];
 
@@ -322,7 +330,7 @@ async function tvdbShow(seriesId: number, token: string): Promise<TvdbShow | nul
  * are requested again instead of reused. `validationFailures` are failed validation lookups.
  */
 async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set<number>, tvdbShowId: number, localTmdbEpisodeIds: Set<number>, traktAuth: ProviderAuth, tmdbToken: string, retry = false) {
-  const cached = relationshipIsReusable(lookupKey(crosswalkLookup("Trakt", tvdbEpisodeId)));
+  const cached = relationshipIsReusable(lookupRequest(crosswalkLookup("Trakt", tvdbEpisodeId)));
   const results = await traktJson<unknown>(crosswalkLookup("Trakt", tvdbEpisodeId), traktAuth);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
@@ -339,12 +347,12 @@ async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set
       ...(origin?.tvdbSource || []),{provider:"TVDB",kind:"catalogue episode",id:tvdbEpisodeId,cached:origin?.tvdbCached},
       {provider:"Trakt",kind:"external TMDB show ID",id:matchedTmdbShowId,cached},
       {provider:"Trakt",kind:"external TMDB episode ID",id:episode.ids!.tmdb as number,cached},
-    ],()=>tmdbJson<unknown>(lookup, tmdbToken)).catch(error => { throw Object.assign(new Error("validation"), { cause: error, relationship }); });
-    if (!isRecord(details)) throw Object.assign(new Error("validation"), { cause: new CrosswalkResponseError("TMDB", "the validating episode record is not an object"), relationship });
+    ],()=>tmdbJson<unknown>(lookup, tmdbToken)).catch(error => { throw Object.assign(new Error("validation"), { cause: error, lookup }); });
+    if (!isRecord(details)) throw Object.assign(new Error("validation"), { cause: new CrosswalkResponseError("TMDB", "the validating episode record is not an object"), lookup });
     return details.id === episode.ids!.tmdb ? details.id as number : undefined;
   }));
   const validatedIds = validations.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []);
-  const validationFailures = validations.flatMap((result) => result.status === "rejected" ? [{ error: (result.reason as { cause?: unknown }).cause ?? result.reason, relationship: (result.reason as { relationship?: string }).relationship || "" }] : []);
+  const validationFailures = validations.flatMap((result) => result.status === "rejected" ? [{ error: (result.reason as { cause?: unknown }).cause ?? result.reason, lookup: (result.reason as { lookup?: ProviderLookup }).lookup }] : []);
   return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds, validationFailures };
 }
 
@@ -590,15 +598,16 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         // unreadable successful response stays with its TVDB episode. It grants no
         // coverage, and later independent methods and sibling episodes still run.
         const crosswalkFailures: EpisodeCheckFailure[] = [];
+        // This show's recorded lookup failures, read through the read port.
+        const failureRecord = lookupFailureRecord(ratingKey);
         const crosswalksAttempted = new Set<string>();
         const tvdbEpisodeOf = (id: number) => providerEpisodes.find((episode) => episode?.source === "TVDB" && episode.providerEpisodeId === id);
         const crosswalkEpisode = (id: number) => episodeReference("TVDB", { ...tvdbEpisodeOf(id), providerEpisodeId: id });
         /** One failed request or interpretation within a crosswalk: a rejected request has its own Provider Lookup cause; anything else is never relabelled as one. */
-        const crosswalkCause = ({ error, relationship }: CrosswalkCause) => {
-          const requestIssue = episodeIdentityIssueId(ratingKey, relationship);
+        const crosswalkCause = ({ error, lookup }: CrosswalkCause) => {
           // A replay without a saved response keeps the scan's rejected-request cause when there is one.
-          const kind: EpisodeCheckFailure["kind"] = error instanceof CrosswalkResponseError ? "unreadable-response" : getCoverageIssue(requestIssue) ? "request-failed" : error instanceof SavedRelationshipUnavailableError ? "relationship-unavailable" : "exception";
-          return kind === "request-failed" ? { kind, reason: `the ${relationshipProvider(relationship)} request failed.`, requestIssue } : { kind, reason: coverageIssueCause(error) };
+          const kind: EpisodeCheckFailure["kind"] = error instanceof CrosswalkResponseError ? "unreadable-response" : lookup && failureRecord.failure(lookup) ? "request-failed" : error instanceof SavedRelationshipUnavailableError ? "relationship-unavailable" : "exception";
+          return kind === "request-failed" && lookup ? { kind, reason: `the ${lookupProvider(lookup)} request failed.`, requestIssue: lookupFailureIssueId(ratingKey, lookup) } : { kind, reason: coverageIssueCause(error) };
         };
         /** Record one episode's failed crosswalk with every cause found for it (e.g. each failed Trakt validation). */
         const failCrosswalk = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, causes: CrosswalkCause[]): EpisodeCheckFailure => {
@@ -611,7 +620,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           crosswalkFailures.push(failure);
           return failure;
         };
-        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, relationship: lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId)) }]);
+        const failedLookup = (crosswalk: EpisodeCrosswalk, tvdbEpisodeId: number, error: unknown) => failCrosswalk(crosswalk, tvdbEpisodeId, [{ error, lookup: crosswalkLookup(crosswalk, tvdbEpisodeId) }]);
         /** Run one crosswalk per TVDB episode; a failure is recorded against its episode only. */
         const settleCrosswalks = async <T,>(crosswalk: EpisodeCrosswalk, ids: number[], lookup: (tvdbEpisodeId: number) => Promise<T>) => {
           const settled = await Promise.allSettled(ids.map((tvdbEpisodeId) => { crosswalksAttempted.add(`${crosswalk}:${tvdbEpisodeId}`); return crosswalkLookupScope.run(true, () => lookup(tvdbEpisodeId)); }));
@@ -630,7 +639,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           try { run(); } catch (error) { failedLookup(crosswalk, tvdbEpisodeId, error); }
         };
         // A failed crosswalk is requested again on the next scan instead of reusing its saved response.
-        const recordedCrosswalkFailures = recordedEpisodeCrosswalkFailures(ratingKey);
+        const recordedCrosswalkFailures = failureRecord.episodeCrosswalkFailures();
         const retryCrosswalks = new Set(recordedCrosswalkFailures.map(({ crosswalk, tvdbEpisodeId }) => `${crosswalk}:${tvdbEpisodeId}`));
         if (!replayScope.getStore()) for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) {
           delete relationshipScope.getStore()?.[lookupKey(crosswalkLookup(crosswalk, tvdbEpisodeId))];

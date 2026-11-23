@@ -42,7 +42,7 @@ import { invalidateShowTmdbCrosswalks, saveRecoveredTmdbCrosswalks, tmdbCrosswal
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { CrosswalkResponseError, crosswalkLookup, liveComparisonEvidence, SavedRelationshipUnavailableError, TraktLoginUnavailableError, type ComparisonEvidence, type LiveEvidenceScan, type LookupTransport, type TmdbShow, type TvdbShow } from "@/lib/comparison-evidence";
-import { legacySavedComparisonEvidence } from "@/lib/legacy-saved-comparison-evidence";
+import { savedComparisonEvidence } from "@/lib/saved-comparison-evidence";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
 export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; heartbeatAt?: string };
@@ -1363,18 +1363,7 @@ function sameCatalogueUse(current: CatalogueUse | undefined, use: CatalogueUse) 
 async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs,settings,index,mappings}: SavedComparisonContext, compares: Record<CatalogueProvider, boolean> = {tmdb:true,tvdb:true}) {
   // A provider the last scan had no catalogue for is not compared, even if a saved copy appeared since.
   const tmdb=input.tmdbId && compares.tmdb ? inputs.tmdb[String(input.tmdbId)] : undefined,tvdb=input.tvdbId && compares.tvdb ? inputs.tvdb[String(input.tvdbId)] : undefined;
-  const plexIds=showProviderIds(input.details.flatMap(detail=>detail.Guid || []));
-  const summaries=Object.fromEntries(plexIds.tmdb.flatMap(id=>{
-    const saved=inputs.tmdb[String(id)];
-    return usableProviderCatalogue(saved) ? [[lookupKey(providerLookup.tmdbSeriesSummary(id)),{provider:"TMDB" as const,value:saved.show,receivedAt:saved.downloadedAt}]] : [];
-  }));
-  // A provider the last scan could not load is a Total Provider Lookup Failure: its series requests failed
-  // in that scan too, so the replay answers any it has no saved answer for as finding no series, as the scan did.
-  const failedSeriesRequests=Object.fromEntries([
-    ...(compares.tmdb ? [] : plexIds.tmdb.map(id=>[lookupKey(providerLookup.tmdbSeriesSummary(id)),{provider:"TMDB",value:null}] as const)),
-    ...(compares.tvdb ? [] : plexIds.tvdb.map(id=>[lookupKey(providerLookup.tvdbSeriesSummary(id)),{provider:"TVDB",value:{}}] as const)),
-  ]);
-  const evidence=legacySavedComparisonEvidence({ratingKey:key,relationships:{...failedSeriesRequests,...summaries,...input.relationships},tvdbEpisodeImdbIds:input.tvdbEpisodeImdbIds,reuseImdbIds:Boolean(input.tvdbId),shared:id=>sharedTmdbCrosswalks.read(id),failures:lookupFailureRecord(key)});
+  const evidence=savedComparisonEvidence({ratingKey:key,comparison:input,tmdbCatalogues:inputs.tmdb,compares,shared:id=>sharedTmdbCrosswalks.read(id),failures:lookupFailureRecord(key)});
   const compared=await compareLoadedPlexShow({
     ...input,tmdbShow:tmdb?.show || null,tvdbResolved:Boolean(tvdb),tvdbSlug:tvdb?.show.slug,
     providerEpisodes:[...(tmdb?.episodes || []),...(tvdb?.episodes || [])],malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],tmdbEpisodeAliases:new Set(input.tmdbEpisodeAliases || []),

@@ -33,13 +33,19 @@ export class CrosswalkResponseError extends Error {
 export class TraktLoginUnavailableError extends Error {
   constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
 }
+/** The series lookups: a missing saved answer to one is a missing show-level input. */
+const SERIES_LOOKUPS = new Set<ProviderLookup["kind"]>(["tmdb-series-by-tvdb-series", "tmdb-series-summary", "tmdb-series-summary-with-external-ids", "tvdb-series-summary"]);
+/** Whether a lookup is one of a comparison's series lookups rather than an episode lookup. */
+export const isSeriesLookup = (lookup: ProviderLookup) => SERIES_LOOKUPS.has(lookup.kind);
+
 /**
- * A cached recheck found no saved response for one episode's crosswalk lookup. No request was
- * attempted; the failure stays with that episode instead of discarding the show comparison.
+ * A cached recheck found no saved response for one lookup. No request was attempted. A missing
+ * episode answer stays with that episode instead of discarding the show comparison; a missing
+ * series answer is a missing show-level input.
  */
 export class SavedRelationshipUnavailableError extends Error {
-  // The message is stored as the episode failure's reason, so its wording stays as it was.
-  constructor(readonly lookup: ProviderLookup) { super(`The saved ${lookupProvider(lookup)} response for this episode is not available to the offline recheck; no request was made.`); }
+  // The episode message is stored as the episode failure's reason, so its wording stays as it was.
+  constructor(readonly lookup: ProviderLookup) { super(`The saved ${lookupProvider(lookup)} response for this ${isSeriesLookup(lookup) ? "series" : "episode"} is not available to the offline recheck; no request was made.`); }
 }
 
 /** A TMDB series record usable as a series: one with a numeric ID. */

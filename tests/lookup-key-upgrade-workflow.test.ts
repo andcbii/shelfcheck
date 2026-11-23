@@ -32,12 +32,12 @@ const DISCARDED_LOG = "Shelfcheck cleared its saved Plex scan data for the new p
 
 /**
  * Turn the closed database into one written by the release before the cutover: that release had
- * the same schema at version 5. Its saved scan data is cleared whatever its key format, so the data
- * this build saved stands in for it.
+ * the same schema at version 5, less migration 7's table. Its saved scan data is cleared whatever
+ * its key format, so the data this build saved stands in for it.
  */
 function asReleaseBeforeCutover() {
   const db = new DatabaseSync(path.join(process.env.SHELFCHECK_DATA_DIR!, "shelfcheck.db"));
-  try { db.exec("PRAGMA user_version = 5"); } finally { db.close(); }
+  try { db.exec("DROP TABLE shelfcheck_coverage_carried; PRAGMA user_version = 5"); } finally { db.close(); }
 }
 
 // TMDB numbers the season S1; TVDB numbers the same episodes S2, so every TVDB episode needs

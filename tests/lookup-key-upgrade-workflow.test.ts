@@ -53,6 +53,7 @@ const found = (episode: Episode) => ({ tv_episode_results: [{ id: episode.id, sh
 
 test("after the upgrade, the existing messages ask for a full scan and a Manual Match still saves; a full scan rebuilds evidence that cached rechecks and a restart keep", async t => {
   const h = await harness(t, catalogue, [tmdb1, tmdb2]);
+  const requested = (pathname: string) => h.requests.includes(pathname);
   h.state.bodies.set("/3/find/301", found(tmdb1));
   h.state.bodies.set("/3/find/302", found(tmdb2));
   h.state.statuses.set("/3/find/303", 404);
@@ -96,7 +97,7 @@ test("after the upgrade, the existing messages ask for a full scan and a Manual 
   // The full scan downloads catalogues again and rebuilds usable evidence under lookup keys.
   h.state.statuses.delete("/3/find/303");
   const rebuilt = await h.rerun();
-  for (const download of ["/3/tv/10/season/1", "/v4/series/20/episodes/default"]) assert.ok(h.requests.includes(download), `${download} is downloaded again`);
+  for (const download of ["/3/tv/10/season/1", "/v4/series/20/episodes/default"]) assert.ok(requested(download), `${download} is downloaded again`);
   assert.deepEqual(issuesOf(rebuilt).filter(issue => issue.id.startsWith("comparison-inputs:")), [], "the full scan clears the incomplete-input message");
   assert.deepEqual(lookupIssues(rebuilt), [], "TVDB 303's crosswalk now answers");
   assert.deepEqual(autoMatches(rebuilt), matches);

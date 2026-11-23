@@ -1,5 +1,6 @@
 import { setCoverageIssue, resolveCoverageIssue, providerLookupContext, type CoverageIssue } from "@/lib/coverage-issues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
+import { memberVerificationIssueId, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import "server-only";
 import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 import { listCoverageMappings, MISSING_MEMBER_MESSAGE, updateCoverageHealth } from "@/lib/manual-coverage";
@@ -27,18 +28,18 @@ export async function recheckCoverageHealth(client: ProviderClient, config: Cred
   for (const mapping of listCoverageMappings()) {
     if (mapping.health === "needs-review") continue; // A reviewed edit is required to repair it.
     const states = await Promise.all(mapping.members.map(async member => {
-      const id = `member-verification:${mapping.id}:${member.provider}:${member.id}`;
+      const id = memberVerificationIssueId(mapping.id, member);
       let state: NonNullable<CoverageMapping["health"]>;
       let cause: string | undefined;
       let explanation: Pick<CoverageIssue,"category"|"lookup"|"cause"|"action"> | undefined;
-      let causedBy: string[] | undefined;
+      let causedBy: CoverageIssueId[] | undefined;
       try {
         state = await memberHealth(member);
       } catch (error) {
         state = error instanceof ProviderHttpError && error.provider === "TVDB" && error.status === 404 && error.requested?.kind === "episode" ? "needs-review" : "pending";
         explanation = providerLookupContext(error,{source:[],requested:{provider:member.provider,kind:"episode",id:member.id},impact:"This Manual Match member’s episode identity and additional coverage could not be verified. The saved match was retained for review."});
         cause = explanation.cause;
-        if (error instanceof ProviderHttpError && error.requested?.kind === "authentication") causedBy = ["provider-authentication:TVDB"];
+        if (error instanceof ProviderHttpError && error.requested?.kind === "authentication") causedBy = [TVDB_AUTHENTICATION_ISSUE];
         if (state === "needs-review") explanation.action = "Review the saved episode reference and edit this Manual Match to repair the missing member.";
       }
       if (cause) setCoverageIssue({id,operation:"member-verification",provider:member.provider,scope:"episode",mappingId:mapping.id,show:{title:member.show,...(member.provider === "TMDB" ? {tmdbId:member.showId} : {tvdbId:member.showId})},episode:{provider:member.provider,id:member.id,showId:member.showId,season:member.season,episode:member.episode,title:member.title},...(causedBy ? {causedBy} : {}),cause,action:state === "needs-review" ? "Edit and review this Manual Match to repair the missing member." : "Retry the Plex scan or review this Manual Match's episode context.",...explanation});

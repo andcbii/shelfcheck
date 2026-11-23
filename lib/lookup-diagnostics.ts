@@ -1,8 +1,8 @@
 import "server-only";
+import { lookupFailureIssueId, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 import { providerLookupContext, resolveCoverageIssue, setCoverageIssue, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
-import { lookupKey, lookupProvider, type ProviderLookup } from "@/lib/provider-lookup";
+import { lookupProvider, type ProviderLookup } from "@/lib/provider-lookup";
 import type { ProviderEpisode } from "@/lib/plex-comparison";
-import { TVDB_AUTHENTICATION_ISSUE } from "@/lib/provider-login-diagnostics";
 
 /**
  * The comparison a lookup belongs to, as its failure diagnostics describe it: the show's identity,
@@ -16,11 +16,6 @@ export type LookupComparisonContext = {
 };
 
 const IMPACT = "Episode identity and coverage could not be fully verified. Available last-good results were retained.";
-
-/** The `episode-identity:` Coverage Issue ID of one show's failed request for a typed lookup. */
-export function lookupFailureIssueId(ratingKey: string, lookup: ProviderLookup) {
-  return `episode-identity:${ratingKey}:${lookupKey(lookup)}`;
-}
 
 /**
  * How one lookup kind's failure is described, or none: a series summary's failure raises no

@@ -1,3 +1,4 @@
+import { COMPARISON_PENDING_ISSUE } from "@/lib/coverage-issue-ids";
 import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
 import "server-only";
@@ -16,7 +17,7 @@ export class CoverageError extends Error {
 export function coverageState() {
   const state = database().prepare("SELECT revision,pending FROM shelfcheck_coverage_state WHERE id=1").get() as {revision:number;pending:number};
   const issues = listCoverageIssues();
-  if (state.pending) issues.push({id:"comparison-pending",operation:"comparison",scope:"library",cause:"Coverage changes need to be compared against the saved library inventory.",action:"Retry the comparison or run a Plex scan."} satisfies CoverageIssue);
+  if (state.pending) issues.push({id:COMPARISON_PENDING_ISSUE,operation:"comparison",scope:"library",cause:"Coverage changes need to be compared against the saved library inventory.",action:"Retry the comparison or run a Plex scan."} satisfies CoverageIssue);
   return {revision:state.revision,pending:issues.length ? 1 : 0,issues};
 }
 

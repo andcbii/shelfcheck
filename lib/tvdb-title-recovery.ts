@@ -1,9 +1,9 @@
 import "server-only";
 import { episodeReference, usableTitle } from "@/lib/compound-episodes";
-import { providerLookupContext } from "@/lib/coverage-issues";
+import { providerLookupContext, savedCoverageIssueIds } from "@/lib/coverage-issues";
 import { ProviderHttpError } from "@/lib/provider-client";
 import { isRecord } from "@/lib/value-guards";
-import { titleRecoveryIssueId } from "@/lib/episode-check-issues";
+import { titleRecoveryIssueId, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison";
 
 /**
@@ -11,7 +11,7 @@ import type { EpisodeCheckFailure, ProviderEpisode } from "@/lib/plex-comparison
  * `no-english-title`: TVDB answered, but its English translation has no usable title.
  * `request-failed`: the translation request itself failed (`reason` is safe, readable text).
  */
-export type TitleRecoveryState = Record<string, { outcome: "no-english-title" } | { outcome: "request-failed"; reason: string; causedBy?: string[] }>;
+export type TitleRecoveryState = Record<string, { outcome: "no-english-title" } | { outcome: "request-failed"; reason: string; causedBy?: CoverageIssueId[] }>;
 
 const untitled = (episode: ProviderEpisode): episode is ProviderEpisode & { providerEpisodeId: number } => episode.source === "TVDB" && Boolean(episode.providerEpisodeId) && !usableTitle(episode.title);
 
@@ -55,7 +55,7 @@ export async function recoverTvdbTitles({ episodes, previous, requestEnglish, au
     } catch (error) {
       // TVDB answers 404 when the episode has no English translation: no title, not an outage.
       if (error instanceof ProviderHttpError && error.status === 404) unresolved[id] = { outcome: "no-english-title" };
-      else unresolved[id] = { outcome: "request-failed", reason: providerLookupContext(error, { source: [], impact: "" }).cause, ...(authenticationError !== undefined && error === authenticationError ? { causedBy: ["provider-authentication:TVDB"] } : {}) };
+      else unresolved[id] = { outcome: "request-failed", reason: providerLookupContext(error, { source: [], impact: "" }).cause, ...(authenticationError !== undefined && error === authenticationError ? { causedBy: [TVDB_AUTHENTICATION_ISSUE] } : {}) };
     }
   }));
   return {
@@ -66,12 +66,12 @@ export async function recoverTvdbTitles({ episodes, previous, requestEnglish, au
   };
 }
 
-/** Saved recovery state is untrusted: keep only well-formed entries. */
+/** Saved recovery state is untrusted: keep only well-formed entries. Saved cause links are adopted as stored, whatever their kind. */
 export function savedTitleRecovery(value: unknown): TitleRecoveryState {
   if (!isRecord(value)) return {};
   return Object.fromEntries(Object.entries(value).flatMap(([id, entry]): [string, TitleRecoveryState[string]][] => !/^\d+$/.test(id) || !isRecord(entry) ? []
     : entry.outcome === "no-english-title" ? [[id, { outcome: "no-english-title" as const }]]
-    : entry.outcome === "request-failed" && typeof entry.reason === "string" ? [[id, { outcome: "request-failed" as const, reason: entry.reason, ...(Array.isArray(entry.causedBy) ? { causedBy: entry.causedBy.filter((item): item is string => typeof item === "string") } : {}) }]]
+    : entry.outcome === "request-failed" && typeof entry.reason === "string" ? [[id, { outcome: "request-failed" as const, reason: entry.reason, ...(Array.isArray(entry.causedBy) ? { causedBy: savedCoverageIssueIds(entry.causedBy) } : {}) }]]
     : []));
 }
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import type { CoverageIssueId } from "../lib/coverage-issue-ids";
 import { catalogues, day, fixture, plexScan, scan as scanRoute } from "./catalogue-override-harness";
 import { harness, type Episode } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
@@ -14,7 +15,7 @@ const connectTrakt = () => config.writeTraktCredentials({ clientId: "client", cl
 // synthesizes for them, and when it adopts shared crosswalk evidence. SHELFCHECK-40 moves this
 // into a saved evidence source; these tests pin today's behaviour so that move changes none of it.
 
-type Issue = { id: string; operation: string; scope?: string; provider?: string; cause: string; impacts?: string[]; failedAt?: string; show?: { ratingKey?: string }; episode?: { id?: number } };
+type Issue = { id: CoverageIssueId; operation: string; scope?: string; provider?: string; cause: string; impacts?: string[]; failedAt?: string; show?: { ratingKey?: string }; episode?: { id?: number } };
 type AutoMatch = { method: string; tmdb: { id?: number }; tvdb: { id?: number } };
 type ProviderMatch = { id: number; name?: string; slug?: string };
 type Show = { ratingKey: string; tmdbId?: number; tvdbId?: number; missing: { tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: string[] }[]; autoMatches?: AutoMatch[]; providerMatches?: { tmdb: ProviderMatch[]; tvdb: ProviderMatch[] }; providerResolution?: { tmdb: boolean; tvdb: boolean } };

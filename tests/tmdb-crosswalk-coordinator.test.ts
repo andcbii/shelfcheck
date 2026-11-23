@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { invalidateShowTmdbCrosswalks, saveRecoveredTmdbCrosswalks, tmdbCrosswalkScanRun, type SharedCrosswalkStore } from "../lib/tmdb-crosswalk-coordinator";
 import type { SharedCrosswalkRecord } from "../lib/tmdb-crosswalk-policy";
+import { lookupFailureIssueId } from "../lib/coverage-issue-ids";
+import { providerLookup } from "../lib/provider-lookup";
 
 const SCAN_STARTED = "2026-06-01T23:30:00.000Z";
 const NOW = "2026-06-01T23:40:00.000Z";
@@ -218,16 +220,16 @@ test("a request that throws before returning is a failed request: its rejection 
 test("a recheck saves its recovered answers as the comparison's own copies before resolving their failed requests", () => {
   const events: string[] = [];
   const replayed = { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT } };
-  saveRecoveredTmdbCrosswalks({ relationships: replayed, resolves: ["episode-identity:ratingKey:other:301"] }, {
+  saveRecoveredTmdbCrosswalks({ relationships: replayed, resolves: [lookupFailureIssueId("ratingKey:other", providerLookup.tmdbEpisodeByTvdbEpisode(301))] }, {
     save: (copies) => events.push(`save ${JSON.stringify(copies)}`),
     resolveFailedRequest: (issueId) => events.push(`resolve ${issueId}`),
   });
-  assert.deepEqual(events, [`save ${JSON.stringify({ [KEY_301]: replayed[KEY_301] })}`, "resolve episode-identity:ratingKey:other:301"]);
+  assert.deepEqual(events, [`save ${JSON.stringify({ [KEY_301]: replayed[KEY_301] })}`, "resolve episode-identity:ratingKey:other:tmdb-episode-by-tvdb:301"]);
 });
 
 test("a recovered answer that cannot be saved leaves its failed request open", () => {
   const resolved: string[] = [];
-  assert.throws(() => saveRecoveredTmdbCrosswalks({ relationships: { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT } }, resolves: ["issue"] }, {
+  assert.throws(() => saveRecoveredTmdbCrosswalks({ relationships: { [KEY_301]: { provider: "TMDB", value: MATCH, receivedAt: OLD_RECEIPT } }, resolves: [lookupFailureIssueId("ratingKey:other", providerLookup.tmdbEpisodeByTvdbEpisode(301))] }, {
     save: () => { throw new Error("disk full"); },
     resolveFailedRequest: (issueId) => resolved.push(issueId),
   }), /disk full/);

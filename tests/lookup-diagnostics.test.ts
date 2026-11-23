@@ -33,13 +33,13 @@ function storedIssue(id: string) {
   return row?.payload;
 }
 
-/** Today's failed-request issue IDs (Story 1 baseline), spelled out independently of the code. */
+/** The failed-request issue IDs (`episode-identity:<ratingKey>:<lookup key>`), spelled out independently of the code. */
 const ids = {
-  tmdbCrosswalk303: "episode-identity:ratingKey:target:TMDB:https://api.themoviedb.org/3/find/303?external_source=tvdb_id",
-  tmdbAssociation20: "episode-identity:ratingKey:target:TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id",
-  tmdbValidation: "episode-identity:ratingKey:target:TMDB:https://api.themoviedb.org/3/tv/10/season/1/episode/2",
-  tvdbExtended303: "episode-identity:ratingKey:target:TVDB:https://api4.thetvdb.com/v4/episodes/303/extended",
-  traktCrosswalk303: "episode-identity:ratingKey:target:Trakt:https://api.trakt.tv/search/tvdb/303?type=episode",
+  tmdbCrosswalk303: "episode-identity:ratingKey:target:tmdb-episode-by-tvdb:303",
+  tmdbAssociation20: "episode-identity:ratingKey:target:tmdb-series-by-tvdb:20",
+  tmdbValidation: "episode-identity:ratingKey:target:tmdb-episode:10:1:2",
+  tvdbExtended303: "episode-identity:ratingKey:target:tvdb-episode-extended:303",
+  traktCrosswalk303: "episode-identity:ratingKey:target:trakt-episode-by-tvdb:303",
 };
 
 /** The comparison context a live scan supplies for the Target show. */
@@ -126,7 +126,7 @@ test("a source chain given with one failure describes that failure only, as if i
   const given = JSON.parse(storedIssue(ids.tmdbValidation)!);
   assert.deepEqual(given.lookup.source, lookupSource);
   assert.deepEqual(given.episode, {provider: "TMDB", id: 9002, showId: 10, season: 1, episode: 2});
-  const own = JSON.parse(storedIssue(ids.tmdbValidation.replace("episode/2", "episode/3"))!);
+  const own = JSON.parse(storedIssue(ids.tmdbValidation.replace(/2$/, "3"))!);
   assert.deepEqual(own.lookup.source, []);
   assert.deepEqual(own.episode, {provider: "TMDB", showId: 10, season: 1, episode: 3});
 });
@@ -187,5 +187,24 @@ test("resolving a lookup leaves other shows' and other lookups' failed requests 
   lookupDiagnostics(target).raiseFailure(providerLookup.tvdbEpisodeExtended(303), new ProviderHttpError("TVDB", 503));
   lookupDiagnostics({ratingKey: "ratingKey:other"}).raiseFailure(providerLookup.tmdbEpisodeByTvdbEpisode(303), new ProviderHttpError("TMDB", 503));
   lookupDiagnostics(target).resolve(providerLookup.tmdbEpisodeByTvdbEpisode(303));
-  assert.deepEqual(listCoverageIssues().map(issue => issue.id).sort(), ["episode-identity:ratingKey:other:TMDB:https://api.themoviedb.org/3/find/303?external_source=tvdb_id", ids.tvdbExtended303]);
+  assert.deepEqual(listCoverageIssues().map(issue => issue.id).sort(), ["episode-identity:ratingKey:other:tmdb-episode-by-tvdb:303", ids.tvdbExtended303]);
+});
+
+test("a TMDB series association and a TMDB episode crosswalk with the same numeric TVDB ID have separate failures, reuse blocking and resolution", t => {
+  temporaryDatabase(t);
+  const diagnostics = lookupDiagnostics(target);
+  const series = providerLookup.tmdbSeriesByTvdbSeries(20);
+  const episode = providerLookup.tmdbEpisodeByTvdbEpisode(20);
+  diagnostics.raiseFailure(series, new ProviderHttpError("TMDB", 503));
+  assert.deepEqual(listCoverageIssues().map(issue => issue.id), [ids.tmdbAssociation20]);
+  assert.deepEqual(lookupFailureRecord("ratingKey:target").failure(series), {open: true, failedAt: "2026-11-12T10:00:00.000Z"});
+  assert.equal(lookupFailureRecord("ratingKey:target").failure(episode), undefined, "the series failure does not block the episode's saved answer");
+  diagnostics.resolve(episode);
+  assert.deepEqual(listCoverageIssues().map(issue => issue.id), [ids.tmdbAssociation20], "the episode's success does not resolve the series failure");
+
+  diagnostics.raiseFailure(episode, new ProviderHttpError("TMDB", 503));
+  assert.deepEqual(listCoverageIssues().map(issue => issue.id).sort(), ["episode-identity:ratingKey:target:tmdb-episode-by-tvdb:20", ids.tmdbAssociation20]);
+  diagnostics.resolve(series);
+  assert.equal(lookupFailureRecord("ratingKey:target").failure(series), undefined);
+  assert.ok(lookupFailureRecord("ratingKey:target").failure(episode), "the series' success does not resolve the episode failure");
 });

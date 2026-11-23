@@ -363,8 +363,8 @@ test("independent Manual Match coverage in a cached recheck does not resolve a f
 // --- Missing saved answers --------------------------------------------------------------
 
 /**
- * Fault injection: removes saved provider relationships whose key `matches` (today's keys name
- * the provider request) from a show's saved comparison, and optionally its saved IMDb identities.
+ * Fault injection: removes saved provider relationships whose key `matches` (lookup keys,
+ * `<kind>:<inputs>`) from a show's saved comparison, and optionally its saved IMDb identities.
  */
 function dropSaved(matches: (key: string) => boolean, imdbOf?: number) {
   const saved = catalogues.readPlexInputs().comparisons["ratingKey:target"]!;
@@ -380,10 +380,10 @@ const traktValidated = (state: Awaited<ReturnType<typeof harness>>["state"]) => 
 // collected the episode in the scan, the TMDB external-ID fallback was never requested, so the
 // recheck that reaches it finds no saved answer for it either.
 const episodeAnswers: { kind: string; trakt?: boolean; arrange: (state: Awaited<ReturnType<typeof harness>>["state"]) => void; drop: (key: string) => boolean; imdb?: number; providers: string[] }[] = [
-  { kind: "TMDB external-ID crosswalk", arrange: state => state.bodies.set("/3/find/301", found(tmdb1)), drop: key => key.includes("/find/301?"), providers: ["TMDB"] },
-  { kind: "Trakt episode search", trakt: true, arrange: traktValidated, drop: key => key.includes("/search/tvdb/301?"), providers: ["TMDB", "Trakt"] },
-  { kind: "TMDB episode validating a Trakt crosswalk", trakt: true, arrange: traktValidated, drop: key => key.endsWith("/tv/10/season/1/episode/1"), providers: ["TMDB", "Trakt"] },
-  { kind: "TVDB episode record (IMDb crosswalk)", arrange: state => { state.imdb.set(tmdb1.id, "tt1"); state.bodies.set("/v4/episodes/301/extended", { data: { id: 301, seriesId: 20, seasonNumber: 2, number: 1, name: "One", remoteIds: [{ id: "tt1", sourceName: "IMDB" }] } }); }, drop: key => key.includes("/episodes/301/extended"), imdb: 301, providers: ["TMDB", "TVDB"] },
+  { kind: "TMDB external-ID crosswalk", arrange: state => state.bodies.set("/3/find/301", found(tmdb1)), drop: key => key === "tmdb-episode-by-tvdb:301", providers: ["TMDB"] },
+  { kind: "Trakt episode search", trakt: true, arrange: traktValidated, drop: key => key === "trakt-episode-by-tvdb:301", providers: ["TMDB", "Trakt"] },
+  { kind: "TMDB episode validating a Trakt crosswalk", trakt: true, arrange: traktValidated, drop: key => key === "tmdb-episode:10:1:1", providers: ["TMDB", "Trakt"] },
+  { kind: "TVDB episode record (IMDb crosswalk)", arrange: state => { state.imdb.set(tmdb1.id, "tt1"); state.bodies.set("/v4/episodes/301/extended", { data: { id: 301, seriesId: 20, seasonNumber: 2, number: 1, name: "One", remoteIds: [{ id: "tt1", sourceName: "IMDB" }] } }); }, drop: key => key === "tvdb-episode-extended:301", imdb: 301, providers: ["TMDB", "TVDB"] },
 ];
 for (const answer of episodeAnswers) test(`a missing saved ${answer.kind} answer is an episode-scoped failure in a cached recheck`, async t => {
   const { rerun, state, requests, status } = await harness(t, catalogue, owned);
@@ -410,8 +410,8 @@ for (const answer of episodeAnswers) test(`a missing saved ${answer.kind} answer
 });
 
 const showAnswers: { kind: string; drop: (key: string) => boolean }[] = [
-  { kind: "TVDB series summary", drop: key => key.endsWith("/v4/series/20") },
-  { kind: "TMDB series association", drop: key => key.includes("/find/20?") },
+  { kind: "TVDB series summary", drop: key => key === "tvdb-series:20" },
+  { kind: "TMDB series association", drop: key => key === "tmdb-series-by-tvdb:20" },
 ];
 for (const answer of showAnswers) test(`a missing saved ${answer.kind} answer leaves a cached recheck incomplete with last-good results kept`, async t => {
   const { rerun, state, requests, status } = await harness(t, catalogue, owned);

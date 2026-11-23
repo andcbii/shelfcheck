@@ -6,7 +6,7 @@
  */
 import type { SavedPlexComparison } from "@/lib/plex-catalogues";
 import { liveTmdbCrosswalkDecision, type SharedCrosswalkRecord } from "@/lib/tmdb-crosswalk-policy";
-import { lookupKey, providerLookup, tmdbEpisodeCrosswalkOfKey } from "@/lib/provider-lookup";
+import { lookupKey, lookupOfKey, providerLookup } from "@/lib/provider-lookup";
 import { responseRecordList } from "@/lib/value-guards";
 
 /** Where shared crosswalk evidence is kept, by TVDB episode. */
@@ -130,14 +130,17 @@ export function saveRecoveredTmdbCrosswalks({ relationships, resolves }: Recover
 }
 
 /**
- * Clearing one show's cache: each usable shared answer among the show's cleared relationships is
- * marked not current for live scans, so its next lookup is requested again. It keeps its original
- * receipt time, and rejections are kept unchanged, so cached rechecks cannot revive an older copy.
+ * Clearing one show's cache: the usable shared answer of each TMDB external-ID episode crosswalk
+ * among the show's cleared relationships is marked not current for live scans, so its next lookup
+ * is requested again. Other lookup kinds (a series association with the same numeric ID included)
+ * invalidate nothing. It keeps its original receipt time, and rejections are kept unchanged, so
+ * cached rechecks cannot revive an older copy.
  */
 export function invalidateShowTmdbCrosswalks({ store, now }: { store: SharedCrosswalkStore; now: () => string }, clearedRelationshipKeys: Iterable<string>) {
   for (const key of clearedRelationshipKeys) {
-    const tvdbEpisodeId = tmdbEpisodeCrosswalkOfKey(key);
-    if (tvdbEpisodeId === undefined) continue;
+    const lookup = lookupOfKey(key);
+    if (lookup?.kind !== "tmdb-episode-by-tvdb-episode") continue;
+    const { tvdbEpisodeId } = lookup;
     const shared = store.read(tvdbEpisodeId);
     if (shared?.receivedAt && !shared.invalidatedAt) store.save(tvdbEpisodeId, { ...shared, invalidatedAt: now() });
   }

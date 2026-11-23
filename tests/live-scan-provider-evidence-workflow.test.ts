@@ -10,18 +10,18 @@ hook.deregister();
 
 // Characterization (SHELFCHECK-124): what a live Plex scan run saves and requests for every
 // matching lookup, and the lookup Coverage Issues it raises. Later Stories of SHELFCHECK-40 move
-// this code; these tests pin today's behaviour, including today's URL-shaped stored keys.
+// this code; these tests pin today's behaviour. Stored keys are lookup keys (SHELFCHECK-141).
 
-const TMDB = "https://api.themoviedb.org/3";
-const TVDB = "https://api4.thetvdb.com/v4";
-/** Today's saved provider relationship keys: provider and request URL. */
+/** The saved provider relationship keys: `<lookup kind>:<inputs>`. */
 const keys = {
-  tmdbSeriesByTvdb: (id: number) => `TMDB:${TMDB}/find/${id}?external_source=tvdb_id`,
-  tmdbEpisodeByTvdb: (id: number) => `TMDB:${TMDB}/find/${id}?external_source=tvdb_id`,
-  tmdbSeries: (id: number) => `TMDB:${TMDB}/tv/${id}`,
-  tmdbSeriesWithExternalIds: (id: number) => `TMDB:${TMDB}/tv/${id}?append_to_response=external_ids`,
-  tvdbSeries: (id: number) => `TVDB:${TVDB}/series/${id}`,
-  tvdbEpisodeExtended: (id: number) => `TVDB:${TVDB}/episodes/${id}/extended`,
+  tmdbSeriesByTvdb: (id: number) => `tmdb-series-by-tvdb:${id}`,
+  tmdbEpisodeByTvdb: (id: number) => `tmdb-episode-by-tvdb:${id}`,
+  tmdbSeries: (id: number) => `tmdb-series:${id}:summary`,
+  tmdbSeriesWithExternalIds: (id: number) => `tmdb-series:${id}:external-ids`,
+  tvdbSeries: (id: number) => `tvdb-series:${id}`,
+  tvdbEpisodeExtended: (id: number) => `tvdb-episode-extended:${id}`,
+  traktEpisodeByTvdb: (id: number) => `trakt-episode-by-tvdb:${id}`,
+  tmdbEpisode: (show: number, season: number, episode: number) => `tmdb-episode:${show}:${season}:${episode}`,
 };
 const requestIssueId = (relationship: string) => `episode-identity:ratingKey:target:${relationship}`;
 
@@ -325,9 +325,9 @@ test("a Trakt episode search and its TMDB episode validation are saved provider 
   await rerun();
   const at = "2026-11-12T10:00:00.000Z";
   const saved = relationships();
-  assert.deepEqual(saved["Trakt:https://api.trakt.tv/search/tvdb/302?type=episode"], { provider: "Trakt", value: search, receivedAt: at });
-  assert.deepEqual(saved["Trakt:https://api.trakt.tv/search/tvdb/303?type=episode"], { provider: "Trakt", value: [], receivedAt: at });
-  assert.deepEqual(saved[`TMDB:${TMDB}/tv/10/season/1/episode/2`], { provider: "TMDB", value: { id: 9002, season_number: 1, episode_number: 2, name: "Two" }, receivedAt: at });
+  assert.deepEqual(saved[keys.traktEpisodeByTvdb(302)], { provider: "Trakt", value: search, receivedAt: at });
+  assert.deepEqual(saved[keys.traktEpisodeByTvdb(303)], { provider: "Trakt", value: [], receivedAt: at });
+  assert.deepEqual(saved[keys.tmdbEpisode(10, 1, 2)],{ provider: "TMDB", value: { id: 9002, season_number: 1, episode_number: 2, name: "Two" }, receivedAt: at });
   assert.equal(Object.hasOwn(saved, keys.tmdbEpisodeByTvdb(302)), false, "the Trakt match makes TVDB 302's TMDB crosswalk unnecessary");
   assert.deepEqual(tally(requests.filter(pathname => pathname.startsWith("/search/") || pathname.startsWith("/3/find/") || pathname.includes("/episode/"))), { "/search/tvdb/302": 1, "/search/tvdb/303": 1, "/3/tv/10/season/1/episode/2": 1, "/3/find/20": 1, "/3/find/303": 1 });
 });
@@ -355,22 +355,31 @@ test("a failed TMDB series association raises one show-scoped lookup issue", asy
   assert.deepEqual(issuesOf(await rerun()), [], "the successful request resolves it");
 });
 
-// KNOWN DEFECT, EXPECTED TO CHANGE AT THE SHELFCHECK-40 CUTOVER (Story 5, SHELFCHECK-128): a TMDB
-// series association and a TMDB episode crosswalk with the same numeric TVDB ID share one saved
-// relationship key, so clearing one show's cache marks an unrelated episode's shared crosswalk
-// evidence as not current. After the cutover, clearing Target must leave TVDB episode 20's shared
-// evidence current and Other's next same-day scan must reuse it.
-test("CURRENT COLLISION (changes at the cutover): clearing one show's cache invalidates another show's episode crosswalk that has its TVDB series ID", async t => {
+// Fixed at the SHELFCHECK-40 cutover (SHELFCHECK-141): a TMDB series association and a TMDB episode
+// crosswalk with the same numeric TVDB ID have separate saved relationship keys, so clearing one
+// show's cache invalidates only that show's own episode crosswalks.
+test("clearing one show's cache leaves current another show's episode crosswalk that has its TVDB series ID; clearing that show invalidates it", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-12T10:00:00Z") });
   // Other (TMDB 11 / TVDB 21) lists TVDB episode 20 at coordinates it does not own; Target is TVDB series 20.
   const tmdbOther: Episode = { provider: "TMDB", id: 9101, season: 1, episode: 1, name: "Pilot", show: "other" };
   const tvdbEpisode20: Episode = { provider: "TVDB", id: 20, season: 2, episode: 1, name: "Pilot", show: "other" };
-  const { rerun, clearCache } = await harness(t, [tmdb1, tvdb1, tmdbOther, tvdbEpisode20], [tmdb1, tmdbOther]);
+  const { rerun, clearCache, requests } = await harness(t, [tmdb1, tvdb1, tmdbOther, tvdbEpisode20], [tmdb1, tmdbOther]);
   await rerun();
   assert.deepEqual(shared(20), { value: empty, receivedAt: "2026-11-12T10:00:00.000Z" }, "Other's crosswalk of TVDB episode 20");
-  assert.ok(Object.hasOwn(relationships(), keys.tmdbSeriesByTvdb(20)), "Target's association with TVDB series 20 has the same key");
+  assert.ok(Object.hasOwn(relationships(), keys.tmdbSeriesByTvdb(20)), "Target's association with TVDB series 20");
+  assert.equal(Object.hasOwn(relationships(), keys.tmdbEpisodeByTvdb(20)), false, "is not an episode crosswalk of TVDB episode 20");
 
   t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
   await clearCache("ratingKey:target");
-  assert.deepEqual(shared(20), { value: empty, receivedAt: "2026-11-12T10:00:00.000Z", invalidatedAt: "2026-11-12T11:00:00.000Z" });
+  assert.deepEqual(shared(20), { value: empty, receivedAt: "2026-11-12T10:00:00.000Z" }, "clearing Target's series association leaves the episode's shared evidence current");
+
+  // Target requests its series association again; Other's same-day crosswalk of episode 20 is reused.
+  requests.length = 0;
+  await rerun();
+  assert.equal(tally(requests)["/3/find/20"], 1);
+  assert.deepEqual(shared(20), { value: empty, receivedAt: "2026-11-12T10:00:00.000Z" });
+
+  t.mock.timers.setTime(Date.parse("2026-11-12T12:00:00Z"));
+  await clearCache("ratingKey:other");
+  assert.deepEqual(shared(20), { value: empty, receivedAt: "2026-11-12T10:00:00.000Z", invalidatedAt: "2026-11-12T12:00:00.000Z" }, "clearing Other's episode crosswalk invalidates it");
 });

@@ -237,7 +237,7 @@ test("a TVDB choice without saved TMDB association evidence keeps last-good resu
   f.at(day(2)); await f.run();
   // The saved TMDB answer for TVDB 1 is gone, so its TMDB series cannot be resolved offline.
   const saved = catalogues.readPlexInputs().comparisons[f.identity]!;
-  const association = Object.keys(saved.relationships).find(key => key.includes("/find/1?"));
+  const association = Object.keys(saved.relationships).find(key => key === "tmdb-series-by-tvdb:1");
   assert.ok(association,"the scan saved TVDB 1's TMDB association for an offline switch");
   delete saved.relationships[association];
   catalogues.savePlexComparison(f.identity,saved);

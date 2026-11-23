@@ -14,17 +14,17 @@ import type { SharedCrosswalkRecord } from "../lib/tmdb-crosswalk-policy";
 const SCAN_STARTED = "2026-11-12T09:00:00.000Z";
 const NOW = "2026-11-12T10:00:00.000Z";
 
-/** Today's relationship keys (Story 1 baseline), spelled out independently of the code. */
+/** The stored relationship keys (lookup keys), spelled out independently of the code. */
 const keys = {
-  tmdbCrosswalk303: "TMDB:https://api.themoviedb.org/3/find/303?external_source=tvdb_id",
-  trakt303: "Trakt:https://api.trakt.tv/search/tvdb/303?type=episode",
-  tvdbExtended303: "TVDB:https://api4.thetvdb.com/v4/episodes/303/extended",
-  tmdbValidation: "TMDB:https://api.themoviedb.org/3/tv/10/season/2/episode/3",
-  tmdbSeriesByTvdb20: "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id",
-  tmdbSeriesByTvdb21: "TMDB:https://api.themoviedb.org/3/find/21?external_source=tvdb_id",
-  tmdbSummary10: "TMDB:https://api.themoviedb.org/3/tv/10",
-  tmdbSummaryWithIds10: "TMDB:https://api.themoviedb.org/3/tv/10?append_to_response=external_ids",
-  tvdbSummary20: "TVDB:https://api4.thetvdb.com/v4/series/20",
+  tmdbCrosswalk303: "tmdb-episode-by-tvdb:303",
+  trakt303: "trakt-episode-by-tvdb:303",
+  tvdbExtended303: "tvdb-episode-extended:303",
+  tmdbValidation: "tmdb-episode:10:2:3",
+  tmdbSeriesByTvdb20: "tmdb-series-by-tvdb:20",
+  tmdbSeriesByTvdb21: "tmdb-series-by-tvdb:21",
+  tmdbSummary10: "tmdb-series:10:summary",
+  tmdbSummaryWithIds10: "tmdb-series:10:external-ids",
+  tvdbSummary20: "tvdb-series:20",
 };
 
 /** Shared crosswalk evidence held in memory. */

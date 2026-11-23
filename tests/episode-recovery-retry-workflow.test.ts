@@ -69,7 +69,7 @@ test("an English title answered as unavailable is requested again only on scans 
 // The English title request and the TMDB crosswalk of the untitled split part both fail.
 // The dependent combined/split check and the crosswalk are grouped under their failed requests.
 const recovery = "episode-check:ratingKey:target:title-recovery:TVDB:102";
-const crosswalkRequest = "episode-identity:ratingKey:target:TMDB:https://api.themoviedb.org/3/find/102?external_source=tvdb_id";
+const crosswalkRequest = "episode-identity:ratingKey:target:tmdb-episode-by-tvdb:102";
 const unresolved = [crosswalkRequest, recovery].sort();
 const providerRequests = (requests: string[]) => requests.filter(path => !path.startsWith("/library/") && !["/3/tv/changes", "/v4/updates", "/v4/login"].includes(path)).sort();
 async function failingRecovery(t: test.TestContext) {

@@ -24,12 +24,12 @@ function temporaryDatabase(t: TestContext) {
   });
 }
 
-/** Today's failed-request issue IDs (Story 1 baseline), spelled out independently of the code. */
+/** The failed-request issue IDs (`episode-identity:<ratingKey>:<lookup key>`), spelled out independently of the code. */
 const ids = {
-  tmdbCrosswalk301: "episode-identity:42:TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id",
-  traktCrosswalk301: "episode-identity:42:Trakt:https://api.trakt.tv/search/tvdb/301?type=episode",
-  tvdbExtended301: "episode-identity:42:TVDB:https://api4.thetvdb.com/v4/episodes/301/extended",
-  tmdbValidation: "episode-identity:42:TMDB:https://api.themoviedb.org/3/tv/10/season/1/episode/2",
+  tmdbCrosswalk301: "episode-identity:42:tmdb-episode-by-tvdb:301",
+  traktCrosswalk301: "episode-identity:42:trakt-episode-by-tvdb:301",
+  tvdbExtended301: "episode-identity:42:tvdb-episode-extended:301",
+  tmdbValidation: "episode-identity:42:tmdb-episode:10:1:2",
 };
 const failedRequest = (id: string, failedAt?: string) => ({id, operation: "episode-identity", provider: "TMDB" as const, scope: "episode" as const, cause: "503 — TMDB request failed", action: "Retry.", ...(failedAt ? {failedAt} : {})});
 

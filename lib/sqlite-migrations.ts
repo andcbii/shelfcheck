@@ -7,13 +7,15 @@ import { DatabaseSync } from "node:sqlite";
 // Every table is created and upgraded here, by numbered migrations tracked by the
 // database's user_version. Version 0 means unversioned, not empty: databases written
 // before migrations existed carry their tables at version 0. Append new migrations;
-// never edit one that has shipped.
-const migrations: ((db: DatabaseSync) => void)[] = [
+// never edit one that has shipped. A migration may return a line to log once the whole
+// upgrade has committed, so the log never reports a change that rolled back.
+const migrations: ((db: DatabaseSync) => string | void)[] = [
   baselineSchema,
   plexSavedScanState,
   traktSavedScanState,
   clearTraktResultsBeforeAirDates,
   seriesNotFoundHistory,
+  lookupKeyReset,
 ];
 
 export const SCHEMA_VERSION = migrations.length;
@@ -87,17 +89,22 @@ function refuseUnusableBackup(backup: string) {
 export function migrateDatabase(db: DatabaseSync) {
   if (userVersion(db) === SCHEMA_VERSION) return;
   db.exec("BEGIN IMMEDIATE");
+  const committedLog: string[] = [];
   try {
     // Another connection may have migrated while this one waited for the write lock.
     const found = userVersion(db);
     if (found > SCHEMA_VERSION) throw newerDatabaseError(found);
-    for (let next = found; next < SCHEMA_VERSION; next++) migrations[next](db);
+    for (let next = found; next < SCHEMA_VERSION; next++) {
+      const line = migrations[next](db);
+      if (line) committedLog.push(line);
+    }
     db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     db.exec("COMMIT");
   } catch (error) {
     if (db.isTransaction) db.exec("ROLLBACK");
     throw error;
   }
+  for (const line of committedLog) console.info(line);
 }
 
 function hasTable(db: DatabaseSync, name: string) {
@@ -313,4 +320,72 @@ function seriesNotFoundHistory(db: DatabaseSync) {
     last_counted_day TEXT NOT NULL,
     PRIMARY KEY(provider, series_id)
   )`);
+}
+
+/** The generated inputs migration 6 keeps: scan accounting, provider verification positions and pending safeguards. */
+const KEPT_BY_LOOKUP_KEY_RESET = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards"];
+const LOOKUP_ISSUE_PREFIX = "episode-identity:";
+
+/** A stored JSON object, or undefined when the text is missing, invalid or not an object. */
+function storedObject(payload: string | null | undefined): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+  try {
+    const value: unknown = JSON.parse(payload);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Migration 6: saved provider relationships and lookup Coverage Issues move from URL-shaped keys to
+ * lookup keys (`<kind>:<inputs>`), with no reader for the old keys, so everything saved under them is
+ * cleared once (SHELFCHECK-40):
+ * - every generated input except scan accounting, provider verification positions and pending
+ *   safeguards: catalogues, inventory, comparisons with their relationships and IMDb identities, and
+ *   shared crosswalk evidence, as a full Clear cache does;
+ * - the Plex report's scan cache and the Plex Resume point, which carry IMDb identities too; the
+ *   report's results, Plex status and options, and the Trakt row are kept;
+ * - every `episode-identity:` Coverage Issue, and only the links to those issues in other issues'
+ *   causes. Every other issue keeps its own cause and surviving links.
+ * Decisions (Manual Matches, Report Missing flags, Ignores, catalogue overrides and selections),
+ * credentials and the series 404 history live elsewhere and are untouched. Nothing is requested: the
+ * next full Plex scan downloads catalogues again.
+ */
+function lookupKeyReset(db: DatabaseSync) {
+  const generated = db.prepare(`DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key NOT IN (${KEPT_BY_LOOKUP_KEY_RESET.map(() => "?").join(",")})`)
+    .run(...KEPT_BY_LOOKUP_KEY_RESET).changes;
+
+  let scanState = 0;
+  const plex = db.prepare("SELECT report, resume_point FROM shelfcheck_scan_state WHERE mode = 'plex'").get() as { report: string | null; resume_point: string | null } | undefined;
+  if (plex) {
+    const report = storedObject(plex.report);
+    const cachedReport = report && Object.hasOwn(report, "scanCache");
+    if (cachedReport) delete report.scanCache;
+    if (cachedReport || plex.resume_point !== null) {
+      db.prepare("UPDATE shelfcheck_scan_state SET report = ?, resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = 'plex'")
+        .run(cachedReport ? JSON.stringify(report) : plex.report);
+      scanState = 1;
+    }
+  }
+
+  // An exact prefix match: substr is case-sensitive and has no wildcards.
+  const removed = new Set((db.prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id, 1, ?) = ?").all(LOOKUP_ISSUE_PREFIX.length, LOOKUP_ISSUE_PREFIX) as { id: string }[]).map(row => row.id));
+  if (removed.size) {
+    db.prepare("DELETE FROM shelfcheck_coverage_issues WHERE substr(id, 1, ?) = ?").run(LOOKUP_ISSUE_PREFIX.length, LOOKUP_ISSUE_PREFIX);
+    const rows = db.prepare("SELECT id, payload FROM shelfcheck_coverage_issues").all() as { id: string; payload: string }[];
+    const rewrite = db.prepare("UPDATE shelfcheck_coverage_issues SET payload = ? WHERE id = ?");
+    for (const row of rows) {
+      const issue = storedObject(row.payload);
+      if (!issue || !Array.isArray(issue.causedBy) || !issue.causedBy.some(parent => removed.has(parent))) continue;
+      const surviving = issue.causedBy.filter(parent => !removed.has(parent));
+      if (surviving.length) issue.causedBy = surviving;
+      else delete issue.causedBy;
+      rewrite.run(JSON.stringify(issue), row.id);
+    }
+  }
+
+  return generated || scanState || removed.size
+    ? "Shelfcheck cleared its saved Plex scan data for the new provider lookup keys. Run a full Plex scan to download provider catalogues again; Manual Matches, Report Missing flags, Ignores, catalogue choices and settings were kept."
+    : "Shelfcheck moved to the new provider lookup keys; there was no saved Plex scan data to clear.";
 }

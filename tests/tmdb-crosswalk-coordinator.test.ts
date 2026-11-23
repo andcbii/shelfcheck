@@ -6,8 +6,8 @@ import type { SharedCrosswalkRecord } from "../lib/tmdb-crosswalk-policy";
 const SCAN_STARTED = "2026-06-01T23:30:00.000Z";
 const NOW = "2026-06-01T23:40:00.000Z";
 const MATCH = { tv_episode_results: [{ id: 901, show_id: 10 }] };
-/** The saved relationship key of TVDB episode 301's TMDB external-ID crosswalk (today's key projection). */
-const KEY_301 = "TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id";
+/** The saved relationship key of TVDB episode 301's TMDB external-ID crosswalk (its lookup key). */
+const KEY_301 = "tmdb-episode-by-tvdb:301";
 const OLD_RECEIPT = "2026-05-30T10:00:00.000Z";
 
 /** Shared crosswalk evidence held in memory, with every save recorded in order. */
@@ -239,8 +239,8 @@ test("a recheck that recovered nothing saves nothing", () => {
 });
 
 /** The saved relationship key of TVDB episode 302's TMDB external-ID crosswalk. */
-const KEY_302 = "TMDB:https://api.themoviedb.org/3/find/302?external_source=tvdb_id";
-const SERIES_KEY = "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id";
+const KEY_302 = "tmdb-episode-by-tvdb:302";
+const SERIES_KEY = "tmdb-series-by-tvdb:20";
 const OLD = "2026-05-01T00:00:00.000Z";
 /** A last-good comparison's saved relationships: two crosswalk copies and a series association, all received earlier. */
 const lastGood = () => ({
@@ -275,8 +275,8 @@ test("clearing one show marks its usable shared answers not current, keeping the
   const alreadyInvalidated = { value: MATCH, receivedAt: OLD, invalidatedAt: "2026-05-02T00:00:00.000Z" };
   const unrelated = { value: MATCH, receivedAt: OLD };
   const { store, records } = inMemoryStore({ 301: usable, 302: rejected, 303: alreadyInvalidated, 304: unrelated });
-  const KEY_303 = "TMDB:https://api.themoviedb.org/3/find/303?external_source=tvdb_id";
-  const TRAKT_305 = "Trakt:https://api.trakt.tv/search/tvdb/305?type=episode";
+  const KEY_303 = "tmdb-episode-by-tvdb:303";
+  const TRAKT_305 = "trakt-episode-by-tvdb:305";
   invalidateShowTmdbCrosswalks({ store, now: () => NOW }, [KEY_301, KEY_302, KEY_303, TRAKT_305]);
   assert.deepEqual(Object.fromEntries(records), {
     301: { value: MATCH, receivedAt: OLD, invalidatedAt: NOW },
@@ -284,6 +284,10 @@ test("clearing one show marks its usable shared answers not current, keeping the
     303: alreadyInvalidated,
     304: unrelated,
   });
+  // A series association with an episode's numeric ID is not that episode's crosswalk.
+  const { store: seriesStore, records: seriesRecords } = inMemoryStore({ 20: usable });
+  invalidateShowTmdbCrosswalks({ store: seriesStore, now: () => NOW }, [SERIES_KEY, "tvdb-series:20", "tmdb-series:20:summary"]);
+  assert.deepEqual(Object.fromEntries(seriesRecords), { 20: usable });
   // The next live lookup of a cleared answer is requested again, even on the day it was received.
   const run = tmdbCrosswalkScanRun({ store, now: () => NOW, startedAt: OLD });
   let requests = 0;

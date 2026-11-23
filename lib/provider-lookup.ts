@@ -2,7 +2,7 @@ import type { ProviderName } from "@/lib/provider-policy";
 
 /**
  * One kind of matching evidence a Plex scan looks up from a provider, by typed identity. Series and
- * episode kinds are distinct even where their stored key is still shared (see `lookupKey`).
+ * episode kinds are distinct, and so are their stored keys (see `lookupKey`).
  * Plain transport (Plex inventory, catalogue episode pages, the catalogue slug read and the TVDB
  * change feed) has no typed lookup.
  */
@@ -87,21 +87,49 @@ export function lookupUrl(lookup: ProviderLookup): string {
 }
 
 /**
- * The one projection from a typed lookup to its stored key: the key its saved provider
- * relationship is kept under, and the lookup part of its `episode-identity:` Coverage Issue ID.
- * It is still the provider and request URL, so a TMDB series association and a TMDB episode
- * crosswalk with the same numeric TVDB ID share one key until the key cutover.
+ * The one projection from a typed lookup to its stored key, `<kind>:<inputs>`: the key its saved
+ * provider relationship is kept under, and the lookup part of its `episode-identity:` Coverage
+ * Issue ID. Every kind has its own key, so a series lookup and an episode lookup with the same
+ * numeric ID never share one. It names no request URL; only transport knows those.
  */
 export function lookupKey(lookup: ProviderLookup): string {
-  return `${lookupProvider(lookup)}:${lookupUrl(lookup)}`;
+  switch (lookup.kind) {
+    case "tmdb-episode-by-tvdb-episode": return `tmdb-episode-by-tvdb:${lookup.tvdbEpisodeId}`;
+    case "tmdb-series-by-tvdb-series": return `tmdb-series-by-tvdb:${lookup.tvdbSeriesId}`;
+    case "tmdb-episode-by-show-season-episode": return `tmdb-episode:${lookup.tmdbShowId}:${lookup.season}:${lookup.episode}`;
+    case "tmdb-series-summary": return `tmdb-series:${lookup.tmdbShowId}:summary`;
+    case "tmdb-series-summary-with-external-ids": return `tmdb-series:${lookup.tmdbShowId}:external-ids`;
+    case "tvdb-series-summary": return `tvdb-series:${lookup.tvdbSeriesId}`;
+    case "tvdb-episode-extended": return `tvdb-episode-extended:${lookup.tvdbEpisodeId}`;
+    case "trakt-episode-search-by-tvdb-episode": return `trakt-episode-by-tvdb:${lookup.tvdbEpisodeId}`;
+  }
 }
 
+/** Builds a lookup from a stored key's parts, for every key `lookupKey` writes. */
+const lookupOfKeyParts: Record<string, (parts: number[], variant?: string) => ProviderLookup | undefined> = {
+  "tmdb-episode-by-tvdb": ([id]) => providerLookup.tmdbEpisodeByTvdbEpisode(id),
+  "tmdb-series-by-tvdb": ([id]) => providerLookup.tmdbSeriesByTvdbSeries(id),
+  "tmdb-episode": ([show, season, episode]) => providerLookup.tmdbEpisodeByShowSeasonEpisode(show, season, episode),
+  "tmdb-series": ([id], variant) => variant === "summary" ? providerLookup.tmdbSeriesSummary(id) : variant === "external-ids" ? providerLookup.tmdbSeriesSummaryWithExternalIds(id) : undefined,
+  "tvdb-series": ([id]) => providerLookup.tvdbSeriesSummary(id),
+  "tvdb-episode-extended": ([id]) => providerLookup.tvdbEpisodeExtended(id),
+  "trakt-episode-by-tvdb": ([id]) => providerLookup.traktEpisodeSearchByTvdbEpisode(id),
+};
+
 /**
- * The TVDB episode whose TMDB external-ID crosswalk a stored key names, if any. While keys are
- * shared, a TMDB series association's key names the same-numbered episode too.
+ * The typed lookup a stored key names, or undefined for any string `lookupKey` never writes, so
+ * callers select saved relationships by lookup kind.
  */
-export function tmdbEpisodeCrosswalkOfKey(key: string): number | undefined {
-  const tvdbEpisodeId = Number(key.match(/\/find\/(\d+)\?/)?.[1]);
-  if (!Number.isSafeInteger(tvdbEpisodeId) || tvdbEpisodeId <= 0) return undefined;
-  return key === lookupKey(providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId)) ? tvdbEpisodeId : undefined;
+export function lookupOfKey(key: string): ProviderLookup | undefined {
+  const [kind, ...rest] = key.split(":");
+  const build = Object.hasOwn(lookupOfKeyParts, kind) ? lookupOfKeyParts[kind] : undefined;
+  if (!build) return undefined;
+  const variant = rest.length && !/^\d+$/.test(rest.at(-1)!) ? rest.pop() : undefined;
+  try {
+    const lookup = build(rest.map(Number), variant);
+    // Only the exact key this lookup projects to names it: no padded, partial or extra parts.
+    return lookup && lookupKey(lookup) === key ? lookup : undefined;
+  } catch {
+    return undefined;
+  }
 }

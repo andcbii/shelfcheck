@@ -1,33 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isEpisodeCoordinate, isProviderId, lookupKey, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey } from "../lib/provider-lookup";
+import { isEpisodeCoordinate, isProviderId, lookupKey, lookupOfKey, providerLookup } from "../lib/provider-lookup";
 
-// Today's exact stored relationship keys (and lookup Coverage Issue ID suffixes). SHELFCHECK-141 (Story SHELFCHECK-128) changes them.
-const todaysKeys = [
-  [providerLookup.tmdbEpisodeByTvdbEpisode(301), "TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id"],
-  [providerLookup.tmdbSeriesByTvdbSeries(20), "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id"],
-  [providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 0, 3), "TMDB:https://api.themoviedb.org/3/tv/10/season/0/episode/3"],
-  [providerLookup.tmdbSeriesSummary(10), "TMDB:https://api.themoviedb.org/3/tv/10"],
-  [providerLookup.tmdbSeriesSummaryWithExternalIds(10), "TMDB:https://api.themoviedb.org/3/tv/10?append_to_response=external_ids"],
-  [providerLookup.tvdbSeriesSummary(20), "TVDB:https://api4.thetvdb.com/v4/series/20"],
-  [providerLookup.tvdbEpisodeExtended(301), "TVDB:https://api4.thetvdb.com/v4/episodes/301/extended"],
-  [providerLookup.traktEpisodeSearchByTvdbEpisode(301), "Trakt:https://api.trakt.tv/search/tvdb/301?type=episode"],
+// The exact stored relationship keys (and lookup Coverage Issue ID suffixes): `<kind>:<inputs>`.
+const storedKeys = [
+  [providerLookup.tmdbEpisodeByTvdbEpisode(301), "tmdb-episode-by-tvdb:301"],
+  [providerLookup.tmdbSeriesByTvdbSeries(20), "tmdb-series-by-tvdb:20"],
+  [providerLookup.tmdbEpisodeByShowSeasonEpisode(10, 0, 3), "tmdb-episode:10:0:3"],
+  [providerLookup.tmdbSeriesSummary(10), "tmdb-series:10:summary"],
+  [providerLookup.tmdbSeriesSummaryWithExternalIds(10), "tmdb-series:10:external-ids"],
+  [providerLookup.tvdbSeriesSummary(20), "tvdb-series:20"],
+  [providerLookup.tvdbEpisodeExtended(301), "tvdb-episode-extended:301"],
+  [providerLookup.traktEpisodeSearchByTvdbEpisode(301), "trakt-episode-by-tvdb:301"],
 ] as const;
 
-test("every typed lookup projects to today's exact stored key", () => {
-  for (const [lookup, key] of todaysKeys) assert.equal(lookupKey(lookup), key, lookup.kind);
+test("every typed lookup projects to its exact stored key", () => {
+  for (const [lookup, key] of storedKeys) assert.equal(lookupKey(lookup), key, lookup.kind);
 });
 
-test("a lookup's stored key today is its provider and request URL", () => {
-  for (const [lookup, key] of todaysKeys) assert.equal(`${key.slice(0, key.indexOf(":"))}:${lookupUrl(lookup)}`, key, lookup.kind);
+test("a stored key reads back as the typed lookup it was made from, and nothing else does", () => {
+  for (const [lookup, key] of storedKeys) assert.deepEqual(lookupOfKey(key), lookup, key);
+  for (const key of [
+    "TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id", "tmdb-episode-by-tvdb:0", "tmdb-episode-by-tvdb:01", "tmdb-episode-by-tvdb:1.5",
+    "tmdb-episode-by-tvdb:301:extra", "tmdb-series:10", "tmdb-series:10:other", "tmdb-episode:10:1", "tmdb-crosswalk:301", "comparison:1", "anything", "",
+  ]) assert.equal(lookupOfKey(key), undefined, key);
 });
 
-test("series and episode lookups are distinct kinds even where today's key is shared", () => {
+test("series and episode lookups with the same numeric ID have separate stored keys", () => {
   const episode = providerLookup.tmdbEpisodeByTvdbEpisode(20);
   const series = providerLookup.tmdbSeriesByTvdbSeries(20);
   assert.notEqual(episode.kind, series.kind);
-  // CURRENT COLLISION (changes at the cutover): both project to one stored key today.
-  assert.equal(lookupKey(episode), lookupKey(series));
+  assert.notEqual(lookupKey(episode), lookupKey(series));
+  assert.equal(lookupOfKey(lookupKey(series))?.kind, "tmdb-series-by-tvdb-series");
+  assert.equal(lookupOfKey(lookupKey(episode))?.kind, "tmdb-episode-by-tvdb-episode");
   const basic = providerLookup.tmdbSeriesSummary(10);
   const external = providerLookup.tmdbSeriesSummaryWithExternalIds(10);
   assert.notEqual(lookupKey(basic), lookupKey(external));
@@ -51,10 +56,4 @@ test("lookup inputs are validated", () => {
   // Callers check provider answers with the same rules before building a lookup.
   assert.deepEqual([1, 0, -1, 1.5, "1", Number.NaN].map(isEpisodeCoordinate), [true, true, false, false, false, false]);
   assert.deepEqual([1, 0, -1, 1.5, "1", Number.NaN].map(isProviderId), [true, false, false, false, false, false]);
-});
-
-test("the per-show clear finds the TVDB episode whose TMDB crosswalk a stored key names", () => {
-  assert.equal(tmdbEpisodeCrosswalkOfKey("TMDB:https://api.themoviedb.org/3/find/301?external_source=tvdb_id"), 301);
-  for (const key of ["TMDB:https://api.themoviedb.org/3/tv/10", "TVDB:https://api4.thetvdb.com/v4/episodes/301/extended", "Trakt:https://api.trakt.tv/search/tvdb/301?type=episode", "TMDB:https://api.themoviedb.org/3/find/301?external_source=imdb_id", "anything"])
-    assert.equal(tmdbEpisodeCrosswalkOfKey(key), undefined, key);
 });

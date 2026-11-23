@@ -6,9 +6,10 @@ import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-mode
 import { readPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 
 /**
- * Manual Match changes: each command runs the whole sequence (scan check,
- * provider revalidation for a reviewed save, the store's transactional write,
- * then one cached recheck of the members the committed change affects).
+ * Manual Match changes: each command runs the whole sequence (refusal while a
+ * Plex scan run is active, provider revalidation for a reviewed save, the
+ * store's transactional write, which also carries the affected members, then
+ * one cached recheck of those members and every other carried member).
  * Routes only parse requests and map results and errors. Preview resolution is
  * a read and stays outside this module. Clearing Report Missing flags for an
  * Ignore takes the newly applied scopes as plain input: which Ignore rules are
@@ -70,7 +71,7 @@ export type IgnoreCleanup = { coverageRevision?: number };
  * in the same transaction, so a failure saves neither. Then rechecks every show
  * of the affected Manual Matches, so derived effects elsewhere are withdrawn at
  * once. Flags outside the scopes and every other Manual Match are kept; Restore
- * or expiry never brings flags back. Refused during a Plex Scan run only when
+ * or expiry never brings flags back. Refused during a Plex scan run only when
  * there are flags to clear; with none, `saveIgnore` still runs exactly once, with
  * no revision change and no recheck.
  */
@@ -118,7 +119,8 @@ function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
  * so the command still reports the committed change. The store's transaction
  * also carried the affected members, so every later recheck compares their
  * shows too, and the Plex page keeps the last results with the comparison
- * pending notice until a recheck or completed full Plex scan covers them.
+ * pending notice until a cached recheck or a committed full Plex scan run
+ * compares every show of each carried member.
  * Known limit: a recheck that fails early may not yet have written every
  * affected show's refresh obligation; a later recheck or scan writes them.
  */

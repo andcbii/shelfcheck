@@ -1,6 +1,7 @@
 import "server-only";
 import type { LookupSourceStep } from "@/lib/coverage-issues";
-import { lookupDiagnostics, traktLoginDiagnostics, type LookupComparisonContext } from "@/lib/lookup-diagnostics";
+import { lookupDiagnostics, type LookupComparisonContext } from "@/lib/lookup-diagnostics";
+import { traktLoginDiagnostics } from "@/lib/provider-login-diagnostics";
 import { lookupFailureRecord } from "@/lib/lookup-failure-record";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import type { EpisodeCrosswalk } from "@/lib/plex-comparison";

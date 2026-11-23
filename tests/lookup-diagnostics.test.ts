@@ -6,8 +6,9 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
-const { lookupDiagnostics, traktLoginDiagnostics } = await import("../lib/lookup-diagnostics");
+const { lookupDiagnostics } = await import("../lib/lookup-diagnostics");
 const { lookupFailureRecord } = await import("../lib/lookup-failure-record");
+const { reconcileEpisodeCheckIssues } = await import("../lib/episode-check-issues");
 const { providerLookup } = await import("../lib/provider-lookup");
 const { getCoverageIssue, listCoverageIssues } = await import("../lib/coverage-issues");
 const { ProviderHttpError, ProviderNetworkError } = await import("../lib/provider-client");
@@ -151,23 +152,26 @@ test("a successful response resolves its lookup's failed request, which the read
   assert.deepEqual(listCoverageIssues(), []);
 });
 
+test("a successful response with an unreadable body resolves the failed request and leaves the episode failure recorded after it", t => {
+  temporaryDatabase(t);
+  const diagnostics = lookupDiagnostics(target);
+  const lookup = providerLookup.tmdbEpisodeByTvdbEpisode(303);
+  diagnostics.raiseFailure(lookup, new ProviderHttpError("TMDB", 503));
+  // The response arrives: its request succeeded, so the failed request resolves first ...
+  diagnostics.resolve(lookup);
+  // ... and only then is its unreadable body recorded, as the episode's crosswalk failure.
+  reconcileEpisodeCheckIssues(showOf, [{operation: "episode-crosswalk", crosswalk: "TMDB", episode: {provider: "TVDB", id: 303, season: 2, episode: 3}, kind: "unreadable-response", reason: "the TMDB response was unreadable."}]);
+  const record = lookupFailureRecord("ratingKey:target");
+  assert.equal(record.failure(lookup), undefined);
+  assert.deepEqual(record.episodeCrosswalkFailures(), [{crosswalk: "TMDB", tvdbEpisodeId: 303}]);
+  assert.equal(getCoverageIssue(ids.tmdbCrosswalk303), undefined);
+  assert.equal(listCoverageIssues().length, 1);
+});
+
 test("resolving a lookup leaves other shows' and other lookups' failed requests open", t => {
   temporaryDatabase(t);
   lookupDiagnostics(target).raiseFailure(providerLookup.tvdbEpisodeExtended(303), new ProviderHttpError("TVDB", 503));
   lookupDiagnostics({ratingKey: "ratingKey:other"}).raiseFailure(providerLookup.tmdbEpisodeByTvdbEpisode(303), new ProviderHttpError("TMDB", 503));
   lookupDiagnostics(target).resolve(providerLookup.tmdbEpisodeByTvdbEpisode(303));
   assert.deepEqual(listCoverageIssues().map(issue => issue.id).sort(), ["episode-identity:ratingKey:other:TMDB:https://api.themoviedb.org/3/find/303?external_source=tvdb_id", ids.tvdbExtended303]);
-});
-
-test("an unrecoverable Trakt login is one library issue, resolved when Trakt answers again", t => {
-  temporaryDatabase(t);
-  traktLoginDiagnostics.raiseFailure(new ProviderHttpError("Trakt", 401));
-  traktLoginDiagnostics.raiseFailure(new ProviderHttpError("Trakt", 401));
-  assert.deepEqual(listCoverageIssues(), [{
-    id: "provider-authentication:Trakt", operation: "provider-authentication", provider: "Trakt", scope: "library", category: "Provider Lookup",
-    lookup: {source: [], requested: {provider: "Trakt", kind: "authentication"}, impact: "Trakt episode identity checks could not be verified. TMDB fallback checks remain available.", status: 401, failureKind: "http"},
-    cause: "401 — Trakt request failed", action: "Check Trakt credentials or permissions, then retry the Plex scan.",
-  }]);
-  traktLoginDiagnostics.resolve();
-  assert.deepEqual(listCoverageIssues(), []);
 });

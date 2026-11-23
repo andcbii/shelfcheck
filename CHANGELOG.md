@@ -21,7 +21,9 @@
 
   Scan Issues entries for failed provider lookups from before the upgrade are
   removed, since they name lookups in the old format; the next scan reports
-  any that still fail. Other entries keep their other causes.
+  any that still fail. Other entries keep their other causes. Some episode
+  check entries may stay on the Scan Issues page without their failed-request
+  link until the next full scan.
 
   Kept through the upgrade: Manual Matches, Report Missing flags, Ignores,
   catalogue overrides and selections, credentials, Plex and Trakt settings,

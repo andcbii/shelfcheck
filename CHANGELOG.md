@@ -46,8 +46,9 @@
   compares their shows too. Before, a later change that rechecked only other
   shows cleared the pending notice while the failed change's shows kept their
   last results. The notice now clears only when no saved change is left
-  unrechecked, or when a full Plex scan completes; a single-show or failed
-  scan leaves it. A database upgraded with the notice already showing has no
+  unrechecked. A recheck or full Plex scan that could not compare one of a
+  change's shows, or ran without a complete library inventory, keeps that
+  change unrechecked; a single-show or failed scan leaves the notice. A database upgraded with the notice already showing has no
   such saved episodes, so its notice clears with the next recheck or full
   Plex scan, as before.
 

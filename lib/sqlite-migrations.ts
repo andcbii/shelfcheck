@@ -401,8 +401,8 @@ function lookupKeyReset(db: DatabaseSync) {
 /**
  * Migration 7: carried Manual Match members (SHELFCHECK-154). Each committed Manual Match change
  * records the members whose shows need a cached recheck, one row per member and show placement,
- * with the coverage revision that recorded it. A successful cached recheck or a completed full Plex
- * scan removes them. Only a new table: every existing record is kept, and a database upgraded with
+ * with the coverage revision that recorded it. A cached recheck or a committed full Plex scan run
+ * removes those whose shows it compared. Only a new table: every existing record is kept, and a database upgraded with
  * a pending comparison keeps it, without carried members, until a recheck or full scan completes it.
  */
 function carriedCoverageMembers(db: DatabaseSync) {

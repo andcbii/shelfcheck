@@ -6,10 +6,13 @@ import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { CoverageMember } from "../lib/manual-coverage-model";
+import type { SavedPlexComparison } from "../lib/plex-catalogues";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const store = await import("../lib/manual-coverage");
 const issues = await import("../lib/coverage-issues");
 const { scanRuns } = await import("../lib/scan-run");
+const scan = await import("../lib/plex-scan");
+const plexInputs = await import("../lib/plex-catalogues");
 hook.deregister();
 
 // The Manual Match store's save and delete, against a real temporary SQLite
@@ -55,6 +58,26 @@ test("replacing members returns old and new members, keeping a former show the m
   assert.deepEqual(keys(replaced.mapping.members), ["TMDB:111", "TVDB:211"]);
   assert.deepEqual(keys(replaced.affectedMembers), ["TMDB:101", "TMDB:111", "TVDB:201", "TVDB:211"]);
   assert.deepEqual([...new Set(replaced.affectedMembers.map(m => `${m.provider}:${m.showId}`))].sort(), ["TMDB:10", "TMDB:11", "TVDB:20", "TVDB:21"]);
+});
+
+/** A saved Plex comparison for one TMDB/TVDB show, with no refresh obligation yet. */
+function savedComparison(tmdbId: number, tvdbId: number) {
+  return { tmdbId, tvdbId, tmdbAliases: [], tvdbAliases: [], relationships: {}, complete: false, group: { records: [] }, details: [], localMetadata: [] } as unknown as SavedPlexComparison;
+}
+
+test("an edit that keeps episode IDs but moves them to another show rechecks both the former and the new show", async (t) => {
+  temporaryStore(t);
+  const first = store.saveCoverageMapping([member("TMDB", 101), member("TVDB", 201)]).mapping;
+  const moved = store.saveCoverageMapping([member("TMDB", 101, 11), member("TVDB", 201, 21)], { id: first.id, revision: first.revision });
+  assert.deepEqual(moved.affectedMembers.map(m => `${m.provider}:${m.id}:${m.showId}`).sort(), ["TMDB:101:10", "TMDB:101:11", "TVDB:201:20", "TVDB:201:21"]);
+
+  // No saved catalogue holds these IDs, so only the members' showIds tie them to a comparison.
+  plexInputs.savePlexComparison("former", savedComparison(10, 20));
+  plexInputs.savePlexComparison("new", savedComparison(11, 21));
+  await scan.requestCoverageRecheck({ members: moved.affectedMembers });
+  const { comparisons } = plexInputs.readPlexInputs();
+  assert.deepEqual(comparisons.former.refresh, { tmdb: true, tvdb: true });
+  assert.deepEqual(comparisons.new.refresh, { tmdb: true, tvdb: true });
 });
 
 test("a flag-only edit returns every member as affected and the saved flags in its Manual Match", (t) => {

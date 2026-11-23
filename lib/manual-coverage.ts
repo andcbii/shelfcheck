@@ -67,10 +67,17 @@ function savedManualMatch(db: ReturnType<typeof database>, id: string): Coverage
  */
 export type ManualMatchEdit = { id: string; revision: unknown };
 
-/** Members a Manual Match change affects, each once: their shows need a cached recheck. */
+/**
+ * Members a Manual Match change affects, each once per show: their shows need a
+ * cached recheck. An edit can keep an episode ID but move it to another show, so
+ * the former and the new show placement are both kept.
+ */
 function distinctMembers(members: CoverageMember[]): CoverageMember[] {
   const seen = new Map<string, CoverageMember>();
-  for (const member of members) if (!seen.has(memberKey(member))) seen.set(memberKey(member), member);
+  for (const member of members) {
+    const key = `${memberKey(member)}:${member.showId}`;
+    if (!seen.has(key)) seen.set(key, member);
+  }
   return [...seen.values()];
 }
 

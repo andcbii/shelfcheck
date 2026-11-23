@@ -1,7 +1,8 @@
 import "server-only";
 import { getCoverageIssue } from "@/lib/coverage-issues";
 import { recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
-import { lookupKey, type ProviderLookup } from "@/lib/provider-lookup";
+import { lookupFailureIssueId } from "@/lib/lookup-diagnostics";
+import type { ProviderLookup } from "@/lib/provider-lookup";
 import type { EpisodeCrosswalk } from "@/lib/plex-comparison";
 
 /**
@@ -11,11 +12,6 @@ import type { EpisodeCrosswalk } from "@/lib/plex-comparison";
 export type RecordedLookupFailure = { open: true; failedAt?: string };
 /** One TVDB episode's crosswalk recorded as failed for a show, by an earlier comparison. */
 export type RecordedEpisodeCrosswalkFailure = { crosswalk: EpisodeCrosswalk; tvdbEpisodeId: number };
-
-/** The `episode-identity:` Coverage Issue ID of one show's failed request for a typed lookup. */
-export function lookupFailureIssueId(ratingKey: string, lookup: ProviderLookup) {
-  return `episode-identity:${ratingKey}:${lookupKey(lookup)}`;
-}
 
 /**
  * Read port for one show's recorded lookup failures. It reports facts only: it decides no

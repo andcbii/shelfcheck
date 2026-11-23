@@ -19,7 +19,8 @@ import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
-import { lookupFailureIssueId, lookupFailureRecord, type RecordedLookupFailure } from "@/lib/lookup-failure-record";
+import { lookupFailureRecord, type RecordedLookupFailure } from "@/lib/lookup-failure-record";
+import { lookupDiagnostics, lookupFailureIssueId, traktLoginDiagnostics } from "@/lib/lookup-diagnostics";
 import { withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-recovery";
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
@@ -152,11 +153,6 @@ class TraktLoginUnavailableError extends Error {
   constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
 }
 
-/** One library-scoped Coverage Issue for the Trakt login, with the actual cause and status. */
-function raiseTraktLoginIssue(error: unknown) {
-  setCoverageIssue({id:"provider-authentication:Trakt",operation:"provider-authentication",provider:"Trakt",scope:"library",...providerLookupContext(error,{source:[],requested:{provider:"Trakt",kind:"authentication"},impact:"Trakt episode identity checks could not be verified. TMDB fallback checks remain available."})});
-}
-
 /**
  * A live scan's lookup of one TVDB episode's TMDB external-ID crosswalk: its scan run's crosswalk
  * coordinator reuses current shared evidence or shares one request with every comparison needing it.
@@ -164,28 +160,28 @@ function raiseTraktLoginIssue(error: unknown) {
  */
 type LiveTmdbCrosswalk = {crosswalks: TmdbCrosswalkComparison; tvdbEpisodeId: number; forced: boolean};
 
-/**
- * `episodeIdentity`: the episode a matching lookup identifies, for its failure diagnostics. `auth`: the
- * login the provider client sends and recovers. `liveCrosswalk`: a live scan's TMDB crosswalk lookup.
- */
-type CheckedJsonOptions = {episodeIdentity?: {provider:"TMDB"|"TVDB";id:number}; auth?: ProviderAuth; liveCrosswalk?: LiveTmdbCrosswalk};
+/** `auth`: the login the provider client sends and recovers. `liveCrosswalk`: a live scan's TMDB crosswalk lookup. */
+type CheckedJsonOptions = {auth?: ProviderAuth; liveCrosswalk?: LiveTmdbCrosswalk};
 
-async function checkedJson<T>(target: ProviderRequestTarget, init: RequestInit, {episodeIdentity, auth, liveCrosswalk}: CheckedJsonOptions = {}): Promise<T> {
+/**
+ * The lookup diagnostics of the comparing show, from its hidden comparison context, for a typed lookup.
+ * Plain transport and requests outside a comparison have none: their enclosing handling reports failures.
+ */
+function comparisonLookupDiagnostics(lookup: ProviderLookup | undefined) {
+  const show = comparisonIssueScope.getStore();
+  return show && lookup ? lookupDiagnostics({...show, lookupSource: lookupSourceScope.getStore()}) : undefined;
+}
+
+async function checkedJson<T>(target: ProviderRequestTarget, init: RequestInit, {auth, liveCrosswalk}: CheckedJsonOptions = {}): Promise<T> {
   const {provider, url, key, lookup} = target;
   const relationships = relationshipScope.getStore();
   const show = comparisonIssueScope.getStore();
-  // Only typed lookups have a failed-request issue; plain transport never matches below.
-  const issueId = show && lookup ? lookupFailureIssueId(show.ratingKey, lookup) : undefined;
   // A live crosswalk's saved copy is never reused directly: the coordinator reuses or replaces it.
   if (relationships && !liveCrosswalk && relationshipIsReusable(target)) return relationships[key].value as T;
   const replay=replayScope.getStore();
   if (replay && crosswalkLookupScope.getStore()) throw new SavedRelationshipUnavailableError(key);
   if (replay) { replay.missing.add(key); throw new Error(`Saved provider identity relationship is missing: ${key}`); }
-  const endpoint = new URL(url);
-  const tvdbEpisodeId = endpoint.pathname.match(/\/(?:episodes|search\/tvdb)\/(\d+)/)?.[1];
-  const findId = endpoint.pathname.match(/\/find\/(\d+)/)?.[1];
-  const coordinate = endpoint.pathname.match(/\/tv\/(\d+)\/season\/(\d+)\/episode\/(\d+)/);
-  const matching = Boolean(tvdbEpisodeId || findId || coordinate || provider === "Trakt");
+  const diagnostics = comparisonLookupDiagnostics(lookup);
   let value: T;
   /** Absent for a live crosswalk: the coordinator keeps the comparison's copy, and a reused one resolves its failed request below. */
   let receivedAt: string | undefined;
@@ -196,24 +192,13 @@ async function checkedJson<T>(target: ProviderRequestTarget, init: RequestInit, 
   }
   catch (error) {
     // A login that cannot be recovered is one library issue, not a failure of each lookup it stops.
-    if (provider === "Trakt" && auth && isProviderLoginFailure("Trakt", error)) { raiseTraktLoginIssue(error); throw new TraktLoginUnavailableError(error); }
-    if (show && matching && issueId) {
-      const externalId = episodeIdentity?.id;
-      setCoverageIssue({id:issueId,failedAt:new Date().toISOString(),...(provider === "TVDB" && error === show.tvdbAuthenticationError ? {causedBy:["provider-authentication:TVDB"]} : {}),operation:findId && !episodeIdentity ? "provider-association" : "episode-identity",provider,scope:tvdbEpisodeId || externalId || coordinate ? "episode" : "show",show:{ratingKey:show.ratingKey,title:show.title,tmdbId:show.tmdbId,tvdbId:show.tvdbId},
-        ...(tvdbEpisodeId || externalId ? {episode:{provider:"TVDB" as const,id:Number(tvdbEpisodeId || externalId),showId:show.tvdbId,...((e)=>e ? {season:e.season,episode:e.episode,title:e.title} : {})(show.providerEpisodes?.find(e=>e.source === "TVDB" && e.providerEpisodeId === Number(tvdbEpisodeId || externalId)))}} : coordinate ? {episode:{provider:"TMDB" as const,...(lookupSourceScope.getStore()?.at(-1)?.kind === "external TMDB episode ID" ? {id:lookupSourceScope.getStore()!.at(-1)!.id} : {}),showId:Number(coordinate[1]),season:Number(coordinate[2]),episode:Number(coordinate[3])}} : {}),
-        ...providerLookupContext(error,{
-          source: lookupSourceScope.getStore() || (tvdbEpisodeId || externalId
-            ? [...(show.tvdbSource || []),{provider:"TVDB",kind:"catalogue episode",id:Number(tvdbEpisodeId || externalId),cached:show.tvdbCached}]
-            : findId ? show.tvdbSource || [] : []),
-          requested:{provider,kind:findId ? "external ID search" : coordinate ? `show ${coordinate[1]} season ${coordinate[2]} episode` : "episode",...(findId || tvdbEpisodeId ? {id:Number(findId || tvdbEpisodeId)} : coordinate ? {id:Number(coordinate[3])} : {})},
-          impact:"Episode identity and coverage could not be fully verified. Available last-good results were retained.",
-        })});
-    }
+    if (provider === "Trakt" && auth && isProviderLoginFailure("Trakt", error)) { traktLoginDiagnostics.raiseFailure(error); throw new TraktLoginUnavailableError(error); }
+    if (lookup) diagnostics?.raiseFailure(lookup, error);
     throw error;
   }
-  if (show && matching && issueId) resolveCoverageIssue(issueId);
+  if (lookup) diagnostics?.resolve(lookup);
   // Only a successful Trakt lookup shows the login works again.
-  if (provider === "Trakt" && auth) resolveCoverageIssue("provider-authentication:Trakt");
+  if (provider === "Trakt" && auth) traktLoginDiagnostics.resolve();
   if (relationships && receivedAt !== undefined) relationships[key] = {provider, value, receivedAt};
   return value;
 }
@@ -314,7 +299,7 @@ const crosswalkFailureKinds: EpisodeCheckFailure["kind"][] = ["request-failed", 
 
 /** `live`: a live scan's crosswalks, and whether this lookup retries the show's failed crosswalk; absent in an offline replay. */
 async function findTmdbEpisodeByTvdbId(tvdbEpisodeId: number, token: string, live?: {crosswalks: TmdbCrosswalkComparison; forced: boolean}): Promise<TmdbEpisodeFindResult[]> {
-  const found = await tmdbJson<unknown>(crosswalkLookup("TMDB", tvdbEpisodeId), token, {episodeIdentity: {provider:"TVDB",id:tvdbEpisodeId}, liveCrosswalk: live && {...live, tvdbEpisodeId}});
+  const found = await tmdbJson<unknown>(crosswalkLookup("TMDB", tvdbEpisodeId), token, {liveCrosswalk: live && {...live, tvdbEpisodeId}});
   return interpretedRecords<TmdbEpisodeFindResult>("TMDB", tmdbCrosswalkResults(found));
 }
 
@@ -856,8 +841,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     return "";
   });
   // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
-  const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.ready(); else resolveCoverageIssue("provider-authentication:Trakt");return credentials;}).catch((error) => {
-    raiseTraktLoginIssue(error);
+  const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.ready(); else traktLoginDiagnostics.resolve();return credentials;}).catch((error) => {
+    traktLoginDiagnostics.raiseFailure(error);
     logger.warn("plex.crosswalk.trakt-unavailable", { error: coverageIssueCause(error) });
     return null;
   });

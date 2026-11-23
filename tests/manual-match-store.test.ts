@@ -7,9 +7,11 @@ import type { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { CoverageMember } from "../lib/manual-coverage-model";
 import type { SavedPlexComparison } from "../lib/plex-catalogues";
+import { seedStoredCoverageIssues } from "./stored-coverage-issues";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const store = await import("../lib/manual-coverage");
 const issues = await import("../lib/coverage-issues");
+const { database } = await import("../lib/sqlite");
 const { scanRuns } = await import("../lib/scan-run");
 const scan = await import("../lib/plex-scan");
 const plexInputs = await import("../lib/plex-catalogues");
@@ -93,7 +95,7 @@ test("stale, conflicting, one-sided, invalid and scan-time saves roll back with 
   temporaryStore(t);
   const tmdb = member("TMDB", 101), tmdb2 = member("TMDB", 102), tvdb = member("TVDB", 201), tvdb2 = member("TVDB", 202);
   const first = store.saveCoverageMapping([tmdb, tmdb2, tvdb, tvdb2]).mapping;
-  issues.setCoverageIssue({ id: "mapping-health:x", operation: "comparison", scope: "library", cause: "c", action: "a", mappingId: first.id });
+  seedStoredCoverageIssues(database(), { id: "mapping-health:x", operation: "comparison", scope: "library", cause: "c", action: "a", mappingId: first.id });
   const before = snapshot();
   const rejected: [string, () => unknown][] = [
     ["stale-revision", () => store.saveCoverageMapping([member("TMDB", 103), tvdb], { id: first.id, revision: first.revision - 1 })],

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  INITIAL_COMPARISON_INPUTS_ISSUE, SCAN_FAILURE_ISSUE, TRAKT_AUTHENTICATION_ISSUE, TVDB_AUTHENTICATION_ISSUE,
+  COMPARISON_PENDING_ISSUE, INITIAL_COMPARISON_INPUTS_ISSUE, SCAN_FAILURE_ISSUE, TRAKT_AUTHENTICATION_ISSUE, TVDB_AUTHENTICATION_ISSUE,
   comparisonFailureIssueId, comparisonInputsIssueId, inventoryDetailsIssueId, memberVerificationIssueId, plexInventoryIssueId,
   catalogueIssueIds, catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix,
   lookupFailureIssueId, titleRecoveryIssueId, providerVerificationIssueId,
@@ -15,6 +15,7 @@ test("library-wide Coverage Issue IDs keep their saved text", () => {
   assert.equal(TVDB_AUTHENTICATION_ISSUE, "provider-authentication:TVDB");
   assert.equal(TRAKT_AUTHENTICATION_ISSUE, "provider-authentication:Trakt");
   assert.equal(INITIAL_COMPARISON_INPUTS_ISSUE, "comparison-inputs:initial");
+  assert.equal(COMPARISON_PENDING_ISSUE, "comparison-pending");
   assert.equal(providerVerificationIssueId("TMDB"), "provider-verification:TMDB");
   assert.equal(providerVerificationIssueId("TVDB"), "provider-verification:TVDB");
 });

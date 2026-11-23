@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { memberVerificationIssueId } from "../lib/coverage-issue-ids";
 import { episode } from "./manual-match-members";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const store = await import("../lib/manual-coverage");
@@ -37,7 +38,7 @@ test("a TVDB member blocked by a refused TVDB sign-in links its member-verificat
 
   await recheckCoverageHealth(client, { tmdbToken: "tmdb", tvdbApiKey: "tvdb" });
 
-  const blocked = issues.getCoverageIssue(`member-verification:${mapping.id}:TVDB:201`);
+  const blocked = issues.getCoverageIssue(memberVerificationIssueId(mapping.id, { provider: "TVDB", id: 201 }));
   assert.deepEqual(blocked?.causedBy, ["provider-authentication:TVDB"]);
-  assert.equal(issues.getCoverageIssue(`member-verification:${mapping.id}:TMDB:101`), undefined, "the TMDB member was verified");
+  assert.equal(issues.getCoverageIssue(memberVerificationIssueId(mapping.id, { provider: "TMDB", id: 101 })), undefined, "the TMDB member was verified");
 });

@@ -5,6 +5,7 @@ import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { CoverageIssueReport } from "../app/reports/components/coverage-issue-report";
 import { catalogueRefreshProgress } from "../lib/catalogue-refresh-progress";
+import { catalogueIssueIds } from "../lib/coverage-issue-ids";
 import type { CoverageIssue } from "../lib/coverage-issues";
 
 const CHECKED = "2026-11-20T12:00:00.000Z";
@@ -37,7 +38,7 @@ test("a catalogue-refresh entry in Scan Issues shows its catalogue age and 404 p
   const container = document.createElement("div");
   const root = createRoot(container);
   t.after(async () => { await act(async () => root.unmount()); await browser.happyDOM.close(); for (const [key, value] of old) { if (value) Object.defineProperty(globalThis, key, value); else Reflect.deleteProperty(globalThis, key); } });
-  const issue = (id: string, catalogueRefresh?: CoverageIssue["catalogueRefresh"]): CoverageIssue => ({ id, scope: "show", provider: "TMDB", operation: "catalogue-refresh", show: { title: `Show ${id}`, tmdbId: 323094 }, cause: "404 — record not found", action: "Check the reference.", ...(catalogueRefresh ? { catalogueRefresh } : {}) });
+  const issue = (ratingKey: string, catalogueRefresh?: CoverageIssue["catalogueRefresh"]): CoverageIssue => ({ id: catalogueIssueIds("tmdb", ratingKey).refreshId, scope: "show", provider: "TMDB", operation: "catalogue-refresh", show: { title: `Show ${ratingKey}`, tmdbId: 323094 }, cause: "404 — record not found", action: "Check the reference.", ...(catalogueRefresh ? { catalogueRefresh } : {}) });
   await act(async () => root.render(createElement(CoverageIssueReport, { issues: [issue("a", { checkedAt: CHECKED, seriesNotFoundDays: 2 }), issue("b", { checkedAt: CHECKED, downloadedAt: daysBefore(74), seriesNotFoundDays: 7 }), issue("c")] })));
   const entries = [...container.querySelectorAll("article")].map(article => article.textContent!);
   assert.match(entries[0], /Catalogue: 404 on 2 days · never downloaded/);

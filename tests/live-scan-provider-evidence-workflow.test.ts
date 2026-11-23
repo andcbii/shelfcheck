@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
 import { harness, type Episode } from "./report-missing-harness";
+import { lookupFailureIssueId } from "../lib/coverage-issue-ids";
+import { providerLookup } from "../lib/provider-lookup";
+import { seedStoredCoverageIssues } from "./stored-coverage-issues";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const catalogues = await import("../lib/plex-catalogues");
 const coverageIssues = await import("../lib/coverage-issues");
 const config = await import("../lib/server-config");
+const { database } = await import("../lib/sqlite");
 hook.deregister();
 
 // Characterization (SHELFCHECK-124): what a live Plex scan run saves and requests for every
@@ -241,7 +245,7 @@ test("an open failed-request Coverage Issue without a failure time blocks reuse 
   const { rerun, requests } = await target(t, "2026-11-12T10:00:00Z");
   await rerun();
   // Issues saved by older releases have no failure time.
-  for (const relationship of [keys.tmdbSeriesByTvdb(20), keys.tmdbEpisodeByTvdb(303)]) coverageIssues.setCoverageIssue({ id: requestIssueId(relationship), operation: "episode-identity", provider: "TMDB", scope: "show", cause: "TMDB request failed.", action: "Run a Plex scan." });
+  for (const relationship of [keys.tmdbSeriesByTvdb(20), keys.tmdbEpisodeByTvdb(303)]) seedStoredCoverageIssues(database(), { id: requestIssueId(relationship), operation: "episode-identity", provider: "TMDB", scope: "show", cause: "TMDB request failed.", action: "Run a Plex scan." });
 
   t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
   requests.length = 0;
@@ -279,7 +283,7 @@ test("lookup diagnostics: series summaries raise no lookup issue; a success reso
   state.bodies.set("/3/find/303", { tv_episode_results: {} });
   t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
   const unreadable = await rerun();
-  assert.equal(coverageIssues.getCoverageIssue(requestIssueId(keys.tmdbEpisodeByTvdb(303))), undefined, "the successful request resolved its failed-request issue");
+  assert.equal(coverageIssues.getCoverageIssue(lookupFailureIssueId("ratingKey:target", providerLookup.tmdbEpisodeByTvdbEpisode(303))), undefined, "the successful request resolved its failed-request issue");
   assert.deepEqual(issuesOf(unreadable), [{
     id: "episode-check:ratingKey:target:episode-crosswalk:TMDB:TVDB:303",
     operation: "episode-crosswalk", provider: "TMDB", scope: "episode", category: "Episode Matching",

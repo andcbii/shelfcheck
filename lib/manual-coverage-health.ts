@@ -1,6 +1,6 @@
 import { setCoverageIssue, resolveCoverageIssue, providerLookupContext, type CoverageIssue } from "@/lib/coverage-issues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
-import { memberVerificationIssueId, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
+import { memberVerificationIssueId, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import "server-only";
 import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 import { listCoverageMappings, MISSING_MEMBER_MESSAGE, updateCoverageHealth } from "@/lib/manual-coverage";
@@ -32,7 +32,7 @@ export async function recheckCoverageHealth(client: ProviderClient, config: Cred
       let state: NonNullable<CoverageMapping["health"]>;
       let cause: string | undefined;
       let explanation: Pick<CoverageIssue,"category"|"lookup"|"cause"|"action"> | undefined;
-      let causedBy: string[] | undefined;
+      let causedBy: CoverageIssueId[] | undefined;
       try {
         state = await memberHealth(member);
       } catch (error) {

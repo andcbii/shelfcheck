@@ -2,7 +2,7 @@ import "server-only";
 import { coverageIssueIdsWithPrefix, getCoverageIssue, resolveCoverageIssue, setCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
 import type { EpisodeCheckFailure, EpisodeCheckMethod, EpisodeCrosswalk } from "@/lib/plex-comparison";
 import type { MalformedCatalogueRecord } from "@/lib/catalogue-records";
-import { catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix } from "@/lib/coverage-issue-ids";
+import { catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 
 /** The show whose comparison evaluated the episode checks. `ratingKey` is the Plex show identity. */
 export type EpisodeCheckShow = { ratingKey: string; title?: string; tmdbId?: number; tvdbId?: number };
@@ -149,7 +149,7 @@ export function catalogueRecordIssue(show: EpisodeCheckShow, record: MalformedCa
  * comparison resolves only its own cause. Other shows' and operations' causes are kept.
  */
 export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], malformedRecords: MalformedCatalogueRecord[] = []) {
-  const current = new Set<string>();
+  const current = new Set<CoverageIssueId>();
   const existing = new Set(coverageIssueIdsWithPrefix(episodeCheckShowPrefix(show.ratingKey)));
   for (const failure of failures) {
     const issue = episodeCheckIssue(show, failure);

@@ -20,7 +20,10 @@ declare const coverageIssuePrefixBrand: unique symbol;
  */
 export type CoverageIssuePrefix = string & { readonly [coverageIssuePrefixBrand]: true };
 
-/** The only place a string becomes a Coverage Issue ID. Private: there is no public string-to-ID function. */
+/**
+ * The only place application text becomes a Coverage Issue ID. Private: there is no public string-to-ID
+ * function. IDs read back from storage are adopted separately, at the storage boundary in `@/lib/coverage-issues`.
+ */
 const issueId = (text: string) => text as CoverageIssueId;
 /** The only place a string becomes a Coverage Issue prefix. Private, like `issueId`. */
 const issuePrefix = (text: string) => text as CoverageIssuePrefix;
@@ -31,6 +34,8 @@ export const SCAN_FAILURE_ISSUE = issueId("scan-failure");
 export const TVDB_AUTHENTICATION_ISSUE = issueId("provider-authentication:TVDB");
 /** A failed Trakt sign-in. */
 export const TRAKT_AUTHENTICATION_ISSUE = issueId("provider-authentication:Trakt");
+/** Manual Match changes await comparison against the saved library inventory: reported with the coverage state, never stored. */
+export const COMPARISON_PENDING_ISSUE = issueId("comparison-pending");
 /** Library-wide comparison inputs missing before any show's inputs were saved. */
 export const INITIAL_COMPARISON_INPUTS_ISSUE = issueId("comparison-inputs:initial");
 

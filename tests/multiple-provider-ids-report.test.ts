@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { multipleProviderIdEntries, selectionSummary } from "../lib/multiple-provider-ids-report";
 import type { ProviderCatalogueSelection, ShowCatalogueSelection } from "../lib/catalogue-selection-store";
+import { catalogueIssueIds, comparisonInputsIssueId, lookupFailureIssueId, type CoverageIssueId } from "../lib/coverage-issue-ids";
+import { providerLookup } from "../lib/provider-lookup";
 
 const single = (id: number): ProviderCatalogueSelection => ({ candidates: [{ id }], automaticId: id, preferredId: id, current: { preferredId: id, usingId: id, state: "preferred", selectedAt: "2026-01-01T00:00:00Z" } });
 const scooby = (tmdb: Partial<ProviderCatalogueSelection> = {}): ShowCatalogueSelection => ({
@@ -33,9 +35,9 @@ test("lists every scanned show with several IDs on either provider, collected or
 });
 
 test("attaches the show's catalogue and comparison Coverage Issues", () => {
-  const issue = (id: string, ratingKey: string, scope: "show" | "episode" = "show") => ({ id, operation: id.split(":")[0].replace("comparison-inputs", "comparison"), scope, cause: "c", action: "a", show: { ratingKey } });
+  const issue = (id: CoverageIssueId, operation: string, ratingKey: string, scope: "show" | "episode" = "show") => ({ id, operation, scope, cause: "c", action: "a", show: { ratingKey } });
   const [entry] = multipleProviderIdEntries({ selections: { "ratingKey:1": scooby() }, shows: [{ ratingKey: "ratingKey:1", title: "S" }],
-    issues: [issue("catalogue-refresh:TMDB:ratingKey:1", "ratingKey:1"), issue("comparison-inputs:ratingKey:1", "ratingKey:1"), issue("episode-identity:x", "ratingKey:1", "episode"), issue("catalogue-refresh:TMDB:ratingKey:2", "ratingKey:2")] });
+    issues: [issue(catalogueIssueIds("tmdb", "ratingKey:1").refreshId, "catalogue-refresh", "ratingKey:1"), issue(comparisonInputsIssueId("ratingKey:1"), "comparison", "ratingKey:1"), issue(lookupFailureIssueId("ratingKey:1", providerLookup.tvdbEpisodeExtended(1)), "episode-identity", "ratingKey:1", "episode"), issue(catalogueIssueIds("tmdb", "ratingKey:2").refreshId, "catalogue-refresh", "ratingKey:2")] });
   assert.deepEqual(entry.issues.map(issue => issue.id), ["catalogue-refresh:TMDB:ratingKey:1", "comparison-inputs:ratingKey:1"]);
 });
 

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
+import { SCAN_FAILURE_ISSUE } from "../lib/coverage-issue-ids";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const plex = await import("../lib/plex-scan");
 const sqlite = await import("../lib/sqlite");
@@ -41,10 +42,10 @@ test("an Interrupted Plex scan is written once and raises the scan-failure Cover
   const first = plex.getPlexScanStatus();
   assert.equal(first.status, "error");
   assert.equal(first.error, "The previous Plex scan was interrupted during tvdb-series-and-episodes (Show A). Start a new scan to resume from its checkpoint.");
-  assert.equal(issues.getCoverageIssue("scan-failure")?.cause, first.error);
-  issues.resolveCoverageIssue("scan-failure");
+  assert.equal(issues.getCoverageIssue(SCAN_FAILURE_ISSUE)?.cause, first.error);
+  issues.resolveCoverageIssue(SCAN_FAILURE_ISSUE);
   assert.deepEqual(plex.getPlexScanStatus(), first, "a later poll rewrites nothing");
-  assert.equal(issues.getCoverageIssue("scan-failure"), undefined, "a later poll does not raise the issue again");
+  assert.equal(issues.getCoverageIssue(SCAN_FAILURE_ISSUE), undefined, "a later poll does not raise the issue again");
 });
 
 test("a failed Plex scan run records its error through the lifecycle, logs to the Plex log and releases the lock", async (t) => {
@@ -56,7 +57,7 @@ test("a failed Plex scan run records its error through the lifecycle, logs to th
   assert.equal(status.error, "Configure Plex, TMDB, and TVDB credentials before scanning.");
   assert.equal(status.rateLimitPaused, false);
   assert.equal(status.activeShows, undefined);
-  assert.ok(issues.getCoverageIssue("scan-failure"));
+  assert.ok(issues.getCoverageIssue(SCAN_FAILURE_ISSUE));
   const log = readFileSync(path.join(dir, "logs", "shelfcheck-plex.log"), "utf8");
   assert.match(log, /plex\.scan\.start \| startedAt=.* version=.* mode="full"/);
   assert.match(log, /\[ERROR\] plex\.scan\.error \| error="Configure Plex, TMDB, and TVDB credentials before scanning\."/);
@@ -176,7 +177,7 @@ test("a Plex scan run vetoed by a coverage-revision change ends at once with a c
   assert.ok(status.finishedAt);
   assert.equal(ignoreResults.savedScanState("plex").report.read(), null, "nothing is committed");
   assert.equal(ignoreResults.savedScanState("plex").resumePoint.read(), null, "no Resume point is forced for a vetoed report");
-  assert.equal(issues.getCoverageIssue("scan-failure"), undefined);
+  assert.equal(issues.getCoverageIssue(SCAN_FAILURE_ISSUE), undefined);
 });
 
 test("after the upgrade a Plex page is idle and its next full scan starts over, though a usable Resume point was saved before", async (t) => {
@@ -190,7 +191,7 @@ test("after the upgrade a Plex page is idle and its next full scan starts over, 
   legacy.close();
 
   assert.deepEqual(plex.getPlexScanStatus(), { status: "idle", processed: 0, total: 0 }, "No stale progress or Interrupted scan appears");
-  assert.equal(issues.getCoverageIssue("scan-failure"), undefined);
+  assert.equal(issues.getCoverageIssue(SCAN_FAILURE_ISSUE), undefined);
   const status = await fullScan();
   assert.equal(status.status, "completed", status.error || "");
   assert.equal(logEvents(dir, "plex.checkpoint.resume").length, 0, "Nothing resumes");

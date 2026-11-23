@@ -30,7 +30,7 @@ import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
-import { catalogueIssueIds, comparisonFailureIssueId, comparisonInputsIssueId, INITIAL_COMPARISON_INPUTS_ISSUE, inventoryDetailsIssueId, lookupFailureIssueId, plexInventoryIssueId, providerVerificationIssueId, SCAN_FAILURE_ISSUE, TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
+import { catalogueIssueIds, comparisonFailureIssueId, comparisonInputsIssueId, INITIAL_COMPARISON_INPUTS_ISSUE, inventoryDetailsIssueId, lookupFailureIssueId, plexInventoryIssueId, providerVerificationIssueId, SCAN_FAILURE_ISSUE, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePayloads, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderLookupStatus, type ProviderRequest, type ShowMatchStatus } from "@/lib/comparison-catalogue-resolver";
 import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
 import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
@@ -265,7 +265,7 @@ async function tvdbChangedShows(since: string, token: string): Promise<Set<numbe
 }
 
 /** Visibly mark a provider's catalogue freshness as unverified after its change check fails. */
-function setProviderVerificationIssue(provider: "TMDB" | "TVDB", error: unknown, causedBy?: string[]) {
+function setProviderVerificationIssue(provider: "TMDB" | "TVDB", error: unknown, causedBy?: CoverageIssueId[]) {
   setCoverageIssue({id:providerVerificationIssueId(provider),...(causedBy ? {causedBy} : {}),operation:"provider-verification",provider,scope:"library",...providerLookupContext(error,{source:[],requested:{provider,kind:provider === "TMDB" ? "show change feed" : "series update feed"},impact:"Provider catalogue freshness could not be verified. Available saved data and successful-download timestamps were retained."})});
 }
 
@@ -759,7 +759,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   }
   const queue: PlexShowGroup[] = [];
   const localResponsesByRatingKey = new Map<string, PlexContainer>();
-  const inventoryFailureCauses: string[] = [];
+  const inventoryFailureCauses: CoverageIssueId[] = [];
   run.progress(processed, candidates.length);
   await runWorkerPool(allShows, PLEX_SCAN_WORKERS, async (group) => {
     const responses = await Promise.allSettled(group.records.map(async (record) => ({
@@ -767,7 +767,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       response: await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken),
     })));
     for (const [index,result] of responses.entries()) {
-      const issueId = plexInventoryIssueId(group.identity, String(group.records[index].ratingKey));
+      // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
+      const issueId = plexInventoryIssueId(group.identity, group.records[index].ratingKey ?? "undefined");
       if (result.status === "fulfilled") {
         const { ratingKey, response } = result.value;
         if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);
@@ -884,7 +885,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     inputs.comparisons[ratingKey] = savedComparison ? {...savedComparison,refresh} : {group, details, localMetadata, tmdbId, tvdbId, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
     savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
     let tmdbCatalogueReused = false;
-    const unavailableCatalogueCauses: string[] = [];
+    const unavailableCatalogueCauses: CoverageIssueId[] = [];
     const tmdbCandidates = plexSelection.tmdb.candidates, tvdbCandidates = plexSelection.tvdb.candidates;
     const catalogueUse: Partial<Record<"tmdb" | "tvdb", CatalogueUse>> = {};
     const catalogueSource = downloadCatalogueSource({

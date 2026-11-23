@@ -4,6 +4,7 @@
  * (saved here), a comparison's acceptance of it (`rejectCopy`), and the checked marker (`retained`).
  * Coverage Issue state stays with the caller.
  */
+import type { CoverageIssueId } from "@/lib/coverage-issue-ids";
 import type { SavedPlexComparison } from "@/lib/plex-catalogues";
 import { liveTmdbCrosswalkDecision, type SharedCrosswalkRecord } from "@/lib/tmdb-crosswalk-policy";
 import { lookupKey, lookupOfKey, providerLookup } from "@/lib/provider-lookup";
@@ -116,14 +117,14 @@ export type TmdbCrosswalkComparison = ReturnType<TmdbCrosswalkScanRun["compariso
  * A cached recheck's recovered crosswalk answers (see the policy's `recover` decision), by relationship
  * key, and the failed-request Coverage Issues they resolve once saved.
  */
-export type RecoveredCrosswalks = { relationships: CrosswalkRelationships; resolves: string[] };
+export type RecoveredCrosswalks = { relationships: CrosswalkRelationships; resolves: CoverageIssueId[] };
 
 /**
  * Saves a cached recheck's recovered answers as the comparison's own copies first, and only then
  * resolves their failed requests, so a failed save leaves them open and the answers recoverable by a
  * later recheck.
  */
-export function saveRecoveredTmdbCrosswalks({ relationships, resolves }: RecoveredCrosswalks, { save, resolveFailedRequest }: { save(copies: CrosswalkRelationships): void; resolveFailedRequest(issueId: string): void }) {
+export function saveRecoveredTmdbCrosswalks({ relationships, resolves }: RecoveredCrosswalks, { save, resolveFailedRequest }: { save(copies: CrosswalkRelationships): void; resolveFailedRequest(issueId: CoverageIssueId): void }) {
   if (!resolves.length) return;
   save(relationships);
   for (const issueId of resolves) resolveFailedRequest(issueId);

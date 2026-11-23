@@ -8,6 +8,7 @@ import test from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const scan = await import("../app/api/plex/scan/route");
 const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 hook.deregister();
 
@@ -27,7 +28,7 @@ async function fixture(t: test.TestContext) {
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
+  ignoreResults.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date(day(0))});
   const state = {
     tmdbFeedFailure:false, tvdbFeedFailure:false,

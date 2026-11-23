@@ -4,6 +4,7 @@ import test from "node:test";
 import { api, flag, harness as workflow, key, preferences, type Episode, type Identity } from "./report-missing-harness";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const { plexSavedState, requestCatalogueRecheck } = await import("../lib/plex-scan");
+const { carriedMembers } = await import("../lib/manual-coverage");
 hook.deregister();
 
 // Two Plex shows: "Target" (TMDB 10 / TVDB 20) and "Other" (TMDB 11 / TVDB 21).
@@ -211,6 +212,36 @@ test("a saved-state failure during Ignore cleanup rolls back both the rule and t
   await ignore(h, { ignoredShows: [forever("ratingKey:other", "Other")] });
   assert.deepEqual(await h.flags(crossShow.id), [], "The flag deletion is committed");
   assert.deepEqual((await settings()).ignoredShows.map((show: { ratingKey: string }) => show.ratingKey), ["ratingKey:other"], "The rule is committed");
+});
+
+test("an Ignore whose pruning of saved results fails inside the joined cleanup transaction restores everything and starts no cached recheck", async t => {
+  const h = await harness(t);
+  const { crossShow } = await setup(h);
+  const db = (globalThis as typeof globalThis & { __shelfcheckDatabase?: import("node:sqlite").DatabaseSync }).__shelfcheckDatabase!;
+  const coverageRevision = () => (db.prepare("SELECT revision FROM shelfcheck_coverage_state").get() as { revision: number }).revision;
+  const everything = async () => ({
+    flags: await h.flags(crossShow.id),
+    mappings: (await h.mappings()).map(mapping => ({ id: mapping.id, revision: mapping.revision })),
+    coverageRevision: coverageRevision(),
+    carried: carriedMembers(),
+    settings: (await (await preferences.GET()).json()).settings,
+    saved: plexSavedState.snapshot(),
+  });
+  const before = await everything();
+  assert.deepEqual(before.flags, [key(c)]);
+  assert.ok((before.saved!.report as { shows: { ratingKey: string }[] }).shows.some(show => show.ratingKey === "ratingKey:other"), "Other has saved results to prune");
+  const fault = failNextRecheck(t);
+  const requests = h.requests.length;
+
+  // Cleanup deletes the flag and the options write succeeds; then pruning the saved results fails.
+  db.exec("CREATE TRIGGER reject_results BEFORE UPDATE OF report, resume_point ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'saved state unavailable'); END;");
+  const failed = await h.patchSettings({ ignoredShows: [forever("ratingKey:other", "Other")] });
+  db.exec("DROP TRIGGER reject_results");
+  assert.equal(failed.status, 500);
+  assert.deepEqual(await failed.json(), { error: "saved state unavailable" });
+  assert.deepEqual(await everything(), before, "Flags, mapping and coverage revisions, carried members, preferences and saved results are all restored");
+  assert.equal(fault.armed, true, "No cached recheck started");
+  assert.equal(h.requests.length, requests, "Nothing was downloaded or enumerated");
 });
 
 /**

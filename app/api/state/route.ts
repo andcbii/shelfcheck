@@ -1,4 +1,4 @@
-import { savedScanState } from "@/lib/sqlite";
+import { savedScanState } from "@/lib/ignore-results";
 import { parseTraktPreferencesPatch } from "@/lib/preferences";
 
 export const runtime = "nodejs";

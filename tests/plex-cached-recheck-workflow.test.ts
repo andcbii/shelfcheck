@@ -9,7 +9,7 @@ const hook=registerHooks({resolve(s,c,next){return s==="server-only" ? {url:"dat
 const api=await import("../app/api/plex/manual-coverage/route");
 const scan=await import("../app/api/plex/scan/route");
 const config=await import("../lib/server-config");
-const sqlite=await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 hook.deregister();
 // These shows have no TVDB ID from Plex or TMDB: since SHELFCHECK-27 (ADR-0006) each has a TVDB missing-ID Scan Issues entry, which these checks are not about.
 const withoutMissingIds = (issues: {lookup?:{failureKind?:string}}[]) => issues.filter(issue=>issue.lookup?.failureKind !== "missing-id");
@@ -21,7 +21,7 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   const global=globalThis as typeof globalThis & {__shelfcheckDatabase?:DatabaseSync};
   t.after(()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;if(beforeData===undefined)delete process.env.SHELFCHECK_DATA_DIR;else process.env.SHELFCHECK_DATA_DIR=beforeData;if(beforeConfig===undefined)delete process.env.SHELFCHECK_CONFIG_DIR;else process.env.SHELFCHECK_CONFIG_DIR=beforeConfig;rmSync(dir,{recursive:true,force:true});});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
-  sqlite.savedScanState("plex").options.patch({ignoredShows:[{ratingKey:"ratingKey:source",title:"Ignored source"}],diagnosticsEnabled:false});
+  ignoreResults.savedScanState("plex").options.patch({ignoredShows:[{ratingKey:"ratingKey:source",title:"Ignored source"}],diagnosticsEnabled:false});
   const requests:string[]=[];
   let blockSave=false,blockCatalogue=false,changeFeedUnavailable=false;
   let enterSave!:()=>void,releaseSave!:()=>void,releaseCatalogue!:()=>void;

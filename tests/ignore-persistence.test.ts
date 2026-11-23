@@ -13,7 +13,7 @@ const serverOnlyHook = registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 serverOnlyHook.deregister();
 
 const traktShow = (id: number) => ({ show: { title: `Show ${id}`, ids: { trakt: id } } });
@@ -24,7 +24,7 @@ const traktReport = () => ({
   lastScan: "2026-11-06T12:00:00.000Z",
 });
 type TraktReport = ReturnType<typeof traktReport>;
-const trakt = () => sqlite.savedScanState("trakt");
+const trakt = () => ignoreResults.savedScanState("trakt");
 const traktIds = (report: unknown) => (report as TraktReport).shows.map((row) => row.show.ids.trakt);
 const plexReport = () => ({
   shows: ["one", "two"].map((id) => ({ ratingKey: id, title: id, missing: [{ season: 1, episode: 1 }] })),
@@ -67,22 +67,22 @@ test("ignore persistence removes saved whole-show results and protects pending s
 
   await t.test("Plex whole-show ignores prune reports and checkpoints while retaining independent season rules", () => {
     const seasonRule = { ratingKey: "one", title: "one", seasons: [2] };
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [], ignoredSeasons: [seasonRule] });
-    sqlite.savedScanState("plex").report.write(plexReport());
-    sqlite.savedScanState("plex").resumePoint.write(plexReport());
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one" }], ignoredSeasons: [seasonRule] });
-    for (const report of [sqlite.savedScanState("plex").report.read(), sqlite.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [], ignoredSeasons: [seasonRule] });
+    ignoreResults.savedScanState("plex").report.write(plexReport());
+    ignoreResults.savedScanState("plex").resumePoint.write(plexReport());
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one" }], ignoredSeasons: [seasonRule] });
+    for (const report of [ignoreResults.savedScanState("plex").report.read(), ignoreResults.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
       assert.deepEqual(report.shows.map((row) => row.ratingKey), ["two"]);
       assert.deepEqual(Object.keys(report.scanCache), ["two"]);
     }
-    assert.deepEqual(sqlite.savedScanState("plex").options.read().ignoredSeasons, [seasonRule]);
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [], ignoredSeasons: [seasonRule] });
-    assert.deepEqual((sqlite.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.map((row) => row.ratingKey), ["two"]);
+    assert.deepEqual(ignoreResults.savedScanState("plex").options.read().ignoredSeasons, [seasonRule]);
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [], ignoredSeasons: [seasonRule] });
+    assert.deepEqual((ignoreResults.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.map((row) => row.ratingKey), ["two"]);
   });
 
   // The upgrade itself discards legacy Trakt results (the legacy upgrade test below and
   // tests/database-migrations.test.ts); results retained in the saved scan state by some
-  // other path are still removed when SQLite opens.
+  // other path are still removed by the Ignore module at the first saved scan state use of each handle.
   await t.test("reopening a Trakt saved scan state removes retained results of active Ignores before reads or a direct Restore", () => {
     const seasonRule = { traktId: 1, title: "Show 1", seasons: [2] };
     for (const restoreFirst of [false, true]) {
@@ -120,11 +120,11 @@ test("ignore persistence removes saved whole-show results and protects pending s
   });
 
   // The upgrade itself discards legacy Plex results (tests/database-migrations.test.ts); results
-  // retained in the saved scan state by some other path are still removed when SQLite opens.
+  // retained in the saved scan state by some other path are still removed at the first saved scan state use.
   await t.test("reopening a Plex saved scan state removes retained results of active Ignores before reads or a direct Restore", () => {
     const seasonRule = { ratingKey: "one", title: "one", seasons: [2] };
     for (const restoreFirst of [false, true]) {
-      sqlite.savedScanState("plex").options.read();
+      ignoreResults.savedScanState("plex").options.read();
       const settings = { ignoredShows: [{ ratingKey: "one", title: "one" }], ignoredSeasons: [seasonRule] };
       cache.__shelfcheckDatabase!.prepare(`INSERT INTO shelfcheck_scan_state (mode, options, report, resume_point) VALUES ('plex', ?, ?, ?)
         ON CONFLICT(mode) DO UPDATE SET options = excluded.options, report = excluded.report, resume_point = excluded.resume_point`)
@@ -133,14 +133,14 @@ test("ignore persistence removes saved whole-show results and protects pending s
       delete cache.__shelfcheckDatabase;
 
       if (!restoreFirst) {
-        assert.deepEqual((sqlite.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.map((row) => row.ratingKey), ["two"]);
-        assert.deepEqual(Object.keys((sqlite.savedScanState("plex").resumePoint.read() as ReturnType<typeof plexReport>).scanCache), ["two"]);
+        assert.deepEqual((ignoreResults.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.map((row) => row.ratingKey), ["two"]);
+        assert.deepEqual(Object.keys((ignoreResults.savedScanState("plex").resumePoint.read() as ReturnType<typeof plexReport>).scanCache), ["two"]);
       }
-      sqlite.savedScanState("plex").options.patch({ ignoredShows: [], ignoredSeasons: [seasonRule] });
+      ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [], ignoredSeasons: [seasonRule] });
       cache.__shelfcheckDatabase!.close();
       delete cache.__shelfcheckDatabase;
-      assert.deepEqual(sqlite.savedScanState("plex").options.read(), { ignoredShows: [], ignoredSeasons: [seasonRule] });
-      for (const report of [sqlite.savedScanState("plex").report.read(), sqlite.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
+      assert.deepEqual(ignoreResults.savedScanState("plex").options.read(), { ignoredShows: [], ignoredSeasons: [seasonRule] });
+      for (const report of [ignoreResults.savedScanState("plex").report.read(), ignoreResults.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
         assert.deepEqual(report.shows.map((row) => row.ratingKey), ["two"]);
         assert.deepEqual(Object.keys(report.scanCache), ["two"]);
       }
@@ -153,7 +153,7 @@ test("ignore persistence removes saved whole-show results and protects pending s
       .run(JSON.stringify({ ignoredShows: [expired] }), JSON.stringify(plexReport()), JSON.stringify(plexReport()));
     cache.__shelfcheckDatabase!.close();
     delete cache.__shelfcheckDatabase;
-    for (const report of [sqlite.savedScanState("plex").report.read(), sqlite.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
+    for (const report of [ignoreResults.savedScanState("plex").report.read(), ignoreResults.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
       assert.deepEqual(report.shows.map((row) => row.ratingKey), ["one", "two"]);
     }
   });
@@ -162,7 +162,7 @@ test("ignore persistence removes saved whole-show results and protects pending s
     trakt().options.patch({ ignoredShows: [] });
     trakt().report.write(traktReport());
     trakt().resumePoint.write(traktReport());
-    const finish = sqlite.trackScanIgnores("trakt");
+    const finish = ignoreResults.trackScanIgnores("trakt");
     try {
       trakt().options.patch({ ignoredShows: [traktShow(1).show] });
       trakt().options.patch({ ignoredShows: [] });
@@ -179,60 +179,60 @@ test("ignore persistence removes saved whole-show results and protects pending s
   });
 
   await t.test("Ignore then Restore during a Plex scan cannot resurrect pending report or checkpoint rows", () => {
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [] });
-    const finish = sqlite.trackScanIgnores("plex");
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [] });
+    const finish = ignoreResults.trackScanIgnores("plex");
     try {
-      sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one" }] });
-      sqlite.savedScanState("plex").options.patch({ ignoredShows: [] });
-      sqlite.savedScanState("plex").report.write(plexReport());
-      sqlite.savedScanState("plex").resumePoint.write(plexReport());
-      for (const report of [sqlite.savedScanState("plex").report.read(), sqlite.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
+      ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one" }] });
+      ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [] });
+      ignoreResults.savedScanState("plex").report.write(plexReport());
+      ignoreResults.savedScanState("plex").resumePoint.write(plexReport());
+      for (const report of [ignoreResults.savedScanState("plex").report.read(), ignoreResults.savedScanState("plex").resumePoint.read()] as ReturnType<typeof plexReport>[]) {
         assert.deepEqual(report.shows.map((row) => row.ratingKey), ["two"]);
         assert.deepEqual(Object.keys(report.scanCache), ["two"]);
       }
     } finally { finish(); }
-    sqlite.savedScanState("plex").report.write(plexReport());
-    assert.equal((sqlite.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.length, 2);
+    ignoreResults.savedScanState("plex").report.write(plexReport());
+    assert.equal((ignoreResults.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.length, 2);
   });
 
   await t.test("a scan retains its initial ignore exclusions after their deadline passes", () => {
     const expiry = "2000-01-01T00:00:01.000Z";
     const started = Date.parse("2000-01-01T00:00:00.000Z");
     trakt().options.patch({ ignoredShows: [{ ...traktShow(1).show, expiresAt: expiry }] });
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one", expiresAt: expiry }] });
-    const finishTrakt = sqlite.trackScanIgnores("trakt", started);
-    const finishPlex = sqlite.trackScanIgnores("plex", started);
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one", expiresAt: expiry }] });
+    const finishTrakt = ignoreResults.trackScanIgnores("trakt", started);
+    const finishPlex = ignoreResults.trackScanIgnores("plex", started);
     try {
       trakt().report.write(traktReport());
-      sqlite.savedScanState("plex").report.write(plexReport());
+      ignoreResults.savedScanState("plex").report.write(plexReport());
       assert.deepEqual(traktIds(trakt().report.read()), [2]);
-      assert.deepEqual((sqlite.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.map((row) => row.ratingKey), ["two"]);
+      assert.deepEqual((ignoreResults.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.map((row) => row.ratingKey), ["two"]);
     } finally { finishTrakt(); finishPlex(); }
     trakt().report.write(traktReport());
-    sqlite.savedScanState("plex").report.write(plexReport());
+    ignoreResults.savedScanState("plex").report.write(plexReport());
     assert.equal(traktIds(trakt().report.read()).length, 2);
-    assert.equal((sqlite.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.length, 2);
+    assert.equal((ignoreResults.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.length, 2);
   });
 
   await t.test("season ignores retain saved results and expired whole-show ignores allow fresh results", () => {
     const expiry = "2000-01-01T00:00:00.000Z";
     trakt().options.patch({ ignoredShows: [{ ...traktShow(1).show, expiresAt: expiry }], ignoredSeasons: [{ traktId: 1, title: "Show 1", seasons: [1] }] });
     trakt().report.write(traktReport());
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one", expiresAt: expiry }], ignoredSeasons: [{ ratingKey: "one", title: "one", seasons: [1] }] });
-    sqlite.savedScanState("plex").report.write(plexReport());
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "one", title: "one", expiresAt: expiry }], ignoredSeasons: [{ ratingKey: "one", title: "one", seasons: [1] }] });
+    ignoreResults.savedScanState("plex").report.write(plexReport());
     assert.equal((trakt().report.read() as TraktReport).missing.length, 2);
-    assert.equal((sqlite.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.length, 2);
+    assert.equal((ignoreResults.savedScanState("plex").report.read() as ReturnType<typeof plexReport>).shows.length, 2);
   });
 
   await t.test("stored deadlines and legacy permanent records survive reopening SQLite", () => {
     const legacy = { ratingKey: "legacy", title: "Legacy" };
     const temporary = { ratingKey: "temporary", title: "Temporary", duration: "90d", expiresAt: "2099-01-01T00:00:00.000Z" };
-    sqlite.savedScanState("plex").options.patch({ ignoredShows: [legacy, temporary] });
+    ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [legacy, temporary] });
     const traktIgnore = { ...traktShow(1).show, duration: "6m", expiresAt: "2099-01-01T00:00:00.000Z" };
     trakt().options.patch({ ignoredShows: [traktIgnore] });
     cache.__shelfcheckDatabase!.close();
     delete cache.__shelfcheckDatabase;
-    assert.deepEqual(sqlite.savedScanState("plex").options.read().ignoredShows, [legacy, temporary]);
+    assert.deepEqual(ignoreResults.savedScanState("plex").options.read().ignoredShows, [legacy, temporary]);
     assert.deepEqual(trakt().options.read().ignoredShows, [traktIgnore]);
   });
 });

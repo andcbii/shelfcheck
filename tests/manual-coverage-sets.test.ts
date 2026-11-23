@@ -9,7 +9,7 @@ const hook = registerHooks({ resolve(s, c, next) {
     return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c);
   } });
 const api = await import("../app/api/plex/manual-coverage/route");
-const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const scan = await import("../app/api/plex/scan/route");
 hook.deregister();
@@ -51,7 +51,7 @@ test("complete-set Manual Matches cover equivalent owned content in both directi
 
   const show = { ratingKey: "1", title: "Target", Guid: [{ id: "tmdb://10" }], updatedAt: 1 };
   const source = { ratingKey: "2", title: "Ignored source", Guid: [{ id: "tvdb://20" }], updatedAt: 1 };
-  sqlite.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
+  ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     let body: unknown;
@@ -154,7 +154,7 @@ test("complete-set Manual Matches cover equivalent owned content in both directi
   assert.equal((await obsolete.json()).code,"unsupported-action");
   assert.deepEqual(await state(),beforeObsolete);
   assert.equal((await (await scan.GET()).json()).scan.status,"completed","the rejected mutation starts no recheck or scan");
-  sqlite.savedScanState("plex").clearReportAndResumePoint(); cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase;
+  ignoreResults.savedScanState("plex").clearReportAndResumePoint(); cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase;
   assert.deepEqual((await state()).mappings.map((m:{id:string})=>m.id),[mapping.id],"mappings survive restart");
   // Edits and an unrelated batch deletion retain the complete-set mapping.
   const unchanged=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:preview.preview}));

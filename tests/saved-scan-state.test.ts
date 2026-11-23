@@ -8,6 +8,7 @@ import test, { type TestContext } from "node:test";
 
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const plexStateRoute = await import("../app/api/plex/state/route");
 const traktStateRoute = await import("../app/api/state/route");
 const traktScanRoute = await import("../app/api/scan/route");
@@ -39,8 +40,8 @@ const traktResults = (savedAt = "report"): Results & { savedAt: string } => ({ s
 
 test("each mode saves its report, Resume point, scan status and options, read back together in one snapshot", (t) => {
   freshDatabase(t);
-  const plex = sqlite.savedScanState("plex");
-  const trakt = sqlite.savedScanState("trakt");
+  const plex = ignoreResults.savedScanState("plex");
+  const trakt = ignoreResults.savedScanState("trakt");
   assert.equal(plex.snapshot(), null, "Nothing is saved yet");
 
   plex.options.patch({ diagnosticsEnabled: false });
@@ -74,8 +75,8 @@ const allowUpdates = () => cache.__shelfcheckDatabase!.exec("DROP TRIGGER reject
 
 test("committing a report clears its Resume point in the same write, and a rejected commit keeps both", (t) => {
   freshDatabase(t);
-  const plex = sqlite.savedScanState("plex");
-  const trakt = sqlite.savedScanState("trakt");
+  const plex = ignoreResults.savedScanState("plex");
+  const trakt = ignoreResults.savedScanState("trakt");
   plex.options.patch({ diagnosticsEnabled: false });
   plex.report.write(plexResults("old"));
   plex.resumePoint.write(plexResults("resume"));
@@ -104,7 +105,7 @@ test("committing a report clears its Resume point in the same write, and a rejec
 
 test("report and Resume point writes keep options; status writes keep every other part and the state timestamp", (t) => {
   freshDatabase(t);
-  const plex = sqlite.savedScanState("plex");
+  const plex = ignoreResults.savedScanState("plex");
   plex.options.patch({ diagnosticsEnabled: false, futureOption: { kept: true } });
   plex.report.write(plexResults());
   plex.resumePoint.write(plexResults("resume"));
@@ -118,9 +119,27 @@ test("report and Resume point writes keep options; status writes keep every othe
   assert.notEqual(plex.snapshot()!.updatedAt, "2020-01-01 00:00:00", "A real state write does");
 });
 
+const backdate = () => cache.__shelfcheckDatabase!.exec("UPDATE shelfcheck_scan_state SET state_updated_at = '2020-01-01 00:00:00'");
+
+test("ordinary report, Resume point and commit report writes still move the state timestamp", (t) => {
+  freshDatabase(t);
+  const plex = ignoreResults.savedScanState("plex");
+  plex.options.patch({ diagnosticsEnabled: false });
+  const writes = [
+    () => plex.report.write(plexResults()),
+    () => plex.resumePoint.write(plexResults("resume")),
+    () => plex.commitReport(plexResults("new")),
+  ];
+  for (const write of writes) {
+    backdate();
+    write();
+    assert.notEqual(plex.snapshot()!.updatedAt, "2020-01-01 00:00:00");
+  }
+});
+
 test("a status-only row has no saved options, distinct from empty options", (t) => {
   freshDatabase(t);
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   trakt.status.write({ status: "completed" });
   assert.deepEqual(trakt.snapshot(), { report: null, resumePoint: null, status: { status: "completed" }, options: null, updatedAt: null });
   trakt.options.patch({});
@@ -129,7 +148,7 @@ test("a status-only row has no saved options, distinct from empty options", (t) 
 
 test("an ordinary options patch writes no report or Resume point; omitted and unknown fields survive", (t) => {
   freshDatabase(t);
-  const plex = sqlite.savedScanState("plex");
+  const plex = ignoreResults.savedScanState("plex");
   const showRule = { ratingKey: "one", title: "one" };
   const seasonRule = { ratingKey: "two", title: "two", seasons: [1] };
   plex.options.patch({ ignoredShows: [showRule], ignoredSeasons: [seasonRule], diagnosticsEnabled: true, futureOption: 3 });
@@ -146,12 +165,12 @@ test("an ordinary options patch writes no report or Resume point; omitted and un
   assert.deepEqual(plex.options.read().ignoredSeasons, [seasonRule], "Season Ignores are independent of show Ignores");
   plex.options.patch({ ignoredSeasons: [] });
   assert.deepEqual(plex.options.read().ignoredShows, [], "Show Ignores are independent of season Ignores");
-  assert.deepEqual(sqlite.savedScanState("trakt").snapshot(), null, "The other mode gains nothing");
+  assert.deepEqual(ignoreResults.savedScanState("trakt").snapshot(), null, "The other mode gains nothing");
 });
 
 test("an Ignore change prunes the saved report and Resume point, and Restore does not bring results back", (t) => {
   freshDatabase(t);
-  const plex = sqlite.savedScanState("plex");
+  const plex = ignoreResults.savedScanState("plex");
   plex.report.write(plexResults());
   plex.resumePoint.write(plexResults("resume"));
   plex.options.patch({ ignoredShows: [{ ratingKey: "one", title: "one" }] });
@@ -162,37 +181,85 @@ test("an Ignore change prunes the saved report and Resume point, and Restore doe
   plex.options.patch({ ignoredShows: [] });
   assert.deepEqual((plex.report.read() as Results).shows.map(row => row.ratingKey), ["two"]);
 
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   trakt.options.patch({ ignoredShows: [{ title: "Show 1", ids: { trakt: 1 } }] });
   trakt.report.write(traktResults());
   assert.deepEqual((trakt.report.read() as Results).shows.map(row => row.show!.ids.trakt), [2], "The Trakt row prunes by its own Ignores");
 });
 
-test("an Ignore save the store rejects still marks the running scan, as before (the guard-before-save gap stays for SHELFCHECK-42)", (t) => {
+// Each mode ignores its first show; its second show is already in the running scan's guard.
+const ignoreCases = [
+  { mode: "plex" as const, ignore: { ratingKey: "one", title: "one" }, guarded: { ratingKey: "two", title: "two" }, results: plexResults, key: (row: Row) => row.ratingKey, first: "one" },
+  { mode: "trakt" as const, ignore: { title: "Show 1", ids: { trakt: 1 } }, guarded: { title: "Show 2", ids: { trakt: 2 } }, results: traktResults, key: (row: Row) => String(row.show!.ids.trakt), first: "1" },
+];
+
+test("an Ignore save whose options write or later pruning fails changes nothing and does not mark the running scan; earlier guard keys stay", (t) => {
   freshDatabase(t);
-  const cases = [
-    { mode: "plex" as const, ignore: { ratingKey: "one", title: "one" }, results: plexResults, key: (row: Row) => row.ratingKey, kept: "two" },
-    { mode: "trakt" as const, ignore: { title: "Show 1", ids: { trakt: 1 } }, results: traktResults, key: (row: Row) => String(row.show!.ids.trakt), kept: "2" },
-  ];
-  for (const { mode, ignore, results, key, kept } of cases) {
-    const store = sqlite.savedScanState(mode);
-    store.options.patch({ ignoredShows: [], diagnosticsEnabled: true });
-    const finish = sqlite.trackScanIgnores(mode);
+  for (const failing of ["OF options", "OF report, resume_point"]) {
+    for (const { mode, ignore, guarded, results, key, first } of ignoreCases) {
+      const store = ignoreResults.savedScanState(mode);
+      // The second show is ignored when the scan starts, then Restored: the guard keeps it.
+      store.options.patch({ ignoredShows: [guarded], diagnosticsEnabled: true });
+      const finish = ignoreResults.trackScanIgnores(mode);
+      try {
+        store.options.patch({ ignoredShows: [] });
+        store.report.write(results());
+        store.resumePoint.write(results("resume"));
+        const before = store.snapshot()!;
+        assert.deepEqual((before.report as Results).shows.map(key), [first], `${mode}: the guard drops the Restored show`);
+
+        rejectUpdates(failing);
+        assert.throws(() => store.options.patch({ ignoredShows: [ignore] }), /saved state unavailable/, `${mode} ${failing}: the save fails`);
+        allowUpdates();
+        assert.deepEqual(store.snapshot(), before, `${mode} ${failing}: options, report, Resume point and timestamp are unchanged`);
+        // The failed Ignore did not reach the guard, so the running scan may still save that show; the earlier key still blocks.
+        store.report.write(results());
+        assert.deepEqual((store.report.read() as Results).shows.map(key), [first], `${mode} ${failing}: no new guard key, the earlier one stays`);
+      } finally { finish(); }
+    }
+  }
+});
+
+test("a successful Ignore save marks the running scan once both its options write and pruning succeed", (t) => {
+  freshDatabase(t);
+  for (const { mode, ignore, results, key, first } of ignoreCases) {
+    const store = ignoreResults.savedScanState(mode);
+    const finish = ignoreResults.trackScanIgnores(mode);
     try {
-      rejectUpdates("OF options");
-      assert.throws(() => store.options.patch({ ignoredShows: [ignore] }), /saved state unavailable/, `${mode}: the save fails`);
-      allowUpdates();
-      assert.deepEqual(store.options.read(), { ignoredShows: [], diagnosticsEnabled: true }, `${mode}: the options are unchanged`);
-      // The running scan's guard still holds the newly supplied Ignore, so its pending results for that show are dropped.
+      store.options.patch({ ignoredShows: [ignore] });
+      store.options.patch({ ignoredShows: [] });
       store.report.write(results());
-      assert.deepEqual((store.report.read() as Results).shows.map(key), [kept], `${mode}: the guard holds the Ignore`);
+      assert.equal((store.report.read() as Results).shows.some(row => key(row) === first), false, `${mode}: the Restored show is still blocked for this scan`);
     } finally { finish(); }
+  }
+});
+
+test("accepted caveat: an outer transaction that rolls back after a successful Ignore save keeps the new guard key until the scan ends", (t) => {
+  freshDatabase(t);
+  for (const { mode, ignore, results, key, first } of ignoreCases) {
+    const store = ignoreResults.savedScanState(mode);
+    store.report.write(results());
+    const before = store.snapshot()!;
+    const finish = ignoreResults.trackScanIgnores(mode);
+    try {
+      const db = sqlite.database();
+      db.exec("BEGIN IMMEDIATE");
+      store.options.patch({ ignoredShows: [ignore] });
+      db.exec("ROLLBACK");
+      assert.deepEqual(store.snapshot(), before, `${mode}: the rollback restores options and results`);
+      // Not rollback-safe, by decision: the guard still holds the Ignore the rollback undid.
+      store.report.write(results());
+      assert.equal((store.report.read() as Results).shows.some(row => key(row) === first), false, `${mode}: the guard keeps the rolled-back key`);
+    } finally { finish(); }
+    // Once the scan ends, its guard is gone and the show saves again.
+    store.report.write(results());
+    assert.equal((store.report.read() as Results).shows.some(row => key(row) === first), true, `${mode}: no guard after the scan`);
   }
 });
 
 test("store operations join a transaction already open, so its rollback undoes them", (t) => {
   freshDatabase(t);
-  const plex = sqlite.savedScanState("plex");
+  const plex = ignoreResults.savedScanState("plex");
   plex.options.patch({ diagnosticsEnabled: true });
   plex.report.write(plexResults());
   const db = sqlite.database();
@@ -211,7 +278,7 @@ test("the Plex state route answers as before, and a Settings save through it kee
   assert.equal(empty.headers.get("Cache-Control"), "private, no-store");
   assert.deepEqual(await empty.json(), { settings: { ignoredShows: [], ignoredSeasons: [], hideUnairedEpisodes: false, airingOffsetDays: 0, autoCompoundEpisodes: true, diagnosticsEnabled: true } });
 
-  const plex = sqlite.savedScanState("plex");
+  const plex = ignoreResults.savedScanState("plex");
   plex.options.patch({ ignoredShows: [{ ratingKey: "one", title: "one" }], futureOption: 1 });
   plex.report.write(plexResults());
   rejectUpdates("OF report, resume_point");
@@ -232,7 +299,7 @@ const patchTrakt = (body: unknown) => traktStateRoute.PATCH(new Request("http://
 test("the Trakt state route returns no state for an empty or status-only database, distinct from empty options", async (t) => {
   freshDatabase(t);
   assert.deepEqual(await traktState(), { state: null, updatedAt: null });
-  sqlite.savedScanState("trakt").status.write({ status: "completed", processed: 1, total: 1 });
+  ignoreResults.savedScanState("trakt").status.write({ status: "completed", processed: 1, total: 1 });
   assert.deepEqual(await traktState(), { state: null, updatedAt: null }, "A scan status alone is no saved state");
 
   assert.deepEqual(await (await patchTrakt({ unknownField: 1 })).json(), { saved: true });
@@ -243,7 +310,7 @@ test("the Trakt state route returns no state for an empty or status-only databas
 
 test("the Trakt state route nests the report, Resume point and scan in the saved options, as before", async (t) => {
   freshDatabase(t);
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   await patchTrakt({ diagnosticsEnabled: false, airingGraceDays: 4, ignoredShows: [], ignoredSeasons: [] });
   trakt.report.write(traktResults());
   trakt.resumePoint.write(traktResults("resume"));
@@ -253,12 +320,12 @@ test("the Trakt state route nests the report, Resume point and scan in the saved
   trakt.status.write({ status: "running", processed: 1, total: 2 });
   trakt.commitReport(traktResults("new"));
   assert.deepEqual((await traktState()).state, { ...options, report: traktResults("new"), scan: { status: "running", processed: 1, total: 2 } });
-  assert.deepEqual(sqlite.savedScanState("plex").snapshot(), null, "Trakt saves nothing for Plex");
+  assert.deepEqual(ignoreResults.savedScanState("plex").snapshot(), null, "Trakt saves nothing for Plex");
 });
 
 test("a Trakt scan heartbeat does not move the state route's updatedAt, while a real state write does", async (t) => {
   freshDatabase(t);
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   await patchTrakt({ diagnosticsEnabled: true });
   cache.__shelfcheckDatabase!.exec("UPDATE shelfcheck_scan_state SET state_updated_at = '2020-01-01 00:00:00' WHERE mode = 'trakt'");
   trakt.status.write({ status: "running", heartbeatAt: "now" });
@@ -269,7 +336,7 @@ test("a Trakt scan heartbeat does not move the state route's updatedAt, while a 
 
 test("clearing the Trakt cache empties the report's cache and clears the Resume point in one write; one show's clear removes only that show", async (t) => {
   freshDatabase(t);
-  const trakt = sqlite.savedScanState("trakt");
+  const trakt = ignoreResults.savedScanState("trakt");
   const clear = async (query = "") => (await traktScanRoute.DELETE(new Request(`http://localhost/api/scan${query}`, { method: "DELETE" }))).json();
   trakt.options.patch({ diagnosticsEnabled: false });
   trakt.report.write(traktResults());

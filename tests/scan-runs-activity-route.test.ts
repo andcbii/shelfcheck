@@ -7,7 +7,7 @@ import { registerHooks } from "node:module";
 import test from "node:test";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const route = await import("../app/api/scan-runs/route");
-const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const { scanRuns } = await import("../lib/scan-run");
 hook.deregister();
 
@@ -45,9 +45,9 @@ test("the scan-runs route never reconciles a stale running status into an Interr
     rmSync(dir, { recursive: true, force: true });
   });
   const stale = { status: "running", processed: 1, total: 4, startedAt: "2026-01-01T00:00:00.000Z", heartbeatAt: "2026-01-01T00:00:00.000Z" };
-  sqlite.savedScanState("plex").status.write(stale);
-  sqlite.savedScanState("trakt").status.write(stale);
+  ignoreResults.savedScanState("plex").status.write(stale);
+  ignoreResults.savedScanState("trakt").status.write(stale);
   assert.deepEqual(await (await route.GET()).json(), { activeScanRun: null });
-  assert.deepEqual(sqlite.savedScanState("plex").status.read(), stale);
-  assert.deepEqual(sqlite.savedScanState("trakt").status.read(), stale);
+  assert.deepEqual(ignoreResults.savedScanState("plex").status.read(), stale);
+  assert.deepEqual(ignoreResults.savedScanState("trakt").status.read(), stale);
 });

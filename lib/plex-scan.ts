@@ -12,7 +12,7 @@ import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
-import { savedScanState, trackScanIgnores } from "@/lib/sqlite";
+import { savedScanState, trackScanIgnores } from "@/lib/ignore-results";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";

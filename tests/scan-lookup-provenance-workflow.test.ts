@@ -7,7 +7,7 @@ import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const scan = await import("../app/api/plex/scan/route");
-const sqlite = await import("../lib/sqlite");
+const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const savedIssues = await import("../lib/coverage-issues");
 hook.deregister();
@@ -22,7 +22,7 @@ test("show lookup failures preserve selected fresh and cached identity sources t
     for (const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()) { if(previous[i] === undefined) delete process.env[key]; else process.env[key] = previous[i]; }
     rmSync(dir,{recursive:true,force:true}); });
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
-  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
+  ignoreResults.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   const show = {ratingKey:"1",title:"Is It Cake? Halloween",Guid:[{id:"tmdb://300594"}]};
   const independent = {ratingKey:"2",title:"Independent saved inputs",Guid:[] as {id:string}[]};
   let includeIndependent = false;
@@ -134,7 +134,7 @@ test("episode failures explain catalogue identity sources and persist safe parse
   const closeDatabase=()=>{global.__shelfcheckDatabase?.close();delete global.__shelfcheckDatabase;};
   t.after(()=>{closeDatabase();for(const [i,key] of ["SHELFCHECK_DATA_DIR","SHELFCHECK_CONFIG_DIR"].entries()){if(previous[i]===undefined)delete process.env[key];else process.env[key]=previous[i];}rmSync(dir,{recursive:true,force:true});});
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"secret-plex",tmdbToken:"secret-tmdb",tvdbApiKey:"secret-tvdb"});
-  sqlite.savedScanState("plex").options.patch({diagnosticsEnabled:false});
+  ignoreResults.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   let failure=true;
   let traktFailure=false;
   let loginFailure=false;

@@ -60,7 +60,20 @@
   is now refused as invalid rather than because a scan is running. Every
   well-formed Manual Match change is still refused while a scan runs.
 
+- Ignore rules over the saved Trakt and Plex results now live in one place,
+  apart from the code that stores them. Ignoring a show still deletes its
+  saved results, so a Restore cannot bring them back, and an Ignore applied
+  during a scan still applies to that scan. Results an older version kept for
+  an ignored show are now removed when Shelfcheck first reads or changes its
+  saved scan state rather than when the database opens, so a temporary Ignore
+  that ends in between keeps those older results.
+
 ### Fixed
+
+- An Ignore whose save fails no longer applies to the running scan: the scan
+  is marked only once the rule and the removal of its saved results are both
+  saved, and a failed save leaves the rule, the saved results and any Report
+  Missing cleanup as they were.
 
 - Clearing one show's cache no longer makes the next scan ask TMDB again for
   an unrelated episode's crosswalk. A TMDB series lookup for a TVDB series and

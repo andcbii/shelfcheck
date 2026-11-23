@@ -57,7 +57,16 @@ const TRAKT_API = "https://api.trakt.tv";
 
 /** The provider that answers a lookup. */
 export function lookupProvider(lookup: ProviderLookup): ProviderName {
-  return lookup.kind.startsWith("tmdb-") ? "TMDB" : lookup.kind.startsWith("tvdb-") ? "TVDB" : "Trakt";
+  switch (lookup.kind) {
+    case "tmdb-episode-by-tvdb-episode":
+    case "tmdb-series-by-tvdb-series":
+    case "tmdb-episode-by-show-season-episode":
+    case "tmdb-series-summary":
+    case "tmdb-series-summary-with-external-ids": return "TMDB";
+    case "tvdb-series-summary":
+    case "tvdb-episode-extended": return "TVDB";
+    case "trakt-episode-search-by-tvdb-episode": return "Trakt";
+  }
 }
 
 /** The request URL that asks a lookup's provider for it. Only transport sends it. */

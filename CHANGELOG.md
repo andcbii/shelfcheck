@@ -66,13 +66,14 @@
   during a scan still applies to that scan. Results an older version kept for
   an ignored show are now removed when Shelfcheck first reads or changes its
   saved scan state rather than when the database opens, so a temporary Ignore
-  that ends in between keeps those older results. An Ignore whose save fails
-  no longer applies to the running scan: the scan is marked only once the
-  rule and the removal of its saved results are both saved, and a failed save
-  leaves the rule, the saved results and any Report Missing cleanup as they
-  were.
+  that ends in between keeps those older results.
 
 ### Fixed
+
+- An Ignore whose save fails no longer applies to the running scan: the scan
+  is marked only once the rule and the removal of its saved results are both
+  saved, and a failed save leaves the rule, the saved results and any Report
+  Missing cleanup as they were.
 
 - Clearing one show's cache no longer makes the next scan ask TMDB again for
   an unrelated episode's crosswalk. A TMDB series lookup for a TVDB series and

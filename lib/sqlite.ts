@@ -97,8 +97,8 @@ type ModeWrite = "writeReport" | "writeResumePoint" | "commitReport" | "writeSta
  * and applies no rules to them. Each write changes only its own part and runs on
  * the given handle, so it joins any transaction open there.
  *
- * Only the public saved scan state store (lib/ignore-results.ts) may use it; a
- * lint rule enforces this, so no write can skip that store.
+ * Only the public saved scan state store may use it; a lint rule enforces this, so
+ * no write can skip that store.
  */
 export function rawSavedScanState(mode: ScanMode, db: DatabaseSync = database()) {
   const run = (sql: ModeWrite, value?: unknown) => {
@@ -108,8 +108,6 @@ export function rawSavedScanState(mode: ScanMode, db: DatabaseSync = database())
   };
   const json = (value: unknown) => value === null ? null : JSON.stringify(value);
   return {
-    /** The handle this store runs on. */
-    db,
     /** All four parts and the state timestamp in one statement; null when the mode has no row. A part that is not a JSON object reads as null. */
     read(): SavedScanStateSnapshot<unknown, unknown, unknown, Record<string, unknown>> | null {
       const row = db.prepare(SAVED_STATE_SQL.row).get(mode) as SavedStateRow | undefined;
@@ -141,8 +139,8 @@ export function rawSavedScanState(mode: ScanMode, db: DatabaseSync = database())
      * state timestamp, so maintenance does not look like a new result.
      */
     replaceResults(parts: { report?: unknown; resumePoint?: unknown }) {
-      const report = Object.prototype.hasOwnProperty.call(parts, "report");
-      const point = Object.prototype.hasOwnProperty.call(parts, "resumePoint");
+      const report = Object.hasOwn(parts, "report");
+      const point = Object.hasOwn(parts, "resumePoint");
       if (report && point) db.prepare(SAVED_STATE_SQL.savedResults).run(json(parts.report), json(parts.resumePoint), mode);
       else if (report) db.prepare(SAVED_STATE_SQL.savedReport).run(json(parts.report), mode);
       else if (point) db.prepare(SAVED_STATE_SQL.savedResumePoint).run(json(parts.resumePoint), mode);

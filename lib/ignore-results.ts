@@ -19,10 +19,25 @@ type IgnoreCache = typeof globalThis & {
 
 const SCAN_MODES: readonly ScanMode[] = ["trakt", "plex"];
 
-/** Each mode's actively ignored show keys, as the strings its saved results are keyed by. */
-const activeIgnoreKeys: Record<ScanMode, (ignoredShows: unknown, now?: number) => string[]> = {
-  trakt: (ignoredShows, now) => [...ignoredTraktIds(ignoredShows, now)].map(String),
-  plex: (ignoredShows, now) => [...ignoredPlexKeys(ignoredShows, now)],
+type ResultRow = { ratingKey?: string; show?: { ids?: { trakt?: number } } };
+
+/**
+ * How each mode keys its saved results: the show key of one saved shows or missing
+ * row (Plex rating key or Trakt show ID), and its actively ignored show keys as the
+ * same strings.
+ */
+const resultKeys: Record<ScanMode, {
+  rowKey(row: ResultRow): string | undefined;
+  activeIgnores(ignoredShows: unknown, now?: number): string[];
+}> = {
+  trakt: {
+    rowKey: row => String(row.show?.ids?.trakt),
+    activeIgnores: (ignoredShows, now) => [...ignoredTraktIds(ignoredShows, now)].map(String),
+  },
+  plex: {
+    rowKey: row => row.ratingKey,
+    activeIgnores: (ignoredShows, now) => [...ignoredPlexKeys(ignoredShows, now)],
+  },
 };
 
 function scanIgnoreGuards() {
@@ -38,7 +53,7 @@ function scanIgnoreGuards() {
  * The returned cleanup removes only the guard it created, never a newer scan's.
  */
 export function trackScanIgnores(mode: ScanMode, now = Date.now()): () => void {
-  const guard = new Set(activeIgnoreKeys[mode](store(mode).readOptions().ignoredShows, now));
+  const guard = new Set(resultKeys[mode].activeIgnores(store(mode).readOptions().ignoredShows, now));
   scanIgnoreGuards()[mode] = guard;
   return () => {
     if (scanIgnoreGuards()[mode] === guard) delete scanIgnoreGuards()[mode];
@@ -52,7 +67,7 @@ function recordScanIgnores(mode: ScanMode, ignored: Iterable<string>) {
 
 /** The shows whose results a mode may not keep: its actively ignored shows, plus the running scan's guard. */
 function blockedShowKeys(mode: ScanMode, ignoredShows: unknown) {
-  return new Set([...activeIgnoreKeys[mode](ignoredShows), ...(scanIgnoreGuards()[mode] || [])]);
+  return new Set([...resultKeys[mode].activeIgnores(ignoredShows), ...(scanIgnoreGuards()[mode] || [])]);
 }
 
 /**
@@ -64,16 +79,15 @@ function blockedShowKeys(mode: ScanMode, ignoredShows: unknown) {
 function pruneIgnoredResults<T>(value: T, mode: ScanMode, blocked: Set<string>): T {
   if (!value || typeof value !== "object" || !blocked.size) return value;
   const report = value as Record<string, unknown>;
-  const isVisible = (item: unknown) => {
+  const isKept = (item: unknown) => {
     if (!item || typeof item !== "object") return true;
-    const row = item as { ratingKey?: string; show?: { ids?: { trakt?: number } } };
-    const key = mode === "plex" ? row.ratingKey : String(row.show?.ids?.trakt);
+    const key = resultKeys[mode].rowKey(item as ResultRow);
     return key === undefined || !blocked.has(key);
   };
   return {
     ...report,
-    ...(Array.isArray(report.shows) ? { shows: report.shows.filter(isVisible) } : {}),
-    ...(Array.isArray(report.missing) ? { missing: report.missing.filter(isVisible) } : {}),
+    ...(Array.isArray(report.shows) ? { shows: report.shows.filter(isKept) } : {}),
+    ...(Array.isArray(report.missing) ? { missing: report.missing.filter(isKept) } : {}),
     ...(report.scanCache && typeof report.scanCache === "object" ? {
       scanCache: Object.fromEntries(Object.entries(report.scanCache).filter(([key]) => !blocked.has(key))),
     } : {}),
@@ -104,8 +118,8 @@ function pruneSavedResults(raw: RawStore, mode: ScanMode, blocked: Set<string>) 
  * options read or patch including Restore, status, scan start, any write), both
  * modes' retained results of active Ignores are removed, so no read or Restore can
  * expose them. Whether an Ignore is active is judged at that first use, not when the
- * handle opened (SHELFCHECK-42 decision 1: a temporary Ignore that expires in between
- * keeps its retained results). It runs on the given handle through the raw store only.
+ * handle opened, so a temporary Ignore that expires in between keeps its retained
+ * results. It runs on the given handle through the raw store only.
  *
  * It is recorded per actual handle, so a reopened handle is normalized again. A failure
  * surfaces and is retried by the next operation. Inside an open transaction success is
@@ -141,19 +155,19 @@ function prunedForSave(raw: RawStore, mode: ScanMode, value: unknown) {
  */
 function patchOptions(raw: RawStore, mode: ScanMode, patch: Record<string, unknown>) {
   const options = { ...raw.readOptions(), ...patch };
-  const ignoring = Object.prototype.hasOwnProperty.call(patch, "ignoredShows");
+  const ignoring = Object.hasOwn(patch, "ignoredShows");
   raw.writeOptions(options);
   if (!ignoring) return;
   // The pruning set already holds the patch's active Ignores, so the guard is not
-  // needed before the save. SHELFCHECK-42 decision 2: the running scan is marked only
-  // after the options write and pruning both succeed; if either throws, no new key is
-  // added and keys already in the guard stay. Accepted caveat: the guard is
+  // needed before the save. The running scan is marked only after the options write
+  // and pruning both succeed, so a failed Ignore save never applies to it: if either
+  // throws, no new key is added and keys already in the guard stay. Accepted caveat: the guard is
   // process memory, not part of the transaction. When this patch joins an outer
   // transaction that later rolls back, or its COMMIT fails, after the patch
   // succeeded, the new keys stay in the guard until that scan ends; the scan only
   // drops that show's results, it never saves wrong ones.
   pruneSavedResults(raw, mode, blockedShowKeys(mode, options.ignoredShows));
-  recordScanIgnores(mode, activeIgnoreKeys[mode](patch.ignoredShows));
+  recordScanIgnores(mode, resultKeys[mode].activeIgnores(patch.ignoredShows));
 }
 
 export type { SavedScanStateSnapshot };

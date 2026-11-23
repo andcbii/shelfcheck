@@ -245,7 +245,7 @@ test("a migration failing after a real schema change rolls back everything, and 
   });
 });
 
-test("a second open runs no migration but still removes ignored results at open", (t) => {
+test("a second open runs no migration but still removes ignored results at the first saved scan state use", (t) => {
   const file = freshDatabaseFile(t);
   ignoreResults.savedScanState("trakt").snapshot();
   closeCached();

@@ -6,7 +6,7 @@ import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -1139,54 +1139,6 @@ function memberInComparison(inputs: PlexGeneratedInputs, input: SavedPlexCompari
   return member.provider==="TMDB"
     ? input.tmdbId===member.showId || input.tmdbAliases.includes(member.showId) || Boolean(input.tmdbEpisodeAliases?.includes(member.showId)) || Boolean(inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
     : input.tvdbId===member.showId || input.tvdbAliases.includes(member.showId) || Boolean(inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
-}
-
-/** A newly applied Plex Ignore: a whole show, or only the selected seasons of it. */
-export type IgnoreScope = {ratingKey: string; seasons?: number[]};
-
-/**
- * Manual Match members inside an Ignore scope. A member belongs to the ignored
- * show when that show's saved comparison lists its provider show or episode, or
- * when one of the show's Plex items carries its identity. A season Ignore also
- * requires the member's provider season (from the saved catalogue, else the
- * saved member) to be one of the selected seasons.
- */
-function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
-  if (!scopes.length) return [];
-  const inputs=readPlexInputs();
-  // Provider season of every catalogued episode, built once per cleanup.
-  const seasons=new Map<string,number>();
-  for (const [provider,catalogues] of [["TMDB",inputs.tmdb],["TVDB",inputs.tvdb]] as const)
-    for (const catalogue of Object.values(catalogues)) for (const episode of catalogue.episodes)
-      if (episode.providerEpisodeId) seasons.set(`${provider}:${episode.providerEpisodeId}`,episode.season);
-  // The member's own provider show only, not aliases or Plex GUIDs, so a
-  // mis-tagged item or shared alias never reaches another show's flags.
-  const ownShow=(input: SavedPlexComparison, member: CoverageMember) => member.provider==="TMDB"
-    ? input.tmdbId===member.showId || Boolean(input.tmdbId && inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id))
-    : input.tvdbId===member.showId || Boolean(input.tvdbId && inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode=>episode.providerEpisodeId===member.id));
-  return listCoverageMappings().flatMap(mapping=>mapping.members).filter(member=>scopes.some(scope=>{
-    const input=inputs.comparisons[scope.ratingKey];
-    // Without a saved comparison, fall back to the show's own Plex items.
-    const inShow=input ? ownShow(input,member)
-      : Boolean(inputs.inventory?.evidence.some(item=>item.showKey===scope.ratingKey && item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id)));
-    return inShow && (!scope.seasons || scope.seasons.includes(seasons.get(`${member.provider}:${member.id}`) ?? member.season));
-  }));
-}
-
-/**
- * Apply Ignore authoritatively over Report Missing. Deletes explicit flags of
- * Manual Match members inside the newly ignored scopes, saves the Ignore rule
- * (`save`) in the same transaction, then rechecks the affected cached shows so
- * derived effects elsewhere are withdrawn immediately. Flags outside the scopes
- * and every other mapping are preserved. Restore or expiry never recreates them.
- * Rejects while a Plex scan is running only when there are flags to delete.
- */
-export async function applyIgnoreReportMissingCleanup(scopes: IgnoreScope[], save: () => void): Promise<number | undefined> {
-  const impact=clearReportMissingFlags(membersInIgnoreScopes(scopes),save);
-  if (!impact.length) return undefined;
-  await requestCoverageRecheck({members:impact});
-  // The coverage revision whose rechecked report the client must display.
-  return coverageState().revision;
 }
 
 let coverageRecheckQueue: Promise<void> = Promise.resolve();

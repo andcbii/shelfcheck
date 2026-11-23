@@ -1,15 +1,18 @@
 import "server-only";
 import { resolveCoverageUrls, reviewedCoverageMembers } from "@/lib/manual-coverage-resolver";
 import { requestCoverageRecheck, type CoverageImpact } from "@/lib/plex-scan";
-import { assertCoverageMutationAllowed, deleteCoverageMapping, deleteCoverageMappings, saveCoverageMapping, type ManualMatchEdit } from "@/lib/manual-coverage";
-import type { CoverageMapping } from "@/lib/manual-coverage-model";
+import { assertCoverageMutationAllowed, clearReportMissingFlags, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, saveCoverageMapping, type ManualMatchEdit } from "@/lib/manual-coverage";
+import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
+import { readPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 
 /**
  * Manual Match changes: each command runs the whole sequence (scan check,
  * provider revalidation for a reviewed save, the store's transactional write,
  * then one cached recheck of the members the committed change affects).
  * Routes only parse requests and map results and errors. Preview resolution is
- * a read and stays outside this module.
+ * a read and stays outside this module. Clearing Report Missing flags for an
+ * Ignore takes the newly applied scopes as plain input: which Ignore rules are
+ * newly active is the caller's concern.
  */
 
 /**
@@ -52,6 +55,61 @@ export async function deleteManualMatches(target: { id: string } | { ids: unknow
   const { deleted, missing, affectedMembers } = "id" in target ? deleteCoverageMapping(target.id) : deleteCoverageMappings(target.ids);
   if (deleted.length) await recheckAfterCommit({ members: affectedMembers });
   return { deleted, missing };
+}
+
+/** A newly applied Plex Ignore: a whole show, or only the selected seasons of it. */
+export type IgnoreScope = { ratingKey: string; seasons?: number[] };
+
+/** `coverageRevision`: the committed coverage revision to reload, present only when flags were cleared. */
+export type IgnoreCleanup = { coverageRevision?: number };
+
+/**
+ * Clear Report Missing flags for newly applied Ignore scopes: Ignore is
+ * authoritative over Report Missing. Deletes the explicit flags of Manual Match
+ * members inside the scopes and runs `saveIgnore` (the synchronous Ignore save)
+ * in the same transaction, so a failure saves neither. Then rechecks every show
+ * of the affected Manual Matches, so derived effects elsewhere are withdrawn at
+ * once. Flags outside the scopes and every other Manual Match are kept; Restore
+ * or expiry never brings flags back. Refused during a Plex Scan run only when
+ * there are flags to clear; with none, `saveIgnore` still runs exactly once, with
+ * no revision change and no recheck.
+ */
+export async function clearReportMissingForIgnore(scopes: IgnoreScope[], saveIgnore: () => void): Promise<IgnoreCleanup> {
+  const members = clearReportMissingFlags(membersInIgnoreScopes(scopes), saveIgnore);
+  if (!members.length) return {};
+  await recheckAfterCommit({ members });
+  // The committed revision, whose rechecked (or, after a failed recheck, pending) report the page reloads.
+  return { coverageRevision: coverageState().revision };
+}
+
+/**
+ * Manual Match members inside an Ignore scope. A member belongs to the ignored
+ * show when that show's saved comparison has it as its own provider show or
+ * lists it in that show's catalogue, or, only when the show has no saved
+ * comparison, when one of the show's Plex items carries its identity. Aliases
+ * never match. A season Ignore also requires the member's provider season (from
+ * the saved catalogue, else the saved member) to be one of the selected seasons.
+ */
+function membersInIgnoreScopes(scopes: IgnoreScope[]): CoverageMember[] {
+  if (!scopes.length) return [];
+  const inputs = readPlexInputs();
+  // Provider season of every catalogued episode, built once per cleanup.
+  const seasons = new Map<string, number>();
+  for (const [provider, catalogues] of [["TMDB", inputs.tmdb], ["TVDB", inputs.tvdb]] as const)
+    for (const catalogue of Object.values(catalogues)) for (const episode of catalogue.episodes)
+      if (episode.providerEpisodeId) seasons.set(`${provider}:${episode.providerEpisodeId}`, episode.season);
+  // The member's own provider show only, not aliases or Plex GUIDs, so a
+  // mis-tagged item or shared alias never reaches another show's flags.
+  const ownShow = (input: SavedPlexComparison, member: CoverageMember) => member.provider === "TMDB"
+    ? input.tmdbId === member.showId || Boolean(input.tmdbId && inputs.tmdb[String(input.tmdbId)]?.episodes.some(episode => episode.providerEpisodeId === member.id))
+    : input.tvdbId === member.showId || Boolean(input.tvdbId && inputs.tvdb[String(input.tvdbId)]?.episodes.some(episode => episode.providerEpisodeId === member.id));
+  return listCoverageMappings().flatMap(mapping => mapping.members).filter(member => scopes.some(scope => {
+    const input = inputs.comparisons[scope.ratingKey];
+    // Without a saved comparison, fall back to the show's own Plex items.
+    const inShow = input ? ownShow(input, member)
+      : Boolean(inputs.inventory?.evidence.some(item => item.showKey === scope.ratingKey && item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
+    return inShow && (!scope.seasons || scope.seasons.includes(seasons.get(`${member.provider}:${member.id}`) ?? member.season));
+  }));
 }
 
 /**

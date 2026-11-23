@@ -1,6 +1,7 @@
 import { parsePlexPreferences, parsePlexPreferencesPatch, type PlexPreferences } from "@/lib/preferences";
 import { activeIgnores } from "@/lib/ignored-shows";
-import { applyIgnoreReportMissingCleanup, plexSavedState, readPlexPreferences, type IgnoreScope } from "@/lib/plex-scan";
+import { plexSavedState, readPlexPreferences } from "@/lib/plex-scan";
+import { clearReportMissingForIgnore, type IgnoreScope } from "@/lib/manual-match-changes";
 import { CoverageError } from "@/lib/manual-coverage";
 
 export const runtime = "nodejs";
@@ -39,12 +40,12 @@ export async function PATCH(request: Request) {
     const saved = plexSavedState.options.read();
     const before = parsePlexPreferences(saved);
     const next = parsePlexPreferences({ ...saved, ...patch });
-    // Ignore is authoritative over Report Missing: applying it deletes flags in its
+    // Ignore is authoritative over Report Missing: applying it clears flags in its
     // scope in the same transaction that saves the rule. Only the supplied fields
     // are saved, so a Settings change leaves the saved report alone.
-    const revision = await applyIgnoreReportMissingCleanup(appliedIgnoreScopes(before, next), () => plexSavedState.options.patch(patch));
+    const { coverageRevision } = await clearReportMissingForIgnore(appliedIgnoreScopes(before, next), () => plexSavedState.options.patch(patch));
     // When cleanup changed flags, the revision tells the page to reload rechecked results.
-    return Response.json({ saved: true, ...(revision === undefined ? {} : { coverageRevision: revision }) }, { headers });
+    return Response.json({ saved: true, ...(coverageRevision === undefined ? {} : { coverageRevision }) }, { headers });
   } catch (error) {
     if (error instanceof CoverageError) return Response.json({ error: error.message, code: error.code }, { status: error.status, headers });
     return Response.json({ error: error instanceof Error ? error.message : "Plex preferences could not be saved." }, { status: 500, headers });

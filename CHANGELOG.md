@@ -31,6 +31,27 @@
   counts, provider change-feed positions, pending fifth-scan safeguards and
   every other Scan Issues entry.
 
+- Saving, editing or deleting a Manual Match, changing only its Report
+  Missing flags, and applying an Ignore that clears Report Missing flags now
+  show as saved when the change was saved but the recheck of the Plex results
+  from saved data then failed. Before, a Manual Match change showed "provider
+  unavailable" and an Ignore showed an error, although the change was saved
+  and no provider was contacted. The Plex page now shows the comparison
+  pending notice and keeps the last results until a later recheck or Plex
+  scan succeeds.
+
+  Two limits remain. The pending notice is saved with the change, but the
+  note that the affected shows need fresh downloads on the next scan is
+  written by the recheck, so a recheck that failed early may not have written
+  it. Nothing reruns a failed recheck, after an error or a restart: a later
+  change that rechecks other shows clears the notice while the shows of the
+  failed change keep their last results. Run a Plex scan to bring every show
+  up to date.
+
+  During a Plex scan, a malformed Manual Match request (an invalid ID or JSON)
+  is now refused as invalid rather than because a scan is running. Every
+  well-formed Manual Match change is still refused while a scan runs.
+
 ### Fixed
 
 - Clearing one show's cache no longer makes the next scan ask TMDB again for

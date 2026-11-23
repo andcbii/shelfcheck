@@ -65,6 +65,11 @@ Specials (season 0) follow the same rules on both providers. TVDB catalogues now
 - When a Plex scan is running, applying an Ignore that would delete flags is rejected with `scan-active`, and neither the rule nor the cleanup is saved. The Plex page then shows the saved preferences again and restores the show's results. Preference saves that delete no flags are unaffected.
 - Visibility is unchanged. Ignored shows and seasons hide their missing results, including Reported missing and incomplete episodes. Ignored content's ownership evidence still satisfies mapped content elsewhere.
 
+### Saved changes whose cached recheck fails (SHELFCHECK-41)
+
+- Saving, editing, flag-only editing or deleting a Manual Match, and an Ignore that clears flags, each commit first and then run one cached recheck. When only that recheck fails, the change is reported as saved with its usual response, and the comparison stays pending: the last results are kept and the existing `comparison-pending` Coverage Issue is shown until a later recheck or Plex scan completes. Validation, provider revalidation and transaction failures keep their errors.
+- Known limits, accepted rather than adding a durable recheck job. The pending state is saved in the change's own transaction, but the affected shows' refresh obligations are written later, by the recheck; one that fails early may leave them unwritten. Nothing replays a failed recheck's affected members, after a failure or after a crash: pending is one library-wide flag, so a later successful recheck of other shows completes it while the failed change's shows keep their last results. A Plex scan compares every show again from the saved Manual Matches.
+
 ## Manual Matches and Matching Episodes
 
 Manual Matches are controlled by the user; Auto Matches are controlled by Shelfcheck. Remove the **Manual Coverage** entry from the top banner. Reports provide **01 — Manual Matches**, **02 — Auto Matches**, **03 — Unmatched Shows**, **04 — Provider Matches**, and **05 — Coverage Issues**.

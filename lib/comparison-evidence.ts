@@ -42,6 +42,9 @@ export class SavedRelationshipUnavailableError extends Error {
   constructor(readonly relationship: string) { super(`The saved ${relationship.slice(0, relationship.indexOf(":"))} response for this episode is not available to the offline recheck; no request was made.`); }
 }
 
+/** A TMDB series record usable as a series: one with a numeric ID. */
+export const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
+
 /** The records of a successful response, or the reason it cannot be interpreted as an error. */
 export function interpretedRecords<T>(provider: ProviderName, list: ReturnType<typeof responseRecordList>): T[] {
   if ("unreadable" in list) throw new CrosswalkResponseError(provider, list.unreadable);
@@ -126,17 +129,20 @@ export type LiveEvidenceScan = {
  * (its identity and lookup provenance, which also bind its read port and diagnostics), its saved
  * evidence and whether its TMDB crosswalks are forced. It reuses saved relationships while no failed
  * request is recorded for them, requests the rest through the scan's transport, and answers TMDB
- * external-ID crosswalks through the scan run's coordinator. Series lookups use `series` until the
- * live source answers them itself.
+ * external-ID crosswalks through the scan run's coordinator. Catalogue downloads (the TVDB slug read
+ * included) are not lookups of this source and are never answered from its saved evidence.
  */
-export function liveComparisonEvidence({ scan, show, saved, forced, series }: {
+export function liveComparisonEvidence({ scan, show, saved, forced }: {
   scan: LiveEvidenceScan;
   show: LookupComparisonContext;
-  /** `reuseImdbIds`: the show's TVDB catalogue is unchanged, so its saved IMDb episode IDs can be reused. */
+  /**
+   * `relationships`: the reusable saved relationships, including other TVDB candidates' TMDB series
+   * associations, which this comparison never reads but keeps for a recheck that switches to one.
+   * `reuseImdbIds`: the show's TVDB catalogue is unchanged, so its saved IMDb episode IDs can be reused.
+   */
   saved: { relationships: CrosswalkRelationships; tvdbEpisodeImdbIds?: Record<string, string[]>; reuseImdbIds: boolean };
   /** The show's TMDB relationships cannot be reused: every TMDB crosswalk is requested in this scan. */
   forced: boolean;
-  series: SeriesEvidence;
 }): ComparisonEvidence {
   const now = scan.now || (() => new Date().toISOString());
   const failures = lookupFailureRecord(show.ratingKey);
@@ -220,10 +226,24 @@ export function liveComparisonEvidence({ scan, show, saved, forced, series }: {
       imdbIds[String(tvdbEpisodeId)] = [...ids];
       return ids;
     },
-    tmdbSeriesByTvdb: (tvdbSeriesId) => series.tmdbSeriesByTvdb(tvdbSeriesId),
-    tmdbSeriesSummary: (tmdbShowId) => series.tmdbSeriesSummary(tmdbShowId),
-    tmdbSeriesSummaryWithExternalIds: (tmdbShowId) => series.tmdbSeriesSummaryWithExternalIds(tmdbShowId),
-    tvdbSeriesSummary: (tvdbSeriesId) => series.tvdbSeriesSummary(tvdbSeriesId),
+    async tmdbSeriesByTvdb(tvdbSeriesId) {
+      const { value } = await relationship(providerLookup.tmdbSeriesByTvdbSeries(tvdbSeriesId));
+      return interpretedRecords<TmdbShow>("TMDB", responseRecordList(value, "tv_results")).filter(usableTmdbShow);
+    },
+    // The basic and external-ID summaries are separate lookups: neither ever answers the other.
+    async tmdbSeriesSummary(tmdbShowId) {
+      const { value } = await relationship(providerLookup.tmdbSeriesSummary(tmdbShowId));
+      return usableTmdbShow(value) ? value : undefined;
+    },
+    async tmdbSeriesSummaryWithExternalIds(tmdbShowId) {
+      const { value } = await relationship(providerLookup.tmdbSeriesSummaryWithExternalIds(tmdbShowId));
+      return usableTmdbShow(value) ? value : undefined;
+    },
+    async tvdbSeriesSummary(tvdbSeriesId) {
+      const { value } = await relationship(providerLookup.tvdbSeriesSummary(tvdbSeriesId));
+      const data = isRecord(value) ? value.data as { id?: number; name?: string; slug?: string; year?: string } | undefined : undefined;
+      return data ? { id: data.id || tvdbSeriesId, name: data.name, slug: data.slug, year: data.year } : null;
+    },
     rejectTmdbEpisodeCrosswalk: (tvdbEpisodeId) => crosswalks.rejectCopy(tvdbEpisodeId),
     changes: () => ({
       relationships: structuredClone(relationships),

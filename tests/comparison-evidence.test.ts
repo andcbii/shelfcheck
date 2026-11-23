@@ -12,7 +12,7 @@ const { getCoverageIssue, listCoverageIssues, setCoverageIssue } = await import(
 const { reconcileEpisodeCheckIssues } = await import("../lib/episode-check-issues");
 const { ProviderHttpError } = await import("../lib/provider-client");
 hook.deregister();
-import type { ComparisonEvidence, SeriesEvidence } from "../lib/comparison-evidence";
+import type { ComparisonEvidence } from "../lib/comparison-evidence";
 import type { ProviderLookup } from "../lib/provider-lookup";
 import type { SharedCrosswalkRecord } from "../lib/tmdb-crosswalk-policy";
 
@@ -39,6 +39,11 @@ const keys = {
   trakt303: "Trakt:https://api.trakt.tv/search/tvdb/303?type=episode",
   tvdbExtended303: "TVDB:https://api4.thetvdb.com/v4/episodes/303/extended",
   tmdbValidation: "TMDB:https://api.themoviedb.org/3/tv/10/season/2/episode/3",
+  tmdbSeriesByTvdb20: "TMDB:https://api.themoviedb.org/3/find/20?external_source=tvdb_id",
+  tmdbSeriesByTvdb21: "TMDB:https://api.themoviedb.org/3/find/21?external_source=tvdb_id",
+  tmdbSummary10: "TMDB:https://api.themoviedb.org/3/tv/10",
+  tmdbSummaryWithIds10: "TMDB:https://api.themoviedb.org/3/tv/10?append_to_response=external_ids",
+  tvdbSummary20: "TVDB:https://api4.thetvdb.com/v4/series/20",
 };
 const issueId = (ratingKey: string, key: string) => `episode-identity:${ratingKey}:${key}`;
 
@@ -58,13 +63,6 @@ function fakeTransport(answer: (lookup: ProviderLookup) => unknown | Promise<unk
   };
 }
 
-const noSeries: SeriesEvidence = {
-  tmdbSeriesByTvdb: async () => { throw new Error("not used"); },
-  tmdbSeriesSummary: async () => { throw new Error("not used"); },
-  tmdbSeriesSummaryWithExternalIds: async () => { throw new Error("not used"); },
-  tvdbSeriesSummary: async () => { throw new Error("not used"); },
-};
-
 const target = {
   ratingKey: "target", title: "Target", tmdbId: 10, tvdbId: 20,
   tvdbSource: [{provider: "Plex" as const, kind: "TVDB series", id: 20}], tvdbCached: false,
@@ -76,9 +74,9 @@ type Scan = Parameters<typeof liveComparisonEvidence>[0]["scan"];
 function liveScan(transport: Scan["transport"], options: {traktLogin?: boolean; store?: ReturnType<typeof inMemoryStore>["store"]} = {}): Scan {
   return {transport, crosswalks: tmdbCrosswalkScanRun({store: options.store || inMemoryStore().store, now: () => NOW, startedAt: SCAN_STARTED}), traktLogin: options.traktLogin ?? true, now: () => NOW};
 }
-function source(scan: Scan, options: {show?: typeof target & {tvdbAuthenticationError?: unknown}; relationships?: Record<string, {provider: string; value: unknown; receivedAt?: string}>; imdb?: Record<string, string[]>; reuseImdbIds?: boolean; forced?: boolean; series?: SeriesEvidence} = {}): ComparisonEvidence {
+function source(scan: Scan, options: {show?: typeof target & {tvdbAuthenticationError?: unknown}; relationships?: Record<string, {provider: string; value: unknown; receivedAt?: string}>; imdb?: Record<string, string[]>; reuseImdbIds?: boolean; forced?: boolean} = {}): ComparisonEvidence {
   return liveComparisonEvidence({
-    scan, show: options.show || target, forced: options.forced ?? false, series: options.series || noSeries,
+    scan, show: options.show || target, forced: options.forced ?? false,
     saved: {relationships: options.relationships || {}, tvdbEpisodeImdbIds: options.imdb, reuseImdbIds: options.reuseImdbIds ?? true},
   });
 }
@@ -289,7 +287,7 @@ test("an invalid identity is a rejected lookup, never a synchronous throw", asyn
   temporaryDatabase(t);
   const provider = fakeTransport(() => []);
   const evidence = source(liveScan(provider.transport));
-  const calls = [() => evidence.tmdbEpisodeByTvdb(0), () => evidence.traktEpisodeSearch(-1), () => evidence.tvdbEpisodeExtended(1.5), () => evidence.tmdbEpisodeDetails({tmdbShowId: 10, season: -1, episode: 1}, {tvdbEpisodeId: 1, tmdbEpisodeId: 1, cached: false})];
+  const calls = [() => evidence.tmdbSeriesByTvdb(0), () => evidence.tmdbSeriesSummary(-1), () => evidence.tmdbSeriesSummaryWithExternalIds(2.5), () => evidence.tvdbSeriesSummary(Number.MAX_SAFE_INTEGER + 1), () => evidence.tmdbEpisodeByTvdb(0), () => evidence.traktEpisodeSearch(-1), () => evidence.tvdbEpisodeExtended(1.5), () => evidence.tmdbEpisodeDetails({tmdbShowId: 10, season: -1, episode: 1}, {tvdbEpisodeId: 1, tmdbEpisodeId: 1, cached: false})];
   for (const call of calls) {
     let pending: Promise<unknown> | undefined;
     assert.doesNotThrow(() => { pending = call(); });
@@ -322,20 +320,117 @@ test("changes are a snapshot: the caller cannot alter the source's evidence, and
   assert.equal(provider.sent.length, 1);
 });
 
-test("series lookups use the legacy series evidence until the live source answers them", async t => {
+const OLD = "2026-11-01T00:00:00.000Z";
+
+test("a TMDB series association is requested once and kept: only usable series answer, and an empty answer is a success", async t => {
   temporaryDatabase(t);
-  const show = {id: 10, name: "Target"};
-  const asked: string[] = [];
-  const series: SeriesEvidence = {
-    tmdbSeriesByTvdb: async id => { asked.push(`tmdb-by-tvdb:${id}`); return [show]; },
-    tmdbSeriesSummary: async id => { asked.push(`tmdb:${id}`); return show; },
-    tmdbSeriesSummaryWithExternalIds: async id => { asked.push(`tmdb+ids:${id}`); return undefined; },
-    tvdbSeriesSummary: async id => { asked.push(`tvdb:${id}`); return null; },
-  };
-  const evidence = source(liveScan(fakeTransport(() => []).transport), {series});
-  assert.deepEqual(await evidence.tmdbSeriesByTvdb(20), [show]);
-  assert.deepEqual(await evidence.tmdbSeriesSummary(10), show);
-  assert.equal(await evidence.tmdbSeriesSummaryWithExternalIds(11), undefined);
+  const answer = {tv_results: [{id: 10, name: "Target"}, {name: "No ID"}]};
+  const provider = fakeTransport(() => answer);
+  const evidence = source(liveScan(provider.transport));
+  assert.deepEqual(await evidence.tmdbSeriesByTvdb(20), [{id: 10, name: "Target"}]);
+  assert.deepEqual(await evidence.tmdbSeriesByTvdb(20), [{id: 10, name: "Target"}]);
+  assert.equal(provider.count("tmdb-series-by-tvdb-series"), 1);
+  assert.deepEqual(evidence.changes().relationships, {[keys.tmdbSeriesByTvdb20]: {provider: "TMDB", value: answer, receivedAt: NOW}});
+
+  const empty = source(liveScan(fakeTransport(() => ({tv_results: []})).transport));
+  assert.deepEqual(await empty.tmdbSeriesByTvdb(20), []);
+  assert.deepEqual(listCoverageIssues(), []);
+
+  const unreadable = source(liveScan(fakeTransport(() => ({tv_results: "no"})).transport));
+  await assert.rejects(unreadable.tmdbSeriesByTvdb(20), CrosswalkResponseError);
+});
+
+test("a saved TMDB series association is reused while no failed request is recorded for it; a failed one raises its provider-association issue and is retried", async t => {
+  temporaryDatabase(t);
+  const saved = {[keys.tmdbSeriesByTvdb20]: {provider: "TMDB", value: {tv_results: [{id: 10}]}, receivedAt: OLD}};
+  const failing = fakeTransport(() => { throw new ProviderHttpError("TMDB", 503); });
+  assert.deepEqual(await source(liveScan(failing.transport), {relationships: saved}).tmdbSeriesByTvdb(20), [{id: 10}]);
+  assert.equal(failing.sent.length, 0);
+
+  await assert.rejects(source(liveScan(failing.transport)).tmdbSeriesByTvdb(20), ProviderHttpError);
+  const issue = getCoverageIssue(issueId("target", keys.tmdbSeriesByTvdb20));
+  assert.equal(issue?.operation, "provider-association");
+  assert.deepEqual(issue?.lookup?.source, [{provider: "Plex", kind: "TVDB series", id: 20}]);
+
+  const ok = fakeTransport(() => ({tv_results: [{id: 11}]}));
+  const retried = source(liveScan(ok.transport), {relationships: saved});
+  assert.deepEqual(await retried.tmdbSeriesByTvdb(20), [{id: 11}]);
+  assert.equal(ok.count("tmdb-series-by-tvdb-series"), 1);
+  assert.equal(getCoverageIssue(issueId("target", keys.tmdbSeriesByTvdb20)), undefined);
+  assert.deepEqual(retried.changes().relationships[keys.tmdbSeriesByTvdb20], {provider: "TMDB", value: {tv_results: [{id: 11}]}, receivedAt: NOW});
+});
+
+test("another TVDB candidate's saved TMDB series association is kept unchanged and never read", async t => {
+  temporaryDatabase(t);
+  const alternative = {provider: "TMDB", value: {tv_results: [{id: 77}]}, receivedAt: OLD};
+  const provider = fakeTransport(() => ({tv_results: [{id: 10}]}));
+  const evidence = source(liveScan(provider.transport), {relationships: {[keys.tmdbSeriesByTvdb21]: alternative}});
+  assert.deepEqual(await evidence.tmdbSeriesByTvdb(20), [{id: 10}]);
+  assert.deepEqual(provider.sent, [{kind: "tmdb-series-by-tvdb-series", tvdbSeriesId: 20}]);
+  assert.deepEqual(evidence.changes().relationships, {
+    [keys.tmdbSeriesByTvdb21]: alternative,
+    [keys.tmdbSeriesByTvdb20]: {provider: "TMDB", value: {tv_results: [{id: 10}]}, receivedAt: NOW},
+  });
+});
+
+test("basic and external-ID TMDB series summaries stay distinct: neither answers the other", async t => {
+  temporaryDatabase(t);
+  const basic = {id: 10, name: "Basic"}, withIds = {id: 10, name: "With IDs", external_ids: {tvdb_id: 20}};
+  const provider = fakeTransport(lookup => lookup.kind === "tmdb-series-summary" ? basic : withIds);
+  const savedBasic = source(liveScan(provider.transport), {relationships: {[keys.tmdbSummary10]: {provider: "TMDB", value: {id: 10, name: "Saved basic"}, receivedAt: OLD}}});
+  assert.deepEqual(await savedBasic.tmdbSeriesSummary(10), {id: 10, name: "Saved basic"});
+  assert.equal(provider.sent.length, 0);
+  assert.deepEqual(await savedBasic.tmdbSeriesSummaryWithExternalIds(10), withIds);
+  assert.deepEqual(provider.sent, [{kind: "tmdb-series-summary-with-external-ids", tmdbShowId: 10}]);
+
+  const savedWithIds = source(liveScan(provider.transport), {relationships: {[keys.tmdbSummaryWithIds10]: {provider: "TMDB", value: withIds, receivedAt: OLD}}});
+  assert.deepEqual(await savedWithIds.tmdbSeriesSummaryWithExternalIds(10), withIds);
+  assert.deepEqual(await savedWithIds.tmdbSeriesSummary(10), basic);
+  assert.equal(provider.count("tmdb-series-summary"), 1);
+  assert.equal(provider.count("tmdb-series-summary-with-external-ids"), 1);
+  assert.deepEqual(savedWithIds.changes().relationships, {
+    [keys.tmdbSummaryWithIds10]: {provider: "TMDB", value: withIds, receivedAt: OLD},
+    [keys.tmdbSummary10]: {provider: "TMDB", value: basic, receivedAt: NOW},
+  });
+});
+
+test("a TMDB series summary that names no series is none, and a failed one raises no issue", async t => {
+  temporaryDatabase(t);
+  const evidence = source(liveScan(fakeTransport(() => ({success: false})).transport));
+  assert.equal(await evidence.tmdbSeriesSummary(10), undefined);
+  assert.equal(await evidence.tmdbSeriesSummaryWithExternalIds(10), undefined);
+  const failing = source(liveScan(fakeTransport(() => { throw new ProviderHttpError("TMDB", 404); }).transport));
+  await assert.rejects(failing.tmdbSeriesSummary(11), ProviderHttpError);
+  await assert.rejects(failing.tmdbSeriesSummaryWithExternalIds(11), ProviderHttpError);
+  assert.deepEqual(listCoverageIssues(), []);
+});
+
+test("a TVDB series summary is read from its record, is none when TVDB has none, and raises no issue on failure", async t => {
+  temporaryDatabase(t);
+  const record = {data: {id: 20, name: "Target", slug: "target", year: "2020", extra: 1}};
+  const provider = fakeTransport(lookup => lookup.kind === "tvdb-series-summary" && lookup.tvdbSeriesId === 20 ? record : {});
+  const evidence = source(liveScan(provider.transport));
+  assert.deepEqual(await evidence.tvdbSeriesSummary(20), {id: 20, name: "Target", slug: "target", year: "2020"});
   assert.equal(await evidence.tvdbSeriesSummary(21), null);
-  assert.deepEqual(asked, ["tmdb-by-tvdb:20", "tmdb:10", "tmdb+ids:11", "tvdb:21"]);
+  assert.deepEqual(evidence.changes().relationships[keys.tvdbSummary20], {provider: "TVDB", value: record, receivedAt: NOW});
+  // A record without its own ID is the requested series.
+  const unnamed = source(liveScan(fakeTransport(() => ({data: {name: "Target"}})).transport));
+  assert.deepEqual(await unnamed.tvdbSeriesSummary(20), {id: 20, name: "Target", slug: undefined, year: undefined});
+
+  const failing = source(liveScan(fakeTransport(() => { throw new ProviderHttpError("TVDB", 500); }).transport));
+  await assert.rejects(failing.tvdbSeriesSummary(20), ProviderHttpError);
+  assert.deepEqual(listCoverageIssues(), []);
+});
+
+test("a saved TVDB series summary answers the comparison's summary without a request, even after the run's TVDB login failed", async t => {
+  temporaryDatabase(t);
+  const loginFailed = new ProviderHttpError("TVDB", 401);
+  const provider = fakeTransport(() => ({data: {id: 20}}));
+  const show = {...target, tvdbAuthenticationError: loginFailed};
+  const saved = {[keys.tvdbSummary20]: {provider: "TVDB", value: {data: {id: 20, name: "Saved", slug: "saved"}}, receivedAt: OLD}};
+  const evidence = source(liveScan(provider.transport), {show, relationships: saved});
+  assert.deepEqual(await evidence.tvdbSeriesSummary(20), {id: 20, name: "Saved", slug: "saved", year: undefined});
+  await assert.rejects(evidence.tvdbSeriesSummary(21), error => error === loginFailed);
+  assert.equal(provider.sent.length, 0);
+  assert.deepEqual(listCoverageIssues(), []);
 });

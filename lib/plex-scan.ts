@@ -44,7 +44,7 @@ import { invalidateShowTmdbCrosswalks, saveRecoveredTmdbCrosswalks, tmdbCrosswal
 import { replayedTmdbCrosswalkDecision } from "@/lib/tmdb-crosswalk-policy";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
-import { CrosswalkResponseError, crosswalkLookup, interpretedRecords, SavedRelationshipUnavailableError, TraktLoginUnavailableError, type TmdbShow, type TraktEpisodeSearchResult, type TvdbShow } from "@/lib/comparison-evidence";
+import { CrosswalkResponseError, crosswalkLookup, interpretedRecords, SavedRelationshipUnavailableError, TraktLoginUnavailableError, usableTmdbShow, type TmdbShow, type TraktEpisodeSearchResult, type TvdbShow } from "@/lib/comparison-evidence";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
 export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; heartbeatAt?: string };
@@ -244,7 +244,6 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCa
   return usableCatalogue("TMDB", show.id, catalogue);
 }
 
-const usableTmdbShow = (value: unknown): value is TmdbShow => isRecord(value) && typeof value.id === "number";
 /**
  * An offline recheck applies the ADR-0004 replay decision for one TVDB episode's TMDB external-ID
  * crosswalk to this comparison's saved relationships. A recovered answer is resolved against this

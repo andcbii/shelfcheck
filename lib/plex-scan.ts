@@ -7,7 +7,7 @@ import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexIn
 import { authenticateTvdb } from "@/lib/tvdb-auth";
 import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
 import { coverageState, beginCoverageRecheck, clearReportMissingFlags, completeCoverageRecheck, listCoverageMappings, saveCoverageEvidence } from "@/lib/manual-coverage";
-import { missingPartsOf, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
+import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
@@ -1133,10 +1133,7 @@ function coverageGroupsForResults(results: PlexShowResult[], manualInventory: Co
     return [{mappingId:mapping.id,health:mapping.health,missing,members:mapping.members.map(member=>{
       const direct=manualInventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
       const matched=outcomes.filter(outcome=>outcome.provider===member.provider && outcome.id===member.id);
-      // Explicit and derived missing status outrank direct ownership and every collected outcome.
-      const missingParts=missingPartsOf(mapping.members,member);
-      const status=member.reportMissing ? "reported-missing" : missingParts.length ? "incomplete" : direct ? "direct" : matched.some(o=>o.status==="missing") ? "missing" : matched.some(o=>o.status==="automatic") ? "automatic" : matched.some(o=>o.status==="manual") ? "manual" : "alternative";
-      return {...member,status,...(status==="incomplete" ? {missingParts} : {})};
+      return {...member,...memberStatus({member,members:mapping.members,direct,matched})};
     })}];
   });
 }

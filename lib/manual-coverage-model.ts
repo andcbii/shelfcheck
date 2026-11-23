@@ -91,6 +91,32 @@ export function missingPartsOf(members: (CoverageIdentity & { reportMissing?: bo
   return members.filter(part => part.provider !== member.provider && part.reportMissing).map(({ provider, id }) => ({ provider, id }));
 }
 
+/** A Manual Match member's status in Plex results. */
+export type MemberStatus = CoverageGroup["members"][number]["status"];
+
+/**
+ * The status a Manual Match member shows in Plex results, highest first:
+ * Reported missing, Incomplete, Directly owned, Missing, Satisfied
+ * automatically, Covered by complete alternative set, then Alternative.
+ * `direct` says whether a Plex item owns the member directly; `matched` holds
+ * the comparison outcomes for this member. Missing parts appear only on an
+ * incomplete combined episode.
+ */
+export function memberStatus({ member, members, direct, matched }: {
+  member: CoverageIdentity & { reportMissing?: boolean };
+  members: (CoverageIdentity & { reportMissing?: boolean })[];
+  direct: boolean;
+  matched: Pick<CoverageOutcome, "status">[];
+}): { status: MemberStatus; missingParts?: CoverageIdentity[] } {
+  // Explicit and derived missing status outrank direct ownership and every collected outcome.
+  if (member.reportMissing) return { status: "reported-missing" };
+  const missingParts = missingPartsOf(members, member);
+  if (missingParts.length) return { status: "incomplete", missingParts };
+  if (direct) return { status: "direct" };
+  for (const status of ["missing", "automatic", "manual"] as const) if (matched.some(outcome => outcome.status === status)) return { status };
+  return { status: "alternative" };
+}
+
 /** Readable label for the derived status, distinct from an explicit "Reported missing". */
 export const INCOMPLETE_LABEL = "Incomplete · mapped part missing";
 

@@ -298,7 +298,7 @@ test("a shared answer received strictly after the comparison's own failed reques
 
 const noRecovery: { kind: string; arrange: (h: Awaited<ReturnType<typeof otherFailed>>) => Promise<void> }[] = [
   { kind: "received at the same time as the failed request", arrange: async h => { await h.rescanTarget(1000); } },
-  { kind: "when the failed request has no failure time", arrange: async h => { await h.rescanTarget(2000); const { failedAt: _, ...undated } = coverageIssues.getCoverageIssue(h.request.id)!; coverageIssues.setCoverageIssue(undated); } },
+  { kind: "when the failed request has no failure time", arrange: async h => { await h.rescanTarget(2000); const undated = coverageIssues.getCoverageIssue(h.request.id)!; delete undated.failedAt; coverageIssues.setCoverageIssue(undated); } },
   { kind: "when no failed request is recorded", arrange: async h => { await h.rescanTarget(2000); coverageIssues.resolveCoverageIssue(h.request.id); } },
 ];
 for (const variant of noRecovery) test(`a shared answer ${variant.kind} is not recovered into the comparison`, async t => {

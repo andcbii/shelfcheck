@@ -36,7 +36,7 @@ import { isProviderLoginFailure, ProviderResponseError, type ProviderAuth } from
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isRecord } from "@/lib/value-guards";
-import { lookupKey, lookupProvider, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey, type ProviderLookup } from "@/lib/provider-lookup";
+import { isEpisodeCoordinate, lookupKey, lookupProvider, lookupUrl, providerLookup, tmdbEpisodeCrosswalkOfKey, type ProviderLookup } from "@/lib/provider-lookup";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
 import type { TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
@@ -408,7 +408,7 @@ async function findEpisodeViaTrakt(tvdbEpisodeId: number, equivalentTmdbIds: Set
   const results = await traktJson<unknown>(crosswalkLookup("Trakt", tvdbEpisodeId), traktAuth);
   if (!Array.isArray(results)) throw new CrosswalkResponseError("Trakt", "the episode search result is not a list");
   const sameShow = (results.filter(isRecord) as TraktEpisodeSearchResult[]).filter((result) => result.type === "episode" && Number.isFinite(result.show?.ids?.tmdb) && equivalentTmdbIds.has(result.show!.ids!.tmdb as number) && result.show?.ids?.tvdb === tvdbShowId);
-  const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && Number.isFinite(result.episode.season) && Number.isFinite(result.episode.number));
+  const completeMappings = sameShow.filter((result) => result.episode?.ids?.tvdb === tvdbEpisodeId && Number.isFinite(result.episode.ids.tmdb) && isEpisodeCoordinate(result.episode.season) && isEpisodeCoordinate(result.episode.number));
   if (!completeMappings.length) return { validated: false, owned: false, validationFailed: 0, traktTmdbIds: [] as number[], validatedTmdbIds: [] as number[], validationFailures: [] as CrosswalkCause[] };
   const validations = await Promise.allSettled(completeMappings.map(async (result) => {
     const episode = result.episode!;

@@ -24,12 +24,17 @@ export type ProviderLookup =
   /** Trakt's episode search for one TVDB episode: its Trakt crosswalk. */
   | { kind: "trakt-episode-search-by-tvdb-episode"; tvdbEpisodeId: number };
 
+/** Whether a value is a provider ID a lookup accepts: a positive safe integer. */
+export const isProviderId = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0;
+/** Whether a value is a season or episode number a lookup accepts: a non-negative safe integer. */
+export const isEpisodeCoordinate = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+
 function providerId(value: number, name: string) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer, not ${value}.`);
+  if (!isProviderId(value)) throw new RangeError(`${name} must be a positive integer, not ${value}.`);
   return value;
 }
 function coordinate(value: number, name: string) {
-  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative integer, not ${value}.`);
+  if (!isEpisodeCoordinate(value)) throw new RangeError(`${name} must be a non-negative integer, not ${value}.`);
   return value;
 }
 

@@ -105,15 +105,19 @@ export function lookupKey(lookup: ProviderLookup): string {
   }
 }
 
-/** Builds a lookup from a stored key's parts, for every key `lookupKey` writes. */
-const lookupOfKeyParts: Record<string, (parts: number[], variant?: string) => ProviderLookup | undefined> = {
-  "tmdb-episode-by-tvdb": ([id]) => providerLookup.tmdbEpisodeByTvdbEpisode(id),
-  "tmdb-series-by-tvdb": ([id]) => providerLookup.tmdbSeriesByTvdbSeries(id),
-  "tmdb-episode": ([show, season, episode]) => providerLookup.tmdbEpisodeByShowSeasonEpisode(show, season, episode),
-  "tmdb-series": ([id], variant) => variant === "summary" ? providerLookup.tmdbSeriesSummary(id) : variant === "external-ids" ? providerLookup.tmdbSeriesSummaryWithExternalIds(id) : undefined,
-  "tvdb-series": ([id]) => providerLookup.tvdbSeriesSummary(id),
-  "tvdb-episode-extended": ([id]) => providerLookup.tvdbEpisodeExtended(id),
-  "trakt-episode-by-tvdb": ([id]) => providerLookup.traktEpisodeSearchByTvdbEpisode(id),
+/**
+ * For every lookup kind, its stored key's leading part and how to build the lookup from the key's
+ * parts. Keyed by every kind, so a new kind does not compile until `lookupOfKey` can read its key.
+ */
+const lookupOfKeyByKind: Record<ProviderLookup["kind"], { prefix: string; build: (parts: number[], variant?: string) => ProviderLookup }> = {
+  "tmdb-episode-by-tvdb-episode": { prefix: "tmdb-episode-by-tvdb", build: ([id]) => providerLookup.tmdbEpisodeByTvdbEpisode(id) },
+  "tmdb-series-by-tvdb-series": { prefix: "tmdb-series-by-tvdb", build: ([id]) => providerLookup.tmdbSeriesByTvdbSeries(id) },
+  "tmdb-episode-by-show-season-episode": { prefix: "tmdb-episode", build: ([show, season, episode]) => providerLookup.tmdbEpisodeByShowSeasonEpisode(show, season, episode) },
+  "tmdb-series-summary": { prefix: "tmdb-series", build: ([id]) => providerLookup.tmdbSeriesSummary(id) },
+  "tmdb-series-summary-with-external-ids": { prefix: "tmdb-series", build: ([id]) => providerLookup.tmdbSeriesSummaryWithExternalIds(id) },
+  "tvdb-series-summary": { prefix: "tvdb-series", build: ([id]) => providerLookup.tvdbSeriesSummary(id) },
+  "tvdb-episode-extended": { prefix: "tvdb-episode-extended", build: ([id]) => providerLookup.tvdbEpisodeExtended(id) },
+  "trakt-episode-search-by-tvdb-episode": { prefix: "trakt-episode-by-tvdb", build: ([id]) => providerLookup.traktEpisodeSearchByTvdbEpisode(id) },
 };
 
 /**
@@ -121,15 +125,18 @@ const lookupOfKeyParts: Record<string, (parts: number[], variant?: string) => Pr
  * callers select saved relationships by lookup kind.
  */
 export function lookupOfKey(key: string): ProviderLookup | undefined {
-  const [kind, ...rest] = key.split(":");
-  const build = Object.hasOwn(lookupOfKeyParts, kind) ? lookupOfKeyParts[kind] : undefined;
-  if (!build) return undefined;
+  const [prefix, ...rest] = key.split(":");
   const variant = rest.length && !/^\d+$/.test(rest.at(-1)!) ? rest.pop() : undefined;
-  try {
-    const lookup = build(rest.map(Number), variant);
-    // Only the exact key this lookup projects to names it: no padded, partial or extra parts.
-    return lookup && lookupKey(lookup) === key ? lookup : undefined;
-  } catch {
-    return undefined;
+  const parts = rest.map(Number);
+  for (const { prefix: kindPrefix, build } of Object.values(lookupOfKeyByKind)) {
+    if (kindPrefix !== prefix) continue;
+    try {
+      const lookup = build(parts, variant);
+      // Only the exact key this lookup projects to names it: no padded, partial or extra parts.
+      if (lookupKey(lookup) === key) return lookup;
+    } catch {
+      // Not this kind's key: invalid parts for it.
+    }
   }
+  return undefined;
 }

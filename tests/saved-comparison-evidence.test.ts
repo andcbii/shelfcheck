@@ -77,7 +77,7 @@ test("a missing episode answer fails that episode only; a missing series answer 
   for (const [provider, lookup] of [["TMDB", evidence.tmdbSeriesByTvdb(20)], ["TMDB", evidence.tmdbSeriesSummary(10)],
     ["TMDB", evidence.tmdbSeriesSummaryWithExternalIds(10)], ["TVDB", evidence.tvdbSeriesSummary(20)]] as const) {
     await assert.rejects(lookup, error => error instanceof SavedRelationshipUnavailableError
-      && error.message === `The saved ${provider} response for this series is not available to the offline recheck; no request was made.`);
+      && error.message === `The saved ${provider} response for this series is not available to the cached recheck; no request was made.`);
   }
   assert.deepEqual(evidence.missing(), [keys.tmdbSeriesByTvdb20, keys.tmdbSummary10, keys.tmdbSummaryWithIds10, keys.tvdbSummary20]);
 });

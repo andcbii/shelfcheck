@@ -329,6 +329,7 @@ function seriesNotFoundHistory(db: DatabaseSync) {
 }
 
 /** The generated inputs migration 6 keeps: scan accounting, provider verification positions and pending safeguards. */
+// Deliberately a copy of plex-catalogues' keptByFullClear, not an import: a shipped migration must not follow later app code changes.
 const KEPT_BY_LOOKUP_KEY_RESET = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards"];
 const LOOKUP_ISSUE_PREFIX = "episode-identity:";
 

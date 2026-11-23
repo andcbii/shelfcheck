@@ -33,10 +33,22 @@ export class CrosswalkResponseError extends Error {
 export class TraktLoginUnavailableError extends Error {
   constructor(readonly reason: unknown) { super("Trakt lookups are unavailable for this scan: the Trakt login could not be recovered."); }
 }
-/** The series lookups: a missing saved answer to one is a missing show-level input. */
-const SERIES_LOOKUPS = new Set<ProviderLookup["kind"]>(["tmdb-series-by-tvdb-series", "tmdb-series-summary", "tmdb-series-summary-with-external-ids", "tvdb-series-summary"]);
+/**
+ * Each lookup kind's scope: a missing saved answer to a series lookup is a missing show-level input.
+ * Keyed by every kind, so a new kind does not compile until its scope is chosen.
+ */
+const LOOKUP_SCOPE: Record<ProviderLookup["kind"], "series" | "episode"> = {
+  "tmdb-episode-by-tvdb-episode": "episode",
+  "tmdb-series-by-tvdb-series": "series",
+  "tmdb-episode-by-show-season-episode": "episode",
+  "tmdb-series-summary": "series",
+  "tmdb-series-summary-with-external-ids": "series",
+  "tvdb-series-summary": "series",
+  "tvdb-episode-extended": "episode",
+  "trakt-episode-search-by-tvdb-episode": "episode",
+};
 /** Whether a lookup is one of a comparison's series lookups rather than an episode lookup. */
-export const isSeriesLookup = (lookup: ProviderLookup) => SERIES_LOOKUPS.has(lookup.kind);
+export const isSeriesLookup = (lookup: ProviderLookup) => LOOKUP_SCOPE[lookup.kind] === "series";
 
 /**
  * A cached recheck found no saved response for one lookup. No request was attempted. A missing
@@ -44,8 +56,13 @@ export const isSeriesLookup = (lookup: ProviderLookup) => SERIES_LOOKUPS.has(loo
  * series answer is a missing show-level input.
  */
 export class SavedRelationshipUnavailableError extends Error {
-  // The episode message is stored as the episode failure's reason, so its wording stays as it was.
-  constructor(readonly lookup: ProviderLookup) { super(`The saved ${lookupProvider(lookup)} response for this ${isSeriesLookup(lookup) ? "series" : "episode"} is not available to the offline recheck; no request was made.`); }
+  // The episode message is stored as the episode failure's reason, so its wording stays byte-identical;
+  // the series message is only logged.
+  constructor(readonly lookup: ProviderLookup) {
+    super(isSeriesLookup(lookup)
+      ? `The saved ${lookupProvider(lookup)} response for this series is not available to the cached recheck; no request was made.`
+      : `The saved ${lookupProvider(lookup)} response for this episode is not available to the offline recheck; no request was made.`);
+  }
 }
 
 /** A TMDB series record usable as a series: one with a numeric ID. */

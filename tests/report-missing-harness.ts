@@ -119,7 +119,8 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   /** Runs a full scan, or a single-show rescan when `ratingKey` is given, and waits for it to complete. */
   const rerun = async (ratingKey?: string) => {
     await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify(ratingKey ? { ratingKey } : {}) }));
-    for (let i = 0; i < 300; i++) {
+    // A deadline, not an iteration count: under full-suite load one scan can take several seconds.
+    for (const deadline = Date.now() + 60_000; Date.now() < deadline;) {
       const result = await status();
       if (result.scan.status !== "running") { assert.equal(result.scan.status, "completed", result.scan.error ?? "scan did not complete"); return result; }
       await new Promise(resolve => setTimeout(resolve, 10));

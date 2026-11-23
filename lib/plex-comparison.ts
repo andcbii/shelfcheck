@@ -2,7 +2,7 @@ import { compoundTvdbEvidence, episodeReference, type CompoundCoverage, type Com
 import { coverageIssueCause } from "@/lib/value-guards";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
 import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-match";
-import { missingPartsOf, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome, type CoverageProvider } from "@/lib/manual-coverage-model";
+import { reportedOrIncomplete, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome, type CoverageProvider } from "@/lib/manual-coverage-model";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
 /** `titleLanguage: "eng"`: the default TVDB title was unusable and `title` was recovered from TVDB's English translation. */
@@ -172,12 +172,15 @@ export function comparePlexShow(input: PlexComparisonInput) {
     // still establishes coverage and the season 0 visibility rule still applies.
     const precedence = attempt("report-missing", () => {
       const memberMapping = mappings.find(mapping => mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
-      const reported = Boolean(episode.providerEpisodeId && memberMapping?.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId && member.reportMissing));
+      // The episode as a member of a Manual Match, when it is one.
+      const mapped = memberMapping && episode.providerEpisodeId ? { members: memberMapping.members, member: { provider: episode.source, id: episode.providerEpisodeId } } : undefined;
       // A combined episode whose split episodes are reported missing is incomplete,
       // with the same precedence. It is derived from the saved flags, never stored.
-      const missingParts = memberMapping && episode.providerEpisodeId && !reported ? missingPartsOf(memberMapping.members, { provider: episode.source, id: episode.providerEpisodeId }) : [];
+      const explicitOrDerived = mapped && reportedOrIncomplete(mapped.members, mapped.member);
+      const reported = explicitOrDerived?.status === "reported-missing";
+      const missingParts = explicitOrDerived?.status === "incomplete" ? explicitOrDerived.missingParts : [];
       if (episode.season === 0 && !reported && !missingParts.length) return { skip: true as const };
-      const outcome: CoverageOutcome | undefined = memberMapping && episode.providerEpisodeId ? { provider: episode.source, id: episode.providerEpisodeId, status: "missing", season: episode.season, airDate: episode.airDate } : undefined;
+      const outcome: CoverageOutcome | undefined = mapped && { ...mapped.member, status: "missing", season: episode.season, airDate: episode.airDate };
       return { skip: false as const, reported, missingParts, outcome };
     });
     const { skip, reported, missingParts, outcome } = precedence ?? { skip: episode?.season === 0, reported: false, missingParts: [], outcome: undefined };

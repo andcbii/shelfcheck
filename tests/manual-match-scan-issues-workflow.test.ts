@@ -164,3 +164,39 @@ test("covering an episode clears only its own crosswalk issues: other episodes',
   assert.deepEqual(issueIds(await h.rerun()), unrelated, "live scan: only TVDB 301's root is retired");
   assert.deepEqual(issueIds(await h.rerun("ratingKey:target")), unrelated, "single-show scan: other shows' issues are kept");
 });
+
+test("with saved automatic evidence and an old failure seeded, cross-show Manual Matches from an ignored show take over attribution and clear the obsolete check, across restart and a single-show scan", async t => {
+  // TMDB 9101 belongs to "Other", which is ignored; Plex owns it there.
+  const tmdbOther: Episode = { provider: "TMDB", id: 9101, season: 1, episode: 1, name: "Pilot", show: "other" };
+  const h = await harness(t, [tmdb1, tmdb2, tvdb1, tvdb2, tmdbOther], [tmdb1, tmdb2, tmdbOther]);
+  const ignored = await h.patchSettings({ ignoredShows: [{ ratingKey: "ratingKey:other", title: "Other", duration: "forever" }] });
+  assert.equal(ignored.status, 200, await ignored.clone().text());
+  h.state.statuses.set("/3/find/301", 404);
+  h.state.bodies.set("/3/find/302", found(tmdb2));
+  const autoMatched = (result: unknown) => (((show(result) as Show & { autoMatches?: { tvdb: { id: number } }[] }).autoMatches) || []).map(match => match.tvdb.id);
+  const seeded = await h.rerun();
+  assert.deepEqual(autoMatched(seeded), [302], "saved automatic evidence collects TVDB 302");
+  assert.deepEqual(issueIds(seeded), [root301], "TVDB 301's rejected request is an old failure");
+
+  for (const members of [[tmdbOther, tvdb1], [tmdb2, tvdb2]]) {
+    const saved = await h.save(members);
+    assert.ok(saved.ok, await saved.clone().text());
+  }
+  h.requests.length = 0;
+  const rechecked = await settled(h.status);
+  assert.deepEqual([...h.requests], [], "the cached recheck makes no provider request");
+  const expect = (result: unknown, when: string) => {
+    assert.deepEqual(manual(result), [301, 302], `${when}: both TVDB episodes are credited to their Manual Matches`);
+    assert.deepEqual(autoMatched(result), [], `${when}: saved automatic evidence makes no Auto Match`);
+    assert.deepEqual(issueIds(result), [], `${when}: the obsolete check and its root leave Scan Issues`);
+    assert.deepEqual(missingTvdb(result), []);
+  };
+  expect(rechecked, "cached recheck");
+
+  h.restart();
+  expect(await h.status(), "after restart");
+  h.requests.length = 0;
+  expect(await h.rerun("ratingKey:target"), "single-show scan");
+  assert.ok(!h.requests.some(path => path === "/3/find/301" || path === "/3/find/302"), "no crosswalk request for a covered episode");
+  expect(await h.rerun(), "full scan");
+});

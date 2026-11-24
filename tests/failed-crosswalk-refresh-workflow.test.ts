@@ -108,7 +108,7 @@ for (const catalogueFails of [true, false]) test(`a rejected crosswalk refresh${
   assert.deepEqual(missingKeys(covered), ["TMDB:9003", "TVDB:303"]);
   assert.deepEqual(autoMatches(covered), ["Matched via TMDB External ID: TVDB 302 = TMDB 9002"], "the rejected match is not revived");
 
-  // The offline rechecks and the covered scan renewed nothing: once the match is deleted, the
+  // The cached rechecks and the covered scan renewed nothing: once the match is deleted, the
   // next same-day live scan retries only the failed lookup, and a valid empty answer resolves only that cause.
   const deleted = await api.DELETE(new Request(`http://localhost/api/plex/manual-coverage?id=${encodeURIComponent((await manual.json()).mapping.id)}`, { method: "DELETE" }));
   assert.equal(deleted.status, 200, await deleted.clone().text());

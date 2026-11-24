@@ -240,7 +240,7 @@ test("a single-show rescan replaces the shared answer, and its failure rejects i
     assert.ok(!missingKeys(skipped, name).includes("TVDB:301"));
   }
 
-  // Deleting the Manual Match after a restart: the offline recheck revives no older copy of
+  // Deleting the Manual Match after a restart: the cached recheck revives no older copy of
   // the rejected answer for either show.
   restart();
   requests.length = 0;

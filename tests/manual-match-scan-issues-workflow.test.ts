@@ -86,7 +86,7 @@ for (const { kind, arrange, shown, resumed } of failures) test(`a Manual Match c
   assert.deepEqual(issueIds(scanned), [root302], "a live scan keeps them cleared");
   assert.deepEqual(missingTvdb(scanned), [302, 303]);
 
-  // When manual coverage ends, the normal check runs again against current evidence.
+  // When Manual Match coverage ends, the normal check runs again against current evidence.
   const deleted = await api.DELETE(new Request(`http://localhost/api/plex/manual-coverage?id=${encodeURIComponent((await saved.json()).mapping.id)}`, { method: "DELETE" }));
   assert.equal(deleted.status, 200, await deleted.clone().text());
   await settled(h.status);

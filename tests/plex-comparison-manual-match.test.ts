@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { comparePlexShow, type PlexComparisonInput, type ProviderEpisode } from "../lib/plex-comparison";
 import type { CoverageEvidence, CoverageMapping, CoverageProvider } from "../lib/manual-coverage-model";
+import { lookupFailureIssueId } from "../lib/coverage-issue-ids";
+import { providerLookup } from "../lib/provider-lookup";
 
 // How the per-show comparison grants Manual Match coverage: a Healthy Manual Match
 // covers an episode when every member on the other provider side is directly owned
@@ -209,7 +211,7 @@ test("a failed Manual Match check leaves the later numbers and automatic evidenc
 // Scan Issues (ADR-0007): a crosswalk check a covering Manual Match made unnecessary is not a
 // failure, as for Report Missing; an uncovered episode's failed check stays, as do other operations.
 test("crosswalk failures a covering Manual Match made unnecessary are dropped; an uncovered episode's are kept", () => {
-  const crosswalk = (id: number, existingOnly?: "carry") => ({ operation: "episode-crosswalk" as const, crosswalk: "TMDB" as const, episode: { provider: "TVDB" as const, id, season: 1, episode: id - 100 }, kind: "request-failed" as const, reason: "the TMDB request failed.", causedBy: [`root:${id}`], ...(existingOnly ? { existingOnly } : {}) });
+  const crosswalk = (id: number, existingOnly?: "carry") => ({ operation: "episode-crosswalk" as const, crosswalk: "TMDB" as const, episode: { provider: "TVDB" as const, id, season: 1, episode: id - 100 }, kind: "request-failed" as const, reason: "the TMDB request failed.", causedBy: [lookupFailureIssueId("show", providerLookup.tmdbEpisodeByTvdbEpisode(id))], ...(existingOnly ? { existingOnly } : {}) });
   const result = comparePlexShow(input({
     providerEpisodes: [episode("TVDB", 101, 1), episode("TVDB", 102, 2), episode("TVDB", 103, 3)],
     coordinateMissingTvdbIds: new Set([101, 102, 103]),

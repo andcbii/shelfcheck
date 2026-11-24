@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { harness, type Episode } from "./report-missing-harness";
+import { api, harness, type Episode } from "./report-missing-harness";
 
 // Shared crosswalk evidence (GLOSSARY): separate show comparisons that need the same TMDB
 // external-ID crosswalk for one TVDB episode share its response, its receipt time and its
@@ -226,17 +226,39 @@ test("a single-show rescan replaces the shared answer, and its failure rejects i
   assert.deepEqual(autoMatches(covered, "other"), []);
   assert.match(crosswalkIssues(covered, "other")[0], /^301: .*Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
 
-  // A same-day retry recovers: one request serves both shows' retries and clears their causes.
-  // The Manual Match still covers TVDB 301 and now decides it ahead of the recovered answer
-  // (ADR-0007), so TVDB 301 is credited to the Manual Match, not to an Auto Match.
+  // While the Manual Match covers TVDB 301, a live scan spends no request on its crosswalk
+  // (ADR-0007), even once TMDB would answer again: the rejected shared answer stays rejected.
   state.statuses.delete("/3/find/301");
   t.mock.timers.setTime(Date.parse("2026-11-12T15:00:00Z"));
+  requests.length = 0;
+  const skipped = await rerun();
+  assert.deepEqual(requests.filter(path => path === "/3/find/301"), [], "no show looks up the covered episode");
+  for (const name of ["target", "other"] as const) {
+    assert.deepEqual(autoMatches(skipped, name), [], `${name}: the Manual Match, not an older copy of the answer, decides TVDB 301`);
+    assert.ok(!missingKeys(skipped, name).includes("TVDB:301"));
+  }
+
+  // Deleting the Manual Match after a restart: the offline recheck revives no older copy of
+  // the rejected answer for either show.
+  restart();
+  requests.length = 0;
+  const deleted = await api.DELETE(new Request(`http://localhost/api/plex/manual-coverage?id=${encodeURIComponent((await manual.json()).mapping.id)}`, { method: "DELETE" }));
+  assert.equal(deleted.status, 200, await deleted.clone().text());
+  const uncovered = await settled(status);
+  assert.deepEqual([...requests], [], "the cached recheck stays offline");
+  for (const name of ["target", "other"] as const) {
+    assert.deepEqual(autoMatches(uncovered, name), [], `${name}: the rejected shared answer is not revived`);
+    assert.ok(missingKeys(uncovered, name).includes("TVDB:301"));
+  }
+
+  // The next live scan resumes normal crosswalk work: one same-day retry serves both shows'
+  // rejected answers and clears their causes.
+  t.mock.timers.setTime(Date.parse("2026-11-12T15:30:00Z"));
   requests.length = 0;
   const recovered = await rerun();
   assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
   for (const name of ["target", "other"] as const) {
-    assert.deepEqual(autoMatches(recovered, name), [], `${name}: the Manual Match, not the recovered answer, decides TVDB 301`);
-    assert.ok(!missingKeys(recovered, name).includes("TVDB:301"));
+    assert.deepEqual(autoMatches(recovered, name), [matched], `${name}: the recovered shared answer covers TVDB 301`);
     assert.deepEqual(crosswalkIssues(recovered, name), []);
   }
 });

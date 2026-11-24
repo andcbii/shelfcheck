@@ -3,7 +3,7 @@ import { coverageIssueCause } from "@/lib/value-guards";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
 import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { reportedOrIncomplete, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome, type CoverageProvider } from "@/lib/manual-coverage-model";
-import { manualMatchCoverageRule } from "@/lib/manual-match-coverage";
+import { manualMatchCoverageRule, type ManualMatchCoverageRule } from "@/lib/manual-match-coverage";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
 /** `titleLanguage: "eng"`: the default TVDB title was unusable and `title` was recovered from TVDB's English translation. */
@@ -87,6 +87,12 @@ export type PlexComparisonInput = {
   mappings: CoverageMapping[];
   manualInventory: CoverageEvidence[];
   autoCompoundEpisodes: boolean;
+  /**
+   * The Manual Match coverage rule evidence gathering already used to leave covered
+   * episodes out of automatic work, so the comparison decides from the same rule.
+   * Absent, the comparison builds its own from `mappings` and `manualInventory`.
+   */
+  manualMatchCoverage?: ManualMatchCoverageRule;
   /** Episode-scoped identity/crosswalk failures from evidence gathering before these decisions. */
   crosswalkFailures?: EpisodeCheckFailure[];
   /**
@@ -131,7 +137,7 @@ export function comparePlexShow(input: PlexComparisonInput) {
     recordDiagnostic("plex.show.auto-compound", { ratingKey, enabled: true, candidates: compoundCovered.length, reconciled, failed: episodeFailures.length });
   }
   // Built lazily: a Manual Match or evidence record is read only when an episode reaches this check.
-  const manualMatchCoverage = manualMatchCoverageRule({ mappings, directInventory: manualInventory });
+  const manualMatchCoverage = input.manualMatchCoverage ?? manualMatchCoverageRule({ mappings, directInventory: manualInventory });
   const manualCoverage: NonNullable<PlexShowResult["manualCoverage"]> = [];
   const missingMap = new Map<string, PlexMissingEpisode>();
   const coverageOutcomes: CoverageOutcome[] = [];

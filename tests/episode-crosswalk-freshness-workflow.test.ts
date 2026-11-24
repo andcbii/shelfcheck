@@ -123,7 +123,8 @@ test("a fresh empty response withdraws only its old match's coverage; a Manual M
   t.mock.timers.setTime(Date.parse("2026-11-13T12:00:00Z"));
   requests.length = 0;
   const next = await rerun();
-  assert.deepEqual(finds(requests).filter(path => path !== "/3/find/20"), ["/3/find/301", "/3/find/302"]);
+  // TVDB 301 needs no crosswalk while its Manual Match covers it, so only TVDB 302 is refreshed.
+  assert.deepEqual(finds(requests).filter(path => path !== "/3/find/20"), ["/3/find/302"]);
   assert.deepEqual(missingKeys(next), ["TVDB:302"], "the Manual Match still covers TVDB 301; TVDB 302 lost its only coverage");
   assert.deepEqual(autoMatches(next), []);
   assert.deepEqual(issuesOf(next), [], "valid empty responses are not Coverage Issues");
@@ -226,20 +227,20 @@ test("a failed refresh of an expired crosswalk grants no coverage from the old a
   // Each failed TMDB crosswalk check of one TVDB episode, with its cause and impact on that episode.
   const crosswalkIssues = (result: unknown) => issuesOf(result).filter(issue => issue.provider === "TMDB" && issue.episode?.id && ["episode-crosswalk", "episode-identity"].includes(issue.operation)).map(issue => `${issue.episode!.id}: ${issue.cause} ${(issue.impacts || []).join(" ")}`).sort();
 
-  // Next UTC day, TMDB rejects both expired crosswalks' refreshes.
+  // Next UTC day, TMDB rejects TVDB 301's expired crosswalk refresh. It would reject TVDB 302's
+  // too, but TVDB 302's Manual Match makes that crosswalk unnecessary (ADR-0007): it is never requested.
   state.statuses.set("/3/find/301", 404);
   state.statuses.set("/3/find/302", 404);
   for (const time of ["2026-11-13T12:00:00Z", "2026-11-13T13:00:00Z"]) {
     t.mock.timers.setTime(Date.parse(time));
     requests.length = 0;
     const failed = await rerun();
-    assert.deepEqual(finds(requests).filter(path => path === "/3/find/301" || path === "/3/find/302"), ["/3/find/301", "/3/find/302"], `${time}: both failed refreshes are requested`);
+    assert.deepEqual(finds(requests).filter(path => path === "/3/find/301" || path === "/3/find/302"), ["/3/find/301"], `${time}: only the needed failed refresh is requested`);
     assert.deepEqual(missingKeys(failed), ["TMDB:9003", "TVDB:301", "TVDB:303"], "the old match no longer covers TVDB 301; the Manual Match still covers TVDB 302");
     assert.deepEqual(autoMatches(failed), []);
-    const [missingCause, collectedCause, ...others] = crosswalkIssues(failed);
-    assert.deepEqual(others, []);
+    const [missingCause, ...others] = crosswalkIssues(failed);
+    assert.deepEqual(others, [], "TVDB 302's crosswalk was not checked, so it did not fail");
     assert.match(missingCause, /^301: .*TMDB request failed.*No other method established coverage, so this episode remains in missing results/, "a failed check, not a confirmed no-match");
-    assert.match(collectedCause, /^302: .*TMDB request failed.*Manual Match established coverage for this episode, so it remains collected/);
   }
 
   // An unreadable successful response is retried like a rejected one and grants nothing.
@@ -265,11 +266,11 @@ test("a failed refresh of an expired crosswalk grants no coverage from the old a
   assert.deepEqual(autoMatches(rechecked), []);
   assert.match(crosswalkIssues(rechecked)[0], /^301: .*could not be interpreted.*remains in missing results/, "the failed check is retained");
 
-  // Recovery clears only its own cause; TVDB 302's failed check stays unresolved despite its Manual Match.
+  // Recovery clears its cause.
   state.bodies.set("/3/find/301", found(tmdb1));
   t.mock.timers.setTime(Date.parse("2026-11-13T16:00:00Z"));
   const recovered = await rerun();
   assert.deepEqual(missingKeys(recovered), ["TMDB:9003", "TVDB:303"]);
   assert.deepEqual(autoMatches(recovered), ["Matched via TMDB External ID: TVDB 301 = TMDB 9001"]);
-  assert.deepEqual(crosswalkIssues(recovered).map(issue => issue.split(":")[0]), ["302"]);
+  assert.deepEqual(crosswalkIssues(recovered), []);
 });

@@ -185,7 +185,7 @@ export function catalogueRecordIssue(show: EpisodeCheckShow, record: MalformedCa
  * unnecessary (ADR-0007); each is resolved unless a current cause still depends on it.
  * Resolving one records no success: the lookup was skipped, not answered.
  */
-export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], malformedRecords: MalformedCatalogueRecord[] = [], unnecessaryLookupCauses: string[] = []) {
+export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], { malformedRecords = [], unnecessaryLookupCauses = [] }: { malformedRecords?: MalformedCatalogueRecord[]; unnecessaryLookupCauses?: string[] } = {}) {
   const current = new Set<string>();
   const existing = new Set(coverageIssueIdsWithPrefix(showIssuePrefix(show.ratingKey)));
   for (const failure of failures) {

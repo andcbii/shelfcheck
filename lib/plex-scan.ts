@@ -16,7 +16,7 @@ import { savedScanState, trackScanIgnores } from "@/lib/ignore-results";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
 import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
-import { manualMatchCoverageRule } from "@/lib/manual-match-coverage";
+import { manualMatchCoverageRule, manualMatchDecisions } from "@/lib/manual-match-coverage";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
 import { compoundMatchingCausesRecorded, episodeCrosswalkLookupCauses, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
 import { lookupFailureRecord } from "@/lib/lookup-failure-record";
@@ -495,10 +495,12 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         for (const id of plexTvdbIds) if (!tvdbSeriesMatches.some((show) => show.id === id)) tvdbSeriesMatches.push({ id });
         const coordinateMissingTvdbIds = new Set(providerEpisodes.filter((episode) => episode.source === "TVDB" && episode.season > 0 && episode.providerEpisodeId && !localEpisodes.has(`${episode.season}:${episode.episode}`)).map((episode) => episode.providerEpisodeId as number));
         // Numbers that did not match are kept apart from episodes that still need automatic
-        // evidence: a TVDB episode a Manual Match covers needs no crosswalk. A failed coverage
-        // check grants nothing here; the comparison records it against that episode.
-        const coveredByManualMatch = (id: number) => { try { return Boolean(manualMatchCoverage({ provider: "TVDB", id })); } catch { return false; } };
-        const needsAutomaticEvidence = new Set([...coordinateMissingTvdbIds].filter((id) => !coveredByManualMatch(id)));
+        // evidence: a TVDB episode its Manual Match decides needs no crosswalk. The decision is
+        // the comparison's own, Report Missing first; a failed check grants nothing here, and
+        // the comparison records it against that episode.
+        const { decidedByManualMatch } = manualMatchDecisions({ mappings, coverage: manualMatchCoverage });
+        const decidedTvdbIds = new Set(providerEpisodes.flatMap((episode) => episode.source === "TVDB" && episode.providerEpisodeId && coordinateMissingTvdbIds.has(episode.providerEpisodeId) && decidedByManualMatch(episode) ? [episode.providerEpisodeId] : []));
+        const needsAutomaticEvidence = new Set([...coordinateMissingTvdbIds].filter((id) => !decidedTvdbIds.has(id)));
         const directTvdbSatisfied = new Set<number>([...coordinateMissingTvdbIds].filter((id) => libraryTvdbEpisodeIds.has(id)));
         const directImdbSatisfied = new Set<number>();
         const traktSatisfied = new Set<number>();
@@ -595,7 +597,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         for (const { crosswalk, tvdbEpisodeId } of recordedCrosswalkFailures) if (!crosswalksAttempted.has(`${crosswalk}:${tvdbEpisodeId}`) && tvdbEpisodeOf(tvdbEpisodeId)) {
           crosswalkFailures.push({ operation: "episode-crosswalk", crosswalk, episode: crosswalkEpisode(tvdbEpisodeId), kind: "exception", reason: "not checked again", existingOnly: "carry" });
         }
-        const { missing, coverageOutcomes, autoMatches, compoundCoverage, manualCoverage, diagnostics, episodeFailures } = comparePlexShow({
+        const { missing, coverageOutcomes, autoMatches, compoundCoverage, manualCoverage, diagnostics, episodeFailures, manualMatchTvdbEpisodeIds } = comparePlexShow({
           ratingKey, primary, tmdbShow, tvdbId, tvdbSlug, tmdbSeriesMatches, providerEpisodes,
           localEpisodes, localProviderEpisodes, localTmdbEpisodeIds, libraryTmdbEpisodeIds,
           coordinateMissingTvdbIds, directTvdbSatisfied, directImdbSatisfied, traktSatisfied,
@@ -605,7 +607,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         for (const { event, data } of diagnostics) logger.info(event, data);
         // The crosswalk lookups of TVDB episodes a Manual Match decided were made unnecessary (ADR-0007):
         // their Provider Lookup causes, read before reconciliation, are retired unless still depended on.
-        const unnecessaryLookupCauses = [...new Set(coverageOutcomes.filter(outcome => outcome.status === "manual" && outcome.provider === "TVDB").flatMap(outcome => episodeCrosswalkLookupCauses(ratingKey, outcome.id)))];
+        const unnecessaryLookupCauses = [...new Set(manualMatchTvdbEpisodeIds.flatMap(tvdbEpisodeId => episodeCrosswalkLookupCauses(ratingKey, tvdbEpisodeId)))];
         for (const failure of episodeFailures) logger[failure.existingOnly === "refresh" ? "info" : "warn"]("plex.show.episode-check-failed", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, ...failure });
         const linkedTvdbIds = [...new Set(tmdbSeriesMatches.flatMap((show) => show.external_ids?.tvdb_id ? [show.external_ids.tvdb_id] : []))];
         const missingTvdbSummaries = linkedTvdbIds.filter((id) => !tvdbSeriesMatches.some((show) => show.id === id));
@@ -1043,7 +1045,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       recordCatalogueCandidateNames(ratingKey,"tmdb",tmdbSeriesMatches);
       recordCatalogueCandidateNames(ratingKey,"tvdb",tvdbSeriesMatches);
       // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
-      reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords,compared.unnecessaryLookupCauses);
+      reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),{malformedRecords,unnecessaryLookupCauses:compared.unnecessaryLookupCauses});
       for (const record of malformedRecords) logger.warn("plex.show.catalogue-record-unusable", { ratingKey, ...record });
       results.push({...compared.result,providerResolution:scanStatus.providerResolution,...(warning ? {warning} : {})});
       inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? retainedComparison(savedComparison) : {group,details,localMetadata,tmdbId,tvdbId,relationships:changes.relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
@@ -1377,7 +1379,7 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
     save:copies=>savePlexComparison(key,{...input,relationships:{...input.relationships,...copies}}),
     resolveFailedRequest:resolveCoverageIssue,
   });
-  reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],compared.unnecessaryLookupCauses);
+  reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),{malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],unnecessaryLookupCauses:compared.unnecessaryLookupCauses});
   resolveCoverageIssue(`comparison-inputs:${key}`);
   resolveCoverageIssue(`comparison-failure:${key}`);
   return compared;

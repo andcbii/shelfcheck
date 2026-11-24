@@ -66,6 +66,19 @@ test("a live scan makes the health recheck's requests but no IMDb, Trakt or TMDB
   assert.deepEqual(manual(result), [301]);
 });
 
+test("a TVDB episode reported missing in its covering Manual Match keeps its crosswalk work, as the comparison does not credit it to the match", async t => {
+  const h = await setup(t);
+  const mapping = await h.saveMatch([tmdb1, tvdb1]);
+  await h.setFlags(mapping.id, [tvdb1]);
+  const { result, scanned } = await h.scan();
+
+  // Report Missing precedes the Manual Match in both the scan and the comparison, so the
+  // episode stays a crosswalk candidate exactly as it would without a Manual Match.
+  assert.deepEqual(crosswalkWork(scanned, 301).sort(), allCrosswalks(301).sort(), "the reported episode is looked up through IMDb, Trakt and TMDB");
+  assert.deepEqual(manual(result), [], "the comparison credits no TVDB episode to the Manual Match");
+  assert.equal(h.missing(result)["TVDB:301"], "reported-missing");
+});
+
 // Losing coverage restores normal crosswalk work against current evidence. Each change is
 // made after a scan in which the Manual Match covered TVDB 301, so TVDB 301 has no saved
 // crosswalk answer and the next scan must look it up.

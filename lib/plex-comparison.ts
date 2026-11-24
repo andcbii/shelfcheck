@@ -9,7 +9,7 @@ import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowRe
 /** `titleLanguage: "eng"`: the default TVDB title was unusable and `title` was recovered from TVDB's English translation. */
 export type ProviderEpisode = { showTitle?: string; season: number; episode: number; title?: string; titleLanguage?: "eng"; airDate?: string; runtime?: number; providerEpisodeId?: number; source: CoverageProvider };
 /** Matching methods of the final per-episode decision, in precedence order. */
-export type EpisodeCheckMethod = "report-missing" | "coordinates" | "automatic-evidence" | "manual-match" | "missing-result";
+export type EpisodeCheckMethod = "report-missing" | "manual-match" | "coordinates" | "automatic-evidence" | "missing-result";
 /**
  * An Episode-scoped failure (GLOSSARY): one matching check that could not be
  * completed for one provider episode. It grants no coverage; `coveredBy` names the
@@ -195,8 +195,9 @@ export function comparePlexShow(input: PlexComparisonInput) {
       listMissing(reported, missingParts);
       continue;
     }
-    if (attempt("coordinates", () => localEpisodes.has(key))) { if (outcome) outcome.status = "automatic"; decide("coordinates"); continue; }
-    if (attempt("automatic-evidence", () => providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes }))) { if (outcome) outcome.status = "automatic"; decide("automatic-evidence"); continue; }
+    // A covering Manual Match decides the episode right after Report Missing (ADR-0007),
+    // ahead of season and episode numbers and automatic evidence. If the check fails,
+    // the later independent methods still run.
     const manual = attempt("manual-match", () => episode.providerEpisodeId === undefined ? undefined : manualMatchCoverage({ provider: episode.source, id: episode.providerEpisodeId }));
     if (manual) {
       if (outcome) outcome.status = "manual";
@@ -204,6 +205,8 @@ export function comparePlexShow(input: PlexComparisonInput) {
       decide("manual-match");
       continue;
     }
+    if (attempt("coordinates", () => localEpisodes.has(key))) { if (outcome) outcome.status = "automatic"; decide("coordinates"); continue; }
+    if (attempt("automatic-evidence", () => providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes }))) { if (outcome) outcome.status = "automatic"; decide("automatic-evidence"); continue; }
     listMissing(false);
   }
   // Report Missing outranks every other method, so a check it made unnecessary is not a failure.
@@ -215,7 +218,10 @@ export function comparePlexShow(input: PlexComparisonInput) {
     return decision !== "reported";
   });
   episodeFailures.splice(0, episodeFailures.length, ...notMadeUnnecessaryByReportMissing);
+  // An episode its Manual Match covers is credited to that match only: automatic evidence
+  // for it, including evidence saved by an earlier scan, makes no Auto Match.
   const autoMatches: PlexAutoMatch[] = [...autoMatchEvidence].flatMap(([tvdbEpisodeId, evidence]) => {
+    if (decisions.get(`TVDB:${tvdbEpisodeId}`) === "manual-match") return [];
     const tvdbEpisode = providerEpisodes.find((episode) => episode?.source === "TVDB" && episode.providerEpisodeId === tvdbEpisodeId);
     if (!tvdbEpisode) return [];
     try { return autoMatchRecord(tvdbEpisodeId, tvdbEpisode, evidence); }

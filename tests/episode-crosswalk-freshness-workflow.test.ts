@@ -114,7 +114,8 @@ test("a fresh empty response withdraws only its old match's coverage; a Manual M
   assert.ok(saved.ok, await saved.clone().text());
   const first = await rerun();
   assert.deepEqual(missingKeys(first), []);
-  assert.deepEqual(autoMatches(first), ["Matched via TMDB External ID: TVDB 301 = TMDB 9001", "Matched via TMDB External ID: TVDB 302 = TMDB 9002"]);
+  // The Manual Match decides TVDB 301 ahead of its crosswalk answer (ADR-0007), so only TVDB 302 is an Auto Match.
+  assert.deepEqual(autoMatches(first), ["Matched via TMDB External ID: TVDB 302 = TMDB 9002"]);
 
   // TMDB removes both external IDs; the change is seen on the next UTC day.
   state.bodies.set("/3/find/301", empty);

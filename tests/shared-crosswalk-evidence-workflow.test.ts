@@ -227,13 +227,16 @@ test("a single-show rescan replaces the shared answer, and its failure rejects i
   assert.match(crosswalkIssues(covered, "other")[0], /^301: .*Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
 
   // A same-day retry recovers: one request serves both shows' retries and clears their causes.
+  // The Manual Match still covers TVDB 301 and now decides it ahead of the recovered answer
+  // (ADR-0007), so TVDB 301 is credited to the Manual Match, not to an Auto Match.
   state.statuses.delete("/3/find/301");
   t.mock.timers.setTime(Date.parse("2026-11-12T15:00:00Z"));
   requests.length = 0;
   const recovered = await rerun();
   assert.deepEqual(requests.filter(path => path === "/3/find/301"), ["/3/find/301"]);
   for (const name of ["target", "other"] as const) {
-    assert.deepEqual(autoMatches(recovered, name), [matched]);
+    assert.deepEqual(autoMatches(recovered, name), [], `${name}: the Manual Match, not the recovered answer, decides TVDB 301`);
+    assert.ok(!missingKeys(recovered, name).includes("TVDB:301"));
     assert.deepEqual(crosswalkIssues(recovered, name), []);
   }
 });

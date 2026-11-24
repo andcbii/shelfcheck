@@ -10,8 +10,8 @@ hook.deregister();
 // leaves the IMDb, Trakt and TMDB episode crosswalk candidates, so a live scan spends no
 // provider request on it. The Manual Match health recheck still runs every scan and asks
 // TVDB for each TVDB member's extended episode, the same endpoint as the IMDb crosswalk,
-// so requests are told apart by when they are made: the health recheck runs before the
-// scan reads Plex's library sections.
+// so requests are told apart by when they are made: the health recheck runs right after
+// the scan's one TVDB sign-in and before the scan reads any show's Plex episodes.
 
 // TMDB numbers the season S1; TVDB numbers the same episodes S2, so each TVDB episode
 // reaches the crosswalks. Plex owns both TMDB episodes, and also reports an IMDb ID no
@@ -42,9 +42,11 @@ async function setup(t: test.TestContext, catalogue: Episode[] = [tmdb1, tmdb2, 
   const scan = async (ratingKey?: string) => {
     h.requests.length = 0;
     const result = await h.rerun(ratingKey);
-    const sections = h.requests.indexOf("/library/sections");
-    assert.ok(sections >= 0, "the scan read Plex's library sections");
-    return { result, health: h.requests.slice(0, sections), scanned: h.requests.slice(sections) };
+    const signIn = h.requests.indexOf("/v4/login");
+    assert.ok(signIn >= 0, "the scan signed in to TVDB");
+    const showRead = h.requests.findIndex((path, index) => index > signIn && path.startsWith("/library/metadata/"));
+    assert.ok(showRead > signIn, "the scan read a show's Plex episodes after the health recheck");
+    return { result, health: h.requests.slice(signIn + 1, showRead), scanned: [...h.requests.slice(0, signIn + 1), ...h.requests.slice(showRead)] };
   };
   const saveMatch = async (members: Episode[]) => {
     const saved = await h.save(members);

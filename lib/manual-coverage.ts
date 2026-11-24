@@ -291,18 +291,24 @@ export function beginCoverageRecheck(revision: number) {
   database().prepare("UPDATE shelfcheck_coverage_state SET pending=1 WHERE id=1 AND revision=?").run(revision);
 }
 
+/** A health update that committed: the Manual Match it changed and the coverage revision it moved to. */
+export type CoverageHealthReceipt = { mappingId: string; revision: number };
 // Lookup results must never overwrite a mapping repaired or deleted during an HTTP request.
-export function updateCoverageHealth(snapshot: CoverageMapping, health: NonNullable<CoverageMapping["health"]>, healthMessage?: string) {
+/** Saves a Manual Match's health; returns a receipt only when this call committed a change. */
+export function updateCoverageHealth(snapshot: CoverageMapping, health: NonNullable<CoverageMapping["health"]>, healthMessage?: string): CoverageHealthReceipt | undefined {
   const db = database();
   db.exec("BEGIN IMMEDIATE");
   try {
+    let receipt: CoverageHealthReceipt | undefined;
     const current = savedManualMatch(db, snapshot.id);
     if (current && current.revision === snapshot.revision && ((current.health || "healthy") !== health || current.healthMessage !== healthMessage)) {
       const revision = coverageState().revision + 1;
       db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify({...current, health, healthMessage, revision}), current.id);
       db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+      receipt = {mappingId: current.id, revision};
     }
     db.exec("COMMIT");
+    return receipt;
   } catch(error) {
     db.exec("ROLLBACK");
     throw error;

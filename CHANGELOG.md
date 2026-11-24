@@ -90,6 +90,15 @@
   TVDB sign-in and Manual Match member issues as they were; the scan failure
   itself is still recorded.
 
+  A single-show scan whose Manual Match recheck changes a match's health, for
+  example when its TVDB sign-in succeeds after a full scan's failed, now
+  completes. It also compares every other show again with the new health,
+  from saved data, downloading a show's catalogues only when its saved data
+  cannot be used, so no result from before the change is kept. If a show
+  still cannot be compared, the scan stops and the earlier results stay, with
+  the reason in Scan Issues. Before, it stopped and asked for a full Plex
+  scan.
+
 - An Ignore whose save fails no longer applies to the running scan: the scan
   is marked only once the rule and the removal of its saved results are both
   saved, and a failed save leaves the rule, the saved results and any Report

@@ -15,6 +15,7 @@ const store = await import("../lib/manual-coverage");
 const savedIssues = await import("../lib/coverage-issues");
 const { scanProviderClient } = await import("../lib/scan-provider-client");
 const { PLEX_CACHE_VERSION } = await import("../lib/plex-scan-cache");
+const plexInputs = await import("../lib/plex-catalogues");
 hook.deregister();
 
 // The Plex scan signs in to TVDB once, after reading Plex, and its Manual Match
@@ -22,14 +23,18 @@ hook.deregister();
 
 type Scan = { scan: { status: string; error?: string }; report: { coverageRevision?: number; shows: { ratingKey: string }[] } | null; coverage: { revision: number; issues: { id: string; impacts?: string[]; causedBy?: string[] }[] } };
 type Answer = Response | (() => Response);
+/** A Plex show and its TMDB catalogue of season 1 `episodes` (one, `tmdbId * 10`, by default); `owns` lists the TVDB episodes it holds in Plex. */
+type PlexShow = { ratingKey: string; title: string; tmdbId: number; episodes?: number[]; owns?: number[] };
 
 /**
  * One Plex show (TMDB 10) and two saved Manual Matches, TMDB 101 with TVDB 201
  * and TMDB 102 with TVDB 202, behind a mocked fetch that records every request.
  * `signIn` answers each TVDB login attempt in turn; `member` may answer a
- * Manual Match member request; `plex` may answer a Plex request.
+ * Manual Match member request; `plex` may answer a Plex request. `shows` lists
+ * the Plex library, each show with its own TMDB catalogue of one episode; it may
+ * change between scans.
  */
-async function fixture(t: TestContext, { matches = true } = {}) {
+async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "1", title: "Target", tmdbId: 10 }] as PlexShow[] } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "scan-sign-in-"));
   const previous = [process.env.SHELFCHECK_DATA_DIR, process.env.SHELFCHECK_CONFIG_DIR];
   process.env.SHELFCHECK_DATA_DIR = dir;
@@ -51,7 +56,7 @@ async function fixture(t: TestContext, { matches = true } = {}) {
   const unexpected: string[] = [];
   t.after(() => assert.deepEqual(unexpected, [], "every request is one the fixture expects"));
   const f = {
-    first: first!, second: second!, reopen, requests,
+    first: first!, second: second!, reopen, requests, shows,
     signIn: [] as Answer[],
     member: (() => undefined) as (url: URL) => Answer | undefined,
     plex: (() => undefined) as (url: URL) => Answer | undefined,
@@ -67,8 +72,11 @@ async function fixture(t: TestContext, { matches = true } = {}) {
       const held = f.plex(url);
       if (held) return answer(held);
       if (url.pathname === "/library/sections") return Response.json({ MediaContainer: { Directory: [{ key: "1", type: "show" }] } });
-      if (url.pathname.includes("allLeaves")) return Response.json({ MediaContainer: { Metadata: [] } });
-      return Response.json({ MediaContainer: { Metadata: [{ ratingKey: "1", title: "Target", Guid: [{ id: "tmdb://10" }] }] } });
+      const leaves = url.pathname.match(/^\/library\/metadata\/([^/]+)\/allLeaves$/);
+      if (leaves) return Response.json({ MediaContainer: { Metadata: (f.shows.find(show => show.ratingKey === leaves[1])?.owns || []).map((id, index) => ({ ratingKey: `${leaves[1]}-${id}`, parentIndex: 1, index: index + 1, Guid: [{ id: `tvdb://${id}` }] })) } });
+      const metadata = f.shows.map(show => ({ ratingKey: show.ratingKey, title: show.title, Guid: [{ id: `tmdb://${show.tmdbId}` }] }));
+      const one = url.pathname.match(/^\/library\/metadata\/([^/]+)$/);
+      return Response.json({ MediaContainer: { Metadata: one ? metadata.filter(show => show.ratingKey === one[1]) : metadata } });
     }
     if (url.pathname === "/v4/login") return answer(f.signIn[signInAttempts++] ?? Response.json({ data: { token: "unexpected-sign-in" } }));
     const held = f.member(url);
@@ -77,8 +85,10 @@ async function fixture(t: TestContext, { matches = true } = {}) {
     if (tvdbMember) return Response.json({ data: { id: Number(tvdbMember[1]) } });
     const tmdbMember = url.pathname.match(/^\/3\/tv\/10\/season\/1\/episode\/(\d+)$/);
     if (tmdbMember) return Response.json({ id: Number(tmdbMember[1]) });
-    if (url.pathname === "/3/tv/10") return Response.json({ id: 10, name: "Target", seasons: [{ season_number: 1 }] });
-    if (url.pathname === "/3/tv/10/season/1") return Response.json({ episodes: [{ id: 100, season_number: 1, episode_number: 1, name: "Pilot", air_date: "2020-01-01" }] });
+    const catalogue = url.pathname.match(/^\/3\/tv\/(\d+)(\/season\/1)?$/);
+    const show = catalogue && f.shows.find(show => show.tmdbId === Number(catalogue[1]));
+    if (show && !catalogue![2]) return Response.json({ id: show.tmdbId, name: show.title, seasons: [{ season_number: 1 }] });
+    if (show) return Response.json({ episodes: (show.episodes || [show.tmdbId * 10]).map((id, index) => ({ id, season_number: 1, episode_number: index + 1, name: `Episode ${id}`, air_date: "2020-01-01" })) });
     if (url.pathname === "/3/tv/changes") return Response.json({ results: [], total_pages: 1 });
     if (url.pathname === "/v4/updates") return Response.json({ data: [] });
     unexpected.push(url.href);
@@ -101,7 +111,9 @@ async function fixture(t: TestContext, { matches = true } = {}) {
   return Object.assign(f, {
     scanWith,
     fullScan: () => completed({}),
-    showScan: () => completed({ ratingKey: "ratingKey:1" }),
+    showScan: (ratingKey = "ratingKey:1") => completed({ ratingKey }),
+    /** The TMDB show catalogues this scan read, by show ID. */
+    cataloguesRead: () => [...new Set(requests.flatMap(request => request.url.pathname.match(/^\/3\/tv\/(\d+)\/season\/1$/)?.[1] ?? []))].map(Number).sort((a, b) => a - b),
     tvdbPaths: () => requests.filter(request => request.url.hostname.includes("thetvdb")).map(request => request.url.pathname),
     tmdbMemberPaths: () => requests.map(request => request.url.pathname).filter(pathname => pathname.startsWith("/3/tv/10/season/1/episode/")).sort(),
     memberIssue: (mappingId: string, provider: "TMDB" | "TVDB", id: number) => savedIssues.getCoverageIssue(memberVerificationIssueId(mappingId, { provider, id })),
@@ -318,4 +330,117 @@ test("a recheck that changes a Manual Match's health does not reuse a Plex repor
   assert.equal(state.report?.coverageRevision, state.coverage.revision, "the new report is saved at the new revision");
   assert.deepEqual((state.report as unknown as { shows: { title: string }[] }).shows.map(show => show.title), ["Target"], "the show is compared again, not taken from the saved report");
   assert.ok(f.requests.some(request => request.url.pathname === "/3/tv/10/season/1"), "its catalogue was read for this revision");
+});
+
+/**
+ * Three Plex shows for single-show scans of "Target". "Matched" (TMDB show 10) has TMDB episodes
+ * 100 and 101 and holds none in Plex; "Holder" holds TVDB episode 201. The first Manual Match
+ * (TMDB 101 with TVDB 201) therefore covers Matched's episode 101 from another show only while it
+ * is healthy.
+ */
+const crossShowLibrary = (): PlexShow[] => [
+  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100, 101] },
+  { ratingKey: "2", title: "Target", tmdbId: 30 },
+  { ratingKey: "3", title: "Holder", tmdbId: 40, owns: [201] },
+];
+type ReportedShow = { ratingKey: string; title: string; missing: unknown[]; catalogueSelection?: unknown; coverageOutcomes?: { provider: string; id: number; status: string }[] };
+type Report = { coverageRevision?: number; shows: ReportedShow[] };
+const report = (state: Scan) => state.report as unknown as Report;
+const row = (state: Scan, ratingKey: string) => report(state).shows.find(show => show.ratingKey === ratingKey);
+/** The status of Manual Match member TMDB 101 in Matched's result. */
+const episode101 = (state: Scan) => row(state, "ratingKey:1")?.coverageOutcomes?.find(outcome => outcome.provider === "TMDB" && outcome.id === 101)?.status;
+const resumePoint = () => ignoreResults.savedScanState("plex").resumePoint.read() as { coverageRevision?: number; shows: { ratingKey: string }[] } | null;
+/** The report without each show's catalogue selection, which the report shows from the saved catalogue uses. */
+const withoutCatalogueSelection = (state: Scan) => ({ ...report(state), shows: report(state).shows.map(show => { const rest = { ...show }; delete rest.catalogueSelection; return rest; }) });
+/** Marks Matched's saved comparison inputs incomplete, so they cannot rebuild its result. */
+const incompleteSavedInputs = () => plexInputs.savePlexComparison("ratingKey:1", { ...plexInputs.readPlexInputs().comparisons["ratingKey:1"], complete: false });
+
+/** A full scan whose refused TVDB sign-in leaves both Manual Matches pending, so Matched misses episode 101. */
+async function pendingAfterFullScan(f: Awaited<ReturnType<typeof fixture>>) {
+  f.signIn = [refused];
+  const full = await f.fullScan();
+  assert.equal(f.health(f.first.id), "pending");
+  assert.equal(episode101(full), "missing", "a pending Manual Match does not cover the episode");
+  assert.equal(row(full, "ratingKey:1")?.missing.length, 2);
+  return full;
+}
+
+test("a single-show scan whose recheck makes pending Manual Matches healthy keeps its own report, with every other show compared again from saved inputs", async (t) => {
+  const f = await fixture(t, { shows: crossShowLibrary() });
+  const full = await pendingAfterFullScan(f);
+  // This scan signs in and the members answer, so both matches become healthy.
+  f.signIn = [signedIn("scan-token"), signedIn("second")];
+  const state = await f.showScan("ratingKey:2");
+  assert.deepEqual(f.tvdbPaths().filter(pathname => pathname === "/v4/login"), ["/v4/login"], "one sign-in");
+  assert.equal(f.health(f.first.id), "healthy");
+  assert.ok(state.coverage.revision > (full.report?.coverageRevision ?? 0), "the recheck changed Manual Match health");
+  assert.equal(state.report?.coverageRevision, state.coverage.revision, "the scan saves its own report at the new revision");
+  assert.equal(episode101(state), "manual", "the healthy match now covers Matched's episode from Holder");
+  assert.equal(row(state, "ratingKey:1")?.missing.length, 1, "Matched misses only episode 100");
+  assert.deepEqual(f.cataloguesRead(), [30], "only the target is downloaded; the others are compared from saved inputs");
+  assert.deepEqual(report(state).shows.map(show => show.title), ["Holder", "Matched", "Target"]);
+  assert.ok(!resumePoint()?.shows.length, "no Resume point is left");
+});
+
+test("a single-show scan whose recheck changes health compares a show with incomplete saved inputs live", async (t) => {
+  const f = await fixture(t, { shows: crossShowLibrary() });
+  await pendingAfterFullScan(f);
+  incompleteSavedInputs();
+  f.signIn = [signedIn("scan-token")];
+  const state = await f.showScan("ratingKey:2");
+  assert.equal(state.report?.coverageRevision, state.coverage.revision);
+  assert.deepEqual(f.cataloguesRead(), [10, 30], "Matched is downloaded and compared with the target");
+  assert.equal(episode101(state), "manual");
+  assert.equal(plexInputs.readPlexInputs().comparisons["ratingKey:1"].complete, true, "its saved inputs are repaired");
+});
+
+for (const [which, ratingKey, title] of [["another show can be compared neither from saved inputs nor live", "1", "Matched"], ["the target cannot be compared", "2", "Target"]] as const) {
+  test(`a single-show scan whose recheck changes health keeps the earlier report at its revision when ${which}`, async (t) => {
+    const f = await fixture(t, { shows: crossShowLibrary() });
+    const full = await pendingAfterFullScan(f);
+    if (ratingKey === "1") incompleteSavedInputs();
+    f.plex = url => url.pathname === `/library/metadata/${ratingKey}` ? Response.json({}, { status: 403 }) : undefined;
+    f.signIn = [signedIn("scan-token")];
+    const state = await f.scanWith({ ratingKey: "ratingKey:2" });
+    assert.equal(state.scan.status, "error");
+    assert.match(state.scan.error || "", new RegExp(`changed a match's health, but ${title} could not be compared again`));
+    assert.equal(f.health(f.first.id), "healthy", "the recheck's health is kept");
+    // Only the catalogue the target downloaded, shown beside the results, is newer.
+    assert.deepEqual(withoutCatalogueSelection(state), withoutCatalogueSelection(full), "the earlier report stays, at its earlier revision");
+    assert.ok(state.coverage.revision > (state.report?.coverageRevision ?? 0));
+    assert.ok(state.coverage.issues.some(issue => issue.id === `inventory-details:ratingKey:${ratingKey}`), "the show's own failure is recorded");
+    const point = resumePoint();
+    assert.ok(!point?.shows.some(show => show.ratingKey === `ratingKey:${ratingKey}`), "its earlier result enters no Resume point");
+    if (point?.shows.length) assert.equal(point.coverageRevision, state.coverage.revision);
+  });
+}
+
+test("a single-show scan does not take a revision change made during its health preparation for its own", async (t) => {
+  const f = await fixture(t, { shows: crossShowLibrary() });
+  const full = await pendingAfterFullScan(f);
+  const db = (globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync }).__shelfcheckDatabase!;
+  let bumped = false;
+  // Another change commits while a member request is out.
+  f.member = url => {
+    if (!bumped && url.pathname.startsWith("/3/tv/10/season/1/episode/")) { bumped = true; db.exec("UPDATE shelfcheck_coverage_state SET revision=revision+1"); }
+    return undefined;
+  };
+  f.signIn = [signedIn("scan-token")];
+  const state = await f.scanWith({ ratingKey: "ratingKey:2" });
+  assert.ok(bumped);
+  assert.equal(state.scan.status, "error");
+  assert.match(state.scan.error || "", /full Plex search/);
+  assert.deepEqual(state.report, full.report, "the earlier report is kept");
+});
+
+test("a single-show scan whose recheck changes no Manual Match's health compares only its show and carries over the rest", async (t) => {
+  const f = await fixture(t, { shows: crossShowLibrary() });
+  const full = await pendingAfterFullScan(f);
+  f.signIn = [refused, signedIn("second")];
+  const state = await f.showScan("ratingKey:2");
+  assert.deepEqual(f.tvdbPaths(), ["/v4/login"]);
+  assert.equal(state.coverage.revision, full.coverage.revision, "the recheck changed nothing");
+  assert.equal(state.report?.coverageRevision, state.coverage.revision);
+  assert.deepEqual(f.cataloguesRead(), [30], "only the target is compared");
+  for (const key of ["ratingKey:1", "ratingKey:3"]) assert.deepEqual(row(state, key), row(full, key), `${key} is carried over unchanged`);
 });

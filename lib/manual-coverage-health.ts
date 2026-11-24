@@ -3,13 +3,14 @@ import type { TvdbSignIn } from "@/lib/tvdb-auth";
 import { memberVerificationIssueId, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import "server-only";
 import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
-import { listCoverageMappings, MISSING_MEMBER_MESSAGE, updateCoverageHealth } from "@/lib/manual-coverage";
+import { listCoverageMappings, MISSING_MEMBER_MESSAGE, updateCoverageHealth, type CoverageHealthReceipt } from "@/lib/manual-coverage";
 import { ProviderClient, ProviderHttpError, ProviderResponseError } from "@/lib/provider-client";
 
 /**
  * Rechecks every Manual Match not already needing review with the scan's one TVDB sign-in; it
  * never signs in to TVDB itself. After a failed sign-in, of whatever kind, its TVDB members are
  * not requested: they wait, pending, under the TVDB sign-in issue the scan already recorded.
+ * Returns a receipt for each health change it committed, in commit order.
  */
 export async function recheckCoverageHealth(client: ProviderClient, {tmdbToken, tvdbSignIn}: {tmdbToken: string; tvdbSignIn: TvdbSignIn}) {
   async function memberHealth(member: CoverageMember): Promise<NonNullable<CoverageMapping["health"]>> {
@@ -26,6 +27,7 @@ export async function recheckCoverageHealth(client: ProviderClient, {tmdbToken, 
     if (record.id !== member.id) throw new ProviderResponseError("TMDB",{provider:"TMDB",kind:`show ${member.showId} season ${member.season} episode`,id:member.episode});
     return "healthy";
   }
+  const receipts: CoverageHealthReceipt[] = [];
   for (const mapping of listCoverageMappings()) {
     if (mapping.health === "needs-review") continue; // A reviewed edit is required to repair it.
     const states = await Promise.all(mapping.members.map(async member => {
@@ -49,6 +51,8 @@ export async function recheckCoverageHealth(client: ProviderClient, {tmdbToken, 
       return state;
     }));
     const health = states.includes("needs-review") ? "needs-review" : states.includes("pending") ? "pending" : "healthy";
-    updateCoverageHealth(mapping,health,health === "needs-review" ? MISSING_MEMBER_MESSAGE : health === "pending" ? "Provider identity could not be verified. Coverage is pending; retry the scan or review the episode context." : undefined);
+    const receipt = updateCoverageHealth(mapping,health,health === "needs-review" ? MISSING_MEMBER_MESSAGE : health === "pending" ? "Provider identity could not be verified. Coverage is pending; retry the scan or review the episode context." : undefined);
+    if (receipt) receipts.push(receipt);
   }
+  return receipts;
 }

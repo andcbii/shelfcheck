@@ -38,7 +38,7 @@ import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUI
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
-import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
+import { checkpointIsUsable, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isEpisodeCoordinate, isProviderId, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
 import { invalidateShowTmdbCrosswalks, saveRecoveredTmdbCrosswalks, tmdbCrosswalkScanRun } from "@/lib/tmdb-crosswalk-coordinator";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
@@ -856,7 +856,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   run.resumePoint.startIntervals();
   // The Resume point holds only completed shows whose cache entry is usable.
   run.resumePoint.provideSnapshot((savedAt) => ({
-    point: { shows: checkpointShowsWithCache(results, scanCache), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision },
+    point: { shows: results.filter((show) => Boolean(scanCache[show.ratingKey])), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision },
     details: { shows: results.length, cacheEntries: Object.keys(scanCache).length },
   }));
   await runTrackedWorkerPool(queue, PLEX_SCAN_WORKERS, activeWork, (group) => ({ key: group.identity, show: group.records[0]?.title || "Unknown show" }), async (group) => {

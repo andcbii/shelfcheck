@@ -22,7 +22,6 @@ import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { resultsView } from "@/lib/results-view";
-import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
@@ -188,7 +187,7 @@ export default function PlexPage() {
   }), [activeIgnoredSeasons, activeIgnoredShows, query, report, settings.airingOffsetDays, settings.hideUnairedEpisodes, sortAscending, sortField, today]);
   const visible = useMemo(() => view.shows.map((show) => ({ ...show.source, missing: show.episodes, percent: show.percent })), [view]);
   const missingCount = view.totals.missingEpisodes;
-  const activelyRateLimitPaused = isActiveRateLimitPause(scanning && status.status === "running", status.rateLimitPaused);
+  const activelyRateLimitPaused = scanning && status.status === "running" && status.rateLimitPaused === true;
   const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
 

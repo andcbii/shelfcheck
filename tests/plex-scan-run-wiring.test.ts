@@ -99,7 +99,11 @@ async function library(t: TestContext, hold: (url: URL) => Promise<Response | un
 
 async function fullScan() {
   plex.startPlexScan();
-  while (scanRuns.activeScanRun()) await new Promise((resolve) => setTimeout(resolve, 5));
+  const deadline = Date.now() + 10_000;
+  while (scanRuns.activeScanRun()) {
+    assert.ok(Date.now() < deadline, "the scan run ends within 10 seconds");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   return plex.getPlexScanStatus();
 }
 
@@ -158,6 +162,28 @@ test("a full Plex scan run that fails saves a Resume point at once, and the next
   const resume = logEvents(dir, "plex.checkpoint.resume");
   assert.equal(resume.length, 1);
   assert.match(resume[0], new RegExp(`savedAt="${saved.savedAt}" shows=2`));
+});
+
+test("a failed full Plex scan run leaves a processed warning result without a cache entry out of its Resume point", async (t) => {
+  const database = () => cache.__shelfcheckDatabase!;
+  // Plex refuses show 11's metadata details (not its episode list): it ends as a warning result with no cache entry.
+  const dir = await library(t, async (u) => (u.hostname === "plex" && u.pathname === "/library/metadata/11" ? new Response("{}", { status: 403 }) : undefined));
+  ignoreResults.savedScanState("plex").status.read();
+  // The report store fails at the final commit, so the run saves its real Resume point.
+  database().exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
+  const failed = await fullScan();
+  assert.equal(failed.status, "error");
+  assert.equal(failed.error, "report store unavailable");
+  assert.equal(failed.processed, 3, "all three shows were processed");
+  const saved = ignoreResults.savedScanState("plex").resumePoint.read() as Checkpoint | null;
+  assert.ok(saved, "the failure saved a Resume point");
+  assert.deepEqual(saved.shows.map((show) => show.ratingKey), ["ratingKey:10", "ratingKey:12"], "only the successful shows, in their existing order");
+  assert.deepEqual(Object.keys(saved.scanCache).sort(), ["ratingKey:10", "ratingKey:12"]);
+  const failureSave = logEvents(dir, "plex.checkpoint.saved").filter((line) => line.includes('reason="failure"'));
+  assert.equal(failureSave.length, 1);
+  // Three results reached the snapshot, but only the two with a cache entry were saved.
+  assert.match(failureSave[0], /\bshows=3\b/);
+  assert.match(failureSave[0], /\bcacheEntries=2\b/);
 });
 
 test("a Plex scan run vetoed by a coverage-revision change ends at once with a clean error, writing no report, Resume point or scan-failure Coverage Issue", async (t) => {

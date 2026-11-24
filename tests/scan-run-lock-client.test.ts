@@ -20,13 +20,16 @@ const TRAKT_LOCKS_PLEX = "A Trakt scan is running. You can start a Plex scan whe
 const traktShow = { title: "Example", year: 2020, ids: { trakt: 7, slug: "example" } };
 const traktReport = { shows: [{ show: traktShow }], missing: [{ show: traktShow, season: 1, episode: 2 }], lastScan: "2026-11-17T12:00:00.000Z", scanCache: { 7: {} } };
 const plexReport = { shows: [{ ratingKey: "one", title: "Example Show", tmdbId: 10, plexEpisodes: 1, missing: [{ season: 1, episode: 2, sources: ["TMDB"] }] }], lastScan: "2026-11-17T12:00:00.000Z", scanCache: { one: {} } };
+const RUNNING_SCAN = { status: "running", processed: 1, total: 4, rateLimitPaused: false };
+const RATE_LIMIT_PAUSED_SCAN = { ...RUNNING_SCAN, rateLimitPaused: true };
+const TMDB_PAUSED_SCAN = { ...RATE_LIMIT_PAUSED_SCAN, rateLimitProvider: "TMDB" };
 
 type Server = {
   /** What GET /api/scan-runs answers; a function answers one request at a time. */
   activity: ActiveScanRun | (() => Reply);
   activityRequests: number;
-  /** The page's own status answers, in order; the last one repeats. */
-  statuses: Record<string, unknown>[];
+  /** The page's own status answers, in order; the last one repeats. An Error fails that request in transport. */
+  statuses: (Record<string, unknown> | Error)[];
   statusRequests: number;
   starts: unknown[];
   start: () => Reply;
@@ -37,7 +40,11 @@ type Server = {
 async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partial<Server> = {}) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const server: Server = { activity: null, activityRequests: 0, statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, starts: [], start: () => Response.json({ error: "unexpected start" }, { status: 500 }), stateScan: { status: "idle", processed: 0, total: 0 }, ...initial };
-  const status = () => server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
+  const status = () => {
+    const reply = server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
   const fetcher: typeof fetch = async (input, init) => {
     if (input === "/api/scan-runs") {
       server.activityRequests += 1;
@@ -65,9 +72,14 @@ async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partia
   const button = (label: string) => Array.from(container.querySelectorAll("button")).find((item) => item.textContent?.includes(label) || item.getAttribute("aria-label") === label);
   const click = async (label: string) => { const target = button(label); assert.ok(target, `${label} is shown`); await act(async () => { target.click(); }); await settle(); };
   const lockMessage = () => container.querySelector(".scan-run-lock")?.textContent || "";
+  const radar = () => container.querySelector(".radar small")?.textContent || "";
+  const scanButtonText = () => container.querySelector("button.primary")?.textContent || "";
+  const traktProgressLine = () => container.querySelector(".loading p")?.textContent ?? null;
+  /** Replaces the status answers and restarts their count, so the next poll gets the first. */
+  const nextStatuses = (...statuses: Server["statuses"]) => { server.statuses = statuses; server.statusRequests = 0; };
   const advance = async (ms: number) => { await act(async () => { t.mock.timers.tick(ms); }); await settle(); };
   const unmount = async () => { await act(async () => { root.unmount(); }); };
-  return { server, container, button, click, lockMessage, advance, unmount };
+  return { server, container, button, click, lockMessage, radar, scanButtonText, traktProgressLine, nextStatuses, advance, unmount };
 }
 
 async function settle() {
@@ -317,4 +329,77 @@ test("a failed first observation keeps the page locked, and polling retries unti
   page.server.activity = null;
   await page.advance(1000);
   assert.equal(page.button("New Plex search")?.disabled, false, "the first successful observation unlocks the page");
+});
+
+// A rate-limit pause shows only while the page is scanning: each page states its
+// own pause check, so these cases drive the rendered pages through their polls.
+
+test("a running Trakt scan paused for the rate limit says so on the radar, scan button and progress line", async (t) => {
+  const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RATE_LIMIT_PAUSED_SCAN, statuses: [RATE_LIMIT_PAUSED_SCAN] });
+  assert.equal(page.radar(), "PAUSED - RATE LIMIT");
+  assert.match(page.scanButtonText(), /^Paused due to Rate Limit/);
+  assert.equal(page.traktProgressLine(), "Paused due to Rate Limit");
+});
+
+test("a running Trakt scan without a pause shows the ordinary scanning wording", async (t) => {
+  const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RUNNING_SCAN, statuses: [RUNNING_SCAN] });
+  assert.equal(page.radar(), "SCANNING");
+  assert.match(page.scanButtonText(), /^Checking 1 of 4/);
+  assert.match(page.traktProgressLine() || "", /^Comparing show 1 of 4\./);
+});
+
+test("a Trakt page that stops scanning with its last status still paused no longer shows the pause", async (t) => {
+  const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RATE_LIMIT_PAUSED_SCAN, statuses: [RATE_LIMIT_PAUSED_SCAN] });
+  assert.equal(page.radar(), "PAUSED - RATE LIMIT");
+
+  // A transport failure ends polling without a status that clears the pause flag.
+  // The run also leaves the lock: a run still holding it would be followed again by
+  // the next observation, making a second status request this test does not count.
+  page.nextStatuses(new TypeError("network down"));
+  page.server.activity = null;
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 1, "the failed status request was made");
+  assert.equal(page.radar(), "MISSING");
+  assert.ok(!page.scanButtonText().includes("Paused"), `the scan button is not paused: ${page.scanButtonText()}`);
+  assert.equal(page.traktProgressLine(), null, "the progress line is gone");
+});
+
+test("a running Plex scan paused for a provider's rate limit says so on the radar and scan button", async (t) => {
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [TMDB_PAUSED_SCAN] });
+  assert.equal(page.radar(), "PAUSED · TMDB");
+  assert.match(page.scanButtonText(), /^Paused for TMDB rate limit/);
+});
+
+test("a running Plex scan without a pause shows the ordinary scanning wording", async (t) => {
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [RUNNING_SCAN] });
+  assert.equal(page.radar(), "SCANNING");
+  assert.match(page.scanButtonText(), /^Checking 1 of 4/);
+});
+
+test("a Plex page that stops scanning with its last status still paused no longer shows the pause", async (t) => {
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [TMDB_PAUSED_SCAN] });
+  assert.equal(page.radar(), "PAUSED · TMDB");
+
+  // A transport failure ends polling while the last status stays running and paused.
+  // The run also leaves the lock: a run still holding it would be followed again by
+  // the next observation, making a second status request this test does not count.
+  page.nextStatuses(new TypeError("network down"));
+  page.server.activity = null;
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 1, "the failed status request was made");
+  assert.equal(page.radar(), "MISSING");
+  assert.ok(!page.scanButtonText().includes("Paused"), `the scan button is not paused: ${page.scanButtonText()}`);
+});
+
+test("a Plex page still polling shows scanning, not a pause, when an idle status carries the pause flag", async (t) => {
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [TMDB_PAUSED_SCAN] });
+  assert.equal(page.radar(), "PAUSED · TMDB");
+
+  page.nextStatuses({ ...TMDB_PAUSED_SCAN, status: "idle", processed: 2 });
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 1, "the idle status was polled");
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 2, "polling continues after an idle status");
+  assert.equal(page.radar(), "SCANNING");
+  assert.match(page.scanButtonText(), /^Checking 2 of 4/);
 });

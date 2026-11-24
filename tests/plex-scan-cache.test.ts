@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { checkpointIsUsable, checkpointShowsWithCache, checkpointWithoutRatingKey, mergeScanProgress, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver } from "../lib/plex-scan-cache";
+import { checkpointIsUsable, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver } from "../lib/plex-scan-cache";
 
 test("Plex checkpoints require matching settings and must be fresh", () => {
   const now = Date.parse("2026-08-09T12:00:00Z");
@@ -13,16 +13,6 @@ test("Plex checkpoints require matching settings and must be fresh", () => {
 
 test("IMDb identity cache retains only current TVDB episode IDs", () => {
   assert.deepEqual(pruneEpisodeIdentityCache({ "1": ["tt1"], "2": ["tt2"] }, [2, 3]), { "2": ["tt2"] });
-});
-
-test("heartbeat-style progress updates retain an active provider rate-limit pause", () => {
-  const current = { status: "running", processed: 1, heartbeatAt: "now", rateLimitPaused: true, rateLimitProvider: "TVDB" };
-  assert.deepEqual(mergeScanProgress(current, { processed: 2, heartbeatAt: "later" }), { ...current, processed: 2, heartbeatAt: "later" });
-});
-
-test("checkpoints retain only shows with a matching cache entry", () => {
-  const shows = [{ ratingKey: "good" }, { ratingKey: "warned" }];
-  assert.deepEqual(checkpointShowsWithCache(shows, { good: { fingerprint: "ok" } }), [{ ratingKey: "good" }]);
 });
 
 test("targeted scans require a compatible cache", () => {

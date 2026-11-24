@@ -99,7 +99,11 @@ async function library(t: TestContext, hold: (url: URL) => Promise<Response | un
 
 async function fullScan() {
   plex.startPlexScan();
-  while (scanRuns.activeScanRun()) await new Promise((resolve) => setTimeout(resolve, 5));
+  const deadline = Date.now() + 10_000;
+  while (scanRuns.activeScanRun()) {
+    assert.ok(Date.now() < deadline, "the scan run ends within 10 seconds");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   return plex.getPlexScanStatus();
 }
 
@@ -167,13 +171,7 @@ test("a failed full Plex scan run leaves a processed warning result without a ca
   ignoreResults.savedScanState("plex").status.read();
   // The report store fails at the final commit, so the run saves its real Resume point.
   database().exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
-  plex.startPlexScan();
-  const deadline = Date.now() + 10_000;
-  while (scanRuns.activeScanRun()) {
-    assert.ok(Date.now() < deadline, "the scan run ends within 10 seconds");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  const failed = plex.getPlexScanStatus();
+  const failed = await fullScan();
   assert.equal(failed.status, "error");
   assert.equal(failed.error, "report store unavailable");
   assert.equal(failed.processed, 3, "all three shows were processed");

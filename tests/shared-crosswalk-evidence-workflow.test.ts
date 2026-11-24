@@ -224,7 +224,9 @@ test("a single-show rescan replaces the shared answer, and its failure rejects i
   assert.deepEqual([...requests], []);
   assert.ok(!missingKeys(covered, "other").includes("TVDB:301"), "independent Manual Match coverage is usable offline");
   assert.deepEqual(autoMatches(covered, "other"), []);
-  assert.match(crosswalkIssues(covered, "other")[0], /^301: .*Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+  // The Manual Match made TVDB 301's crosswalk unnecessary (ADR-0007), so neither show keeps its
+  // failed check or request root; the shared answer itself stays rejected.
+  for (const name of ["target", "other"] as const) assert.deepEqual(crosswalkIssues(covered, name), [], `${name}: the check is no failure`);
 
   // While the Manual Match covers TVDB 301, a live scan spends no request on its crosswalk
   // (ADR-0007), even once TMDB would answer again: the rejected shared answer stays rejected.

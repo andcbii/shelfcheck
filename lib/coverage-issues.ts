@@ -101,4 +101,11 @@ export function coverageIssueIdsWithPrefix(prefix: string): string[] {
   return (database().prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id,1,length(?))=? ORDER BY id").all(prefix,prefix) as {id:string}[]).map(row=>row.id);
 }
 export function resolveCoverageIssue(id: string) { database().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=?").run(id); }
+/**
+ * Resolves a cause an operation made unnecessary, unless another current cause still names it in
+ * `causedBy`: a root stays while any dependent remains.
+ */
+export function resolveCoverageIssueWithoutDependents(id: string) {
+  database().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=? AND NOT EXISTS (SELECT 1 FROM shelfcheck_coverage_issues AS dependent, json_each(dependent.payload,'$.causedBy') AS parent WHERE parent.value=?)").run(id,id);
+}
 export { coverageIssueCause } from "@/lib/value-guards";

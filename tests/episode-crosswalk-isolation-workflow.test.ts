@@ -103,7 +103,9 @@ test("failed IMDb and Trakt crosswalks let the TMDB crosswalk still collect the 
   assert.deepEqual(missingKeys(recovered), ["TMDB:9003", "TVDB:303"]);
 });
 
-test("a complete-set Manual Match collects an episode whose crosswalk failed; the cause stays until the lookup recovers or Report Missing makes it unnecessary", async t => {
+// Another method alone does not resolve a failed crosswalk check, but a covering Manual Match
+// (like Report Missing) makes it unnecessary, so it is no longer a failure (ADR-0007).
+test("direct ownership keeps an episode's failed crosswalk cause; a complete-set Manual Match then makes the check unnecessary", async t => {
   const plex = [...owned];
   const { rerun, state, save, setFlags, status, requests, missing } = await harness(t, catalogue, plex);
   state.bodies.set("/3/find/301", { tv_episode_results: {} });
@@ -111,25 +113,7 @@ test("a complete-set Manual Match collects an episode whose crosswalk failed; th
   state.bodies.set("/3/find/303", { tv_episode_results: [null] });
   const [first] = crosswalkIssues(await rerun()).filter(issue => issue.episode?.id === 301);
   assert.ok(first);
-  const saved = await save([tmdb1, tvdb1]);
-  assert.ok(saved.ok, await saved.clone().text());
-  const mappingId = (await saved.json()).mapping.id as string;
-
-  // The offline cached recheck interprets the saved responses again: no HTTP, no show-level discard.
-  const before = requests.length;
-  let rechecked = await status();
-  for (let i = 0; i < 100 && pending(rechecked); i++) { await new Promise(resolve => setTimeout(resolve, 10)); rechecked = await status(); }
-  assert.equal(requests.length, before, "cached recheck performs no HTTP");
-  assert.deepEqual(showFailures(rechecked), []);
-  assert.deepEqual(missingKeys(rechecked), ["TMDB:9003", "TVDB:303"], "the Manual Match collects TVDB 301");
   const byEpisode = (result: unknown) => Object.fromEntries(crosswalkIssues(result).map(issue => [issue.episode!.id!, issue]));
-  assert.equal(byEpisode(rechecked)[301]?.id, first.id, "the failed check is retained");
-  assert.match(byEpisode(rechecked)[301].impacts!.join(" "), /A complete-set Manual Match established coverage for this episode, so it remains collected/);
-  assert.match(byEpisode(rechecked)[303].impacts!.join(" "), /remains in missing results/, "an unrelated failed check is preserved");
-
-  const scanned = await rerun();
-  assert.deepEqual(missingKeys(scanned), ["TMDB:9003", "TVDB:303"]);
-  assert.deepEqual(Object.keys(byEpisode(scanned)).sort(), ["301", "303"]);
 
   // Plex now owns TVDB 301 directly, so its crosswalk is not looked up again: the unrepaired cause stays.
   plex.push({ ...tvdb1, season: 9, episode: 9 });
@@ -140,7 +124,25 @@ test("a complete-set Manual Match collects an episode whose crosswalk failed; th
   assert.match(byEpisode(owning)[301].cause, /could not be interpreted/);
   assert.match(byEpisode(owning)[301].impacts!.join(" "), /established coverage for this episode, so it remains collected/);
 
-  // Report Missing outranks every method, so the crosswalk check is no longer needed.
+  const saved = await save([tmdb1, tvdb1]);
+  assert.ok(saved.ok, await saved.clone().text());
+  const mappingId = (await saved.json()).mapping.id as string;
+
+  // The offline cached recheck: no HTTP, no show-level discard, and the covered episode's check is no failure.
+  const before = requests.length;
+  let rechecked = await status();
+  for (let i = 0; i < 100 && pending(rechecked); i++) { await new Promise(resolve => setTimeout(resolve, 10)); rechecked = await status(); }
+  assert.equal(requests.length, before, "cached recheck performs no HTTP");
+  assert.deepEqual(showFailures(rechecked), []);
+  assert.deepEqual(missingKeys(rechecked), ["TMDB:9003", "TVDB:303"], "the Manual Match collects TVDB 301");
+  assert.deepEqual(Object.keys(byEpisode(rechecked)), ["303"], "the Manual Match made TVDB 301's check unnecessary");
+  assert.match(byEpisode(rechecked)[303].impacts!.join(" "), /remains in missing results/, "an unrelated failed check is preserved");
+
+  const scanned = await rerun();
+  assert.deepEqual(missingKeys(scanned), ["TMDB:9003", "TVDB:303"]);
+  assert.deepEqual(Object.keys(byEpisode(scanned)), ["303"]);
+
+  // Report Missing outranks every method; the crosswalk check stays unnecessary.
   await setFlags(mappingId, [tvdb1]);
   const reported = await rerun();
   assert.equal(missing(reported)["TVDB:301"], "reported-missing");

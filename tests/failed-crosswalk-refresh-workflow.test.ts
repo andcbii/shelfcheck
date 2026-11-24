@@ -93,7 +93,9 @@ for (const catalogueFails of [true, false]) test(`a rejected crosswalk refresh${
   assert.deepEqual([...requests], [], "the cached recheck stays offline after restart");
   assert.deepEqual(missingKeys(after), ["TMDB:9003", "TVDB:303"], "independent Manual Match coverage is usable offline");
   assert.deepEqual(autoMatches(after), ["Matched via TMDB External ID: TVDB 302 = TMDB 9002"], "the rejected match is not revived");
-  assert.match(crosswalkIssues(after)[0], /^301: .*TMDB request failed.*Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+  // The Manual Match made the crosswalk unnecessary (ADR-0007): its failed check and root leave Scan
+  // Issues, but the shared rejection is untouched, so the request is still retried once coverage ends.
+  assert.deepEqual(crosswalkIssues(after), []);
 
   // While the Manual Match covers TVDB 301, a live scan needs no crosswalk for it (ADR-0007)
   // and reuses TVDB 302's fresh response.

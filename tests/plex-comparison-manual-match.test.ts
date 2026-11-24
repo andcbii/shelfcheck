@@ -205,3 +205,21 @@ test("a failed Manual Match check leaves the later numbers and automatic evidenc
   assert.deepEqual(missing(result), ["TMDB:3"]);
   assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}:${failure.coveredBy ?? "-"}`), ["manual-match:1:coordinates", "manual-match:2:automatic-evidence", "manual-match:3:-"]);
 });
+
+// Scan Issues (ADR-0007): a crosswalk check a covering Manual Match made unnecessary is not a
+// failure, as for Report Missing; an uncovered episode's failed check stays, as do other operations.
+test("crosswalk failures a covering Manual Match made unnecessary are dropped; an uncovered episode's are kept", () => {
+  const crosswalk = (id: number, existingOnly?: "carry") => ({ operation: "episode-crosswalk" as const, crosswalk: "TMDB" as const, episode: { provider: "TVDB" as const, id, season: 1, episode: id - 100 }, kind: "request-failed" as const, reason: "the TMDB request failed.", causedBy: [`root:${id}`], ...(existingOnly ? { existingOnly } : {}) });
+  const result = comparePlexShow(input({
+    providerEpisodes: [episode("TVDB", 101, 1), episode("TVDB", 102, 2), episode("TVDB", 103, 3)],
+    coordinateMissingTvdbIds: new Set([101, 102, 103]),
+    mappings: [mapping("m", [["TVDB", 101], ["TMDB", 1]]), mapping("n", [["TVDB", 103], ["TMDB", 3]])],
+    manualInventory: [owned("a", "show", ["TMDB", 1]), owned("c", "show", ["TMDB", 3])],
+    crosswalkFailures: [crosswalk(101), crosswalk(102), crosswalk(103, "carry")],
+  }));
+  assert.equal(statusOf(result, "TVDB", 101), "manual");
+  assert.equal(statusOf(result, "TVDB", 103), "manual");
+  assert.deepEqual(result.episodeFailures.map(failure => failure.episode.id), [102], "only the uncovered episode's check is still a failure, fresh or carried alike");
+  assert.equal(result.episodeFailures[0].coveredBy, undefined);
+  assert.deepEqual(missing(result), ["TVDB:102"]);
+});

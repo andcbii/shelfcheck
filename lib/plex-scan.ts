@@ -18,7 +18,7 @@ import { SHELFCHECK_VERSION } from "@/lib/version";
 import { episodeReference, type CompoundCoverage, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { manualMatchCoverageRule } from "@/lib/manual-match-coverage";
 import { comparePlexShow, type EpisodeCheckFailure, type EpisodeCrosswalk, type ProviderEpisode } from "@/lib/plex-comparison";
-import { compoundMatchingCausesRecorded, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
+import { compoundMatchingCausesRecorded, episodeCrosswalkLookupCauses, reconcileEpisodeCheckIssues } from "@/lib/episode-check-issues";
 import { lookupFailureRecord } from "@/lib/lookup-failure-record";
 import { lookupDiagnostics, lookupFailureIssueId } from "@/lib/lookup-diagnostics";
 import { TVDB_AUTHENTICATION_ISSUE, traktLoginDiagnostics, tvdbLoginDiagnostics } from "@/lib/provider-login-diagnostics";
@@ -603,6 +603,9 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           compoundCausesRecorded: compoundMatchingCausesRecorded(ratingKey),
         });
         for (const { event, data } of diagnostics) logger.info(event, data);
+        // The crosswalk lookups of TVDB episodes a Manual Match decided were made unnecessary (ADR-0007):
+        // their Provider Lookup causes, read before reconciliation, are retired unless still depended on.
+        const unnecessaryLookupCauses = [...new Set(coverageOutcomes.filter(outcome => outcome.status === "manual" && outcome.provider === "TVDB").flatMap(outcome => episodeCrosswalkLookupCauses(ratingKey, outcome.id)))];
         for (const failure of episodeFailures) logger[failure.existingOnly === "refresh" ? "info" : "warn"]("plex.show.episode-check-failed", { ratingKey, tmdbShowId: tmdbShow?.id, tvdbShowId: tvdbId, ...failure });
         const linkedTvdbIds = [...new Set(tmdbSeriesMatches.flatMap((show) => show.external_ids?.tvdb_id ? [show.external_ids.tvdb_id] : []))];
         const missingTvdbSummaries = linkedTvdbIds.filter((id) => !tvdbSeriesMatches.some((show) => show.id === id));
@@ -613,7 +616,7 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
           tvdb: tvdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, slug: show.slug, ...(show.year && Number.isFinite(Number(show.year)) ? { year: Number(show.year) } : {}) })),
         };
         const result: PlexShowResult = { ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: primary.year, thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, coverageOutcomes, missing, ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) };
-  return {result,tmdbSeriesMatches,tvdbSeriesMatches,episodeFailures};
+  return {result,tmdbSeriesMatches,tvdbSeriesMatches,episodeFailures,unnecessaryLookupCauses};
 }
 
 /**
@@ -1040,7 +1043,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       recordCatalogueCandidateNames(ratingKey,"tmdb",tmdbSeriesMatches);
       recordCatalogueCandidateNames(ratingKey,"tvdb",tvdbSeriesMatches);
       // Episode-scoped failures are isolated: they neither fail the show nor make its comparison incomplete.
-      reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords);
+      reconcileEpisodeCheckIssues({ratingKey,title:primary.title,tmdbId,tvdbId},withTitleRecovery(ratingKey,compared.episodeFailures,titleRecovery.state,providerEpisodes,titleRecovery.carried),malformedRecords,compared.unnecessaryLookupCauses);
       for (const record of malformedRecords) logger.warn("plex.show.catalogue-record-unusable", { ratingKey, ...record });
       results.push({...compared.result,providerResolution:scanStatus.providerResolution,...(warning ? {warning} : {})});
       inputs.comparisons[ratingKey] = !cacheable && savedComparison?.complete ? retainedComparison(savedComparison) : {group,details,localMetadata,tmdbId,tvdbId,relationships:changes.relationships,tmdbAliases:tmdbSeriesMatches.map(show=>show.id),tvdbAliases:tvdbSeriesMatches.map(show=>show.id),tmdbEpisodeAliases:[...tmdbEpisodeAliases],tvdbEpisodeImdbIds:cachedTvdbEpisodeImdbIds,complete:cacheable,refresh};
@@ -1374,7 +1377,7 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
     save:copies=>savePlexComparison(key,{...input,relationships:{...input.relationships,...copies}}),
     resolveFailedRequest:resolveCoverageIssue,
   });
-  reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])]);
+  reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true),[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],compared.unnecessaryLookupCauses);
   resolveCoverageIssue(`comparison-inputs:${key}`);
   resolveCoverageIssue(`comparison-failure:${key}`);
   return compared;

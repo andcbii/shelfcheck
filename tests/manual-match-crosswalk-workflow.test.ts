@@ -143,7 +143,9 @@ for (const answer of ["a valid answer", "a rejection"] as const) test(`covering 
     // Other's rescan fails, which rejects the shared answer for every show.
     h.state.statuses.set("/3/find/301", 404);
     t.mock.timers.setTime(Date.parse("2026-11-12T11:00:00Z"));
-    assert.equal(missing301(await h.rerun("ratingKey:other"), "other"), true);
+    const rejected = await h.rerun("ratingKey:other");
+    assert.equal(missing301(rejected, "other"), true);
+    assert.deepEqual(issueIds(rejected), ["episode-identity:ratingKey:other:tmdb-episode-by-tvdb:301"], "Other's failed request is a Scan Issue");
     h.state.statuses.delete("/3/find/301");
   }
 
@@ -156,6 +158,10 @@ for (const answer of ["a valid answer", "a rejection"] as const) test(`covering 
   const covered = await h.rerun("ratingKey:target");
   assert.deepEqual(h.requests.filter(path => path === "/3/find/301"), [], "the covered show spends no request on the crosswalk, even in a single-show scan that forces its lookups");
   assert.deepEqual(manual(covered), [301]);
+  // The Manual Match covers TVDB 301 in both shows (one ID-keyed rule), so the cached recheck after
+  // saving already made the crosswalk unnecessary everywhere: no failed check or request root is
+  // left, while the shared outcome itself is unchanged.
+  assert.deepEqual(issueIds(covered), []);
 
   h.restart();
   h.requests.length = 0;
@@ -177,6 +183,9 @@ for (const answer of ["a valid answer", "a rejection"] as const) test(`covering 
     for (const name of ["target", "other"] as const) assert.deepEqual(autoMatched(resumed, name), [301]);
     assert.deepEqual(issueIds(resumed), []);
   } else {
+    // Offline, neither show has a copy to replay and none is revived: each asks for a live scan.
+    assert.deepEqual(issueIds(uncovered), ["episode-check:ratingKey:other:episode-crosswalk:TMDB:TVDB:301", "episode-check:ratingKey:target:episode-crosswalk:TMDB:TVDB:301"]);
+    for (const item of (uncovered as { coverage: { issues: { cause: string }[] } }).coverage.issues) assert.match(item.cause, /not available to the offline recheck/);
     for (const name of ["target", "other"] as const) {
       assert.deepEqual(autoMatched(uncovered, name), [], `${name}: no older copy of the rejected answer is revived`);
       assert.equal(missing301(uncovered, name), true);
@@ -186,5 +195,6 @@ for (const answer of ["a valid answer", "a rejection"] as const) test(`covering 
     const retried = await h.rerun();
     assert.deepEqual(h.requests.filter(path => path === "/3/find/301"), ["/3/find/301"], "the rejected answer is retried once for both shows");
     for (const name of ["target", "other"] as const) assert.deepEqual(autoMatched(retried, name), [301]);
+    assert.deepEqual(issueIds(retried), [], "the retry the shared rejection still signals clears both shows' checks");
   }
 });

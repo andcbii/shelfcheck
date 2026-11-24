@@ -50,10 +50,9 @@ test("a cached Manual Match recheck isolates a crosswalk whose request was rejec
   assert.deepEqual(showFailures(rechecked), [], "the rejected episode crosswalk does not reject the whole show");
   assert.deepEqual(missingKeys(rechecked), ["TMDB:9003", "TVDB:303"], "the Manual Match collects TVDB 301; the saved TVDB 302 crosswalk still collects it");
 
-  // The scan's rejected request remains the one current cause; the recheck explains the new coverage without claiming a new request.
-  const after = issuesOf(rechecked).filter(issue => issue.provider === "TMDB" && issue.episode?.id === 301);
-  assert.deepEqual(after.map(issue => issue.id), [requestCause.id]);
-  assert.match(after[0].impacts!.join(" "), /A complete-set Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+  // The Manual Match made TVDB 301's crosswalk unnecessary (ADR-0007): its failed check and the
+  // rejected request's Provider Lookup root leave Scan Issues, without claiming a new request.
+  assert.deepEqual(issuesOf(rechecked), []);
 
   // While the Manual Match covers TVDB 301 the next scan needs no crosswalk for it (ADR-0007).
   state.statuses.delete("/3/find/301");

@@ -1,5 +1,7 @@
 import "server-only";
-import { coverageIssueIdsWithPrefix, getCoverageIssue, resolveCoverageIssue, setCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
+import { coverageIssueIdsWithPrefix, getCoverageIssue, resolveCoverageIssue, resolveCoverageIssueWithoutDependents, setCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
+import { lookupFailureIssueId } from "@/lib/lookup-diagnostics";
+import { isProviderId, providerLookup } from "@/lib/provider-lookup";
 import type { EpisodeCheckFailure, EpisodeCheckMethod, EpisodeCrosswalk } from "@/lib/plex-comparison";
 import { catalogueRecordKey, type MalformedCatalogueRecord } from "@/lib/catalogue-records";
 
@@ -64,6 +66,19 @@ export function compoundMatchingCausesRecorded(ratingKey: string) {
 /** The episode crosswalk causes currently recorded for one show, by crosswalk and TVDB episode. */
 export function recordedEpisodeCrosswalkFailures(ratingKey: string) {
   return episodeCrosswalks.flatMap(crosswalk => recordedTvdbEpisodeIds(ratingKey, { operation: "episode-crosswalk", crosswalk }).map(tvdbEpisodeId => ({ crosswalk, tvdbEpisodeId })));
+}
+
+/**
+ * The Provider Lookup causes behind one TVDB episode's crosswalks in one show: each crosswalk's
+ * own request, and every request its recorded crosswalk cause names (such as a Trakt validation's
+ * TMDB episode request, which other episodes may share). Read before the show's episode checks are
+ * reconciled, so a cause about to be resolved still names its requests.
+ */
+export function episodeCrosswalkLookupCauses(ratingKey: string, tvdbEpisodeId: number): string[] {
+  if (!isProviderId(tvdbEpisodeId)) return [];
+  const own = [providerLookup.tvdbEpisodeExtended(tvdbEpisodeId), providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId), providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId)].map(lookup => lookupFailureIssueId(ratingKey, lookup));
+  const named = episodeCrosswalks.flatMap(crosswalk => getCoverageIssue(episodeCheckIssueId(ratingKey, { operation: "episode-crosswalk", crosswalk, episode: { provider: "TVDB", id: tvdbEpisodeId } }))?.causedBy || []);
+  return [...new Set([...own, ...named.filter(id => id.startsWith(`episode-identity:${ratingKey}:`))])];
 }
 
 /** What the episode's decision still established, after this check failed. */
@@ -166,8 +181,11 @@ export function catalogueRecordIssue(show: EpisodeCheckShow, record: MalformedCa
  * Publish the current episode-scoped failures of one completed show comparison.
  * Each failed check keeps one current cause; a check that completed in this
  * comparison resolves only its own cause. Other shows' and operations' causes are kept.
+ * `unnecessaryLookupCauses`: Provider Lookup causes whose lookups this comparison made
+ * unnecessary (ADR-0007); each is resolved unless a current cause still depends on it.
+ * Resolving one records no success: the lookup was skipped, not answered.
  */
-export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], malformedRecords: MalformedCatalogueRecord[] = []) {
+export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], malformedRecords: MalformedCatalogueRecord[] = [], unnecessaryLookupCauses: string[] = []) {
   const current = new Set<string>();
   const existing = new Set(coverageIssueIdsWithPrefix(showIssuePrefix(show.ratingKey)));
   for (const failure of failures) {
@@ -189,4 +207,5 @@ export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: Ep
     setCoverageIssue(issue);
   }
   for (const id of existing) if (!current.has(id)) resolveCoverageIssue(id);
+  for (const id of unnecessaryLookupCauses) resolveCoverageIssueWithoutDependents(id);
 }

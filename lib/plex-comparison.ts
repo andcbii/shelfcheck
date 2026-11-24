@@ -241,15 +241,19 @@ export function comparePlexShow(input: PlexComparisonInput) {
     if (attempt("automatic-evidence", () => providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes }))) { if (outcome) outcome.status = "automatic"; decide("automatic-evidence"); continue; }
     listMissing(false);
   }
-  // Report Missing outranks every other method, so a check it made unnecessary is not a failure.
-  // A failed check stays reported when another method established coverage.
-  const notMadeUnnecessaryByReportMissing = episodeFailures.filter(failure => {
+  // Report Missing and a covering Manual Match outrank automatic evidence, so a crosswalk or
+  // compound check either made unnecessary is not a failure (ADR-0007). A relationship failure
+  // stays while any of its dependents is still undecided by them. A failed check stays
+  // reported when another method established coverage.
+  const madeUnnecessary = (decision: EpisodeDecision | undefined) => decision === "reported" || decision === "manual-match";
+  const stillNeeded = episodeFailures.filter(failure => {
     if ((failure.operation !== "compound-matching" && failure.operation !== "episode-crosswalk") || !failure.episode.id) return true;
     const decision = decisions.get(`${failure.episode.provider}:${failure.episode.id}`);
     if (decision) describeDecision(failure, decision);
-    return decision !== "reported";
+    if (decision === "reported") return false;
+    return !madeUnnecessary(decision) || Boolean(failure.dependents?.some(dependent => !madeUnnecessary(decisions.get(`${dependent.provider}:${dependent.id}`))));
   });
-  episodeFailures.splice(0, episodeFailures.length, ...notMadeUnnecessaryByReportMissing);
+  episodeFailures.splice(0, episodeFailures.length, ...stillNeeded);
   // An episode its Manual Match covers is credited to that match only: automatic evidence
   // for it, including evidence saved by an earlier scan, makes no Auto Match.
   const autoMatches: PlexAutoMatch[] = [...autoMatchEvidence].flatMap(([tvdbEpisodeId, evidence]) => {

@@ -86,3 +86,22 @@ test("a cached recheck after saving, editing and deleting a Manual Match credits
   assert.deepEqual(recheckRequests(), [], "the delete's cached recheck makes no provider request");
   assert.deepEqual(credit(state), { autoMatches: [301, 302], manualMatches: [], manual: [], missing: 0 });
 });
+
+test("a directly owned member stays Directly owned in the Manual Matches report once its Manual Match covers the other side, with no Auto Match row", async t => {
+  const h = await harness(t, [tmdb1, tmdb2, tvdb1, tvdb2], [tmdb1, tmdb2]);
+  // The crosswalk would match TVDB 301 to the owned TMDB 9001 automatically.
+  h.state.bodies.set("/3/find/301", found(tmdb1));
+  // A many-to-many Manual Match whose TMDB side Plex owns directly. Reporting TMDB 9002 and
+  // TVDB 302 missing lists the match in the Manual Matches report, and leaves the direct
+  // ownership of both TMDB episodes, and so the coverage of TVDB 301, unchanged.
+  const saved = await h.save([tmdb1, tmdb2, tvdb1, tvdb2]);
+  assert.equal(saved.status, 201, await saved.clone().text());
+  const mapping = (await saved.json()).mapping as { id: string };
+  await h.setFlags(mapping.id, [tmdb2, tvdb2]);
+
+  const scanned = await h.rerun();
+  assert.deepEqual(h.group(scanned, mapping.id), { "TMDB:9001": "direct", "TMDB:9002": "reported-missing", "TVDB:301": "manual", "TVDB:302": "reported-missing" }, "TMDB 9001 is still Directly owned while the Manual Match covers TVDB 301");
+  const { autoMatches, manual } = credit(scanned);
+  assert.deepEqual(manual, ["TVDB:301"]);
+  assert.deepEqual(autoMatches, [], "no Auto Match row pairs TVDB 301 with its directly owned TMDB 9001");
+});

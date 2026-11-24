@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { harness, type Episode } from "./report-missing-harness";
+import { api, harness, type Episode } from "./report-missing-harness";
 
 // A failed required refresh of an expired TMDB external-ID crosswalk (episode crosswalk
 // freshness, GLOSSARY) rejects the old response: it grants no coverage in that live scan,
@@ -95,15 +95,27 @@ for (const catalogueFails of [true, false]) test(`a rejected crosswalk refresh${
   assert.deepEqual(autoMatches(after), ["Matched via TMDB External ID: TVDB 302 = TMDB 9002"], "the rejected match is not revived");
   assert.match(crosswalkIssues(after)[0], /^301: .*TMDB request failed.*Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
 
-  // The offline rechecks renewed nothing: the next same-day live scan retries only the failed
-  // lookup, reusing TVDB 302's fresh response, and a valid empty answer resolves only that cause.
+  // While the Manual Match covers TVDB 301, a live scan needs no crosswalk for it (ADR-0007)
+  // and reuses TVDB 302's fresh response.
   state.statuses.delete("/3/find/301");
   state.bodies.set("/3/find/301", empty);
+  t.mock.timers.setTime(Date.parse("2026-11-13T14:00:00Z"));
+  requests.length = 0;
+  const covered = await rerun();
+  assert.deepEqual(crosswalkFinds(requests), [], "no crosswalk is requested");
+  assert.deepEqual(missingKeys(covered), ["TMDB:9003", "TVDB:303"]);
+  assert.deepEqual(autoMatches(covered), ["Matched via TMDB External ID: TVDB 302 = TMDB 9002"], "the rejected match is not revived");
+
+  // The offline rechecks and the covered scan renewed nothing: once the match is deleted, the
+  // next same-day live scan retries only the failed lookup, and a valid empty answer resolves only that cause.
+  const deleted = await api.DELETE(new Request(`http://localhost/api/plex/manual-coverage?id=${encodeURIComponent((await manual.json()).mapping.id)}`, { method: "DELETE" }));
+  assert.equal(deleted.status, 200, await deleted.clone().text());
+  await settled(status);
   t.mock.timers.setTime(Date.parse("2026-11-13T15:00:00Z"));
   requests.length = 0;
   const retried = await rerun();
   assert.deepEqual(crosswalkFinds(requests), ["/3/find/301"], "only the failed crosswalk is requested again");
-  assert.deepEqual(missingKeys(retried), ["TMDB:9003", "TVDB:303"]);
+  assert.deepEqual(missingKeys(retried), ["TMDB:9003", "TVDB:301", "TVDB:303"]);
   assert.deepEqual(autoMatches(retried), ["Matched via TMDB External ID: TVDB 302 = TMDB 9002"]);
   assert.deepEqual(crosswalkIssues(retried), [], "a valid empty answer is not a Coverage Issue");
 });

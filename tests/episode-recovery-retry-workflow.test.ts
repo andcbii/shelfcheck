@@ -152,13 +152,16 @@ test("a cached Manual Match recheck neither consumes pending episode recovery no
   before = requests.length;
   const retried = await rerun();
   assert.deepEqual(translations(requests.slice(before)), ["/v4/episodes/102/translations/eng"]);
-  assert.ok(requests.slice(before).includes("/3/find/102"));
+  assert.ok(!requests.slice(before).includes("/3/find/102"), "the Manual Match makes TVDB 102's crosswalk unnecessary (ADR-0007)");
   assert.deepEqual(currentIssues(retried), unresolved);
   assert.deepEqual(missingKeys(retried), ["TMDB:9002"]);
 
   state.statuses.clear();
   state.english.set(102, "Arrival (2)");
   const repaired = await rerun();
-  assert.deepEqual(currentIssues(repaired), [], "only repair clears the causes");
+  // The title recovery is repaired. TVDB 102's crosswalk is not requested again while the Manual
+  // Match covers it (ADR-0007), so its rejected request stays recorded; retiring causes a Manual
+  // Match made unnecessary is a later step of the Story.
+  assert.deepEqual(currentIssues(repaired), [crosswalkRequest], "only repair clears the title recovery cause");
   assert.deepEqual(missingKeys(repaired), ["TMDB:9002"]);
 });

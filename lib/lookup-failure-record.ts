@@ -1,7 +1,7 @@
 import "server-only";
 import { getCoverageIssue } from "@/lib/coverage-issues";
 import { recordedEpisodeCrosswalkFailures } from "@/lib/episode-check-issues";
-import { lookupFailureIssueId } from "@/lib/lookup-diagnostics";
+import { lookupFailureIssueId } from "@/lib/coverage-issue-ids";
 import type { ProviderLookup } from "@/lib/provider-lookup";
 import type { EpisodeCrosswalk } from "@/lib/plex-comparison";
 

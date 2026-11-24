@@ -2,6 +2,7 @@ import "server-only";
 import { titleDependentTvdbEpisodeIds, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import type { CatalogueLoad, CatalogueLoadSettings, ComparedCatalogue, ComparisonCatalogueSource, SavedCatalogue, SeriesAssociation } from "@/lib/comparison-catalogue-resolver";
 import type { CatalogueProvider } from "@/lib/catalogue-selection";
+import { TVDB_AUTHENTICATION_ISSUE } from "@/lib/coverage-issue-ids";
 import type { MalformedCatalogueRecord, NormalisedCatalogue } from "@/lib/catalogue-records";
 import type { ProviderEpisode } from "@/lib/plex-comparison";
 import { reuseProviderCatalogue } from "@/lib/plex-catalogue-policy";
@@ -58,7 +59,7 @@ export type DownloadCatalogueSourceOptions = {
 };
 
 /** The Coverage Issue causes of a catalogue load the scan's TVDB authentication failure prevented. */
-const TVDB_AUTHENTICATION_CAUSE = ["provider-authentication:TVDB"];
+const TVDB_AUTHENTICATION_CAUSE = [TVDB_AUTHENTICATION_ISSUE];
 
 /** What each provider's series request (TMDB `/tv/{id}`, TVDB `/series/{id}`) is called in a request identity. */
 const SERIES_REQUEST_KIND: Record<CatalogueProvider, string> = { tmdb: "show", tvdb: "series" };

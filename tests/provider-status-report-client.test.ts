@@ -3,6 +3,7 @@ import { registerHooks } from "node:module";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { catalogueIssueIds } from "../lib/coverage-issue-ids";
 import type { CoverageIssue } from "../lib/coverage-issues";
 import type { PlexShowResult } from "../lib/plex-scan";
 // The report components import types from server-only modules.
@@ -37,7 +38,7 @@ test("an Unmatched Shows row gives each provider's cause", () => {
 
 test("a failing multi-ID provider's Scan Issues entry lists each candidate's ID, cause, catalogue age and 404 progress", () => {
   const issue: CoverageIssue = {
-    id: "catalogue-refresh:TMDB:ratingKey:1", scope: "show", provider: "TMDB", operation: "catalogue-refresh", category: "Provider Lookup", show: { title: "Example", tmdbId: 100 },
+    id: catalogueIssueIds("tmdb", "ratingKey:1").refreshId, scope: "show", provider: "TMDB", operation: "catalogue-refresh", category: "Provider Lookup", show: { title: "Example", tmdbId: 100 },
     cause: "404 — record not found", action: "Check the Plex provider ID reference.",
     candidates: [{ id: 100, cause: "404 — record not found", catalogueRefresh: { checkedAt: "2026-06-01T12:00:00.000Z", seriesNotFoundDays: 3 } }, { id: 20, cause: "TMDB network request failed", catalogueRefresh: { checkedAt: "2026-06-01T12:00:00.000Z", downloadedAt: "2026-03-19T12:00:00.000Z" } }],
   };

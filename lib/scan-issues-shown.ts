@@ -1,4 +1,5 @@
-import { catalogueIssueIds, PROVIDERS } from "@/lib/catalogue-selection";
+import { PROVIDERS } from "@/lib/catalogue-selection";
+import { catalogueIssueIds, comparisonInputsIssueId, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import type { CoverageIssue } from "@/lib/coverage-issues";
 import { isUnmatchedShow } from "@/lib/plex-reporting";
 import type { PlexShowResult } from "@/lib/plex-scan";
@@ -7,7 +8,7 @@ import type { PlexShowResult } from "@/lib/plex-scan";
 function ownEntryIds(ratingKey: string) {
   return [
     ...PROVIDERS.flatMap(provider => Object.values(catalogueIssueIds(provider, ratingKey))),
-    `comparison-inputs:${ratingKey}`,
+    comparisonInputsIssueId(ratingKey),
   ];
 }
 
@@ -19,6 +20,6 @@ function ownEntryIds(ratingKey: string) {
  * impact folded into them. Every Scan Issues count is the length of what this returns.
  */
 export function shownScanIssues<I extends Pick<CoverageIssue, "id" | "scope">>(issues: I[], shows: Pick<PlexShowResult, "ratingKey" | "providerResolution">[]): I[] {
-  const hidden = new Set(shows.filter(isUnmatchedShow).flatMap(show => ownEntryIds(show.ratingKey)));
+  const hidden = new Set<CoverageIssueId>(shows.filter(isUnmatchedShow).flatMap(show => ownEntryIds(show.ratingKey)));
   return hidden.size ? issues.filter(issue => issue.scope !== "show" || !hidden.has(issue.id)) : issues;
 }

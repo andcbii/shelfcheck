@@ -1,6 +1,7 @@
 import "server-only";
 import { database } from "@/lib/sqlite";
 import { ProviderHttpError, ProviderCooldownTooLongError, ProviderNetworkError, ProviderResponseError } from "@/lib/provider-client";
+import type { CoverageIssueId, CoverageIssuePrefix } from "@/lib/coverage-issue-ids";
 
 export type LookupSourceStep = { provider: "Plex" | "TMDB" | "TVDB" | "Trakt"; kind: string; id?: number; cached?: boolean };
 export type ProviderLookup = {
@@ -30,7 +31,7 @@ export function providerLookupContext(error: unknown, context: Omit<ProviderLook
 
 /** One current cause, owned and resolved only by the operation that evaluated it. */
 export type CoverageIssue = {
-  id: string;
+  id: CoverageIssueId;
   operation: string;
   provider?: "Plex" | "TMDB" | "TVDB" | "Trakt";
   scope: "library" | "show" | "episode";
@@ -44,7 +45,7 @@ export type CoverageIssue = {
   /** A provider choosing among several Plex series whose preferred series failed: each candidate that failed, why, and its catalogue age and 404 progress, in the order tried. */
   candidates?: { id: number; cause: string; catalogueRefresh?: CatalogueRefreshState }[];
   /** Failure IDs captured when this operation establishes its blocked inputs. */
-  causedBy?: string[];
+  causedBy?: CoverageIssueId[];
   /** Dependent impacts projected from the same durable current issue state. */
   impacts?: string[];
   show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number };
@@ -64,12 +65,37 @@ export type CatalogueRefreshState = {
   /** The series is a Gone provider record (ADR-0006): its saved catalogue is kept but not compared. */
   gone?: true;
 };
+/**
+ * The storage boundary for Coverage Issue IDs: an ID or cause link read back from saved data is
+ * adopted exactly as it was saved. It is not checked against today's kinds and never dropped, so
+ * issues and cause links saved by earlier versions, including kinds no longer produced, keep loading,
+ * showing and folding. Private: application code makes IDs only with the vocabulary's constructors
+ * (`@/lib/coverage-issue-ids`), never from text.
+ */
+function adoptStoredId(saved: string) {
+  return saved as CoverageIssueId;
+}
+/** A saved Coverage Issue payload, with its ID and cause links adopted at the storage boundary. */
+function storedIssue(payload: string): CoverageIssue {
+  const issue = JSON.parse(payload);
+  // A payload that is not an object is returned as it was read, as before adoption.
+  if (typeof issue !== "object" || issue === null || Array.isArray(issue)) return issue;
+  return { ...issue, ...("id" in issue ? { id: adoptStoredId(issue.id) } : {}), ...(Array.isArray(issue.causedBy) ? { causedBy: issue.causedBy.map(adoptStoredId) } : {}) };
+}
+/**
+ * The cause links of a carrier saved outside the issue table (such as a saved catalogue's title
+ * recovery), adopted at the storage boundary like the issue table's: every string is kept as saved.
+ * For storage reads only; lint limits who may call it.
+ */
+export function savedCoverageIssueIds(saved: unknown[]): CoverageIssueId[] {
+  return saved.filter((item): item is string => typeof item === "string").map(adoptStoredId);
+}
 export function listCoverageIssues(): CoverageIssue[] {
-  const issues: CoverageIssue[] = (database().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>JSON.parse(row.payload));
+  const issues: CoverageIssue[] = (database().prepare("SELECT payload FROM shelfcheck_coverage_issues ORDER BY id").all() as {payload:string}[]).map(row=>storedIssue(row.payload));
   const byId = new Map(issues.map(issue=>[issue.id,issue]));
   // A dependent issue's own recorded impacts travel with it into its root, never impacts folded into it here.
   const ownImpacts = new Map(issues.map(issue=>[issue.id,issue.impacts || []]));
-  const rootsFor = (id:string, seen:Set<string>): CoverageIssue[] | undefined => {
+  const rootsFor = (id:CoverageIssueId, seen:Set<CoverageIssueId>): CoverageIssue[] | undefined => {
     const issue = byId.get(id);
     if (!issue || seen.has(id)) return undefined;
     if (!issue.causedBy?.length) return [issue];
@@ -89,16 +115,16 @@ export function listCoverageIssues(): CoverageIssue[] {
     return false;
   });
 }
-export function getCoverageIssue(id: string): CoverageIssue | undefined {
+export function getCoverageIssue(id: CoverageIssueId): CoverageIssue | undefined {
   const row = database().prepare("SELECT payload FROM shelfcheck_coverage_issues WHERE id=?").get(id) as {payload:string} | undefined;
-  return row ? JSON.parse(row.payload) : undefined;
+  return row ? storedIssue(row.payload) : undefined;
 }
 export function setCoverageIssue(issue: CoverageIssue) {
   database().prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload").run(issue.id,JSON.stringify(issue));
 }
-/** Current cause IDs owned by one operation family, e.g. one show's episode checks. */
-export function coverageIssueIdsWithPrefix(prefix: string): string[] {
-  return (database().prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id,1,length(?))=? ORDER BY id").all(prefix,prefix) as {id:string}[]).map(row=>row.id);
+/** Current cause IDs owned by one operation family, e.g. one show's episode checks: an exact, case-sensitive prefix match. */
+export function coverageIssueIdsWithPrefix(prefix: CoverageIssuePrefix): CoverageIssueId[] {
+  return (database().prepare("SELECT id FROM shelfcheck_coverage_issues WHERE substr(id,1,length(?))=? ORDER BY id").all(prefix,prefix) as {id:string}[]).map(row=>adoptStoredId(row.id));
 }
-export function resolveCoverageIssue(id: string) { database().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=?").run(id); }
+export function resolveCoverageIssue(id: CoverageIssueId) { database().prepare("DELETE FROM shelfcheck_coverage_issues WHERE id=?").run(id); }
 export { coverageIssueCause } from "@/lib/value-guards";

@@ -70,6 +70,35 @@
 
 ### Fixed
 
+- A Plex scan now signs in to TVDB once, after reading Plex, and its Manual
+  Match recheck uses that sign-in. When the sign-in fails, for any reason (a
+  refused login, a network error, an unreadable answer, a too-long rate-limit
+  wait or a missing token), Scan Issues shows the TVDB sign-in failure once
+  with every Manual Match TVDB episode it blocked folded under it, also after
+  a restart or a later scan failure. Those Manual Matches stay saved and
+  pending, no TVDB episode request is sent for them, and their TMDB episodes
+  are still checked. The TVDB sign-in issue now says Manual Match episodes
+  could not be verified as well.
+
+  Before, the recheck signed in on its own before reading Plex: a failed
+  recheck sign-in left its member issues pointing at a sign-in issue that was
+  never recorded, or that a second, successful sign-in later cleared, so they
+  showed one by one; and they were grouped only when the sign-in failed with
+  an HTTP error.
+
+  A scan that fails reading Plex now sends no TVDB sign-in and leaves earlier
+  TVDB sign-in and Manual Match member issues as they were; the scan failure
+  itself is still recorded.
+
+  A single-show scan whose Manual Match recheck changes a match's health, for
+  example when its TVDB sign-in succeeds after a full scan's failed, now
+  completes. It also compares every other show again with the new health,
+  from saved data, downloading a show's catalogues only when its saved data
+  cannot be used, so no result from before the change is kept. If a show
+  still cannot be compared, the scan stops and the earlier results stay, with
+  the reason in Scan Issues. Before, it stopped and asked for a full Plex
+  scan.
+
 - An Ignore whose save fails no longer applies to the running scan: the scan
   is marked only once the rule and the removal of its saved results are both
   saved, and a failed save leaves the rule, the saved results and any Report

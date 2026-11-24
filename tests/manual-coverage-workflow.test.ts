@@ -224,6 +224,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   const outage = await rerun();
   assert.equal(outage.coverage.pending, 1);
   assert.ok(outage.coverage.issues.some((issue:{operation:string;mappingId:string;provider:string;episode?:{id:number;provider:string};cause:string})=>issue.operation === "member-verification" && issue.mappingId === saved.mapping.id && issue.provider === "TVDB" && issue.episode?.provider === "TVDB" && issue.episode.id === 200 && issue.cause.includes("401")));
+  assert.ok(outage.coverage.issues.some((issue:{id:string;operation:string})=>issue.operation === "member-verification" && issue.id === `member-verification:${saved.mapping.id}:TVDB:200`), "The member's stored issue ID keeps its saved form");
+  assert.ok(outage.coverage.issues.every((issue:{causedBy?:string[]})=>issue.causedBy === undefined), "A member refused after a good TVDB sign-in is not filed under the sign-in");
   assert.equal((await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id).health, "pending");
   assert.equal(outage.report.shows[0].missing[0].tmdbEpisodeId, 100);
   healthFailure = 429;

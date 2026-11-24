@@ -1,6 +1,7 @@
 import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
-import { catalogueIssueIds, OTHER_PROVIDER, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { OTHER_PROVIDER, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
+import { catalogueIssueIds, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { CATALOGUE_AGE_LIMIT_TEXT, GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
@@ -61,7 +62,7 @@ export type CatalogueLoad<T> =
       /** A series ID resolved before the failure, which the Coverage Issue then names. */
       resolvedId?: number;
       /** Coverage Issue IDs this failure is caused by, such as provider authentication. */
-      causedBy?: string[];
+      causedBy?: CoverageIssueId[];
       /** The lookup provenance at the failure, when the attempt extended it. */
       lookupSource?: LookupSourceStep[];
       /**
@@ -86,7 +87,7 @@ export type SeriesAssociation =
   | { outcome: "found"; id: number; cached: boolean }
   | { outcome: "known-empty" }
   | { outcome: "missing" }
-  | { outcome: "failed"; error: unknown; causedBy?: string[] };
+  | { outcome: "failed"; error: unknown; causedBy?: CoverageIssueId[] };
 
 /** Where the resolver gets catalogues: the live scan's downloading source or the cached recheck's saved one. */
 export type ComparisonCatalogueSource<P extends CataloguePayloads> = {
@@ -191,7 +192,7 @@ export type ComparedCatalogue<T> = { id: number; origin: "downloaded" | "reused"
 export type CatalogueUseProposal = { action: "set"; use: CatalogueUse } | { action: "clear" } | { action: "unchanged" };
 
 /** A catalogue Coverage Issue (catalogue-refresh or catalogue-fallback-refresh) and what to do with it. */
-export type CatalogueIssueAction = { action: "set"; issue: CoverageIssue } | { action: "resolve"; id: string } | { action: "preserve"; id: string };
+export type CatalogueIssueAction = { action: "set"; issue: CoverageIssue } | { action: "resolve"; id: CoverageIssueId } | { action: "preserve"; id: CoverageIssueId };
 
 export type ProviderResolution<T> = {
   /** The provider's series identity after resolution: the series compared, else the one that is unavailable. */
@@ -209,7 +210,7 @@ export type ProviderResolution<T> = {
   obligation: RefreshObligationPatch;
   issues: CatalogueIssueAction[];
   /** The Coverage Issue ID that explains a missing catalogue, for the comparison-inputs issue's causes. */
-  unavailableCause?: string;
+  unavailableCause?: CoverageIssueId;
   /** A warning for the show's result when no catalogue is usable or a derived series could not be loaded. */
   warning?: string;
   /** Saved evidence cannot resolve this provider's series, so the comparison is pending. */
@@ -239,7 +240,7 @@ export type ComparisonCatalogueResolution<P extends CataloguePayloads> = {
   /** The order the comparison runs the catalogues in, whatever the resolution order: TMDB, then TVDB. */
   comparisonOrder: readonly CatalogueProvider[];
   /** The Coverage Issue IDs explaining each missing catalogue, in resolution order: the comparison-inputs issue's causes. */
-  unavailableCauses: string[];
+  unavailableCauses: CoverageIssueId[];
   /** The show's result warnings: the providers' in resolution order, then a live scan's warning that Plex reports no ID at all. */
   warnings: string[];
   /**
@@ -449,7 +450,7 @@ function preservedIssues(provider: CatalogueProvider, request: ComparisonCatalog
 }
 
 /** A provider's catalogue-refresh Coverage Issue value, in the shape the scan sets it. */
-function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: string; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; catalogueRefresh?: CatalogueRefreshState }): CoverageIssue {
+function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogueRequest, identities: Identities, input: { id: CoverageIssueId; failure: Failure; seriesId: number | undefined; requested: { kind: RequestedKind; id: number }; source: LookupSourceStep[]; impact: string; failedAt?: string; candidates?: CoverageIssue["candidates"]; catalogueRefresh?: CatalogueRefreshState }): CoverageIssue {
   const name = PROVIDER_NAME[provider];
   const ids = { ...identities, [provider]: input.seriesId };
   return {
@@ -459,7 +460,7 @@ function catalogueIssue(provider: CatalogueProvider, request: ComparisonCatalogu
     ...(input.catalogueRefresh ? { catalogueRefresh: input.catalogueRefresh } : {}),
     ...providerLookupContext(input.failure.error, { source: input.failure.lookupSource || input.source, requested: { provider: name, ...input.requested }, impact: input.impact }),
     ...(input.candidates ? { candidates: input.candidates } : {}),
-  } as CoverageIssue;
+  };
 }
 
 /** A series' catalogue age and, when its load failed with a series-request 404, its 404 progress, as of this resolution. */
@@ -693,7 +694,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const kind = PROVIDER_TERMS[provider].requestedKind;
   const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);
   const issues: CatalogueIssueAction[] = [];
-  let warning: string | undefined, unavailableCause: string | undefined;
+  let warning: string | undefined, unavailableCause: CoverageIssueId | undefined;
   if (preferredState === "failed-this-attempt") {
     const failure = failureOf(choice.preferredError);
     // The one entry lists each candidate tried, why it failed, and its own catalogue age and 404 progress.

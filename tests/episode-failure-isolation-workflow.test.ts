@@ -111,9 +111,11 @@ test("a later direct ownership collects the episode but does not resolve its unr
   assert.deepEqual(episodeIssues(await rerun()), []);
 });
 
-test("a complete-set Manual Match still collects an episode whose combined/split check failed, and the failed check stays reported", async t => {
+// A covered episode takes no part in combined/split matching (ADR-0007), so the check that
+// failed for it is no longer run and no longer a failure.
+test("a complete-set Manual Match collects an episode whose combined/split check failed, and that check is no longer run", async t => {
   const { rerun, save, setFlags, status, requests, missing } = await harness(t, catalogue({ 102: { name: null } }), owned);
-  await rerun();
+  assert.deepEqual(episodeIssues(await rerun()).map(item => item.episode?.id), [102], "before the Manual Match the check fails");
   const saved = await save([combined, part2]);
   assert.ok(saved.ok, await saved.clone().text());
   const mappingId = (await saved.json()).mapping.id as string;
@@ -124,13 +126,11 @@ test("a complete-set Manual Match still collects an episode whose combined/split
   assert.equal(requests.length, before, "cached recheck performs no HTTP");
   assert.deepEqual(issuesOf(rechecked).filter(issue => /^comparison-(inputs|failure):/.test(issue.id)), []);
   assert.deepEqual(missingKeys(rechecked), ["TMDB:9002", "TVDB:104"], "the Manual Match collects the split episode");
-  const [issue] = episodeIssues(rechecked);
-  assert.equal(issue?.episode?.id, 102, "the failed check is retained");
-  assert.match(issue.impacts!.join(" "), /complete-set Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+  assert.deepEqual(episodeIssues(rechecked), [], "the covered episode is no combined/split input, so its check no longer fails");
 
   const scanned = await rerun();
   assert.deepEqual(missingKeys(scanned), ["TMDB:9002", "TVDB:104"]);
-  assert.deepEqual(episodeIssues(scanned).map(item => item.id), [issue.id]);
+  assert.deepEqual(episodeIssues(scanned), []);
 
   // Report Missing outranks every method, so the combined/split check is no longer needed.
   await setFlags(mappingId, [part2]);

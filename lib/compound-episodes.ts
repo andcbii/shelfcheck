@@ -85,14 +85,16 @@ function approximately(value: number, expected: number) {
  * same season and air date that may be its split parts. Undefined when the local episode
  * cannot be a combined episode, so no TVDB title is needed for it.
  */
-function sameDayCandidates(episodes: CompoundProviderEpisode[], tmdbEpisodes: CompoundProviderEpisode[], local: LocalCompoundEpisode) {
+function sameDayCandidates(episodes: CompoundProviderEpisode[], tmdbEpisodes: CompoundProviderEpisode[], local: LocalCompoundEpisode, excluded: (episode: CompoundProviderEpisode) => boolean = () => false) {
   if (!local.tmdbEpisodeId || !usableTitle(local.title) || !local.runtime) return undefined;
   const tmdb = tmdbEpisodes.find((episode) => episode.providerEpisodeId === local.tmdbEpisodeId);
-  if (!tmdb?.airDate || !usableTitle(tmdb.title) || !tmdb.runtime || tmdb.season !== local.season) return undefined;
+  if (!tmdb || excluded(tmdb)) return undefined;
+  if (!tmdb.airDate || !usableTitle(tmdb.title) || !tmdb.runtime || tmdb.season !== local.season) return undefined;
   const title = baseTitle(tmdb.title);
   if (!title || baseTitle(local.title) !== title) return undefined;
   const sameDay = episodes.filter((episode) => episode?.source === "TVDB"
     && episode.providerEpisodeId
+    && !excluded(episode)
     && episode.season === tmdb.season
     && episode.airDate === tmdb.airDate);
   return { tmdb, title, sameDay, localRuntime: local.runtime, tmdbRuntime: tmdb.runtime };
@@ -120,8 +122,14 @@ export function compoundTvdbCoverage(episodes: CompoundProviderEpisode[], localE
  * Combined/split evidence with episode-scoped failures isolated: a relationship
  * that cannot be evaluated grants no coverage and is reported, while every other
  * owned episode is still evaluated.
+ *
+ * `excluded` provider episodes take no part in any relationship: an excluded TMDB
+ * episode is never the combined side and an excluded TVDB episode is never a split
+ * part, nor a dependent or anchor of a withheld relationship. Only the parts that
+ * remain must meet the rules on their own. Excluding an episode changes neither the
+ * show's typical TMDB runtime nor Plex inventory.
  */
-export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localEpisodes: LocalCompoundEpisode[]): { coverage: CompoundCoverage[]; failures: CompoundEvidenceFailure[] } {
+export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localEpisodes: LocalCompoundEpisode[], { excluded }: { excluded?: (episode: CompoundProviderEpisode) => boolean } = {}): { coverage: CompoundCoverage[]; failures: CompoundEvidenceFailure[] } {
   const coverage: CompoundCoverage[] = [];
   const failures: CompoundEvidenceFailure[] = [];
   const tmdbEpisodes = episodes.filter((episode) => episode?.source === "TMDB");
@@ -140,7 +148,7 @@ export function compoundTvdbEvidence(episodes: CompoundProviderEpisode[], localE
   return { coverage, failures };
 
   function compoundForLocal(local: LocalCompoundEpisode) {
-    const candidate = sameDayCandidates(episodes, tmdbEpisodes, local);
+    const candidate = sameDayCandidates(episodes, tmdbEpisodes, local, excluded);
     if (!candidate) return;
     const { title, sameDay, localRuntime, tmdbRuntime } = candidate;
     const matches = sameDay.filter((episode) => usableTitle(episode.title) && baseTitle(episode.title) === title)

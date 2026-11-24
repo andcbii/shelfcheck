@@ -76,7 +76,11 @@ export function catalogueIssueIds(provider: CatalogueProvider, ratingKey: string
 
 /** The `episode-identity:` Coverage Issue ID of one show's failed request for a typed lookup; wraps its stored lookup key unchanged. */
 export function lookupFailureIssueId(ratingKey: string, lookup: ProviderLookup) {
-  return issueId(`episode-identity:${ratingKey}:${lookupKey(lookup)}`);
+  return issueId(`${lookupFailureShowPrefix(ratingKey)}${lookupKey(lookup)}`);
+}
+/** Every `episode-identity:` Coverage Issue of one show's failed Provider Lookups starts with this prefix. */
+export function lookupFailureShowPrefix(ratingKey: string) {
+  return issuePrefix(`episode-identity:${ratingKey}:`);
 }
 
 type EpisodeCheck = Pick<EpisodeCheckFailure, "operation" | "method" | "crosswalk">;

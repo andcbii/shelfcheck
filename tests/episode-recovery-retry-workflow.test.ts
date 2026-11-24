@@ -145,20 +145,21 @@ test("a cached Manual Match recheck neither consumes pending episode recovery no
   for (let i = 0; i < 100 && (rechecked as unknown as Result).coverage.pending; i++) { await new Promise(resolve => setTimeout(resolve, 10)); rechecked = await status(); }
   assert.deepEqual(requests.slice(before), [], "the cached recheck makes no requests");
   assert.deepEqual(missingKeys(rechecked), ["TMDB:9002"], "the Manual Match collects the episode");
-  assert.deepEqual(currentIssues(rechecked), unresolved, "alternative ownership does not clear the failed checks");
-  assert.match(JSON.stringify((rechecked as unknown as Result).coverage.issues), /A complete-set Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved\./);
+  // The Manual Match makes TVDB 102's crosswalk unnecessary (ADR-0007): its failed check and
+  // Provider Lookup root leave Scan Issues. The title recovery is unrelated and stays.
+  assert.deepEqual(currentIssues(rechecked), [recovery], "the Manual Match does not clear the title recovery");
 
   // The next scan still retries the recovery (alongside the Manual Match's own refresh obligation).
   before = requests.length;
   const retried = await rerun();
   assert.deepEqual(translations(requests.slice(before)), ["/v4/episodes/102/translations/eng"]);
-  assert.ok(requests.slice(before).includes("/3/find/102"));
-  assert.deepEqual(currentIssues(retried), unresolved);
+  assert.ok(!requests.slice(before).includes("/3/find/102"), "the Manual Match makes TVDB 102's crosswalk unnecessary (ADR-0007)");
+  assert.deepEqual(currentIssues(retried), [recovery]);
   assert.deepEqual(missingKeys(retried), ["TMDB:9002"]);
 
   state.statuses.clear();
   state.english.set(102, "Arrival (2)");
   const repaired = await rerun();
-  assert.deepEqual(currentIssues(repaired), [], "only repair clears the causes");
+  assert.deepEqual(currentIssues(repaired), [], "only repair clears the title recovery cause");
   assert.deepEqual(missingKeys(repaired), ["TMDB:9002"]);
 });

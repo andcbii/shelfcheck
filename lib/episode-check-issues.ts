@@ -1,8 +1,9 @@
 import "server-only";
-import { coverageIssueIdsWithPrefix, getCoverageIssue, resolveCoverageIssue, setCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
+import { coverageIssueIdsWithPrefix, getCoverageIssue, resolveCoverageIssue, resolveCoverageIssueWithoutDependents, setCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
+import { isProviderId, providerLookup } from "@/lib/provider-lookup";
 import type { EpisodeCheckFailure, EpisodeCheckMethod, EpisodeCrosswalk } from "@/lib/plex-comparison";
 import type { MalformedCatalogueRecord } from "@/lib/catalogue-records";
-import { catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix, type CoverageIssueId } from "@/lib/coverage-issue-ids";
+import { catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix, lookupFailureIssueId, lookupFailureShowPrefix, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 
 /** The show whose comparison evaluated the episode checks. `ratingKey` is the Plex show identity. */
 export type EpisodeCheckShow = { ratingKey: string; title?: string; tmdbId?: number; tvdbId?: number };
@@ -50,6 +51,19 @@ export function compoundMatchingCausesRecorded(ratingKey: string) {
 /** The episode crosswalk causes currently recorded for one show, by crosswalk and TVDB episode. */
 export function recordedEpisodeCrosswalkFailures(ratingKey: string) {
   return episodeCrosswalks.flatMap(crosswalk => recordedTvdbEpisodeIds(ratingKey, { operation: "episode-crosswalk", crosswalk }).map(tvdbEpisodeId => ({ crosswalk, tvdbEpisodeId })));
+}
+
+/**
+ * The Provider Lookup causes behind one TVDB episode's crosswalks in one show: each crosswalk's
+ * own request, and every request its recorded crosswalk cause names (such as a Trakt validation's
+ * TMDB episode request, which other episodes may share). Read before the show's episode checks are
+ * reconciled, so a cause about to be resolved still names its requests.
+ */
+export function episodeCrosswalkLookupCauses(ratingKey: string, tvdbEpisodeId: number): CoverageIssueId[] {
+  if (!isProviderId(tvdbEpisodeId)) return [];
+  const own = [providerLookup.tvdbEpisodeExtended(tvdbEpisodeId), providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId), providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId)].map(lookup => lookupFailureIssueId(ratingKey, lookup));
+  const named = episodeCrosswalks.flatMap(crosswalk => getCoverageIssue(episodeCheckIssueId(ratingKey, { operation: "episode-crosswalk", crosswalk, episode: { provider: "TVDB", id: tvdbEpisodeId } }))?.causedBy || []);
+  return [...new Set([...own, ...named.filter(id => id.startsWith(lookupFailureShowPrefix(ratingKey)))])];
 }
 
 /** What the episode's decision still established, after this check failed. */
@@ -147,8 +161,11 @@ export function catalogueRecordIssue(show: EpisodeCheckShow, record: MalformedCa
  * Publish the current episode-scoped failures of one completed show comparison.
  * Each failed check keeps one current cause; a check that completed in this
  * comparison resolves only its own cause. Other shows' and operations' causes are kept.
+ * `unnecessaryLookupCauses`: Provider Lookup causes whose lookups this comparison made
+ * unnecessary (ADR-0007); each is resolved unless a current cause still depends on it.
+ * Resolving one records no success: the lookup was skipped, not answered.
  */
-export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], malformedRecords: MalformedCatalogueRecord[] = []) {
+export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], { malformedRecords = [], unnecessaryLookupCauses = [] }: { malformedRecords?: MalformedCatalogueRecord[]; unnecessaryLookupCauses?: CoverageIssueId[] } = {}) {
   const current = new Set<CoverageIssueId>();
   const existing = new Set(coverageIssueIdsWithPrefix(episodeCheckShowPrefix(show.ratingKey)));
   for (const failure of failures) {
@@ -170,4 +187,5 @@ export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: Ep
     setCoverageIssue(issue);
   }
   for (const id of existing) if (!current.has(id)) resolveCoverageIssue(id);
+  for (const id of unnecessaryLookupCauses) resolveCoverageIssueWithoutDependents(id);
 }

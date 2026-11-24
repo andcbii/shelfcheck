@@ -338,7 +338,9 @@ test("a recovered answer that cannot be saved leaves the failed request open, an
   assert.deepEqual(showInputIssues(recovered), []);
 });
 
-test("independent Manual Match coverage in a cached recheck does not resolve a failed crosswalk", async t => {
+// A covering Manual Match makes the crosswalk unnecessary (ADR-0007): its failed check and
+// request root leave Scan Issues, but nothing records the skipped lookup as answered.
+test("a Manual Match retires a failed crosswalk in a cached recheck without recording it as recovered", async t => {
   const { rerun, state, requests, save, status, restart } = await harness(t, catalogue, owned);
   state.statuses.set("/3/find/301", 404);
   state.bodies.set("/3/find/302", found(tmdb2));
@@ -346,6 +348,8 @@ test("independent Manual Match coverage in a cached recheck does not resolve a f
   const [request] = episodeIssues(scanned, "target", 301).filter(issue => issue.operation === "episode-identity");
   assert.ok(request.failedAt);
   const before = savedRelationships();
+  const shared = catalogues.readSharedTmdbCrosswalk(301);
+  assert.ok(shared?.rejectedAt && !shared.receivedAt, "the failed request rejected the shared answer");
 
   const manual = await save([tmdb1, tvdb1]);
   assert.ok(manual.ok, await manual.clone().text());
@@ -355,9 +359,9 @@ test("independent Manual Match coverage in a cached recheck does not resolve a f
     const rechecked = await settled(status);
     assert.deepEqual(requests, []);
     assert.ok(!missingKeys(rechecked).includes("TVDB:301"), "the Manual Match collects TVDB 301");
-    assert.equal(coverageIssues.getCoverageIssue(request.id)?.failedAt, request.failedAt, "the failed request stays open with its failure time");
-    assert.match(episodeIssues(rechecked, "target", 301).find(issue => issue.id === request.id)!.impacts!.join(" "), /A complete-set Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+    assert.deepEqual(episodeIssues(rechecked, "target", 301), [], "the failed check and its request root leave Scan Issues");
     assert.deepEqual(savedRelationships(), before, "no crosswalk answer is saved for it");
+    assert.deepEqual(catalogues.readSharedTmdbCrosswalk(301), shared, "the shared answer stays rejected");
   }
 });
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.7.1 - 2026-11-23
 
 ### Changed
 
@@ -67,6 +67,25 @@
   an ignored show are now removed when Shelfcheck first reads or changes its
   saved scan state rather than when the database opens, so a temporary Ignore
   that ends in between keeps those older results.
+
+- A Manual Match now decides an episode it covers before anything Shelfcheck
+  works out by itself. Each episode is decided by Report Missing first, then a
+  Healthy Manual Match whose other side you directly own, then season and
+  episode numbers, then automatic evidence. A covered episode is credited to
+  its Manual Match even when its numbers or a Plex ID also match: it shows in
+  the Manual Matches report and no longer as an Auto Match. Pending and Needs
+  review Manual Matches change nothing.
+
+  A Plex scan no longer asks TVDB, Trakt or TMDB to crosswalk a TVDB episode
+  a Manual Match covers, and covered episodes take no part in combined and
+  split episode matching. The Manual Match health check still runs on every
+  scan.
+
+  Scan Issues entries for crosswalk and combined or split checks that a
+  Manual Match made unnecessary, and the failed provider lookups behind them,
+  are removed when the show is next compared. A failed lookup another episode
+  still needs stays. Saved results change as each show is compared again; no
+  scan is needed only for this change.
 
 ### Fixed
 

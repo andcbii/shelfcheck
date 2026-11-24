@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
-import { harness, type Episode } from "./report-missing-harness";
+import { api, harness, type Episode } from "./report-missing-harness";
 
 // Cached Manual Match rechecks replay saved provider relationships offline. An
 // unavailable episode relationship is an episode-scoped failure (GLOSSARY): it
@@ -50,14 +50,22 @@ test("a cached Manual Match recheck isolates a crosswalk whose request was rejec
   assert.deepEqual(showFailures(rechecked), [], "the rejected episode crosswalk does not reject the whole show");
   assert.deepEqual(missingKeys(rechecked), ["TMDB:9003", "TVDB:303"], "the Manual Match collects TVDB 301; the saved TVDB 302 crosswalk still collects it");
 
-  // The scan's rejected request remains the one current cause; the recheck explains the new coverage without claiming a new request.
-  const after = issuesOf(rechecked).filter(issue => issue.provider === "TMDB" && issue.episode?.id === 301);
-  assert.deepEqual(after.map(issue => issue.id), [requestCause.id]);
-  assert.match(after[0].impacts!.join(" "), /A complete-set Manual Match established coverage for this episode, so it remains collected; this failed check is still unresolved/);
+  // The Manual Match made TVDB 301's crosswalk unnecessary (ADR-0007): its failed check and the
+  // rejected request's Provider Lookup root leave Scan Issues, without claiming a new request.
+  assert.deepEqual(issuesOf(rechecked), []);
 
-  // The next scan requests the crosswalk again and its recovery clears the cause.
+  // While the Manual Match covers TVDB 301 the next scan needs no crosswalk for it (ADR-0007).
   state.statuses.delete("/3/find/301");
   state.bodies.set("/3/find/301", found(tmdb1));
+  requests.length = 0;
+  const covered = await rerun();
+  assert.ok(!requests.includes("/3/find/301"));
+  assert.deepEqual(missingKeys(covered), ["TMDB:9003", "TVDB:303"]);
+
+  // Once the match is deleted, the next scan requests the crosswalk again and its recovery clears the cause.
+  const deleted = await api.DELETE(new Request(`http://localhost/api/plex/manual-coverage?id=${encodeURIComponent((await saved.json()).mapping.id)}`, { method: "DELETE" }));
+  assert.equal(deleted.status, 200, await deleted.clone().text());
+  await settled(status);
   requests.length = 0;
   const recovered = await rerun();
   assert.ok(requests.includes("/3/find/301"));
@@ -137,7 +145,8 @@ test("Report Missing keeps its precedence over a complete-set Manual Match when 
   const matched = await settled(status);
   assert.deepEqual(showFailures(matched), []);
   assert.deepEqual(missingKeys(matched), ["TMDB:9003", "TVDB:302", "TVDB:303"], "the complete-set Manual Match collects TVDB 301; TVDB 302 lost only its own evidence");
-  assert.deepEqual(crosswalkIssues(matched).map(issue => issue.episode?.id).sort(), [301, 302]);
+  // The covered TVDB 301 needs no crosswalk (ADR-0007), so only TVDB 302's unavailable relationship is a failed check.
+  assert.deepEqual(crosswalkIssues(matched).map(issue => issue.episode?.id).sort(), [302]);
 
   await setFlags(mappingId, [tvdb1]);
   const reported = await settled(status);

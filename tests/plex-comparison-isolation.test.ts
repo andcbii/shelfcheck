@@ -35,26 +35,29 @@ test("a failed automatic-evidence decision leaves the episode missing without di
   assert.match(result.episodeFailures[0].reason, /evidence unavailable/);
 });
 
-test("a later complete-set Manual Match still collects an episode after an earlier method fails, and the failure is kept", () => {
+test("a covering Manual Match decides an episode before automatic evidence, so a failing later check is never reached", () => {
+  // ADR-0007: the Manual Match is checked right after Report Missing. Before, it came last and
+  // collected episode 2 only after its automatic-evidence check had failed.
   const mapping = { id: "m", members: [{ provider: "TMDB" as const, id: 2 }, { provider: "TVDB" as const, id: 200 }] };
   const result = comparePlexShow(input({ libraryTmdbEpisodeIds: new FailingIds([3], 2), mappings: [mapping] as PlexComparisonInput["mappings"], manualInventory: [{ identities: [{ provider: "TVDB", id: 200 }] }] as PlexComparisonInput["manualInventory"] }));
   assert.deepEqual(missingIds(result), [4]);
   assert.deepEqual(result.manualCoverage.map(item => item.mappingId), ["m"]);
   assert.equal(result.coverageOutcomes.find(outcome => outcome.id === 2)?.status, "manual");
-  assert.equal(result.episodeFailures[0].coveredBy, "manual-match");
+  assert.deepEqual(result.episodeFailures, []);
 });
 
 /** The impact 05 — Scan Issues shows for one episode's failed check. */
 const impactOf = (result: ReturnType<typeof comparePlexShow>, id: number) => episodeCheckIssue({ ratingKey: "show" }, result.episodeFailures.find(failure => failure.episode.id === id && failure.method !== "manual-match")!).impacts!.join(" ");
 
-test("when Report Missing cannot be evaluated, other valid methods still collect and unflagged specials stay hidden", () => {
+test("when Report Missing and Manual Matches cannot be evaluated, numbers and automatic evidence still collect and unflagged specials stay hidden", () => {
   const throwing = { id: "x", get members(): never { throw new Error("saved flags unreadable"); } };
   const special: ProviderEpisode = { source: "TMDB", season: 0, episode: 1, providerEpisodeId: 5, title: "Special" };
   const result = comparePlexShow(input({ mappings: [throwing] as unknown as PlexComparisonInput["mappings"], providerEpisodes: [tmdb(1, 1), tmdb(2, 2), tmdb(3, 3), tmdb(4, 4), special] }));
   // Coordinates collect 1 and owned TMDB identity collects 3; 2 and 4 stay missing; the unflagged special is not listed.
   assert.deepEqual(missingIds(result), [2, 4]);
-  // The unreadable Manual Matches also fail the complete-set check of the uncollected episodes.
-  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["report-missing:1", "report-missing:2", "manual-match:2", "report-missing:3", "report-missing:4", "manual-match:4", "report-missing:5"]);
+  // The unreadable Manual Matches also fail the Manual Match check, which now runs right after
+  // Report Missing for every listed episode (ADR-0007), before numbers or automatic evidence collect it.
+  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["report-missing:1", "manual-match:1", "report-missing:2", "manual-match:2", "report-missing:3", "manual-match:3", "report-missing:4", "manual-match:4", "report-missing:5"]);
   assert.match(impactOf(result, 1), /Plex season and episode numbering established coverage for this episode, so it remains collected/);
   assert.match(impactOf(result, 3), /Automatic provider evidence established coverage for this episode, so it remains collected/);
   assert.match(impactOf(result, 2), /remains in missing results/);

@@ -167,10 +167,14 @@ test("Report Missing on a one-to-one Manual Match overrides direct ownership and
 test("Report Missing beats automatic crosswalk ownership and only names members of the saved mapping", async t => {
   const h = await harness(t);
   h.state.crosswalk = true;
-  const saved = await (await h.save(100, [200])).json();
   const automatic = await h.rerun();
   assert.deepEqual(h.missing(automatic), []);
   assert.ok(automatic.report.shows[0].autoMatches?.some((match: { tvdb: { id: number } }) => match.tvdb.id === 200), "TVDB 200 is collected through the TMDB external-ID crosswalk");
+  // A covering Manual Match decides TVDB 200 ahead of the crosswalk (ADR-0007), so it is no longer an Auto Match.
+  const saved = await (await h.save(100, [200])).json();
+  const manual = await h.status();
+  assert.deepEqual(h.missing(manual), []);
+  assert.ok(!manual.report.shows[0].autoMatches?.some((match: { tvdb: { id: number } }) => match.tvdb.id === 200), "TVDB 200 is credited to the Manual Match");
   const flagged = await h.post({ action: "save", id: saved.mapping.id, revision: saved.mapping.revision, reportMissing: [{ provider: "TVDB", id: 200 }] });
   assert.equal(flagged.status, 200);
   const reported = await h.status();

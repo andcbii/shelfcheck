@@ -24,14 +24,6 @@ export function checkpointIsUsable(checkpoint: { cacheVersion?: number; autoComp
   return resumePointIsFresh(checkpoint.savedAt, now);
 }
 
-export function mergeScanProgress<T extends object>(current: T, progress: Partial<T>): T {
-  return { ...current, ...progress };
-}
-
-export function checkpointShowsWithCache<T extends { ratingKey: string }>(shows: T[], cache: Record<string, unknown>): T[] {
-  return shows.filter((show) => Boolean(cache[show.ratingKey]));
-}
-
 export function plexReportCacheIsUsable(report: { cacheVersion?: number; autoCompoundEpisodes?: boolean; scanCache?: Record<string, unknown> } | null | undefined, cacheVersion: number, autoCompoundEpisodes: boolean) {
   return report?.cacheVersion === cacheVersion && report.autoCompoundEpisodes === autoCompoundEpisodes && Boolean(report.scanCache);
 }

@@ -25,8 +25,8 @@ type Server = {
   /** What GET /api/scan-runs answers; a function answers one request at a time. */
   activity: ActiveScanRun | (() => Reply);
   activityRequests: number;
-  /** The page's own status answers, in order; the last one repeats. */
-  statuses: Record<string, unknown>[];
+  /** The page's own status answers, in order; the last one repeats. An Error fails that request in transport. */
+  statuses: (Record<string, unknown> | Error)[];
   statusRequests: number;
   starts: unknown[];
   start: () => Reply;
@@ -37,7 +37,11 @@ type Server = {
 async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partial<Server> = {}) {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const server: Server = { activity: null, activityRequests: 0, statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, starts: [], start: () => Response.json({ error: "unexpected start" }, { status: 500 }), stateScan: { status: "idle", processed: 0, total: 0 }, ...initial };
-  const status = () => server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
+  const status = () => {
+    const reply = server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
   const fetcher: typeof fetch = async (input, init) => {
     if (input === "/api/scan-runs") {
       server.activityRequests += 1;
@@ -317,4 +321,89 @@ test("a failed first observation keeps the page locked, and polling retries unti
   page.server.activity = null;
   await page.advance(1000);
   assert.equal(page.button("New Plex search")?.disabled, false, "the first successful observation unlocks the page");
+});
+
+// A rate-limit pause shows only while the page is scanning: each page states its
+// own pause check, so these cases drive the rendered pages through their polls.
+
+const radar = (page: { container: HTMLElement }) => page.container.querySelector(".radar small")?.textContent || "";
+const primary = (page: { container: HTMLElement }) => page.container.querySelector("button.primary")?.textContent || "";
+const traktProgressLine = (page: { container: HTMLElement }) => page.container.querySelector(".loading p")?.textContent ?? null;
+
+test("a running Trakt scan paused for the rate limit says so on the radar, scan button and progress line", async (t) => {
+  const paused = { status: "running", processed: 1, total: 4, rateLimitPaused: true };
+  const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: paused, statuses: [paused] });
+  assert.equal(radar(page), "PAUSED - RATE LIMIT");
+  assert.match(primary(page), /^Paused due to Rate Limit/);
+  assert.equal(traktProgressLine(page), "Paused due to Rate Limit");
+});
+
+test("a running Trakt scan without a pause shows the ordinary scanning wording", async (t) => {
+  const running = { status: "running", processed: 1, total: 4, rateLimitPaused: false };
+  const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: running, statuses: [running] });
+  assert.equal(radar(page), "SCANNING");
+  assert.match(primary(page), /^Checking 1 of 4/);
+  assert.match(traktProgressLine(page) || "", /^Comparing show 1 of 4\./);
+});
+
+test("a Trakt page that stops scanning with its last status still paused no longer shows the pause", async (t) => {
+  const paused = { status: "running", processed: 1, total: 4, rateLimitPaused: true };
+  const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: paused, statuses: [paused] });
+  assert.equal(radar(page), "PAUSED - RATE LIMIT");
+
+  // A transport failure ends polling without a status that clears the pause flag.
+  // The run also leaves the lock, so observation does not follow it again.
+  page.server.statuses = [new TypeError("network down")];
+  page.server.statusRequests = 0;
+  page.server.activity = null;
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 1, "the failed status request was made");
+  assert.equal(radar(page), "MISSING");
+  assert.ok(!primary(page).includes("Paused"), `the scan button is not paused: ${primary(page)}`);
+  assert.equal(traktProgressLine(page), null, "the progress line is gone");
+});
+
+test("a running Plex scan paused for a provider's rate limit says so on the radar and scan button", async (t) => {
+  const paused = { status: "running", processed: 1, total: 4, rateLimitPaused: true, rateLimitProvider: "TMDB" };
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [paused] });
+  assert.equal(radar(page), "PAUSED · TMDB");
+  assert.match(primary(page), /^Paused for TMDB rate limit/);
+});
+
+test("a running Plex scan without a pause shows the ordinary scanning wording", async (t) => {
+  const running = { status: "running", processed: 1, total: 4, rateLimitPaused: false };
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [running] });
+  assert.equal(radar(page), "SCANNING");
+  assert.match(primary(page), /^Checking 1 of 4/);
+});
+
+test("a Plex page that stops scanning with its last status still paused no longer shows the pause", async (t) => {
+  const paused = { status: "running", processed: 1, total: 4, rateLimitPaused: true, rateLimitProvider: "TMDB" };
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [paused] });
+  assert.equal(radar(page), "PAUSED · TMDB");
+
+  // A transport failure ends polling while the last status stays running and paused.
+  // The run also leaves the lock, so observation does not follow it again.
+  page.server.statuses = [new TypeError("network down")];
+  page.server.statusRequests = 0;
+  page.server.activity = null;
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 1, "the failed status request was made");
+  assert.equal(radar(page), "MISSING");
+  assert.ok(!primary(page).includes("Paused"), `the scan button is not paused: ${primary(page)}`);
+});
+
+test("a Plex page still polling shows scanning, not a pause, when an idle status carries the pause flag", async (t) => {
+  const paused = { status: "running", processed: 1, total: 4, rateLimitPaused: true, rateLimitProvider: "TMDB" };
+  const page = await mountPage(t, "plex", { activity: PLEX_RUN, statuses: [paused] });
+  assert.equal(radar(page), "PAUSED · TMDB");
+
+  page.server.statuses = [{ status: "idle", processed: 2, total: 4, rateLimitPaused: true, rateLimitProvider: "TMDB" }];
+  page.server.statusRequests = 0;
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 1, "the idle status was polled");
+  await page.advance(1000);
+  assert.equal(page.server.statusRequests, 2, "polling continues after an idle status");
+  assert.equal(radar(page), "SCANNING");
+  assert.match(primary(page), /^Checking 2 of 4/);
 });

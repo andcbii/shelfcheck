@@ -14,7 +14,6 @@ import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, traktLocalAirDate, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
-import { isActiveRateLimitPause } from "@/lib/rate-limit-status";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
@@ -302,7 +301,7 @@ export default function Home() {
   }), [activeIgnoredSeasons, activeIgnoredShows, airingGraceDays, missingByShow, query, sortAscending, sortField, today]);
   const grouped = useMemo(() => view.shows.map((show) => ({ show: show.source, episodes: show.episodes })), [view]);
   const missingCount = view.totals.missingEpisodes;
-  const activelyRateLimitPaused = isActiveRateLimitPause(scanning, rateLimitPaused);
+  const activelyRateLimitPaused = scanning && rateLimitPaused === true;
 
   function chooseSort(field: "title" | "percent") {
     if (field === sortField) setSortAscending((ascending) => !ascending);

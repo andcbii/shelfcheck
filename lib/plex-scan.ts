@@ -851,9 +851,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
       uncompared.add(ratingKey);
       const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
-      if (rebuildFrom && previous) {
-        // Its last-good result predates this run's health change: it never enters a newer report or Resume point.
-        notRecompared.push(previous.title);
+      if (rebuildFrom) {
+        // Every show this run compares must be compared again after its health change: neither a last-good
+        // result from before it nor a placeholder enters a newer report or Resume point.
+        notRecompared.push(previous?.title || primary.title || "Unknown show");
         processed += 1;
         run.progress(processed, candidates.length);
         return;

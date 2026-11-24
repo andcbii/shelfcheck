@@ -394,14 +394,22 @@ test("a single-show scan whose recheck changes health compares a show with incom
   assert.equal(plexInputs.readPlexInputs().comparisons["ratingKey:1"].complete, true, "its saved inputs are repaired");
 });
 
-for (const [which, ratingKey, title] of [["another show can be compared neither from saved inputs nor live", "1", "Matched"], ["the target cannot be compared", "2", "Target"]] as const) {
+const failures = [
+  ["another show can be compared neither from saved inputs nor live", "1", "Matched"],
+  ["the target cannot be compared", "2", "Target"],
+  // A show added to Plex after the full scan has no earlier result to keep.
+  ["a newly added target with no earlier result cannot be compared", "4", "Added"],
+] as const;
+for (const [which, ratingKey, title] of failures) {
   test(`a single-show scan whose recheck changes health keeps the earlier report at its revision when ${which}`, async (t) => {
     const f = await fixture(t, { shows: crossShowLibrary() });
     const full = await pendingAfterFullScan(f);
     if (ratingKey === "1") incompleteSavedInputs();
+    if (ratingKey === "4") f.shows.push({ ratingKey: "4", title: "Added", tmdbId: 50 });
+    const target = ratingKey === "4" ? "ratingKey:4" : "ratingKey:2";
     f.plex = url => url.pathname === `/library/metadata/${ratingKey}` ? Response.json({}, { status: 403 }) : undefined;
     f.signIn = [signedIn("scan-token")];
-    const state = await f.scanWith({ ratingKey: "ratingKey:2" });
+    const state = await f.scanWith({ ratingKey: target });
     assert.equal(state.scan.status, "error");
     assert.match(state.scan.error || "", new RegExp(`changed a match's health, but ${title} could not be compared again`));
     assert.equal(f.health(f.first.id), "healthy", "the recheck's health is kept");
@@ -410,7 +418,7 @@ for (const [which, ratingKey, title] of [["another show can be compared neither 
     assert.ok(state.coverage.revision > (state.report?.coverageRevision ?? 0));
     assert.ok(state.coverage.issues.some(issue => issue.id === `inventory-details:ratingKey:${ratingKey}`), "the show's own failure is recorded");
     const point = resumePoint();
-    assert.ok(!point?.shows.some(show => show.ratingKey === `ratingKey:${ratingKey}`), "its earlier result enters no Resume point");
+    assert.ok(!point?.shows.some(show => show.ratingKey === `ratingKey:${ratingKey}`), "no result of it enters the Resume point");
     if (point?.shows.length) assert.equal(point.coverageRevision, state.coverage.revision);
   });
 }

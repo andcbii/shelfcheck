@@ -1,12 +1,9 @@
 import "server-only";
+import { TRAKT_AUTHENTICATION_ISSUE, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import { providerLookupContext, resolveCoverageIssue, setCoverageIssue } from "@/lib/coverage-issues";
 
-/** The scan run's TVDB login issue: the cause linked from TVDB requests that failed because of it. */
-export const TVDB_AUTHENTICATION_ISSUE = "provider-authentication:TVDB";
-const TRAKT_AUTHENTICATION_ISSUE = "provider-authentication:Trakt";
-
 /** One provider's scan-run login issue: library-scoped, raised once however many requests it stops. */
-function providerLoginDiagnostics(provider: "TVDB" | "Trakt", id: string, impact: string) {
+function providerLoginDiagnostics(provider: "TVDB" | "Trakt", id: CoverageIssueId, impact: string) {
   return {
     raiseFailure(error: unknown) {
       setCoverageIssue({id, operation: "provider-authentication", provider, scope: "library", ...providerLookupContext(error, {source: [], requested: {provider, kind: "authentication"}, impact})});
@@ -16,7 +13,7 @@ function providerLoginDiagnostics(provider: "TVDB" | "Trakt", id: string, impact
 }
 
 /** The scan run's TVDB login: resolved when TVDB login succeeds. */
-export const tvdbLoginDiagnostics = providerLoginDiagnostics("TVDB", TVDB_AUTHENTICATION_ISSUE, "TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained.");
+export const tvdbLoginDiagnostics = providerLoginDiagnostics("TVDB", TVDB_AUTHENTICATION_ISSUE, "TVDB catalogue downloads, freshness and Manual Match episodes could not be verified. Available last-good data and saved Manual Matches were retained.");
 
 /**
  * The scan run's Trakt login: one issue for a login that cannot be recovered, not one per Trakt

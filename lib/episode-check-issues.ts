@@ -1,9 +1,9 @@
 import "server-only";
 import { coverageIssueIdsWithPrefix, getCoverageIssue, resolveCoverageIssue, resolveCoverageIssueWithoutDependents, setCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
-import { lookupFailureIssueId } from "@/lib/lookup-diagnostics";
 import { isProviderId, providerLookup } from "@/lib/provider-lookup";
 import type { EpisodeCheckFailure, EpisodeCheckMethod, EpisodeCrosswalk } from "@/lib/plex-comparison";
-import { catalogueRecordKey, type MalformedCatalogueRecord } from "@/lib/catalogue-records";
+import type { MalformedCatalogueRecord } from "@/lib/catalogue-records";
+import { catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix, lookupFailureIssueId, lookupFailureShowPrefix, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 
 /** The show whose comparison evaluated the episode checks. `ratingKey` is the Plex show identity. */
 export type EpisodeCheckShow = { ratingKey: string; title?: string; tmdbId?: number; tvdbId?: number };
@@ -37,31 +37,16 @@ const methodLabels: Record<EpisodeCheckMethod, string> = {
 };
 const numbering = (item: { season?: number; episode?: number }) => item.season !== undefined && item.episode !== undefined ? `S${String(item.season).padStart(2, "0")}E${String(item.episode).padStart(2, "0")}` : "unknown numbering";
 
-/** Every episode-check cause of one show starts with this prefix. */
-const showIssuePrefix = (ratingKey: string) => `episode-check:${ratingKey}:`;
-/** One check of one show: its operation, decision method and crosswalk, followed by the provider episode. */
-const checkIssuePrefix = (ratingKey: string, check: Pick<EpisodeCheckFailure, "operation" | "method" | "crosswalk">) =>
-  `${showIssuePrefix(ratingKey)}${check.operation}${check.method ? `:${check.method}` : ""}${check.crosswalk ? `:${check.crosswalk}` : ""}:`;
-
-/** Stable per show, check and provider episode, so a repeated failure updates the same current cause. */
-export function episodeCheckIssueId(ratingKey: string, failure: Pick<EpisodeCheckFailure, "operation" | "method" | "crosswalk" | "episode">) {
-  const { provider = "Provider", id, season, episode } = failure.episode;
-  return `${checkIssuePrefix(ratingKey, failure)}${provider}:${id ?? `${season}x${episode}`}`;
-}
-/** The current cause of a failed English title request for one TVDB episode. */
-export function titleRecoveryIssueId(ratingKey: string, tvdbEpisodeId: number) {
-  return episodeCheckIssueId(ratingKey, { operation: "title-recovery", episode: { provider: "TVDB", id: tvdbEpisodeId } });
-}
 /** The TVDB episodes with a recorded current cause for one check of one show. */
 function recordedTvdbEpisodeIds(ratingKey: string, check: Pick<EpisodeCheckFailure, "operation" | "method" | "crosswalk">) {
-  return coverageIssueIdsWithPrefix(`${checkIssuePrefix(ratingKey, check)}TVDB:`).flatMap(id => {
+  return coverageIssueIdsWithPrefix(episodeCheckTvdbEpisodePrefix(ratingKey, check)).flatMap(id => {
     const recorded = getCoverageIssue(id)?.episode?.id;
     return recorded !== undefined ? [recorded] : [];
   });
 }
 /** Whether one show has a recorded combined/split matching cause. */
 export function compoundMatchingCausesRecorded(ratingKey: string) {
-  return coverageIssueIdsWithPrefix(checkIssuePrefix(ratingKey, { operation: "compound-matching" })).length > 0;
+  return coverageIssueIdsWithPrefix(episodeCheckPrefix(ratingKey, { operation: "compound-matching" })).length > 0;
 }
 /** The episode crosswalk causes currently recorded for one show, by crosswalk and TVDB episode. */
 export function recordedEpisodeCrosswalkFailures(ratingKey: string) {
@@ -74,11 +59,11 @@ export function recordedEpisodeCrosswalkFailures(ratingKey: string) {
  * TMDB episode request, which other episodes may share). Read before the show's episode checks are
  * reconciled, so a cause about to be resolved still names its requests.
  */
-export function episodeCrosswalkLookupCauses(ratingKey: string, tvdbEpisodeId: number): string[] {
+export function episodeCrosswalkLookupCauses(ratingKey: string, tvdbEpisodeId: number): CoverageIssueId[] {
   if (!isProviderId(tvdbEpisodeId)) return [];
   const own = [providerLookup.tvdbEpisodeExtended(tvdbEpisodeId), providerLookup.traktEpisodeSearchByTvdbEpisode(tvdbEpisodeId), providerLookup.tmdbEpisodeByTvdbEpisode(tvdbEpisodeId)].map(lookup => lookupFailureIssueId(ratingKey, lookup));
   const named = episodeCrosswalks.flatMap(crosswalk => getCoverageIssue(episodeCheckIssueId(ratingKey, { operation: "episode-crosswalk", crosswalk, episode: { provider: "TVDB", id: tvdbEpisodeId } }))?.causedBy || []);
-  return [...new Set([...own, ...named.filter(id => id.startsWith(`episode-identity:${ratingKey}:`))])];
+  return [...new Set([...own, ...named.filter(id => id.startsWith(lookupFailureShowPrefix(ratingKey)))])];
 }
 
 /** What the episode's decision still established, after this check failed. */
@@ -139,11 +124,6 @@ const recordProblems: Record<MalformedCatalogueRecord["problem"], string> = {
   "no-identity-or-numbering": "has no usable episode ID or season and episode numbering",
 };
 
-/** Stable per show and provider record: its identity, else its numbering, else its response position. */
-export function catalogueRecordIssueId(ratingKey: string, record: MalformedCatalogueRecord) {
-  return `${showIssuePrefix(ratingKey)}catalogue-record:${catalogueRecordKey(record)}`;
-}
-
 /**
  * A malformed individual catalogue record. Only fields the provider supplied are
  * reported; without identity or numbering the issue stays at show scope.
@@ -185,9 +165,9 @@ export function catalogueRecordIssue(show: EpisodeCheckShow, record: MalformedCa
  * unnecessary (ADR-0007); each is resolved unless a current cause still depends on it.
  * Resolving one records no success: the lookup was skipped, not answered.
  */
-export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], { malformedRecords = [], unnecessaryLookupCauses = [] }: { malformedRecords?: MalformedCatalogueRecord[]; unnecessaryLookupCauses?: string[] } = {}) {
-  const current = new Set<string>();
-  const existing = new Set(coverageIssueIdsWithPrefix(showIssuePrefix(show.ratingKey)));
+export function reconcileEpisodeCheckIssues(show: EpisodeCheckShow, failures: EpisodeCheckFailure[], { malformedRecords = [], unnecessaryLookupCauses = [] }: { malformedRecords?: MalformedCatalogueRecord[]; unnecessaryLookupCauses?: CoverageIssueId[] } = {}) {
+  const current = new Set<CoverageIssueId>();
+  const existing = new Set(coverageIssueIdsWithPrefix(episodeCheckShowPrefix(show.ratingKey)));
   for (const failure of failures) {
     const issue = episodeCheckIssue(show, failure);
     if (failure.existingOnly && !existing.has(issue.id)) continue;

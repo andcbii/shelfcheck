@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { registerHooks } from "node:module";
 import test from "node:test";
+import { TVDB_AUTHENTICATION_ISSUE } from "../lib/coverage-issue-ids";
 import type { SeriesAssociation } from "../lib/comparison-catalogue-resolver";
 import { applyObligationPatch, type RefreshObligation } from "../lib/refresh-obligation";
 import { inMemoryCatalogueSource } from "./in-memory-catalogue-source";
@@ -193,7 +194,7 @@ test("a failure caused by provider authentication names that cause, and the othe
   const authentication = new Error("TVDB authentication failed.");
   const { source } = inMemoryCatalogueSource({
     now: NOW, saved: { tmdb: { 10: before(DAY), 11: before(DAY) }, tvdb: { 3: before(DAY) } },
-    failing: { tmdb: { 11: notFound(11) }, tvdb: { 1: { error: authentication, causedBy: ["provider-authentication:TVDB"] } } },
+    failing: { tmdb: { 11: notFound(11) }, tvdb: { 1: { error: authentication, causedBy: [TVDB_AUTHENTICATION_ISSUE] } } },
   });
   const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, { candidates: [1, 3], preferredId: 1 }), { source });
 
@@ -996,7 +997,7 @@ test("a provider with one Plex ID keeps its saved catalogue at any age after a f
 test("a single TVDB ID failing on provider authentication names that cause, and the TMDB identity resolved before it", async () => {
   const { source } = inMemoryCatalogueSource({
     now: NOW, saved: { tmdb: { 11: before(DAY) } },
-    failing: { tvdb: { 1: { error: new Error("TVDB authentication failed."), causedBy: ["provider-authentication:TVDB"] } } },
+    failing: { tvdb: { 1: { error: new Error("TVDB authentication failed."), causedBy: [TVDB_AUTHENTICATION_ISSUE] } } },
   });
   const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11 }, { candidates: [1], preferredId: 1, refreshObligation: true }), { source });
 

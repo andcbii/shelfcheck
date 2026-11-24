@@ -1,3 +1,4 @@
+import type { CoverageIssueId } from "@/lib/coverage-issue-ids";
 import { compoundTvdbEvidence, episodeReference, type CompoundCoverage, type CompoundEvidenceFailure, type EpisodeReference, type LocalCompoundEpisode } from "@/lib/compound-episodes";
 import { coverageIssueCause } from "@/lib/value-guards";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
@@ -29,7 +30,7 @@ export type EpisodeCheckFailure = {
    */
   kind: CompoundEvidenceFailure["kind"] | "request-failed" | "unreadable-response" | "relationship-unavailable";
   reason: string;
-  causedBy?: string[];
+  causedBy?: CoverageIssueId[];
   /**
    * Applies only to a cause already recorded; it raises no new one, yet does not resolve it either
    * (only repaired evidence or a completed check does):

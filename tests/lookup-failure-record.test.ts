@@ -5,10 +5,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
+import { lookupFailureIssueId } from "../lib/coverage-issue-ids";
+import { seedStoredCoverageIssues } from "./stored-coverage-issues";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const { lookupFailureRecord } = await import("../lib/lookup-failure-record");
 const { providerLookup } = await import("../lib/provider-lookup");
-const { setCoverageIssue, resolveCoverageIssue } = await import("../lib/coverage-issues");
+const { resolveCoverageIssue } = await import("../lib/coverage-issues");
+const { database } = await import("../lib/sqlite");
 const { reconcileEpisodeCheckIssues } = await import("../lib/episode-check-issues");
 hook.deregister();
 
@@ -40,13 +43,13 @@ test("a lookup with no failed-request issue has no recorded failure", t => {
 
 test("an open failed-request issue reports its failure time", t => {
   temporaryDatabase(t);
-  setCoverageIssue(failedRequest(ids.tmdbCrosswalk301, "2026-11-20T10:00:00.000Z"));
+  seedStoredCoverageIssues(database(), failedRequest(ids.tmdbCrosswalk301, "2026-11-20T10:00:00.000Z"));
   assert.deepEqual(lookupFailureRecord("42").failure(providerLookup.tmdbEpisodeByTvdbEpisode(301)), {open: true, failedAt: "2026-11-20T10:00:00.000Z"});
 });
 
 test("an undated open failed-request issue is still open, distinct from no failure", t => {
   temporaryDatabase(t);
-  setCoverageIssue(failedRequest(ids.tmdbCrosswalk301));
+  seedStoredCoverageIssues(database(), failedRequest(ids.tmdbCrosswalk301));
   const failure = lookupFailureRecord("42").failure(providerLookup.tmdbEpisodeByTvdbEpisode(301));
   assert.deepEqual(failure, {open: true});
   assert.equal(Object.hasOwn(failure!, "failedAt"), false);
@@ -54,16 +57,16 @@ test("an undated open failed-request issue is still open, distinct from no failu
 
 test("a resolved failed-request issue is no longer recorded", t => {
   temporaryDatabase(t);
-  setCoverageIssue(failedRequest(ids.tmdbCrosswalk301, "2026-11-20T10:00:00.000Z"));
-  resolveCoverageIssue(ids.tmdbCrosswalk301);
+  seedStoredCoverageIssues(database(), failedRequest(ids.tmdbCrosswalk301, "2026-11-20T10:00:00.000Z"));
+  resolveCoverageIssue(lookupFailureIssueId("42", providerLookup.tmdbEpisodeByTvdbEpisode(301)));
   assert.equal(lookupFailureRecord("42").failure(providerLookup.tmdbEpisodeByTvdbEpisode(301)), undefined);
 });
 
 test("each lookup kind reads its own show's failed-request issue", t => {
   temporaryDatabase(t);
-  setCoverageIssue(failedRequest(ids.traktCrosswalk301, "2026-11-20T10:00:00.000Z"));
-  setCoverageIssue(failedRequest(ids.tvdbExtended301, "2026-11-20T11:00:00.000Z"));
-  setCoverageIssue(failedRequest(ids.tmdbValidation, "2026-11-20T12:00:00.000Z"));
+  seedStoredCoverageIssues(database(), failedRequest(ids.traktCrosswalk301, "2026-11-20T10:00:00.000Z"));
+  seedStoredCoverageIssues(database(), failedRequest(ids.tvdbExtended301, "2026-11-20T11:00:00.000Z"));
+  seedStoredCoverageIssues(database(), failedRequest(ids.tmdbValidation, "2026-11-20T12:00:00.000Z"));
   const record = lookupFailureRecord("42");
   assert.deepEqual(record.failure(providerLookup.traktEpisodeSearchByTvdbEpisode(301)), {open: true, failedAt: "2026-11-20T10:00:00.000Z"});
   assert.deepEqual(record.failure(providerLookup.tvdbEpisodeExtended(301)), {open: true, failedAt: "2026-11-20T11:00:00.000Z"});

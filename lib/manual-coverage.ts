@@ -1,3 +1,4 @@
+import { COMPARISON_PENDING_ISSUE } from "@/lib/coverage-issue-ids";
 import { listCoverageIssues, resolveCoverageIssue, type CoverageIssue } from "@/lib/coverage-issues";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
 import "server-only";
@@ -16,7 +17,7 @@ export class CoverageError extends Error {
 export function coverageState() {
   const state = database().prepare("SELECT revision,pending FROM shelfcheck_coverage_state WHERE id=1").get() as {revision:number;pending:number};
   const issues = listCoverageIssues();
-  if (state.pending) issues.push({id:"comparison-pending",operation:"comparison",scope:"library",cause:"Coverage changes need to be compared against the saved library inventory.",action:"Retry the comparison or run a Plex scan."} satisfies CoverageIssue);
+  if (state.pending) issues.push({id:COMPARISON_PENDING_ISSUE,operation:"comparison",scope:"library",cause:"Coverage changes need to be compared against the saved library inventory.",action:"Retry the comparison or run a Plex scan."} satisfies CoverageIssue);
   return {revision:state.revision,pending:issues.length ? 1 : 0,issues};
 }
 
@@ -290,18 +291,24 @@ export function beginCoverageRecheck(revision: number) {
   database().prepare("UPDATE shelfcheck_coverage_state SET pending=1 WHERE id=1 AND revision=?").run(revision);
 }
 
+/** A health update that committed: the Manual Match it changed and the coverage revision it moved to. */
+export type CoverageHealthReceipt = { mappingId: string; revision: number };
 // Lookup results must never overwrite a mapping repaired or deleted during an HTTP request.
-export function updateCoverageHealth(snapshot: CoverageMapping, health: NonNullable<CoverageMapping["health"]>, healthMessage?: string) {
+/** Saves a Manual Match's health; returns a receipt only when this call committed a change. */
+export function updateCoverageHealth(snapshot: CoverageMapping, health: NonNullable<CoverageMapping["health"]>, healthMessage?: string): CoverageHealthReceipt | undefined {
   const db = database();
   db.exec("BEGIN IMMEDIATE");
   try {
+    let receipt: CoverageHealthReceipt | undefined;
     const current = savedManualMatch(db, snapshot.id);
     if (current && current.revision === snapshot.revision && ((current.health || "healthy") !== health || current.healthMessage !== healthMessage)) {
       const revision = coverageState().revision + 1;
       db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify({...current, health, healthMessage, revision}), current.id);
       db.prepare("UPDATE shelfcheck_coverage_state SET revision=?,pending=1 WHERE id=1").run(revision);
+      receipt = {mappingId: current.id, revision};
     }
     db.exec("COMMIT");
+    return receipt;
   } catch(error) {
     db.exec("ROLLBACK");
     throw error;

@@ -5,11 +5,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { comparisonInputsIssueId, inventoryDetailsIssueId, lookupFailureIssueId } from "../lib/coverage-issue-ids";
+import { providerLookup } from "../lib/provider-lookup";
+import { seedStoredCoverageIssues } from "./stored-coverage-issues";
 const hook = registerHooks({resolve(s,c,next) { return s === "server-only" ? {url:"data:text/javascript,export%20%7B%7D",shortCircuit:true} : next(s,c); }});
 const scan = await import("../app/api/plex/scan/route");
 const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const savedIssues = await import("../lib/coverage-issues");
+const { database } = await import("../lib/sqlite");
 hook.deregister();
 
 test("show lookup failures preserve selected fresh and cached identity sources through reload and recovery", async t => {
@@ -87,13 +91,13 @@ test("show lookup failures preserve selected fresh and cached identity sources t
   const metadataBlocked = await run();
   assert.equal(metadataBlocked.coverage.issues.length,1,"metadata lookup and comparison impact count as one cause");
   assert.equal(metadataBlocked.coverage.issues[0].id,"inventory-details:ratingKey:1");
-  assert.deepEqual(savedIssues.getCoverageIssue("comparison-inputs:ratingKey:1")?.causedBy,["inventory-details:ratingKey:1"]);
+  assert.deepEqual(savedIssues.getCoverageIssue(comparisonInputsIssueId("ratingKey:1"))?.causedBy,["inventory-details:ratingKey:1"]);
   metadataFailure = false;
   inventoryFailure = true;
   const inventoryBlocked = await run();
   assert.deepEqual(inventoryBlocked.coverage.issues.map((i:{id:string})=>i.id),["inventory:ratingKey:1:1"],"one failed inventory lookup blocks all dependent comparisons without adding causes");
-  assert.deepEqual(savedIssues.getCoverageIssue("comparison-inputs:ratingKey:2")?.causedBy,["inventory:ratingKey:1:1"]);
-  assert.equal(savedIssues.getCoverageIssue("inventory-details:ratingKey:1"),undefined,"successful metadata retry clears its old lookup failure even while inventory remains incomplete");
+  assert.deepEqual(savedIssues.getCoverageIssue(comparisonInputsIssueId("ratingKey:2"))?.causedBy,["inventory:ratingKey:1:1"]);
+  assert.equal(savedIssues.getCoverageIssue(inventoryDetailsIssueId("ratingKey:1")),undefined,"successful metadata retry clears its old lookup failure even while inventory remains incomplete");
   inventoryFailure = false;
   assert.deepEqual((await run()).coverage.issues,[]);
   status = 404;
@@ -181,7 +185,7 @@ test("episode failures explain catalogue identity sources and persist safe parse
   assert.deepEqual(authBlocked.coverage.issues.map((i:{id:string})=>i.id),["provider-authentication:TVDB"],"cached catalogues and blocked episode verification share the established authentication cause");
   assert.match(authBlocked.coverage.issues[0].impacts.join(" "),/Episode identity and coverage/);
   assert.equal(blockedEpisodeRequests,0,"known authentication failure prevents doomed episode requests");
-  const blockedIssue=savedIssues.getCoverageIssue("episode-identity:ratingKey:1:tvdb-episode-extended:200");
+  const blockedIssue=savedIssues.getCoverageIssue(lookupFailureIssueId("ratingKey:1",providerLookup.tvdbEpisodeExtended(200)));
   assert.deepEqual(blockedIssue?.causedBy,["provider-authentication:TVDB"]);
   assert.ok(!JSON.stringify(authBlocked.coverage).includes("secret-"));
   assert.match(authBlocked.report.shows[0].warning,/identity.*failed/);
@@ -220,12 +224,13 @@ test("shared scan state preserves independent legacy causes and groups explicit 
   t.after(()=>{close();if(previous === undefined) delete process.env.SHELFCHECK_DATA_DIR;else process.env.SHELFCHECK_DATA_DIR=previous;rmSync(dir,{recursive:true,force:true});});
   // Seed failure-time payloads from an earlier session, including pre-provenance records.
   const show = {ratingKey:"ratingKey:1",title:"Is It Cake? Halloween",tmdbId:300594,tvdbId:484205};
-  savedIssues.setCoverageIssue({id:"authentication",scope:"library",provider:"TVDB",operation:"provider-authentication",cause:"401 — TVDB login failed",action:"Check TVDB credentials."});
-  savedIssues.setCoverageIssue({id:"catalogue",scope:"show",provider:"TVDB",operation:"catalogue-refresh",show,causedBy:["authentication"],cause:"TVDB catalogue could not be downloaded.",action:"Check TVDB credentials."});
-  savedIssues.setCoverageIssue({id:"dependent",scope:"show",operation:"comparison",show,causedBy:["catalogue"],cause:"Episode comparison could not be checked.",action:"Run a scan."});
-  savedIssues.setCoverageIssue({id:"legacy-input",scope:"show",operation:"comparison",show,cause:"Saved library inventory is unavailable.",action:"Run a scan."});
-  savedIssues.setCoverageIssue({id:"unrelated-comparison",scope:"show",operation:"comparison",show,cause:"Independent comparison failure.",action:"Run a scan."});
-  savedIssues.setCoverageIssue({id:"unrelated-library",scope:"library",operation:"inventory",cause:"Independent Plex enumeration failure.",action:"Run a scan."});
+  seedStoredCoverageIssues(database(),
+    {id:"authentication",scope:"library",provider:"TVDB",operation:"provider-authentication",cause:"401 — TVDB login failed",action:"Check TVDB credentials."},
+    {id:"catalogue",scope:"show",provider:"TVDB",operation:"catalogue-refresh",show,causedBy:["authentication"],cause:"TVDB catalogue could not be downloaded.",action:"Check TVDB credentials."},
+    {id:"dependent",scope:"show",operation:"comparison",show,causedBy:["catalogue"],cause:"Episode comparison could not be checked.",action:"Run a scan."},
+    {id:"legacy-input",scope:"show",operation:"comparison",show,cause:"Saved library inventory is unavailable.",action:"Run a scan."},
+    {id:"unrelated-comparison",scope:"show",operation:"comparison",show,cause:"Independent comparison failure.",action:"Run a scan."},
+    {id:"unrelated-library",scope:"library",operation:"inventory",cause:"Independent Plex enumeration failure.",action:"Run a scan."});
   close();
   const state = (await (await scan.GET()).json()).coverage;
   assert.equal(state.issues.length,4);

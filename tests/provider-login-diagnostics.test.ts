@@ -29,14 +29,14 @@ function storedIssue(id: string) {
   return row?.payload;
 }
 
-test("a failed TVDB login is one library issue, resolved when TVDB login succeeds", t => {
+test("a failed TVDB login is one library issue that names Manual Match verification, resolved when TVDB login succeeds", t => {
   temporaryDatabase(t);
   tvdbLoginDiagnostics.raiseFailure(new ProviderHttpError("TVDB", 401));
   tvdbLoginDiagnostics.raiseFailure(new ProviderHttpError("TVDB", 401));
   assert.equal(listCoverageIssues().length, 1);
   assert.equal(storedIssue("provider-authentication:TVDB"), JSON.stringify({
     id: "provider-authentication:TVDB", operation: "provider-authentication", provider: "TVDB", scope: "library", category: "Provider Lookup",
-    lookup: {source: [], requested: {provider: "TVDB", kind: "authentication"}, impact: "TVDB catalogue downloads and freshness could not be verified. Available last-good data was retained.", status: 401, failureKind: "http"},
+    lookup: {source: [], requested: {provider: "TVDB", kind: "authentication"}, impact: "TVDB catalogue downloads, freshness and Manual Match episodes could not be verified. Available last-good data and saved Manual Matches were retained.", status: 401, failureKind: "http"},
     cause: "401 — TVDB request failed", action: "Check TVDB credentials or permissions, then retry the Plex scan.",
   }));
   tvdbLoginDiagnostics.resolve();

@@ -3,6 +3,7 @@ import { coverageIssueCause } from "@/lib/value-guards";
 import { providerEpisodeIsOwned } from "@/lib/plex-episode-outcome";
 import { resolvedTmdbMatchEpisode, type TmdbFindEpisode } from "@/lib/plex-auto-match";
 import { reportedOrIncomplete, type CoverageEvidence, type CoverageIdentity, type CoverageMapping, type CoverageOutcome, type CoverageProvider } from "@/lib/manual-coverage-model";
+import { manualMatchCoverageRule } from "@/lib/manual-match-coverage";
 import type { PlexAutoMatch, PlexAutoMatchMethod, PlexMissingEpisode, PlexShowResult } from "@/lib/plex-scan";
 
 /** `titleLanguage: "eng"`: the default TVDB title was unusable and `title` was recovered from TVDB's English translation. */
@@ -129,6 +130,8 @@ export function comparePlexShow(input: PlexComparisonInput) {
     }
     recordDiagnostic("plex.show.auto-compound", { ratingKey, enabled: true, candidates: compoundCovered.length, reconciled, failed: episodeFailures.length });
   }
+  // Built lazily: a Manual Match or evidence record is read only when an episode reaches this check.
+  const manualMatchCoverage = manualMatchCoverageRule({ mappings, directInventory: manualInventory });
   const manualCoverage: NonNullable<PlexShowResult["manualCoverage"]> = [];
   const missingMap = new Map<string, PlexMissingEpisode>();
   const coverageOutcomes: CoverageOutcome[] = [];
@@ -194,17 +197,10 @@ export function comparePlexShow(input: PlexComparisonInput) {
     }
     if (attempt("coordinates", () => localEpisodes.has(key))) { if (outcome) outcome.status = "automatic"; decide("coordinates"); continue; }
     if (attempt("automatic-evidence", () => providerEpisodeIsOwned({ source: episode.source, providerEpisodeId: episode.providerEpisodeId, localTmdbEpisodeIds: libraryTmdbEpisodeIds, tvdbEvidence: { directTvdb: Boolean(episode.providerEpisodeId && directTvdbSatisfied.has(episode.providerEpisodeId)), directImdb: Boolean(episode.providerEpisodeId && directImdbSatisfied.has(episode.providerEpisodeId)), trakt: Boolean(episode.providerEpisodeId && traktSatisfied.has(episode.providerEpisodeId)), tmdb: Boolean(episode.providerEpisodeId && tmdbSatisfied.has(episode.providerEpisodeId)), compound: Boolean(episode.providerEpisodeId && compoundSatisfied.has(episode.providerEpisodeId)) }, autoCompoundEpisodes }))) { if (outcome) outcome.status = "automatic"; decide("automatic-evidence"); continue; }
-    const manual = attempt("manual-match", () => {
-      const mapping = mappings.find(mapping => (!mapping.health || mapping.health === "healthy") && mapping.members.some(member => member.provider === episode.source && member.id === episode.providerEpisodeId));
-      if (!mapping) return undefined;
-      const sourceMembers = mapping.members.filter(member => member.provider !== episode.source);
-      const evidence = manualInventory.filter(item => sourceMembers.some(member => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
-      const sourceComplete = sourceMembers.length && sourceMembers.every(member => evidence.some(item => item.identities.some(identity => identity.provider === member.provider && identity.id === member.id)));
-      return sourceComplete ? { mapping, evidence } : undefined;
-    });
+    const manual = attempt("manual-match", () => episode.providerEpisodeId === undefined ? undefined : manualMatchCoverage({ provider: episode.source, id: episode.providerEpisodeId }));
     if (manual) {
       if (outcome) outcome.status = "manual";
-      if (!manualCoverage.some(item => item.mappingId === manual.mapping.id)) manualCoverage.push({ mappingId: manual.mapping.id, source: manual.evidence });
+      if (!manualCoverage.some(item => item.mappingId === manual.mapping.id)) manualCoverage.push({ mappingId: manual.mapping.id, source: manual.source });
       decide("manual-match");
       continue;
     }

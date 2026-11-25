@@ -26,7 +26,17 @@ export function showOptions(mappings: CoverageMapping[], provider: CoverageProvi
   return [...shows.values()].sort(compareShows).map(show => ({ ...show, label: show.showYear ? `${show.show} (${show.showYear})` : show.show }));
 }
 
-export const filteringShows = (picks: ShowPicks) => picks.TMDB.length > 0 || picks.TVDB.length > 0;
+/**
+ * The picks whose show is still on that side of a saved Manual Match, or
+ * `picks` itself when every picked show still is.
+ */
+export function savedShowPicks(mappings: CoverageMapping[], picks: ShowPicks): ShowPicks {
+  const saved = (provider: CoverageProvider, showId: number) => mappings.some(mapping => mapping.members.some(member => member.provider === provider && member.showId === showId));
+  const kept: ShowPicks = { TMDB: picks.TMDB.filter(showId => saved("TMDB", showId)), TVDB: picks.TVDB.filter(showId => saved("TVDB", showId)) };
+  return kept.TMDB.length === picks.TMDB.length && kept.TVDB.length === picks.TVDB.length ? picks : kept;
+}
+
+export const filteringShows =(picks: ShowPicks) => picks.TMDB.length > 0 || picks.TVDB.length > 0;
 
 /**
  * The Manual Matches the show filters keep. A match belongs to a show when any

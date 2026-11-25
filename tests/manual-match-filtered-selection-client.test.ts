@@ -160,3 +160,63 @@ test("Saving a match the filters hide keeps the filters and says so; a visible s
   await report.click("Delete match", report.dialog()!);
   assert.deepEqual(report.deletes, [["who-b"]]);
 });
+
+const deleteOne = async (report: Awaited<ReturnType<typeof mountReport>>, id: string) => {
+  await report.click(/^Delete/, report.card(id));
+  await report.click("Delete match", report.dialog()!);
+};
+
+test("A refresh of the same mounted report keeps the filters and ticked matches across changed show names and years", async t => {
+  const report = await mountReport(t, [...lostMatches(3), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Lost (2004)");
+  await report.pick("TVDB shows", "Lost (2004)");
+  await report.tick("lost-01", "lost-02");
+  // The saved show is renamed and its year corrected before the next refresh.
+  const renamed = (show: Member) => show.provider === "TMDB" && show.showId === lost.showId ? { ...show, show: "LOST", showYear: 2005 } : show;
+  report.server.mappings = report.server.mappings.map(mapping => ({ ...mapping, members: mapping.members.map(renamed) }));
+  await deleteOne(report, "lost-03");
+  assert.deepEqual(report.deletes, [["lost-03"]]);
+  assert.deepEqual(report.picked("TMDB shows"), ["LOST (2005)"]);
+  assert.deepEqual(report.picked("TVDB shows"), ["Lost (2004)"]);
+  assert.equal(report.heading(), "Manual Matches (2 of 3)");
+  assert.deepEqual(report.cards(), ["lost-01", "lost-02"]);
+  assert.deepEqual(report.ticked(), ["lost-01", "lost-02"]);
+});
+
+test("When a refresh removes a picked show's last match, the pick is dropped and the selection clears", async t => {
+  const report = await mountReport(t, [match("who", [who], [tvdbWho]), ...lostMatches(1), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Doctor Who (2005)");
+  await report.pick("TMDB shows", "Archer (2009)");
+  await report.tick("archer");
+  await deleteOne(report, "who");
+  assert.deepEqual(report.picked("TMDB shows"), ["Archer (2009)"]);
+  assert.equal(report.heading(), "Manual Matches (1 of 2)");
+  assert.deepEqual(report.cards(), ["archer"]);
+  assert.equal(report.bulkBar(), null);
+  // Removing the remaining pick lists everything again: no Doctor Who pick lingers to filter by.
+  await report.click("Remove Archer (2009)");
+  assert.equal(report.heading(), "Manual Matches (2)");
+});
+
+test("A save that moves a picked show's last match to another show drops the pick and lists the saved match", async t => {
+  const report = await mountReport(t, [match("who", [who], [tvdbWho]), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Doctor Who (2005)");
+  report.server.resolveAs = [member("TMDB", { ...archer, episode: 2 }), member("TVDB", { ...tvdbArcher, episode: 2 })];
+  await report.click(/^Edit/, report.card("who"));
+  await report.click("Resolve and review", report.dialog()!);
+  await report.click("Save Manual Match", report.dialog()!);
+  assert.deepEqual(report.picked("TMDB shows"), []);
+  assert.equal(report.heading(), "Manual Matches (2)");
+  assert.equal(report.card("who").querySelector(".manual-match-saved")?.textContent, "Saved");
+  assert.doesNotMatch(report.container.textContent!, /Hidden by the current filters/);
+});
+
+test("The show filters reset when the report is left or reloaded", async t => {
+  const report = await mountReport(t, [...lostMatches(1), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Lost (2004)");
+  assert.equal(report.heading(), "Manual Matches (1 of 2)");
+  // Leaving or reloading the page mounts a new report.
+  await act(async () => report.root.render(createElement(ManualMatchEditor, { key: "reloaded", initialUrls: [], onChanged() {}, report: true })));
+  assert.deepEqual(report.picked("TMDB shows"), []);
+  assert.equal(report.heading(), "Manual Matches (2)");
+});

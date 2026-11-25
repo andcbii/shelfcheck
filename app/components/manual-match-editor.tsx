@@ -5,7 +5,7 @@ import { ManualMatchList, plural } from "@/app/components/manual-match-list";
 import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 import { ManualMatchShowFilter } from "@/app/components/manual-match-show-filter";
-import { filterByShows, filteringShows, noShowPicks, showOptions, type ShowPicks } from "@/lib/manual-match-filters";
+import { filterByShows, filteringShows, noShowPicks, savedShowPicks, showOptions, type ShowPicks } from "@/lib/manual-match-filters";
 import { orderManualMatches } from "@/lib/manual-match-order";
 type Props = {
   initialUrls: string[];
@@ -91,6 +91,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const flagsChanged = draftFlags.join() !== (editing ? flaggedKeys(editing.members) : []).join();
   const dirty = flagsChanged || Boolean(preview) || (editing ? !savedUrls : urls.join() !== defaultUrls.join());
   const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
+  // A refresh that removes a picked show's last Manual Match drops the pick, which changes the
+  // filter, so the selection and any pending bulk delete clear as for any filter change.
+  const savedPicks = savedShowPicks(scopedMappings, showPicks);
+  if (savedPicks !== showPicks) changeShowPicks(savedPicks);
   // Only the report has a fixed show order and show filters; the Plex page keeps the saved order.
   const filtering = report && filteringShows(showPicks);
   const listedMappings = report ? orderManualMatches(filtering ? filterByShows(scopedMappings, showPicks) : scopedMappings) : scopedMappings;
@@ -289,8 +293,13 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           // filters hide has no card to show, so the filters stay as they are and a message says so.
           closeForm();
           setSavedNote(result.mapping ? { id: result.mapping.id } : null);
-          if (result.mapping && filtering && !filterByShows([result.mapping], showPicks).length) setMessage("Saved. Hidden by the current filters.");
-        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details." : "Saved. Affected cached Plex comparisons have been rechecked.");
+          const latest = await load();
+          // Judged against the refreshed picks: moving a picked show's last match away drops that pick.
+          const picks = latest && savedShowPicks(latest, showPicks);
+          if (result.mapping && picks && filteringShows(picks) && !filterByShows([result.mapping], picks).length) setMessage("Saved. Hidden by the current filters.");
+          return;
+        }
+        setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details." : "Saved. Affected cached Plex comparisons have been rechecked.");
         await load();
       }
     } catch (error) {

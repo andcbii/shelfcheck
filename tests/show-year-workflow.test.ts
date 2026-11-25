@@ -224,8 +224,10 @@ test("a full scan holding the Plex show without a usable year keeps its last kno
   // The TMDB and TVDB summaries give 1999; only a usable Plex year replaces the last known one.
   for (const missing of [undefined, 0, "2010", 20050, 2005.5]) {
     who.year = missing;
-    assert.equal((await f.run()).scan.status, "completed");
+    const result = await f.run();
+    assert.equal(result.scan.status, "completed");
     assert.deepEqual([(await f.years())["TMDB 57243"], (await f.years())["TVDB 78804"]], [2005, 2005], `Plex year ${JSON.stringify(missing)} keeps the last known year`);
+    assert.equal(result.report.shows.find((show: { title: string }) => show.title === "Doctor Who")?.year, 2005, `the Plex page shows the kept year for Plex year ${JSON.stringify(missing)}`);
   }
   f.state.libraries = [[other]];
   await f.run();
@@ -233,6 +235,21 @@ test("a full scan holding the Plex show without a usable year keeps its last kno
   f.state.libraries = [[who, other]];
   await f.run();
   assert.equal((await f.years())["TMDB 57243"], 1999, "a returning show does not revive the year of its removed identity");
+});
+
+test("a completed full scan publishes the Plex inventory's new year even when it keeps a show's last-good comparison", async t => {
+  const f = await fixture(t);
+  const who: PlexRecord = { ratingKey: "1", title: "Doctor Who", year: 2005, guid: "plex://show/who", ids: ["tmdb://57243", "tvdb://78804"] };
+  f.state.libraries = [[who]];
+  await f.save(57243, 78804);
+  assert.equal((await f.run()).scan.status, "completed");
+  who.year = 2010;
+  // The show's details fail, so its last-good comparison is kept; the library listing still gives 2010.
+  f.state.failures.set("/library/metadata/1", 404);
+  const result = await f.run();
+  assert.equal(result.scan.status, "completed", result.scan.error || "");
+  assert.deepEqual(await f.years(), { "TMDB 57243": 2010, "TVDB 78804": 2010 }, "the fresh Plex inventory year wins over the kept comparison's");
+  assert.equal(result.report.shows[0].year, 2010, "the Plex page shows the same year");
 });
 
 test("provider shows map to Plex groups by same-provider selected IDs and resolved candidates, one year per group in any order", async t => {

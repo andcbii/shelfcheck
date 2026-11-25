@@ -2,6 +2,9 @@
 
 type Props = { total: number; page: number; pageSize: number; onPageChange: (page: number) => void; onPageSizeChange: (pageSize: number) => void };
 
+/** `page`, moved back if need be to the last page of `total` results; page 1 when there are none. */
+export const clampPage = (page: number, total: number, pageSize: number) => Math.min(page, Math.max(1, Math.ceil(total / pageSize)));
+
 export function ReportPagination({ total, page, pageSize, onPageChange, onPageSizeChange }: Props) {
   if (!total) return null;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));

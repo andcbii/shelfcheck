@@ -2,7 +2,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { ManualMatchCard } from "@/app/components/manual-match-card";
 import { Popup } from "@/app/components/popup";
-import { ReportPagination } from "@/app/reports/report-pagination";
+import { clampPage, ReportPagination } from "@/app/reports/report-pagination";
 import type { CoverageMapping } from "@/lib/manual-coverage-model";
 
 export type ManualMatchPaging = {
@@ -54,7 +54,7 @@ function DeleteConfirmation({ matches, locked, onCancel, onConfirm }: { matches:
 }
 
 export function ManualMatchList({ matches, report, filterSelectAndPage, locked, pending, paging: { page, pageSize, onPageChange, onPageSizeChange }, selection: { selected, onSelectionChange, confirmation, onConfirmationChange }, onDeleteSelected, onEdit, onDelete, savedId, showFilters }: Props) {
-  const currentPage = Math.min(page, Math.max(1, Math.ceil(matches.length / pageSize)));
+  const currentPage = clampPage(page, matches.length, pageSize);
   const selectedIds = selected.filter(id => matches.some(match => match.id === id));
   const pageMatches = matches.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   // The one Manual Match whose Delete awaits confirmation; a refresh that removes it closes the confirmation.
@@ -71,7 +71,7 @@ export function ManualMatchList({ matches, report, filterSelectAndPage, locked, 
  {filterSelectAndPage && <><p role="status">{pending ? <>Some coverage checks need attention. <a href="/reports/coverage-issues">See Scan Issues</a> for details.</> : ""}</p><h3>{report ? "Manual Matches" : "Saved Manual Matches"} ({showFilters?.active ? `${matches.length} of ${showFilters.total}` : matches.length})</h3>
  {showFilters && showFilters.total > 0 && showFilters.controls}
  {!matches.length && (showFilters?.active
-   ? <div className="empty auto-match-empty"><h3>No Manual Matches match these filters</h3><button className="secondary" onClick={showFilters.onClear}>Clear filters</button></div>
+   ? <div className="empty auto-match-empty"><h3>No Manual Matches match these filters</h3><button type="button" className="secondary" onClick={showFilters.onClear}>Clear filters</button></div>
    : <div className="empty auto-match-empty"><h3>{report ? "No Manual Matches" : "No Manual Matches saved."}</h3><p>Create a Manual Match to link complete episode sets, even before either set is owned.</p></div>)}
  {selectedIds.length > 0 && <section className="manual-match-bulk-bar" aria-label="Selected Manual Matches"><p role="status">{selectedIds.length} selected · Selection spans pages.</p><button disabled={locked || selectedIds.length === matches.length} onClick={() => onSelectionChange(matches.map(match => match.id))}>Select all {plural(matches.length, "Manual Match", "Manual Matches")}</button><button disabled={locked} onClick={() => onSelectionChange([])}>Clear selection</button><button className="danger" disabled={locked} onClick={() => onConfirmationChange([...selectedIds])}>Delete {plural(selectedIds.length, "selected match", "selected matches")}</button></section>}
  {bulkConfirmation && <DeleteConfirmation matches={bulkConfirmation} locked={locked} onCancel={() => onConfirmationChange(null)} onConfirm={() => { onConfirmationChange(null); onDeleteSelected(bulkConfirmation.map(match => match.id)); }}/>}

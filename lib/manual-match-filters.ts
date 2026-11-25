@@ -17,24 +17,27 @@ export function showOptions(mappings: CoverageMapping[], provider: CoverageProvi
   return [...savedShows(mappings, provider).values()].sort(compareShows).map(show => ({ ...show, label: show.showYear ? `${show.show} (${show.showYear})` : show.show }));
 }
 
+const providers = (picks: ShowPicks) => Object.keys(picks) as CoverageProvider[];
+
 /**
- * The picks whose show is still on that side of a saved Manual Match, or
- * `picks` itself when every picked show still is.
+ * `picks` pruned to the shows still on that side of a saved Manual Match, or
+ * `picks` itself when none needs pruning.
  */
-export function savedShowPicks(mappings: CoverageMapping[], picks: ShowPicks): ShowPicks {
+export function pruneShowPicks(mappings: CoverageMapping[], picks: ShowPicks): ShowPicks {
   const saved = (provider: CoverageProvider, showId: number) => mappings.some(mapping => mapping.members.some(member => member.provider === provider && member.showId === showId));
-  const kept: ShowPicks = { TMDB: picks.TMDB.filter(showId => saved("TMDB", showId)), TVDB: picks.TVDB.filter(showId => saved("TVDB", showId)) };
-  return kept.TMDB.length === picks.TMDB.length && kept.TVDB.length === picks.TVDB.length ? picks : kept;
+  const kept = Object.fromEntries(providers(picks).map(provider => [provider, picks[provider].filter(showId => saved(provider, showId))])) as ShowPicks;
+  return providers(picks).every(provider => kept[provider].length === picks[provider].length) ? picks : kept;
 }
 
-export const filteringShows =(picks: ShowPicks) => picks.TMDB.length > 0 || picks.TVDB.length > 0;
+/** Whether any show is picked in either show filter. */
+export const filteringShows = (picks: ShowPicks) => providers(picks).some(provider => picks[provider].length > 0);
 
 /**
  * The Manual Matches the show filters keep. A match belongs to a show when any
  * member on that side has its show ID; picks combine with OR within a side and
- * AND across the sides.
+ * AND across the sides. With nothing picked it keeps every match.
  */
 export function filterByShows<T extends CoverageMapping>(mappings: T[], picks: ShowPicks): T[] {
-  const sides = (Object.keys(picks) as CoverageProvider[]).filter(provider => picks[provider].length);
+  const sides = providers(picks).filter(provider => picks[provider].length);
   return mappings.filter(mapping => sides.every(provider => mapping.members.some(member => member.provider === provider && picks[provider].includes(member.showId))));
 }

@@ -5,8 +5,9 @@ import { ManualMatchList, plural } from "@/app/components/manual-match-list";
 import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
 import { ManualMatchShowFilter } from "@/app/components/manual-match-show-filter";
-import { filterByShows, filteringShows, noShowPicks, savedShowPicks, showOptions, type ShowPicks } from "@/lib/manual-match-filters";
+import { filterByShows, filteringShows, noShowPicks, pruneShowPicks, showOptions, type ShowPicks } from "@/lib/manual-match-filters";
 import { orderManualMatches } from "@/lib/manual-match-order";
+import { clampPage } from "@/app/reports/report-pagination";
 type Props = {
   initialUrls: string[];
   initialMappingId?: string;
@@ -91,28 +92,21 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const flagsChanged = draftFlags.join() !== (editing ? flaggedKeys(editing.members) : []).join();
   const dirty = flagsChanged || Boolean(preview) || (editing ? !savedUrls : urls.join() !== defaultUrls.join());
   const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
-  // A refresh that removes a picked show's last Manual Match drops the pick, which changes the
-  // filter, so the selection and any pending bulk delete clear as for any filter change.
-  const savedPicks = savedShowPicks(scopedMappings, showPicks);
-  if (savedPicks !== showPicks) changeShowPicks(savedPicks);
+  // Picks whose show has no saved Manual Match left are ignored; `acceptMappings` also drops them.
+  const prunedPicks = pruneShowPicks(scopedMappings, showPicks);
   // Only the report has a fixed show order and show filters; the Plex page keeps the saved order.
-  const filtering = report && filteringShows(showPicks);
+  const filtering = report && filteringShows(prunedPicks);
   // Ordered before filtering, so each show is named as in every saved match, as its filter option is.
-  const listedMappings = report ? filterByShows(orderManualMatches(scopedMappings), showPicks) : scopedMappings;
-  // Only listed Manual Matches stay ticked: one a refresh removes or the filters hide drops out
-  // of the selection, so it is not ticked if it is listed again.
-  const listedSelection = selected.filter(id => listedMappings.some(mapping => mapping.id === id));
-  if (listedSelection.length !== selected.length) setSelected(listedSelection);
+  const listedMappings = report ? filterByShows(orderManualMatches(scopedMappings), prunedPicks) : scopedMappings;
   // A filter change clears ticked matches and any pending bulk delete, so nothing hidden can be deleted.
-  function changeShowPicks(picks: ShowPicks) {
+  function changeShowPicks(picks: ShowPicks, saved = scopedMappings) {
     setShowPicks(picks);
     changeSelection([]);
-    const shown = filteringShows(picks) ? filterByShows(scopedMappings, picks).length : scopedMappings.length;
-    setPage(current => Math.min(current, Math.max(1, Math.ceil(shown / pageSize))));
+    setPage(current => clampPage(current, filterByShows(saved, picks).length, pageSize));
   }
   const showFilters = report ? {
     controls: <div className="match-filter manual-match-show-filters" role="group" aria-label="Filter by show">
-      {(["TMDB", "TVDB"] as const).map(provider => <ManualMatchShowFilter key={provider} label={`${provider} shows`} options={showOptions(scopedMappings, provider)} picked={showPicks[provider]} onChange={picked => changeShowPicks({ ...showPicks, [provider]: picked })}/>)}
+      {(["TMDB", "TVDB"] as const).map(provider => <ManualMatchShowFilter key={provider} label={`${provider} shows`} options={showOptions(scopedMappings, provider)} picked={prunedPicks[provider]} onChange={picked => changeShowPicks({ ...prunedPicks, [provider]: picked })}/>)}
     </div>,
     total: scopedMappings.length,
     active: filtering,
@@ -122,9 +116,16 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
     setSelected(ids);
     setConfirmation(null);
   }
+  // A refresh that removes a picked show's last Manual Match drops that pick, a filter change.
+  // Otherwise only listed Manual Matches stay ticked: one the refresh removes or the filters now
+  // hide drops out of the selection, so it is not ticked if it is listed again.
   function acceptMappings(next: CoverageMapping[]) {
     setMappings(next);
-    setPage(current => Math.min(current, Math.max(1, Math.ceil(next.length / pageSize))));
+    const picks = pruneShowPicks(next, showPicks);
+    if (picks !== showPicks) return changeShowPicks(picks, next);
+    const listed = filterByShows(next, picks);
+    setSelected(current => current.filter(id => listed.some(mapping => mapping.id === id)));
+    setPage(current => clampPage(current, listed.length, pageSize));
     setConfirmation(null);
   }
   // Loads a saved Manual Match into the draft. Opening the form is separate, so a
@@ -296,8 +297,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           setSavedNote(result.mapping ? { id: result.mapping.id } : null);
           const latest = await load();
           // Judged against the refreshed picks: moving a picked show's last match away drops that pick.
-          const picks = latest && savedShowPicks(latest, showPicks);
-          if (result.mapping && picks && filteringShows(picks) && !filterByShows([result.mapping], picks).length) setMessage("Saved. Hidden by the current filters.");
+          const picks = latest && pruneShowPicks(latest, showPicks);
+          if (result.mapping && picks && !filterByShows([result.mapping], picks).length) setMessage("Saved. Hidden by the current filters.");
           return;
         }
         setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details." : "Saved. Affected cached Plex comparisons have been rechecked.");

@@ -28,6 +28,7 @@ import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
 import { LIBRARY_INVENTORY_REQUESTS, PLEX_PREPARATION_WORKERS, PLEX_PREPARED_SHOWS_AHEAD, PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { PreparationQueue, runTrackedWorkerPool, runWorkerPool, settleBeforeFailing, type ActiveScanWork } from "@/lib/scan-concurrency";
+import type { ScanPreparationProgress } from "@/lib/scan-run-activity";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup, type ShowProviderIds } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, previewCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
@@ -48,7 +49,7 @@ import { CrosswalkResponseError, crosswalkLookup, liveComparisonEvidence, SavedR
 import { savedComparisonEvidence } from "@/lib/saved-comparison-evidence";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
-export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; heartbeatAt?: string };
+export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; preparation?: ScanPreparationProgress; heartbeatAt?: string };
 export type PlexProviderShowMatch = { id: number; name?: string; year?: number; slug?: string };
 export type PlexProviderMatches = { tmdb: PlexProviderShowMatch[]; tvdb: PlexProviderShowMatch[] };
 export type PlexShow = { ratingKey: string; plexGuid?: string; plexGuids?: string[]; plexRatingKeys?: string[]; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number };
@@ -1129,12 +1130,28 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     };
   };
   /**
+   * The run's preparation progress, reported as each item settles: every physical record of the library,
+   * ignored shows' included (a single-show scan reads the whole library too), and every show it compares.
+   */
+  const preparationProgress: ScanPreparationProgress = {
+    inventory: { settled: 0, total: allShows.reduce((records, group) => records + group.records.length, 0) },
+    catalogues: { settled: 0, total: candidates.length },
+  };
+  const settle = (count: keyof ScanPreparationProgress) => {
+    const progress = preparationProgress[count];
+    progress.settled = Math.min(progress.total, progress.settled + 1);
+    run.reportPreparation({ inventory: { ...preparationProgress.inventory }, catalogues: { ...preparationProgress.catalogues } });
+  };
+  /**
    * The run's progress events. A show's preparation settles once, downloaded (any catalogue downloaded
    * this run), reused (only saved catalogues the freshness policy reused) or failed (none usable, or the
    * preparation itself failed).
    */
   const preparationEvents = {
-    preparationSettled: (group: PlexShowGroup, outcome: "downloaded" | "reused" | "failed") => logger.info("plex.show.prepared", { ratingKey: group.identity, outcome }),
+    preparationSettled: (group: PlexShowGroup, outcome: "downloaded" | "reused" | "failed") => {
+      logger.info("plex.show.prepared", { ratingKey: group.identity, outcome });
+      settle("catalogues");
+    },
   };
   const preparationOutcome = (result: PromiseSettledResult<PreparedShow>) => {
     if (result.status === "rejected" || result.value.kind !== "prepared") return "failed";
@@ -1160,7 +1177,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     settled: (group, result) => preparationEvents.preparationSettled(group, preparationOutcome(result)),
   });
   drains.push(() => preparation.drain());
-  run.progress(processed, candidates.length);
+  run.reportPreparation({ inventory: { ...preparationProgress.inventory }, catalogues: { ...preparationProgress.catalogues } });
   // One job per physical record, merged and ignored shows included, each holding its slot across retries.
   const inventoryJobs = allShows.flatMap((group) => group.records.map((record) => ({ group, record })));
   const inventoryResults = new Array<PromiseSettledResult<PlexContainer>>(inventoryJobs.length);
@@ -1175,6 +1192,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const result: PromiseSettledResult<PlexContainer> = await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken, { spacing: "none" })
       .then((value) => ({ status: "fulfilled", value }), (reason: unknown) => ({ status: "rejected", reason }));
     inventoryResults[index] = result;
+    settle("inventory");
     if (result.status === "fulfilled" && record.ratingKey) localResponsesByRatingKey.set(record.ratingKey, result.value);
     // Once every record of a show to compare is in, its catalogues are prepared while the rest of the library downloads.
     if (toCompare.has(group) && recordsIn(group)) preparation.offer(group);
@@ -1213,7 +1231,13 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // Catalogue reuse does not certify ownership. Rebuild every comparison against this inventory.
   queue.push(...candidates);
   logger.info("plex.scan.plan", { total: candidates.length, reused: processed, refreshing: queue.length, tmdbChanged: tmdbChanges?.size, tvdbChanged: tvdbChanges?.size, cacheUsable, targetRatingKey });
-  run.progress(processed, candidates.length);
+  /** The comparison counter starts once the first show's comparison can begin: the whole library is in and its preparation is ready. */
+  let comparing = false;
+  const beginComparisons = () => {
+    if (comparing) return;
+    comparing = true;
+    run.progress(processed, candidates.length);
+  };
   const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(allShows, libraryInventory.items, ignoredKeys);
   logger.info("plex.library.episode-identities", { tmdb: libraryTmdbEpisodeIds.size, tvdb: libraryTvdbEpisodeIds.size, imdb: libraryImdbEpisodeIds.size });
   // Initialization is over: between active shows the heartbeat now shows "processing".
@@ -1228,6 +1252,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     // The show's preparation, started early once its records were in, or now; consumed once.
     throwIfRunFailed();
     const prepared = await preparation.take(group);
+    beginComparisons();
     const {primary, ratingKey, showStarted, phaseTimings} = prepared.show;
     /** Keep the show's last-good result; `scanStatus` replaces its provider status with this scan's, which is never republished. */
     const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {

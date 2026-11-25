@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { activeScanShows, pauseCountdownWording, rateLimitPauseWording, scanPreparationWording, scanStepWording, type ScanProgressStatus } from "@/lib/scan-run-activity";
+import { activeScanShows, pauseCountdownWording, rateLimitPauseWording, scanPreparationLines, scanRunPhaseWording, scanStepWording, type ScanProgressStatus } from "@/lib/scan-run-activity";
 
 type ScanProgressBoxProps = {
   /** The overall progress, 0 to 100, for the acid bar along the bottom. */
@@ -15,17 +15,20 @@ type ScanProgressBoxProps = {
 
 /**
  * The box under a report heading while the page follows a Scan run: the shows
- * it is checking right now, each with its step in plain English, or what it is
- * doing before the first show starts, over the acid progress bar. The scan
+ * it is checking right now, each with its step in plain English, under how far
+ * a Plex scan's preparation has got while it runs ("Reading Plex library
+ * 210/666"), or what the run is doing while neither is known (getting ready,
+ * removing unused Manual Match members), over the acid progress bar. The scan
  * button already shows the "N of M" count, so the box does not repeat it.
  *
- * During a rate-limit pause the box is marked paused (its show lines dim), its
+ * During a rate-limit pause the box is marked paused (its preparation and show lines dim), its
  * heading reads "Waiting", and a notice names the provider with the resume time
  * and a countdown when the status says when the pause ends.
  */
 export function ScanProgressBox({ progress, status, paused, maxShows }: ScanProgressBoxProps) {
   const shows = activeScanShows(status.activeShows).slice(0, maxShows);
-  const preparing = shows.length === 0 ? scanPreparationWording(status.currentPhase) : null;
+  const preparation = scanPreparationLines(status.preparation);
+  const solo = shows.length === 0 && preparation.length === 0 ? scanRunPhaseWording(status) : null;
   const resumeAt = paused && status.rateLimitResumeAt ? Date.parse(status.rateLimitResumeAt) : NaN;
   const resumesAt = Number.isFinite(resumeAt) ? new Date(resumeAt) : null;
   return <div className="scan-progress" data-paused={paused ? "true" : undefined}>
@@ -36,11 +39,12 @@ export function ScanProgressBox({ progress, status, paused, maxShows }: ScanProg
       {/* Keyed by the deadline, so a new deadline starts a fresh countdown from the current clock. */}
       {resumesAt && <PauseCountdown key={resumeAt} resumeAt={resumeAt} />}
     </p>}
+    {preparation.length > 0 && <ul className="scan-progress-preparation">{preparation.map((line) => <li key={line.slice(0, line.lastIndexOf(" "))}>{line}</li>)}</ul>}
     {shows.length > 0 && <ul className="scan-progress-shows">{shows.map((item) => <li key={item.key}>
       <span className="scan-progress-show">{item.show}</span>
       <span className="scan-progress-step">{scanStepWording(item.phase)}</span>
     </li>)}</ul>}
-    {preparing && <p className="scan-progress-solo">{preparing}</p>}
+    {solo && <p className="scan-progress-solo">{solo}</p>}
     <span className="scan-progress-bar" style={{ width: `${progress}%` }} />
   </div>;
 }

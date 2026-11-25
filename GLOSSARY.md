@@ -68,6 +68,10 @@ _Avoid_: Missed safeguard, overdue refresh
 A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes. Every saved Manual Match can grant coverage; it has no health or verification status.
 _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
 
+**Gone member**:
+A Manual Match member whose episode its own provider show no longer lists, as proven only by that show's catalogue downloaded fresh and complete in a scan run whose comparison of the show completed. A reused, saved, failed, incomplete or fallback catalogue never proves a member gone. Once the scan has saved its report, it removes its gone members from their Manual Matches, deleting a Manual Match left without a TMDB or TVDB member.
+_Avoid_: Stale member, broken member, Needs review
+
 **Auto Match**:
 A match determined and controlled by Shelfcheck through automatic matching.
 

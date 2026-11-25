@@ -417,7 +417,11 @@ function carriedCoverageMembers(db: DatabaseSync) {
   )`);
 }
 
-const MEMBER_CHECK_PREFIX = "member-verification:";
+/**
+ * The operation of the member-verification Coverage Issues Manual Match health produced, which also
+ * began their IDs. A literal, as historical migrations keep their own IDs.
+ */
+const MEMBER_VERIFICATION = "member-verification";
 
 /**
  * Migration 8: Manual Match health is retired (ADR-0008), so every saved Manual Match can grant
@@ -426,10 +430,11 @@ const MEMBER_CHECK_PREFIX = "member-verification:";
  * - every member-verification Coverage Issue (by its ID prefix or its operation), and only the links
  *   to those issues in other issues' causes;
  * - the Plex Resume point, whose results were compared while Pending and Needs review matches
- *   granted no coverage.
- * Saved catalogues, the Plex report (with its scan cache) and every other record are kept, so the
- * next Plex scan is an ordinary scan: no download sweep and no forced recompare. Logs only when it
- * changed something.
+ *   granted no coverage;
+ * - the health each coverage group of the saved Plex report carried, so it is never served again.
+ * Saved catalogues, the rest of the Plex report (with its scan cache) and every other record are
+ * kept, so the next Plex scan is an ordinary scan: no download sweep and no forced recompare. Logs
+ * only when it changed something.
  */
 function manualMatchHealthRetired(db: DatabaseSync) {
   let mappings = 0;
@@ -444,7 +449,7 @@ function manualMatchHealthRetired(db: DatabaseSync) {
   }
 
   const issues = db.prepare("SELECT id, payload FROM shelfcheck_coverage_issues").all() as { id: string; payload: string }[];
-  const removed = new Set(issues.filter(row => row.id.startsWith(MEMBER_CHECK_PREFIX) || storedObject(row.payload)?.operation === "member-verification").map(row => row.id));
+  const removed = new Set(issues.filter(row => row.id.startsWith(`${MEMBER_VERIFICATION}:`) || storedObject(row.payload)?.operation === MEMBER_VERIFICATION).map(row => row.id));
   if (removed.size) {
     const remove = db.prepare("DELETE FROM shelfcheck_coverage_issues WHERE id = ?");
     for (const id of removed) remove.run(id);
@@ -462,6 +467,18 @@ function manualMatchHealthRetired(db: DatabaseSync) {
 
   const resumePoint = db.prepare("UPDATE shelfcheck_scan_state SET resume_point = NULL, state_updated_at = CURRENT_TIMESTAMP WHERE mode = 'plex' AND resume_point IS NOT NULL").run().changes;
 
-  if (mappings || removed.size || resumePoint)
+  let reportGroups = 0;
+  const plex = db.prepare("SELECT report FROM shelfcheck_scan_state WHERE mode = 'plex'").get() as { report: string | null } | undefined;
+  const report = storedObject(plex?.report);
+  if (report && Array.isArray(report.coverageGroups)) {
+    for (const group of report.coverageGroups as unknown[]) {
+      if (group === null || typeof group !== "object" || !Object.hasOwn(group, "health")) continue;
+      delete (group as Record<string, unknown>).health;
+      reportGroups++;
+    }
+    if (reportGroups) db.prepare("UPDATE shelfcheck_scan_state SET report = ?, state_updated_at = CURRENT_TIMESTAMP WHERE mode = 'plex'").run(JSON.stringify(report));
+  }
+
+  if (mappings || removed.size || resumePoint || reportGroups)
     return "Shelfcheck retired Manual Match health: every saved Manual Match can now grant coverage. Its member checks and the Plex Resume point were cleared; the next Plex scan is an ordinary scan.";
 }

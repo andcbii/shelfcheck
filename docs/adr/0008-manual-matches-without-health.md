@@ -13,7 +13,7 @@ So a Manual Match has no health. A scan makes no request for any Manual Match me
 
 - The Manual Matches report and the Matching Episodes editor show no Healthy, Pending or Needs review status and offer no health filter; selection, paging and delete work over every saved Manual Match.
 - A member whose episode a provider has deleted keeps its match covering until a scan removes it (see End-of-scan member removal below) or the match is edited.
-- Upgrading (migration 8) drops each saved match's health and health message and every stored member-verification Coverage Issue, with only the links to them, and rejects the Plex Resume point, whose shows were compared while Pending and Needs review matches covered nothing. Saved catalogues and the saved report are kept: the next Plex scan is an ordinary scan, which compares every show again, and nothing is compared again until then.
+- Upgrading (migration 8) drops each saved match's health and health message and every stored member-verification Coverage Issue, with only the links to them, and rejects the Plex Resume point, whose shows were compared while Pending and Needs review matches covered nothing. It also drops the health each coverage group of the saved report carried, so no API payload serves it again. Saved catalogues and the rest of the saved report are kept: the next Plex scan is an ordinary scan, which compares every show again, and nothing is compared again until then.
 
 ## Considered options
 

@@ -6,7 +6,7 @@ status: accepted
 
 Report Missing and a Manual Match are both set by the user, so both are checked before any automatic method. Each episode's coverage is decided in this order: Report Missing, then a Manual Match that covers the episode, then season and episode numbers, then automatic evidence (direct identities, episode crosswalks and compound matching), then missing results. This supersedes ADR-0001's order, which checked the Manual Match last as a fallback. That order ran every automatic per-episode lookup, one or more provider requests each, before reaching a match the user had already saved (SHELFCHECK-159).
 
-A Manual Match takes precedence only when it grants coverage: every member on the other side is directly owned. Otherwise the episode falls through to the numbers check and automatic evidence as before. ~~The match must also be Healthy; Pending and Needs review matches add no coverage and change nothing.~~ Superseded by ADR-0008: Manual Matches have no health.
+A Manual Match takes precedence only when it grants coverage: every member on the other side is directly owned. (Since ADR-0008 it grants coverage only to TVDB episodes, from directly owned TMDB members.) Otherwise the episode falls through to the numbers check and automatic evidence as before. ~~The match must also be Healthy; Pending and Needs review matches add no coverage and change nothing.~~ Superseded by ADR-0008: Manual Matches have no health.
 
 ## Consequences
 

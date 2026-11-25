@@ -1,13 +1,13 @@
 ---
 status: accepted
-supersedes: the Manual Match health parts of ADR-0001 and ADR-0007
+supersedes: the Manual Match health parts of ADR-0001 and ADR-0007, and ADR-0001's coverage of TMDB episodes from owned TVDB members
 ---
 
 # Manual Matches have no health
 
 ADR-0001 gave each Manual Match a health, rechecked on every Plex scan: each member's episode was requested from its provider, and only a **Healthy** match could grant coverage. **Pending** (a member could not be checked) and **Needs review** (TVDB answered that a member's episode is gone) matches granted nothing, and ADR-0007 kept that gate when it moved the Manual Match ahead of automatic matching. In practice the recheck cost every scan about 55 s before its first comparison (272 TVDB and 125 TMDB episode requests, held to TVDB's 200 ms spacing), and it did harm: a provider outage made Pending matches stop covering, so owned episodes showed as missing. The user decides which episodes are equivalent; a provider's opinion of a member adds nothing he uses.
 
-So a Manual Match has no health. A scan makes no request for any Manual Match member, every saved Manual Match is eligible to grant coverage, and member-verification Coverage Issues no longer exist. Everything else about granting coverage is unchanged: the complete-set rule, direct ownership, ignored-show evidence, no transitive coverage, Report Missing precedence (ADR-0007) and the derived Incomplete combined episode. Saving or editing a Manual Match still resolves every episode at its provider and reviews the preview, so a match still starts from real provider records.
+So a Manual Match has no health. A scan makes no request for any Manual Match member, every saved Manual Match is eligible to grant coverage, and member-verification Coverage Issues no longer exist. Apart from its direction (see One-way coverage below), everything else about granting coverage is unchanged: the complete-set rule, direct ownership, ignored-show evidence, no transitive coverage, Report Missing precedence (ADR-0007) and the derived Incomplete combined episode. Saving or editing a Manual Match still resolves every episode at its provider and reviews the preview, so a match still starts from real provider records.
 
 ## Consequences
 
@@ -19,6 +19,16 @@ So a Manual Match has no health. A scan makes no request for any Manual Match me
 
 - **Answer the health recheck from saved catalogues** (rejected in ADR-0007 because a saved catalogue only proves an episode existed when it was downloaded). With no health there is nothing to answer, so that option is moot.
 - **Keep health but let Pending matches cover.** It removes the outage harm but keeps the per-scan requests, and Needs review still depends on a check the user does not need.
+
+## One-way coverage
+
+TMDB is the library's official order. Shelfcheck lists a TMDB episode as collected only when Plex owns it by its own season and episode numbers or its own TMDB identity, so a Manual Match covers one way: it grants coverage only to its TVDB members, when every TMDB member is directly owned. Owning TVDB members never gives a TMDB episode Manual Match coverage, however complete the TVDB side. This reverses ADR-0001, where both directly owned TVDB parts covered an otherwise-missing TMDB special. Direct and automatic TMDB matching, including combined/split matching from TMDB records, are unchanged. Scans and cached rechecks share the one rule.
+
+Because a TMDB episode is never covered, it is never left out of combined/split matching by its Manual Match: a TMDB combined episode in a Manual Match stays the combined side of a relationship. A TMDB member is also never credited to its Manual Match in coverage outcomes or missing results; its outcome comes from its numbers, its identity or the missing list.
+
+### Considered options
+
+- **Keep both directions.** A Manual Match whose TVDB side is owned would keep marking a TMDB episode collected that Plex does not hold under the official order, so the TMDB view of the library would overstate what is there.
 
 ## End-of-scan member removal
 

@@ -5,7 +5,8 @@ import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
 import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { signInToTvdb, type TvdbSignIn } from "@/lib/tvdb-auth";
-import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, saveCoverageEvidence, type CarriedMember } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, removeManualMatchMembers, saveCoverageEvidence, type CarriedMember, type ManualMatchMemberRemoval } from "@/lib/manual-coverage";
+import { manualMatchRemovalCandidates } from "@/lib/manual-match-removal-candidates";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -768,6 +769,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   };
   const results: PlexShowResult[] = [];
   const scanCache: Record<string, PlexCacheEntry> = {};
+  // Manual Match members successfully compared shows prove gone; applied only after the report is saved.
+  const removalCandidates: ManualMatchMemberRemoval[] = [];
   if (targetRatingKey) {
     const carried = targetedScanCarryOver({ cacheUsable, shows: prior?.shows || [], cache: prior?.scanCache || {}, currentIdentities: new Set(shows.map((show) => show.identity)), targetRatingKey });
     results.push(...carried.shows);
@@ -1063,6 +1066,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       retainComparison(cause, scanStatus);
       return;
     }
+    // Only a completed comparison may propose removals, from its own fresh complete downloads.
+    removalCandidates.push(...manualMatchRemovalCandidates(mappings, [resolution.tmdb.catalogue, resolution.tvdb.catalogue]));
     const fingerprint = plexFingerprint(group);
     const episodeFingerprint = plexEpisodeFingerprint(localMetadata);
     cachedTvdbEpisodeImdbIds = pruneEpisodeIdentityCache(cachedTvdbEpisodeImdbIds, providerEpisodes.filter((episode) => episode.source === "TVDB").flatMap((episode) => episode.providerEpisodeId ? [episode.providerEpisodeId] : []));
@@ -1075,8 +1080,33 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const finishedAt = new Date().toISOString();
   const coverageGroups=coverageGroupsForResults(results,manualInventory);
   const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
-  // A coverage-revision veto commits nothing and ends the run with an error status.
-  run.complete({
+  /**
+   * After the report is saved, still owning the scan run lock: apply every removal as one Manual
+   * Match change, log what committed, then compare the affected shows again from saved inputs. A
+   * failed change rolls back and removes nothing; a failed recheck keeps the committed removals,
+   * whose members stay carried and pending until a later recheck or scan compares them.
+   */
+  const finalize = async () => {
+    if (!removalCandidates.length) return;
+    let removal: ReturnType<typeof removeManualMatchMembers>;
+    try {
+      removal = removeManualMatchMembers(removalCandidates, owner);
+    } catch (error) {
+      logger.warn("plex.manual-match.removal-failed", { proposals: removalCandidates.length, error: coverageIssueCause(error) });
+      return;
+    }
+    for (const { mappingId, member, matchDeleted } of removal.removed)
+      logger.info("plex.manual-match.member-removed", { mappingId, provider: member.provider, showId: member.showId, show: member.show, episodeId: member.id, season: member.season, episode: member.episode, matchDeleted });
+    if (!removal.removed.length) return;
+    try {
+      await requestCoverageRecheck({members: removal.affectedMembers});
+    } catch (error) {
+      logger.warn("plex.manual-match.recheck-failed", { revision: removal.revision, affectedMembers: removal.affectedMembers.length, error: coverageIssueCause(error) });
+    }
+  };
+  // A coverage-revision veto commits nothing, finalizes nothing and ends the run with an error status.
+  await run.completeAfter({
+    finalize,
     commit: () => {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
       if (targetRatingKey) plexSavedState.report.write(report); else plexSavedState.commitReport(report);

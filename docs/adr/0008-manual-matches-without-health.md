@@ -12,10 +12,26 @@ So a Manual Match has no health. A scan makes no request for any Manual Match me
 ## Consequences
 
 - The Manual Matches report and the Matching Episodes editor show no Healthy, Pending or Needs review status and offer no health filter; selection, paging and delete work over every saved Manual Match.
-- A member whose episode a provider has deleted keeps its match covering until the match is edited.
+- A member whose episode a provider has deleted keeps its match covering until a scan removes it (see End-of-scan member removal below) or the match is edited.
 - Upgrading (migration 8) drops each saved match's health and health message and every stored member-verification Coverage Issue, with only the links to them, and rejects the Plex Resume point, whose shows were compared while Pending and Needs review matches covered nothing. Saved catalogues and the saved report are kept: the next Plex scan is an ordinary scan, which compares every show again, and nothing is compared again until then.
 
 ## Considered options
 
 - **Answer the health recheck from saved catalogues** (rejected in ADR-0007 because a saved catalogue only proves an episode existed when it was downloaded). With no health there is nothing to answer, so that option is moot.
 - **Keep health but let Pending matches cover.** It removes the outage harm but keeps the per-scan requests, and Needs review still depends on a check the user does not need.
+
+## End-of-scan member removal
+
+What health used to flag is now cleaned up instead: a Plex scan removes a gone member, one whose own provider show's catalogue, downloaded fresh and complete in that scan, no longer lists its episode. Only the raw list of every episode ID the provider returned counts, specials, unnumbered and unaired records included, and only for the member's own show ID: a reused or saved catalogue, a fallback catalogue of another ID, a failed or incomplete download, or one with an unreadable record proves nothing gone. A reused catalogue is excluded because it may predate the match; a member saved today must never be deleted by yesterday's list. Only a show whose comparison completed proposes removals.
+
+The removals are applied after the scan saves its report, as one scan-owned Manual Match change, and the scan then runs the cached recheck of the affected shows before it reports completion; the scan keeps the scan run lock throughout, so no user edit interleaves. Removing a member can change another show's result (a TMDB member gone from one show can let the remaining TMDB set cover a TVDB episode in another, and a many-to-many match becoming one-to-many can derive Incomplete), so removing during the comparison would make results depend on worker order. A Manual Match left without a TMDB or TVDB member is deleted (Pinky and the Brain S04E09 matched to Animaniacs S05E24 is deleted when TVDB no longer lists S05E24). The remaining members keep their Report Missing flags; the manual-save rule about flags on both sides is not applied. Each committed removal is written to the Plex scan log; there is no Coverage Issue for it.
+
+Boundaries: a scan that fails, is interrupted or is vetoed before its report is saved removes nothing, and a later scan with its own fresh complete download can. A removal change that fails rolls back whole. A removal committed before a failed cached recheck stays; its members stay carried and the comparison pending until a later recheck or scan. Cached rechecks never remove members.
+
+Trade-off: a provider that deletes an episode and re-adds it under a new ID loses that member at the next fresh download, and the re-added episode shows as missing until the user edits the match to add it. We accept that: matching the new record automatically would mean guessing identity from numbering or titles, which is what a Manual Match exists to override.
+
+### Considered options
+
+- **Remove during the comparison, before later shows compare.** Results would depend on worker completion order and could stay wrong for shows already compared.
+- **Remove in a batch before any comparison.** It needs every show's fresh catalogue before the first comparison, delaying the scan for a rare clean-up.
+- **Prove absence from a still-fresh saved catalogue.** It saves downloads but can delete a member added after that catalogue was downloaded.

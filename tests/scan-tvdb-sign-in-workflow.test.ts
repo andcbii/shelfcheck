@@ -93,6 +93,8 @@ async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "
     const found = url.pathname.match(/^\/3\/find\/(\d+)$/);
     const foundShow = found && f.shows.find(show => show.tvdbId === Number(found[1]));
     if (foundShow) return Response.json({ tv_results: [{ id: foundShow.tmdbId, name: foundShow.title }], tv_episode_results: [] });
+    // An uncovered TVDB episode's TMDB crosswalk finds nothing.
+    if (found) return Response.json({ tv_results: [], tv_episode_results: [] });
     if (url.pathname === "/3/tv/changes") return Response.json({ results: [], total_pages: 1 });
     if (url.pathname === "/v4/updates") return Response.json({ data: [] });
     unexpected.push(url.href);
@@ -143,12 +145,13 @@ async function assertSignInIssueAfterReload(f: Awaited<ReturnType<typeof fixture
 }
 
 /**
- * Three Plex shows. "Matched" (TMDB show 10, TVDB series 50) has TVDB episode 201 and holds none
- * in Plex; "Holder" holds TMDB episode 101. The first Manual Match (TMDB 101 with TVDB 201)
- * therefore covers Matched's TVDB episode 201 from another show, one way (ADR-0008).
+ * Three Plex shows. "Matched" (TMDB show 10, TVDB series 20) has TVDB episodes 201 and 202 and
+ * holds none in Plex; "Holder" holds TMDB episode 101. The first Manual Match (TMDB 101 with
+ * TVDB 201) therefore covers Matched's TVDB episode 201 from another show, one way (ADR-0008).
+ * Matched lists both Manual Matches' members, so its fresh downloads remove none.
  */
 const crossShowLibrary = (): PlexShow[] => [
-  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100], tvdbId: 50, tvdbEpisodes: [201] },
+  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100, 101, 102], tvdbId: 20, tvdbEpisodes: [201, 202] },
   { ratingKey: "2", title: "Target", tmdbId: 30 },
   { ratingKey: "3", title: "Holder", tmdbId: 40, ownsTmdb: [101] },
 ];

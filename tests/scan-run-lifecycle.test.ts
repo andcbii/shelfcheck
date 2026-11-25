@@ -251,6 +251,54 @@ for (const hook of ["committed", "succeeded"] as const) {
   });
 }
 
+test("completeAfter awaits finalization after the commit, owning the lock and running, before it settles the Resume point and records completion", async () => {
+  const h = harness();
+  h.point = { savedAt: h.iso(-1_000), shows: ["earlier"] };
+  const order: string[] = [];
+  const finalizing = deferred();
+  let outcome: Promise<string> | undefined;
+  const started = h.startRun(async (run) => {
+    outcome = run.completeAfter({ commit: () => order.push("commit"), finalize: async () => { order.push("finalize"); await finalizing.promise; order.push("finalized"); }, processed: 4, total: 4, finishedAt: h.iso(20_000), details: { shows: 4 } });
+    await outcome;
+  }, { hooks: { committed: () => order.push("committed"), succeeded: () => order.push("succeeded") } });
+  await Promise.resolve();
+  assert.deepEqual(order, ["commit", "committed", "finalize"]);
+  assert.equal(h.runs.activeScanRun()?.runId, started.owner.runId, "the run still owns the scan run lock");
+  assert.equal(h.status()?.status, "running");
+  assert.deepEqual(h.point, { savedAt: h.iso(-1_000), shows: ["earlier"] }, "the Resume point is not settled yet");
+  assert.ok(!h.events().includes("plex.scan.complete"));
+  finalizing.resolve();
+  await started.settled;
+  assert.equal(await outcome, "completed");
+  assert.deepEqual(order, ["commit", "committed", "finalize", "finalized", "succeeded"]);
+  assert.equal(h.status()?.status, "completed");
+  assert.equal(h.point, null);
+  assert.equal(h.runs.activeScanRun(), null);
+});
+
+test("completeAfter never finalizes a vetoed run", async () => {
+  const h = harness();
+  let outcome: string | undefined;
+  await h.startRun(async (run) => {
+    outcome = await run.completeAfter({ commit: () => assert.fail("a vetoed run commits nothing"), finalize: async () => assert.fail("a vetoed run finalizes nothing"), processed: 1, total: 1, finishedAt: h.iso(), details: {} });
+  }, { hooks: { veto: () => true } }).settled;
+  assert.equal(outcome, "vetoed");
+  assert.equal(h.status()?.status, "error");
+});
+
+test("a finalization that throws fails the run after its commit, forcing no Resume point over the committed report", async () => {
+  const h = harness();
+  h.point = { savedAt: h.iso(-1_000), shows: ["earlier"] };
+  await h.startRun(async (run) => {
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["a"] }, details: {} }));
+    await run.completeAfter({ commit: () => {}, finalize: async () => { throw new Error("coverage store down"); }, processed: 4, total: 4, finishedAt: h.iso(), details: {} });
+  }).settled;
+  assert.equal(h.status()?.status, "error");
+  assert.equal(h.status()?.error, "coverage store down");
+  assert.ok(!h.events().includes("plex.checkpoint.saved"));
+  assert.deepEqual(h.point, { savedAt: h.iso(-1_000), shows: ["earlier"] });
+});
+
 test("rate-limit reporting stores the resume time with the pause and clears it with the pause; a provider may give none", async () => {
   const h = harness();
   const work = deferred();

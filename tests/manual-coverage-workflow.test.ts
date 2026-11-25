@@ -77,7 +77,10 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
         body = { MediaContainer: { Metadata: [show] } };
     }
     else if (u.pathname === "/3/tv/10")
-      body = { id: 10, name: "Target", seasons: [{ season_number: 1 }] };
+      body = { id: 10, name: "Target", seasons: [{ season_number: 0 }, { season_number: 1 }] };
+    // TMDB still lists the other Manual Matches' members, as specials, so a fresh download removes none of them.
+    else if (u.pathname === "/3/tv/10/season/0")
+      body = { episodes: [{ id: 101, season_number: 0, episode_number: 2, name: "Independent", air_date: "2020-01-01" }, { id: 102, season_number: 0, episode_number: 3, name: "Cleanup", air_date: "2020-01-01" }] };
     else if (u.pathname === "/3/tv/10/season/1" || u.pathname === "/v4/series/20/episodes/default") {
       if (blockSeason) {
         entered();
@@ -85,7 +88,9 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
       }
       body = u.pathname === "/3/tv/10/season/1"
         ? { episodes: [{ id: 100, season_number: 1, episode_number: 1, name: "Missing", air_date: "2020-01-01" }] }
-        : { data: { episodes: tvdbEpisodes.map(id => id === 200 ? { id: 200, seasonNumber: 8, number: 8, name: "Equivalent", aired: "2020-01-01" } : { id: 202, seasonNumber: 10, number: 10, name: "Replacement equivalent", aired: "2020-01-01" }) } };
+        // TVDB still lists the other Manual Matches' members, as specials, so a fresh download removes none of them.
+        : { data: { episodes: [...tvdbEpisodes.map(id => id === 200 ? { id: 200, seasonNumber: 8, number: 8, name: "Equivalent", aired: "2020-01-01" } : { id: 202, seasonNumber: 10, number: 10, name: "Replacement equivalent", aired: "2020-01-01" }),
+          ...[200, 201, 202, 203].filter(id => !tvdbEpisodes.includes(id)).map((id, index) => ({ id, seasonNumber: 0, number: index + 1, name: "Special", aired: "2020-01-01" }))] } };
     }
     else if (u.pathname === "/3/tv/10/season/1/episode/1")
       body = { id: 100, season_number: 1, episode_number: 1, name: "Missing" };

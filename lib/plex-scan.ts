@@ -3,7 +3,7 @@ import { setCoverageIssue, resolveCoverageIssue, getCoverageIssue, coverageIssue
 import { isPlexScanActive } from "@/lib/plex-scan-active";
 import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
 import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
-import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type PlexShowYear, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { signInToTvdb, type TvdbSignIn } from "@/lib/tvdb-auth";
 import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, removeManualMatchMembers, saveCoverageEvidence, type CarriedMember, type ManualMatchMemberRemoval } from "@/lib/manual-coverage";
 import { manualMatchRemovalCandidates } from "@/lib/manual-match-removal-candidates";
@@ -13,7 +13,7 @@ import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
 import { inDatabaseTransaction } from "@/lib/sqlite";
-import { fullScanProviderYears, publishPlexShowYears, showDetailsYear } from "@/lib/show-year";
+import { fullScanPlexShowYears, fullScanProviderYears, publishPlexShowYears, showDetailsYear, withPublishedPlexYears } from "@/lib/show-year";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { savedScanState, trackScanIgnores } from "@/lib/ignore-results";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
@@ -1422,6 +1422,16 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
       if (targetRatingKey) plexSavedState.report.write(report);
       else {
+        // A completed full scan's report shows the Plex years it publishes, so every consumer reads one value.
+        let plexYears: PlexShowYear[] | undefined;
+        if (libraryInventory!.complete) {
+          try {
+            plexYears = fullScanPlexShowYears(results, allShows);
+            withPublishedPlexYears(report.shows, plexYears);
+          } catch (error) {
+            logger.warn("plex.show-year.read-failed", { error: coverageIssueCause(error) });
+          }
+        }
         plexSavedState.commitReport(report);
         // Once its report is saved, a completed full scan publishes the Plex years of its whole library, ignored
         // shows included, and records the provider years of its fresh show-details answers; nothing else does.
@@ -1429,7 +1439,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         if (libraryInventory!.complete) {
           try {
             inDatabaseTransaction(() => {
-              publishPlexShowYears(results, allShows);
+              if (plexYears) publishPlexShowYears(plexYears);
               providerYears.record();
             });
           } catch (error) {

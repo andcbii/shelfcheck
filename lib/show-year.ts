@@ -48,26 +48,48 @@ function heldProviderShows(show: PlexShowResult): { tmdb: number[]; tvdb: number
 }
 
 /**
- * Publish the Plex years of a completed full scan's library: each show it compared, then each
- * library show it did not (an ignored show: an Ignore excludes missing episodes, not the show), whose
- * Plex GUIDs name the provider shows it holds. A group the library still holds without a usable year
- * keeps its last known year; a group the library no longer holds is dropped, so its provider shows
- * become absent. Call it only once a completed full scan has saved its report.
+ * The Plex years a completed full scan's library gives, one row per Plex show group, each with the
+ * provider shows it holds: a compared show's verified provider shows (its selected IDs and resolved
+ * candidates), or, for a library show it did not compare (an ignored show: an Ignore excludes
+ * missing episodes, not the show), those its Plex GUIDs name. A group's year is its year in this
+ * scan's library inventory, even when the scan kept the group's last-good comparison; a group the
+ * library still holds without a usable year keeps its last known year; a group the library no
+ * longer holds has no row, so its provider shows become absent. Reads the saved snapshot only.
  */
-export function publishPlexShowYears(compared: PlexShowResult[], library: PlexShowGroup[]): void {
+export function fullScanPlexShowYears(compared: PlexShowResult[], library: PlexShowGroup[]): PlexShowYear[] {
   const previous = new Map(readPlexShowYears().map(row => [row.identity, row.year]));
-  const published = new Map<string, PlexShowYear>();
-  const publish = (identity: string, year: number | undefined, held: { tmdb: number[]; tvdb: number[] }) => {
-    if (published.has(identity)) return;
-    const known = usableShowYear(year) ?? previous.get(identity);
-    published.set(identity, { identity, ...(known === undefined ? {} : { year: known }), ...held });
+  const inventoryYears = new Map(library.map(group => [group.identity, plexGroupYear(group.records)]));
+  const rows = new Map<string, PlexShowYear>();
+  const add = (identity: string, year: number | undefined, held: { tmdb: number[]; tvdb: number[] }) => {
+    if (rows.has(identity)) return;
+    const known = usableShowYear(inventoryYears.has(identity) ? inventoryYears.get(identity) : year) ?? previous.get(identity);
+    rows.set(identity, { identity, ...(known === undefined ? {} : { year: known }), ...held });
   };
-  for (const show of compared) publish(show.ratingKey, show.year, heldProviderShows(show));
+  for (const show of compared) add(show.ratingKey, show.year, heldProviderShows(show));
   for (const group of library) {
     const ids = group.records.map(record => showProviderIds(record.Guid));
-    publish(group.identity, plexGroupYear(group.records), { tmdb: [...new Set(ids.flatMap(id => id.tmdb))].sort((a, b) => a - b), tvdb: [...new Set(ids.flatMap(id => id.tvdb))].sort((a, b) => a - b) });
+    add(group.identity, undefined, { tmdb: [...new Set(ids.flatMap(id => id.tmdb))].sort((a, b) => a - b), tvdb: [...new Set(ids.flatMap(id => id.tvdb))].sort((a, b) => a - b) });
   }
-  savePlexShowYears([...published.values()]);
+  return [...rows.values()];
+}
+
+/**
+ * Give each show of a completed full scan's report the Plex year it publishes, so the Plex page,
+ * the report headers and Manual Matches read one value. Call it before the report is saved.
+ */
+export function withPublishedPlexYears(shows: PlexShowResult[], published: PlexShowYear[]): void {
+  const years = new Map(published.map(row => [row.identity, row.year]));
+  for (const show of shows) {
+    if (!years.has(show.ratingKey)) continue;
+    const year = years.get(show.ratingKey);
+    if (year === undefined) delete show.year;
+    else show.year = year;
+  }
+}
+
+/** Publish a completed full scan's Plex years (from `fullScanPlexShowYears`) once it has saved its report. */
+export function publishPlexShowYears(published: PlexShowYear[]): void {
+  savePlexShowYears(published);
 }
 
 /** The Plex year of one provider show in a published snapshot. */

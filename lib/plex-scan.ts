@@ -349,6 +349,97 @@ function fulfilOverdueSafeguards(inputs: PlexGeneratedInputs, utcDate: string) {
   if (overdue.length) savePendingSafeguards(inputs.pendingSafeguards);
 }
 
+/** TMDB's freshness for a scan, once its verified changes and safeguard are retained. */
+type TmdbFreshness = {
+  /** The verified change list with verification recovery; null when it could not be read. A targeted scan reads none. */
+  changes: Set<number> | null;
+  /** The TMDB series whose saved catalogues this scan treats as changed: verified and retained deferred changes. */
+  catalogueChanges: Set<number>;
+};
+
+/** TVDB's freshness for a scan, once its verified changes are retained. */
+type TvdbFreshness = {
+  /** The verified updates; null when they could not be read. A targeted scan reads none. */
+  changes: Set<number> | null;
+  /** The TVDB series whose saved catalogues this scan treats as changed: verified and retained pending changes. */
+  catalogueChanges: Set<number>;
+  /** The changes relationship reuse may trust: the catalogue changes, or null while the updates could not be read. */
+  verifiedChanges: Set<number> | null;
+};
+
+/**
+ * A scan's provider freshness, checked while the Plex inventory downloads. Each provider is ready
+ * once its change list is read (or has failed, raising its verification issue) and its changes are
+ * retained, so a catalogue decision for that provider can wait on that provider alone. `settled`
+ * resolves once both have settled, fulfilled or not: a run drains it before it ends.
+ */
+type ProviderFreshness = { tmdb: Promise<TmdbFreshness>; tvdb: Promise<TvdbFreshness>; settled: Promise<void> };
+
+type ProviderFreshnessContext = {
+  inputs: PlexGeneratedInputs;
+  config: { tmdbToken: string };
+  /** The run's one TVDB sign-in. */
+  tvdbSignIn: TvdbSignIn;
+  /** The scan's fixed start; its UTC date is the scan's date. */
+  startedAt: string;
+  /** A single-show scan neither reads the change lists nor consults the verification positions. */
+  targeted: boolean;
+  /** Whether this full scan needs today's TMDB change list as a safeguard. */
+  safeguardDue: boolean;
+  candidates: PlexShowGroup[];
+  logger: Pick<ScanLogger, "warn">;
+};
+
+/** Start checking each provider's freshness from its own verification position. */
+function startProviderFreshness({inputs, config, tvdbSignIn, startedAt, targeted, safeguardDue, candidates, logger}: ProviderFreshnessContext): ProviderFreshness {
+  const utcDate = startedAt.slice(0, 10);
+  const {tmdb: tmdbPosition, tvdb: tvdbPosition} = inputs.verification;
+  const tmdb = (async (): Promise<TmdbFreshness> => {
+    // TMDB verification recovery: catalogues its change feed cannot cover are treated as changed.
+    const plan = targeted ? {recover: []} : tmdbVerificationPlan(tmdbPosition, Object.values(inputs.tmdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [{id: catalogue.show.id, downloadedAt: catalogue.downloadedAt}] : []), startedAt);
+    const recovery = new Set(plan.recover);
+    const changes = targeted ? null : await (plan.feedFrom ? tmdbChangedShows(plan.feedFrom, config.tmdbToken, startedAt) : Promise.resolve(new Set<number>())).then(changes => changes && new Set([...changes, ...recovery])).catch((error) => {
+      setProviderVerificationIssue("TMDB", error);
+      logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    });
+    // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
+    retainVerifiedChanges(inputs, changes ?? recovery, null);
+    if (changes !== null) {
+      resolveCoverageIssue(providerVerificationIssueId("TMDB"));
+      fulfilOverdueSafeguards(inputs, utcDate);
+    }
+    // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
+    const safeguardChanges = safeguardDue
+      ? tmdbPosition?.slice(0, 10) === utcDate ? changes
+        : await tmdbChangedShows(startedAt, config.tmdbToken, startedAt).catch(error => {
+          setProviderVerificationIssue("TMDB", error);
+          return null;
+        })
+      : null;
+    if (safeguardDue) retainSafeguard(inputs, utcDate, safeguardChanges, candidates);
+    return {changes, catalogueChanges: new Set([...(changes || []), ...Object.keys(inputs.deferredTmdbChanges).map(Number)])};
+  })();
+  const tvdb = (async (): Promise<TvdbFreshness> => {
+    // Without TVDB history, verification starts at each saved catalogue's own successful download.
+    const feedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
+    const changes = targeted ? null : await (!feedFrom ? Promise.resolve(new Set<number>()) : withTvdbSignIn(tvdbSignIn, token => tvdbChangedShows(feedFrom, token))).catch((error) => {
+      setProviderVerificationIssue("TVDB", error, tvdbSignIn.outcome === "failed" && error === tvdbSignIn.error ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
+      logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    });
+    retainVerifiedChanges(inputs, null, changes);
+    if (changes !== null) resolveCoverageIssue(providerVerificationIssueId("TVDB"));
+    // Retained TVDB changes stay due even while the feed itself is unavailable.
+    const catalogueChanges = new Set([...(changes || []), ...Object.keys(inputs.pendingTvdbChanges).map(Number)]);
+    return {changes, catalogueChanges, verifiedChanges: changes === null ? null : catalogueChanges};
+  })();
+  // Each provider's failure is observed when it is awaited; until then it must not surface as unhandled.
+  tmdb.catch(() => {});
+  tvdb.catch(() => {});
+  return {tmdb, tvdb, settled: Promise.allSettled([tmdb, tvdb]).then(() => {})};
+}
+
 type LoadedComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];
   tmdbId?: number; tvdbId?: number; tmdbShow: TmdbShow | null; tvdbResolved: boolean; tvdbSlug?: string;
@@ -724,49 +815,6 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
   // A single-show scan whose own health preparation alone moved the revision rebuilds every carried row instead of carrying it.
   const rebuildFrom = !cacheUsable && baseline ? ownHealthChangeBaseline(baseline, healthReceipts, coverageRevision, autoCompoundEpisodes) : undefined;
-  let tmdbChanges: Set<number> | null = null;
-  let tvdbChanges: Set<number> | null = null;
-  // Each provider verifies from its own position; targeted scans never consult or advance them.
-  const {tmdb: tmdbPosition, tvdb: tvdbPosition} = inputs.verification;
-  // TMDB verification recovery: catalogues its change feed cannot cover are treated as changed.
-  const tmdbPlan = targetRatingKey ? {recover: []} : tmdbVerificationPlan(tmdbPosition, Object.values(inputs.tmdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [{id: catalogue.show.id, downloadedAt: catalogue.downloadedAt}] : []), startedAt);
-  const tmdbRecovery = new Set(tmdbPlan.recover);
-  if (!targetRatingKey) {
-    tmdbChanges = await (tmdbPlan.feedFrom ? tmdbChangedShows(tmdbPlan.feedFrom, config.tmdbToken, startedAt) : Promise.resolve(new Set<number>())).then(changes => changes && new Set([...changes, ...tmdbRecovery])).catch((error) => {
-      setProviderVerificationIssue("TMDB", error);
-      logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
-      return null;
-    });
-  }
-  // Without TVDB history, verification starts at each saved catalogue's own successful download.
-  const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
-  if (!targetRatingKey) {
-    tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : withTvdbSignIn(tvdbSignIn, token => tvdbChangedShows(tvdbFeedFrom, token))).catch((error) => {
-      setProviderVerificationIssue("TVDB", error, tvdbSignIn.outcome === "failed" && error === tvdbSignIn.error ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
-      logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
-      return null;
-    });
-  }
-  // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
-  retainVerifiedChanges(inputs, tmdbChanges ?? tmdbRecovery, tvdbChanges);
-  if (tmdbChanges !== null) {
-    resolveCoverageIssue(providerVerificationIssueId("TMDB"));
-    fulfilOverdueSafeguards(inputs, utcDate);
-  }
-  if (tvdbChanges !== null) resolveCoverageIssue(providerVerificationIssueId("TVDB"));
-  // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
-  const safeguardChanges = safeguardDue
-    ? tmdbPosition?.slice(0, 10) === utcDate ? tmdbChanges
-      : await tmdbChangedShows(startedAt, config.tmdbToken, startedAt).catch(error => {
-        setProviderVerificationIssue("TMDB", error);
-        return null;
-      })
-    : null;
-  if (safeguardDue) retainSafeguard(inputs, utcDate, safeguardChanges, candidates);
-  const tmdbCatalogueChanges = new Set([...(tmdbChanges || []), ...Object.keys(inputs.deferredTmdbChanges).map(Number)]);
-  // Retained TVDB changes stay due even while the feed itself is unavailable.
-  const tvdbCatalogueChanges = new Set([...(tvdbChanges || []), ...Object.keys(inputs.pendingTvdbChanges).map(Number)]);
-  const tvdbVerifiedChanges = tvdbChanges === null ? null : tvdbCatalogueChanges;
   // One coordinator per scan run: its comparisons share in-flight crosswalk requests and what this scan requested.
   const liveEvidence: LiveEvidenceScan = {
     transport: liveLookupTransport({tmdbToken: config.tmdbToken, tvdbSignIn, traktAuth}),
@@ -784,43 +832,53 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const queue: PlexShowGroup[] = [];
   const localResponsesByRatingKey = new Map<string, PlexContainer>();
   const inventoryFailureCauses: CoverageIssueId[] = [];
-  run.progress(processed, candidates.length);
-  // One job per physical record, merged and ignored shows included, each holding its slot across retries.
-  const inventoryJobs = allShows.flatMap((group) => group.records.map((record) => ({ group, record })));
-  const inventoryResults = new Array<PromiseSettledResult<PlexContainer>>(inventoryJobs.length);
-  await runWorkerPool(inventoryJobs, PLEX_INVENTORY_REQUESTS, async ({ record }, index) => {
-    inventoryResults[index] = await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken, { spacing: "none" })
-      .then((value) => ({ status: "fulfilled", value }), (reason: unknown) => ({ status: "rejected", reason }));
-  });
-  for (const [index, { group, record }] of inventoryJobs.entries()) {
-    const result = inventoryResults[index];
-    // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
-    const issueId = plexInventoryIssueId(group.identity, record.ratingKey);
-    if (result.status === "fulfilled") {
-      if (record.ratingKey) localResponsesByRatingKey.set(record.ratingKey, result.value);
-      resolveCoverageIssue(issueId);
-    } else {
-      inventoryFailureCauses.push(issueId);
-      setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
-      logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
-    }
-  }
   const manualInventory: CoverageEvidence[] = [];
-  for (const group of allShows) for (const record of group.records) {
-    for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
-      const ids = idsFromGuids(item.Guid);
-      manualInventory.push({
-        ratingKey: item.ratingKey || "", showKey: group.identity,
-        identities: [
-          ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
-          ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
-        ],
-      });
+  // Provider freshness is checked while the Plex inventory downloads; each provider is ready once its changes are retained.
+  const freshness = startProviderFreshness({inputs, config, tvdbSignIn, startedAt, targeted: Boolean(targetRatingKey), safeguardDue, candidates, logger});
+  try {
+    run.progress(processed, candidates.length);
+    // One job per physical record, merged and ignored shows included, each holding its slot across retries.
+    const inventoryJobs = allShows.flatMap((group) => group.records.map((record) => ({ group, record })));
+    const inventoryResults = new Array<PromiseSettledResult<PlexContainer>>(inventoryJobs.length);
+    await runWorkerPool(inventoryJobs, PLEX_INVENTORY_REQUESTS, async ({ record }, index) => {
+      inventoryResults[index] = await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken, { spacing: "none" })
+        .then((value) => ({ status: "fulfilled", value }), (reason: unknown) => ({ status: "rejected", reason }));
+    });
+    for (const [index, { group, record }] of inventoryJobs.entries()) {
+      const result = inventoryResults[index];
+      // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
+      const issueId = plexInventoryIssueId(group.identity, record.ratingKey);
+      if (result.status === "fulfilled") {
+        if (record.ratingKey) localResponsesByRatingKey.set(record.ratingKey, result.value);
+        resolveCoverageIssue(issueId);
+      } else {
+        inventoryFailureCauses.push(issueId);
+        setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
+        logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
+      }
     }
+    for (const group of allShows) for (const record of group.records) {
+      for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
+        const ids = idsFromGuids(item.Guid);
+        manualInventory.push({
+          ratingKey: item.ratingKey || "", showKey: group.identity,
+          identities: [
+            ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
+            ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
+          ],
+        });
+      }
+    }
+    if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
+    inputs.inventory = {capturedAt: startedAt, complete: allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))), groups: allShows, items: Object.fromEntries([...localResponsesByRatingKey].map(([key,value]) => [key,value.MediaContainer?.Metadata || []])), evidence: manualInventory};
+    savePlexInventory(inputs.inventory);
+  } catch (error) {
+    // A fatal failure ends the run only once every launched task has settled, so none writes after it.
+    await freshness.settled;
+    throw error;
   }
-  if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
-  inputs.inventory = {capturedAt: startedAt, complete: allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))), groups: allShows, items: Object.fromEntries([...localResponsesByRatingKey].map(([key,value]) => [key,value.MediaContainer?.Metadata || []])), evidence: manualInventory};
-  savePlexInventory(inputs.inventory);
+  await freshness.settled;
+  const [{changes: tmdbChanges, catalogueChanges: tmdbCatalogueChanges}, {changes: tvdbChanges, catalogueChanges: tvdbCatalogueChanges, verifiedChanges: tvdbVerifiedChanges}] = await Promise.all([freshness.tmdb, freshness.tvdb]);
   // Writes of the offline rebuilds below, applied only with the report they belong to.
   const stagedEffects = new SavedComparisonEffects(true);
   // Shows this run's health change requires it to compare again that kept only a last-good result.

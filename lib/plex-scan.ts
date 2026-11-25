@@ -87,6 +87,9 @@ export function readPlexPreferences() {
   return parsePlexPreferences(plexSavedState.options.read());
 }
 
+/** The phase of a Plex scan applying its Manual Match removals after its report is saved (ADR-0008). */
+const MANUAL_MATCH_REMOVAL_PHASE = "manual-match-removal";
+
 /**
  * The Plex scan mode's adapter to the scan run lifecycle: its status and
  * Resume point stores, log event prefix and Interrupted scan wording. The
@@ -98,8 +101,10 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   failureMessage: "The Plex scan failed.",
   vetoedError: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.",
   status: plexSavedState.status,
-  interruptedError: (status) => `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
-  onInterrupted: (status) => setCoverageIssue({id:SCAN_FAILURE_ISSUE,operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
+  interruptedError: (status) => status.currentPhase === MANUAL_MATCH_REMOVAL_PHASE
+    ? "The previous Plex scan saved its report but was interrupted while applying its Manual Match removals. Removals already applied stay; the shows they affect stay pending until a cached recheck or the next Plex scan compares them."
+    : `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
+  onInterrupted: (status) => setCoverageIssue({id:SCAN_FAILURE_ISSUE,operation:"scan",scope:"library",cause:status.error!,action:status.currentPhase === MANUAL_MATCH_REMOVAL_PHASE ? "Start a new Plex scan to compare the shows the removals affect." : "Start a new Plex scan to resume verification."}),
   resumePoint: {
     ...plexSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length }),
@@ -1118,6 +1123,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   };
   // A coverage-revision veto commits nothing, finalizes nothing and ends the run with an error status.
   await run.completeAfter({
+    phase: MANUAL_MATCH_REMOVAL_PHASE,
     finalize,
     commit: () => {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.

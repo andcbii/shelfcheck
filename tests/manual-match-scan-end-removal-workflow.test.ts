@@ -473,3 +473,29 @@ test("after a failed cached recheck, the affected shows keep their last-good row
   assert.deepEqual(h.missing(later), {}, "a later scan finds t1 alone now covers v1");
   assert.equal((await coverage(h)).pending, 0);
 });
+
+test("a scan whose process ends while applying its removals reads as interrupted there; committed removals stay pending until a later scan", async t => {
+  const { h, revision } = await pinkyGone(t);
+  // The removal commits; the process then ends before the cached recheck, still running in the removal phase.
+  db().exec(`CREATE TRIGGER fail_recheck BEFORE UPDATE OF report ON shelfcheck_scan_state WHEN json_extract(NEW.report, '$.coverageRevision') > ${revision} BEGIN SELECT RAISE(ABORT, 'process ended'); END;`);
+  const scanned = await h.rerun();
+  db().exec("DROP TRIGGER fail_recheck;");
+  const heartbeatAt = new Date(Date.now() - 120_000).toISOString();
+  db().prepare("UPDATE shelfcheck_scan_state SET status=? WHERE mode='plex'").run(JSON.stringify({ status: "running", processed: 2, total: 2, startedAt: heartbeatAt, heartbeatAt, currentPhase: "manual-match-removal" }));
+
+  const interrupted = await h.status() as unknown as { scan: { status: string; error?: string }; coverage: Coverage & { issues: { id: string; cause?: string; action?: string }[] } };
+  assert.equal(interrupted.scan.status, "error", "never recorded as completed");
+  assert.match(interrupted.scan.error!, /saved its report but was interrupted while applying its Manual Match removals/);
+  const failure = interrupted.coverage.issues.find(issue => issue.id === "scan-failure");
+  assert.equal(failure?.cause, interrupted.scan.error);
+  assert.match(failure?.action || "", /compare the shows the removals affect/);
+  assert.ok(interrupted.coverage.issues.some(issue => issue.id === "comparison-pending"), "the committed removal's shows stay pending");
+  assert.deepEqual(await h.mappings(), [], "the committed removal stays");
+  assert.equal(((interrupted as unknown as typeof scanned).report as { coverageRevision?: number }).coverageRevision, revision, "the saved report is the scan's own");
+
+  const later = await h.rerun();
+  const state = await coverage(h);
+  assert.equal(state.pending, 0, "a later scan compares the affected shows");
+  assert.deepEqual(state.issues, []);
+  assert.equal((later.report as { coverageRevision?: number }).coverageRevision, state.revision);
+});

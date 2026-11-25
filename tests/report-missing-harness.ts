@@ -59,11 +59,12 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `bodies`/`statuses`: per-pathname provider response overrides (e.g. a malformed `/3/find/301` payload or a 404).
   // `imdb`: an IMDb GUID Plex also carries on the owned file of a provider episode.
   // `english`: TVDB English episode translations by TVDB episode ID (null name = translation without a title); others are 404.
+  // `tvdbDefaultSeasonType`: the season type TVDB's series records name as their default order (1 is Aired Order; undefined omits it).
   // `onRequest`: called with each request's pathname before it is answered (e.g. to advance a controlled clock).
   // `raw`: per-pathname successful (HTTP 200) response bodies sent as-is, e.g. one that is not JSON.
   // `hold`: per-pathname gates; a matching request is recorded at once but answered only when its gate settles.
   // `respond`: answers a request first when it returns a response, e.g. by its Authorization header.
-  const state = { gone, onRequest: undefined as ((pathname: string) => void) | undefined, respond: undefined as ((url: URL, init?: RequestInit) => Response | undefined) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
+  const state = { gone, onRequest: undefined as ((pathname: string) => void) | undefined, respond: undefined as ((url: URL, init?: RequestInit) => Response | undefined) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tvdbDefaultSeasonType: 1 as number | undefined, tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
@@ -100,7 +101,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
       const episode = tmdbAllEpisodes.filter(inShow(Number(match[1]))).find(item => item.season === Number(match![2]) && item.episode === Number(match![3]))!;
       body = { id: episode.id, season_number: episode.season, episode_number: episode.episode, name: episode.name };
     }
-    else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])$/))) body = { data: { id: Number(match[1]), name: match[1] === "20" ? "Target" : "Other", slug: match[1] === "20" ? "target" : "other" } };
+    else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])$/))) body = { data: { id: Number(match[1]), name: match[1] === "20" ? "Target" : "Other", slug: match[1] === "20" ? "target" : "other", ...(state.tvdbDefaultSeasonType === undefined ? {} : { defaultSeasonType: state.tvdbDefaultSeasonType }) } };
     else if ((match = u.pathname.match(/^\/v4\/series\/(2[01])\/episodes\/default$/))) body = { data: { episodes: tvdbAllEpisodes.filter(listed).filter(inShow(Number(match[1]))).map((episode): unknown => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: episode.airDate || "2020-01-01", ...(episode.runtime ? { runtime: episode.runtime } : {}) })).concat(match[1] === "20" ? state.tvdbRecords : []) } };
     else if ((match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/))) {
       const episode = tvdbAllEpisodes.find(item => item.id === Number(match![1]))!;
@@ -119,9 +120,11 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   });
   const post = (body: unknown) => api.POST(new Request("http://localhost/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
   const status = async (): Promise<Result & { scan: { status: string; error?: string } }> => (await scan.GET()).json();
+  /** Starts a full scan, or a single-show rescan when `ratingKey` is given, without waiting for it. */
+  const start = (ratingKey?: string) => scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify(ratingKey ? { ratingKey } : {}) }));
   /** Runs a full scan, or a single-show rescan when `ratingKey` is given, and waits for it to end, however it ends. */
   const scanToEnd = async (ratingKey?: string) => {
-    await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify(ratingKey ? { ratingKey } : {}) }));
+    await start(ratingKey);
     // A deadline, not an iteration count: under full-suite load one scan can take several seconds.
     for (const deadline = Date.now() + 60_000; Date.now() < deadline;) {
       const result = await status();
@@ -182,5 +185,5 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     assert.equal(response.status, 200, await response.clone().text());
   };
   const restart = () => { cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase; };
-  return { state, requests, patchSettings, post, status, scanToEnd, rerun, clearCache, mappings, save, setFlags, flags, missing, group, restart, writeFlags, writeUndatedRelationships };
+  return { state, requests, patchSettings, post, status, start, scanToEnd, rerun, clearCache, mappings, save, setFlags, flags, missing, group, restart, writeFlags, writeUndatedRelationships };
 }

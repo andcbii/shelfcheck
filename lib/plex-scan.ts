@@ -205,10 +205,19 @@ async function findEpisodeViaTrakt(evidence: ComparisonEvidence, tvdbEpisodeId: 
   return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds, validationFailures };
 }
 
+/** TVDB's season type ID for Aired Order (type "official"), TVDB's primary episode order. */
+const TVDB_AIRED_ORDER = 1;
+
+/**
+ * A TVDB series' catalogue: its default order's episode pages. The download proves an episode gone
+ * (ADR-0008) only when that default order is Aired Order: another default order (DVD, absolute,
+ * alternate) need not list every episode the series has, and a series record that names none
+ * proves nothing.
+ */
 async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<DownloadedEpisodes & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
   const enumeration = episodeIdEnumeration("TVDB", seriesId);
-  const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string } }>(`${TVDB_API}/series/${seriesId}`, token);
+  const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string; defaultSeasonType?: unknown } }>(`${TVDB_API}/series/${seriesId}`, token);
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
   while (page < 100) {
@@ -222,7 +231,8 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
     page += 1;
     if (page >= 100) throw new Error("TVDB episode catalogue exceeded the safe pagination limit.");
   }
-  return { ...usableCatalogue("TVDB", seriesId, catalogue), episodeIds: enumeration.complete(), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
+  const airedOrder = series?.data?.defaultSeasonType === TVDB_AIRED_ORDER;
+  return { ...usableCatalogue("TVDB", seriesId, catalogue), episodeIds: airedOrder ? enumeration.complete() : undefined, slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
 }
 
 /**
@@ -1066,8 +1076,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       retainComparison(cause, scanStatus);
       return;
     }
-    // Only a completed comparison may propose removals, from its own fresh complete downloads.
-    removalCandidates.push(...manualMatchRemovalCandidates(mappings, [resolution.tmdb.catalogue, resolution.tvdb.catalogue]));
+    // Only a comparison that completed with a fresh result may propose removals, from its own fresh
+    // complete downloads: a show compared with a saved copy for one provider keeps its last-good
+    // saved comparison, so it proposes none.
+    if (cacheable) removalCandidates.push(...manualMatchRemovalCandidates(mappings, [resolution.tmdb.catalogue, resolution.tvdb.catalogue]));
     const fingerprint = plexFingerprint(group);
     const episodeFingerprint = plexEpisodeFingerprint(localMetadata);
     cachedTvdbEpisodeImdbIds = pruneEpisodeIdentityCache(cachedTvdbEpisodeImdbIds, providerEpisodes.filter((episode) => episode.source === "TVDB").flatMap((episode) => episode.providerEpisodeId ? [episode.providerEpisodeId] : []));

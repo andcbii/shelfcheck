@@ -1,42 +1,23 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
 import { ManualMatchEditor } from "../app/components/manual-match-editor";
+import { mountDom } from "./dom-environment";
+import { cardIds, savedMatch, type SavedMatch, type ShowEpisode } from "./manual-match-members";
 
-type Side = { showId: number; show: string; season: number; episode: number; showYear?: number };
-let nextEpisodeId = 1;
 // A saved Manual Match whose TMDB side holds `tmdb` and whose TVDB side holds one episode.
-function match(id: string, tmdb: Side[], tvdb: Side = { showId: 900, show: "Other", season: 1, episode: 1 }) {
-  const member = (provider: "TMDB" | "TVDB", side: Side) => ({ provider, id: nextEpisodeId++, title: "Episode", url: `https://example.test/${provider}/${nextEpisodeId}`, ...side });
-  return { id, revision: 1, createdAt: "2026-01-01T00:00:00.000Z", members: [...tmdb.map(side => member("TMDB", side)), member("TVDB", tvdb)] };
-}
+const match = (id: string, tmdb: ShowEpisode[]) => savedMatch(id, tmdb, [{ showId: 900, show: "Other" }]);
 
-// Mounts the Manual Match editor with a mocked Manual Coverage read and returns the cards' mapping IDs in order.
-async function mount(t: TestContext, mappings: unknown[], report = true) {
-  const browser = new Window({ url: "http://localhost/reports/manual-matches" });
-  const previous = new Map<string, PropertyDescriptor | undefined>();
-  const fetch = async (input: unknown) => Response.json(String(input) === "/api/plex/scan" ? { scan: { status: "completed" } } : { mappings, revision: 1, pending: 0 });
-  for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch })) {
-    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
-  const container = document.createElement("div");
-  const root = createRoot(container);
-  t.after(async () => {
-    await act(async () => root.unmount());
-    await browser.happyDOM.close();
-    for (const [key, value] of previous) { if (value) Object.defineProperty(globalThis, key, value); else Reflect.deleteProperty(globalThis, key); }
-  });
+// Mounts the Manual Match editor with a mocked Manual Coverage read and returns the cards' Manual Match IDs in order.
+async function mount(t: TestContext, mappings: SavedMatch[], report = true) {
+  const { container, root } = mountDom(t, { fetch: async (input: unknown) => Response.json(String(input) === "/api/plex/scan" ? { scan: { status: "completed" } } : { mappings, revision: 1, pending: 0 }) });
   await act(async () => root.render(createElement(ManualMatchEditor, { initialUrls: [], onChanged() {}, report })));
-  const cards = () => [...container.querySelectorAll<HTMLInputElement>("article input[type=checkbox]")].map(input => input.getAttribute("aria-label")!.replace("Select Manual Match ", ""));
   const click = async (label: string) => {
     const button = [...container.querySelectorAll("button")].find(item => item.textContent === label);
     assert.ok(button, `${label} button`);
     await act(async () => button.click());
   };
-  return { cards, click };
+  return { cards: () => cardIds(container), click };
 }
 
 test("Manual Matches report orders a show's matches by season and episode as numbers", async t => {
@@ -89,7 +70,7 @@ test("Saved Manual Matches outside the report keep the saved order", async t => 
 });
 
 for (const [order, mappings] of [["API", shows], ["reversed API", [...shows].reverse()]] as const) {
-  test(`Manual Matches report orders shows by name, then Show year with no year last, then show ID, then mapping ID (${order} order)`, async t => {
+  test(`Manual Matches report orders shows by name, then Show year with no year last, then show ID, then Manual Match ID (${order} order)`, async t => {
     assert.deepEqual((await mount(t, mappings)).cards(), ["archer", "who-1963-lower-id", "who-1963-a", "who-1963-b", "who-2005", "who-unknown", "zoo"]);
   });
 }

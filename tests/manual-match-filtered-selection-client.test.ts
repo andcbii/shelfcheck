@@ -2,16 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act, createElement } from "react";
 import { ManualMatchEditor } from "../app/components/manual-match-editor";
+import type { CoverageMember } from "../lib/manual-coverage-model";
 import { mountDom } from "./dom-environment";
-
-type Provider = "TMDB" | "TVDB";
-type Show = { showId: number; show: string; showYear?: number; season?: number; episode?: number };
-type Member = Show & { provider: Provider; id: number; title: string; url: string; season: number; episode: number };
-type Mapping = { id: string; revision: number; createdAt: string; members: Member[] };
-let nextEpisodeId = 1;
-const member = (provider: Provider, { season = 1, episode = 1, ...show }: Show): Member => ({ provider, id: nextEpisodeId++, title: "Episode", url: `https://example.test/${provider}/${nextEpisodeId}`, season, episode, ...show });
-// A saved Manual Match holding one episode of each listed TMDB and TVDB show.
-const match = (id: string, tmdb: Show[], tvdb: Show[]): Mapping => ({ id, revision: 1, createdAt: "2026-01-01T00:00:00.000Z", members: [...tmdb.map(show => member("TMDB", show)), ...tvdb.map(show => member("TVDB", show))] });
+import { cardIds, reportHeading, savedMatch as match, showFilterCombobox, showMember as member, type SavedMatch } from "./manual-match-members";
 
 const lost = { showId: 4607, show: "Lost", showYear: 2004 };
 const tvdbLost = { showId: 73739, show: "Lost", showYear: 2004 };
@@ -27,8 +20,8 @@ const lostMatches = (count: number) => Array.from({ length: count }, (_, index) 
  * that keeps the saved Manual Matches, records each DELETE payload, and saves a
  * reviewed edit as the members `resolveAs` gives.
  */
-async function mountReport(t: test.TestContext, initial: Mapping[]) {
-  const server = { mappings: initial, revision: 1, resolveAs: [] as Member[] };
+async function mountReport(t: test.TestContext, initial: SavedMatch[]) {
+  const server = { mappings: initial, revision: 1, resolveAs: [] as CoverageMember[] };
   const deletes: string[][] = [];
   const { browser, container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
     if (String(input) === "/api/plex/scan") return Response.json({ scan: { status: "completed" } });
@@ -48,11 +41,7 @@ async function mountReport(t: test.TestContext, initial: Mapping[]) {
     return Response.json({ mappings: server.mappings, revision: server.revision, pending: 0 });
   } });
   await act(async () => root.render(createElement(ManualMatchEditor, { initialUrls: [], onChanged() {}, report: true })));
-  const combobox = (name: string) => {
-    const label = [...container.querySelectorAll("label")].find(item => item.textContent === name);
-    assert.ok(label, `${name} label`);
-    return container.querySelector<HTMLInputElement>(`#${label.htmlFor}`)!;
-  };
+  const combobox = (name: string) => showFilterCombobox(container, name);
   const options = (name: string) => [...container.querySelectorAll<HTMLElement>(`#${combobox(name).getAttribute("aria-controls")} [role="option"]`)];
   const pick = async (name: string, label: string) => {
     await act(async () => combobox(name).focus());
@@ -73,12 +62,12 @@ async function mountReport(t: test.TestContext, initial: Mapping[]) {
     return found;
   };
   const tick = async (...ids: string[]) => { for (const id of ids) await act(async () => card(id).querySelector<HTMLInputElement>("input[type=checkbox]")!.click()); };
-  const cards = () => [...container.querySelectorAll<HTMLInputElement>("article input[type=checkbox]")].map(input => input.getAttribute("aria-label")!.replace("Select Manual Match ", ""));
+  const cards = () => cardIds(container);
   const ticked = () => [...container.querySelectorAll<HTMLInputElement>("article input[type=checkbox]")].filter(input => input.checked).map(input => input.getAttribute("aria-label")!.replace("Select Manual Match ", ""));
   const bulkBar = () => container.querySelector<HTMLElement>('[aria-label="Selected Manual Matches"]')?.textContent ?? null;
   const dialog = () => container.querySelector<HTMLElement>('[role="dialog"]');
   const dialogName = () => dialog()?.getAttribute("aria-label") ?? null;
-  const heading = () => [...container.querySelectorAll("h3")].map(item => item.textContent).find(text => text?.startsWith("Manual Matches"));
+  const heading = () => reportHeading(container);
   return { browser, container, root, server, deletes, pick, picked, button, click, card, tick, cards, ticked, bulkBar, dialog, dialogName, heading };
 }
 
@@ -135,7 +124,7 @@ test("Saving a match the filters hide keeps the filters and says so; a visible s
   const report = await mountReport(t, [match("who-a", [who], [tvdbWho]), match("who-b", [{ ...who, episode: 2 }], [{ ...tvdbWho, episode: 2 }]), match("archer", [archer], [tvdbArcher])]);
   await report.pick("TMDB shows", "Doctor Who (2005)");
   await report.tick("who-a", "who-b");
-  const save = async (id: string, members: Member[]) => {
+  const save = async (id: string, members: CoverageMember[]) => {
     report.server.resolveAs = members;
     await report.click(/^Edit/, report.card(id));
     await report.click("Resolve and review", report.dialog()!);
@@ -172,7 +161,7 @@ test("A refresh of the same mounted report keeps the filters and ticked matches 
   await report.pick("TVDB shows", "Lost (2004)");
   await report.tick("lost-01", "lost-02");
   // The saved show is renamed and its year corrected before the next refresh.
-  const renamed = (show: Member) => show.provider === "TMDB" && show.showId === lost.showId ? { ...show, show: "LOST", showYear: 2005 } : show;
+  const renamed = (show: CoverageMember) => show.provider === "TMDB" && show.showId === lost.showId ? { ...show, show: "LOST", showYear: 2005 } : show;
   report.server.mappings = report.server.mappings.map(mapping => ({ ...mapping, members: mapping.members.map(renamed) }));
   await deleteOne(report, "lost-03");
   assert.deepEqual(report.deletes, [["lost-03"]]);

@@ -1,46 +1,15 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { Window } from "happy-dom";
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
 import { ManualMatchEditor } from "../app/components/manual-match-editor";
-
-type Provider = "TMDB" | "TVDB";
-type Show = { showId: number; show: string; showYear?: number; season?: number; episode?: number };
-type Mapping = { id: string; revision: number; createdAt: string; members: unknown[] };
-let nextEpisodeId = 1;
-// A saved Manual Match holding one episode of each listed TMDB and TVDB show.
-function match(id: string, tmdb: Show[], tvdb: Show[], createdAt = "2026-01-01T00:00:00.000Z", revision = 1): Mapping {
-  const member = (provider: Provider, { season = 1, episode = 1, ...show }: Show) => ({ provider, id: nextEpisodeId++, title: "Episode", url: `https://example.test/${provider}/${nextEpisodeId}`, season, episode, ...show });
-  return { id, revision, createdAt, members: [...tmdb.map(show => member("TMDB", show)), ...tvdb.map(show => member("TVDB", show))] };
-}
+import { mountDom } from "./dom-environment";
+import { cardIds, reportHeading, savedMatch as match, showFilterCombobox, type SavedMatch } from "./manual-match-members";
 
 // Mounts the Manual Matches report with a mocked Manual Coverage read and drives its show filters.
-async function mount(t: TestContext, mappings: Mapping[]) {
-  const browser = new Window({ url: "http://localhost/reports/manual-matches" });
-  const previous = new Map<string, PropertyDescriptor | undefined>();
-  const fetch = async (input: unknown) => Response.json(String(input) === "/api/plex/scan" ? { scan: { status: "completed" } } : { mappings, revision: 1, pending: 0 });
-  for (const [key, value] of Object.entries({ window: browser, document: browser.document, HTMLElement: browser.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true, fetch })) {
-    previous.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
-  const container = document.createElement("div");
-  document.body.appendChild(container);
-  const root = createRoot(container);
-  t.after(async () => {
-    await act(async () => root.unmount());
-    await browser.happyDOM.close();
-    for (const [key, value] of previous) { if (value) Object.defineProperty(globalThis, key, value); else Reflect.deleteProperty(globalThis, key); }
-  });
+async function mount(t: TestContext, mappings: SavedMatch[]) {
+  const { browser, container, root } = mountDom(t, { fetch: async (input: unknown) => Response.json(String(input) === "/api/plex/scan" ? { scan: { status: "completed" } } : { mappings, revision: 1, pending: 0 }) });
   await act(async () => root.render(createElement(ManualMatchEditor, { initialUrls: [], onChanged() {}, report: true })));
-  // The filter's combobox, found by its label as a screen reader would.
-  const combobox = (name: string) => {
-    const label = [...container.querySelectorAll("label")].find(item => item.textContent === name);
-    assert.ok(label, `${name} label`);
-    const input = container.querySelector<HTMLInputElement>(`#${label.htmlFor}`);
-    assert.equal(input?.getAttribute("role"), "combobox");
-    return input!;
-  };
+  const combobox = (name: string) => showFilterCombobox(container, name);
   const listbox = (name: string) => {
     const id = combobox(name).getAttribute("aria-controls");
     return id ? container.querySelector<HTMLElement>(`#${id}[role="listbox"]`) : null;
@@ -64,14 +33,12 @@ async function mount(t: TestContext, mappings: Mapping[]) {
       await act(async () => option.click());
     }
   };
-  const cards = () => [...container.querySelectorAll<HTMLInputElement>("article input[type=checkbox]")].map(input => input.getAttribute("aria-label")!.replace("Select Manual Match ", ""));
-  const heading = () => [...container.querySelectorAll("h3")].map(item => item.textContent).find(text => text?.startsWith("Manual Matches"));
   const click = async (label: string) => {
     const button = [...container.querySelectorAll("button")].find(item => item.textContent === label || item.getAttribute("aria-label") === label);
     assert.ok(button, `${label} button`);
     await act(async () => button.click());
   };
-  return { container, combobox, listbox, options, optionLabels, open, key, type, pick, cards, heading, click };
+  return { container, combobox, listbox, options, optionLabels, open, key, type, pick, cards: () => cardIds(container), heading: () => reportHeading(container), click };
 }
 
 const day = (n: number) => `2026-01-${String(n).padStart(2, "0")}T00:00:00.000Z`;
@@ -83,7 +50,7 @@ for (const [order, reverse] of [["API", false], ["reversed API", true]] as const
       match("who-1963-old", [{ showId: 121, show: "Dr. Who", showYear: 1963 }], [lost], day(1), 7),
       match("who-1963-new", [{ showId: 121, show: "Doctor Who", showYear: 1963 }], [lost], day(5)),
       match("who-2005", [{ showId: 57243, show: "Doctor Who", showYear: 2005 }], [lost], day(2)),
-      // Equal creation times: the higher mapping ID counts as the newer match.
+      // Equal creation times: the higher Manual Match ID counts as the newer match.
       match("archer-2", [{ showId: 1000, show: "Archer", showYear: 2009 }], [lost], day(3)),
       match("archer-1", [{ showId: 1000, show: "Archer (old)" }], [lost], day(3)),
       match("zoo", [{ showId: 7, show: "Zoo" }], [lost], day(4)),

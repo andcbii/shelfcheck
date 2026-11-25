@@ -94,8 +94,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   // Only the report has a fixed show order and show filters; the Plex page keeps the saved order.
   const filtering = report && filteringShows(showPicks);
   const listedMappings = report ? orderManualMatches(filtering ? filterByShows(scopedMappings, showPicks) : scopedMappings) : scopedMappings;
+  // A filter change clears ticked matches and any pending bulk delete, so nothing hidden can be deleted.
   function changeShowPicks(picks: ShowPicks) {
     setShowPicks(picks);
+    changeSelection([]);
     const shown = filteringShows(picks) ? filterByShows(scopedMappings, picks).length : scopedMappings.length;
     setPage(current => Math.min(current, Math.max(1, Math.ceil(shown / pageSize))));
   }

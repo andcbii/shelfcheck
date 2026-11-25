@@ -25,6 +25,8 @@ import { resultsView } from "@/lib/results-view";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
+import { ScanProgressBox } from "@/app/components/scan-progress-box";
+import type { ScanProgressStatus } from "@/lib/scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useClearCache } from "@/app/hooks/use-clear-cache";
 import { useLocalToday } from "@/app/hooks/use-local-today";
@@ -34,7 +36,9 @@ import { parsePlexPreferences } from "@/lib/preferences";
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
 type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string; catalogueSelection?: ShowCatalogueSelection; providerResolution?: PlexProviderResolution };
 type Report = { shows: Show[]; lastScan: string; coverageGroups?: CoverageGroup[]; scanCache?: Record<string, unknown> };
-type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" };
+type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" } & Omit<ScanProgressStatus, "rateLimitProvider">;
+// A Plex scan checks up to three shows at once.
+const PLEX_ACTIVE_SHOWS = 3;
 type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: boolean; tvdbApiKeySaved: boolean; tvdbPinSaved: boolean; configured: boolean };
 type FieldKey = "plexUrl" | "plexToken" | "tmdbToken" | "tvdbApiKey" | "tvdbPin";
 type IgnoredShow = { ratingKey: string; title: string } & IgnoreTiming;
@@ -413,7 +417,7 @@ export default function PlexPage() {
         {group.health && group.health !== "healthy" && <p>{group.health === "pending" ? "Coverage pending recheck" : "Mapping needs review"}</p>}
         {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{String(member.season).padStart(2, "0")}E{String(member.episode).padStart(2, "0")} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "reported-missing" ? "Reported missing" : member.status === "incomplete" ? INCOMPLETE_LABEL : member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong>{member.status === "incomplete" && member.missingParts?.length ? <small>{missingPartsExplanation(group.members, member.missingParts)}</small> : null}</li>)}</ul></section>)}
       </section>)}
-      {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
+      {scanning ? <ScanProgressBox progress={progress} status={status} maxShows={PLEX_ACTIVE_SHOWS} /> : visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);
         const showCollapsed = collapsedShows.has(show.ratingKey);
         const percentCollected = Math.round(show.percent * 100);

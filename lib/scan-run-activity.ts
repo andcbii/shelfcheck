@@ -53,11 +53,27 @@ const SCAN_STEP_WORDING: Record<string, string> = {
   "collection-progress": "Checking your Trakt collection",
   "air-dates": "Looking up air dates",
   poster: "Fetching the poster",
+  "plex-inventory": "Reading episodes in Plex",
+  "tmdb-show-and-seasons": "Getting the episode list from TMDB",
+  "tvdb-series-and-episodes": "Getting the episode list from TVDB",
+  "episode-crosswalk": "Matching episode numbers between providers",
+};
+
+const SCAN_PREPARATION_WORDING: Record<string, string> = {
+  initializing: "Getting ready…",
 };
 
 /** A show's current step in plain English; a step without wording reads neutrally rather than by its raw name. */
 export function scanStepWording(phase: string): string {
   return Object.hasOwn(SCAN_STEP_WORDING, phase) ? SCAN_STEP_WORDING[phase] : "Working on it";
+}
+
+/**
+ * What the progress box says while no show is being checked and the Scan run
+ * is still preparing, from its current phase; null once it is past preparing.
+ */
+export function scanPreparationWording(currentPhase: string | undefined): string | null {
+  return currentPhase !== undefined && Object.hasOwn(SCAN_PREPARATION_WORDING, currentPhase) ? SCAN_PREPARATION_WORDING[currentPhase] : null;
 }
 
 /** The well-formed shows of a status's `activeShows`, skipping anything an older or damaged status holds instead. */

@@ -119,16 +119,22 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   });
   const post = (body: unknown) => api.POST(new Request("http://localhost/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
   const status = async (): Promise<Result & { scan: { status: string; error?: string } }> => (await scan.GET()).json();
-  /** Runs a full scan, or a single-show rescan when `ratingKey` is given, and waits for it to complete. */
-  const rerun = async (ratingKey?: string) => {
+  /** Runs a full scan, or a single-show rescan when `ratingKey` is given, and waits for it to end, however it ends. */
+  const scanToEnd = async (ratingKey?: string) => {
     await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: JSON.stringify(ratingKey ? { ratingKey } : {}) }));
     // A deadline, not an iteration count: under full-suite load one scan can take several seconds.
     for (const deadline = Date.now() + 60_000; Date.now() < deadline;) {
       const result = await status();
-      if (result.scan.status !== "running") { assert.equal(result.scan.status, "completed", result.scan.error ?? "scan did not complete"); return result; }
+      if (result.scan.status !== "running") return result;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     throw new Error("scan timeout");
+  };
+  /** Runs a full scan, or a single-show rescan when `ratingKey` is given, and waits for it to complete. */
+  const rerun = async (ratingKey?: string) => {
+    const result = await scanToEnd(ratingKey);
+    assert.equal(result.scan.status, "completed", result.scan.error ?? "scan did not complete");
+    return result;
   };
   type Saved = { id: string; revision: number; members: (Identity & { reportMissing: boolean })[] };
   const mappings = async () => (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings as Saved[];
@@ -176,5 +182,5 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
     assert.equal(response.status, 200, await response.clone().text());
   };
   const restart = () => { cache.__shelfcheckDatabase?.close(); delete cache.__shelfcheckDatabase; };
-  return { state, requests, patchSettings, post, status, rerun, clearCache, mappings, save, setFlags, flags, missing, group, restart, writeFlags, writeUndatedRelationships };
+  return { state, requests, patchSettings, post, status, scanToEnd, rerun, clearCache, mappings, save, setFlags, flags, missing, group, restart, writeFlags, writeUndatedRelationships };
 }

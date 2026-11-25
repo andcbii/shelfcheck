@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { harness, key, type Episode } from "./report-missing-harness";
 
@@ -163,4 +164,136 @@ for (const order of ["Target", "Other"] as const) test(`a many-to-many match bec
   assert.deepEqual(await h.flags(match.id), [key(t1)], "t1 keeps its flag");
   assert.deepEqual(h.missing(result), expected.missing(want));
   assert.deepEqual(h.group(result, match.id), expected.group(want, remaining.id));
+});
+
+const db = () => (globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync }).__shelfcheckDatabase!;
+/** Pinky and the Brain S04E09 <-> Animaniacs S05E24, saved and scanned, with S05E24 then gone from TVDB 21. */
+async function pinkyGone(t: test.TestContext) {
+  const h = await harness(t, library, owned);
+  await h.rerun();
+  const match = await saved(h, [pinky, animaniacs]);
+  await h.rerun();
+  h.state.gone.add(animaniacs.id);
+  h.state.tvdbChanged = [21];
+  return { h, match, revision: (await coverage(h)).revision };
+}
+async function unchanged(h: Harness, match: { id: string }, revision: number) {
+  assert.deepEqual((await h.mappings()).map(mapping => [mapping.id, mapping.members.map(key)]), [[match.id, [key(pinky), key(animaniacs)]]], "no member is removed");
+  assert.equal((await coverage(h)).revision, revision, "no Manual Match change committed");
+  assert.deepEqual(removals(), [], "no removal is logged");
+}
+
+test("a scan whose report cannot be saved applies no removal", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  db().exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
+  const failed = await h.scanToEnd();
+  assert.equal(failed.scan.status, "error");
+  assert.equal(failed.scan.error, "report store unavailable");
+  await unchanged(h, match, revision);
+});
+
+test("a scan vetoed by a Manual Match change applies no removal", async t => {
+  const { h, match } = await pinkyGone(t);
+  // The coverage revision moves while the scan runs, as a Manual Match save would move it.
+  h.state.onRequest = pathname => { if (pathname === "/v4/series/21/episodes/default") db().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1"); };
+  const vetoed = await h.scanToEnd();
+  assert.equal(vetoed.scan.status, "error");
+  assert.match(vetoed.scan.error!, /Manual Matches changed while this scan was running/);
+  h.state.onRequest = undefined;
+  await unchanged(h, match, (await coverage(h)).revision);
+});
+
+test("a failed removal change rolls back and removes nothing; the scan's saved report stands", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  db().exec("CREATE TRIGGER fail_removal BEFORE DELETE ON shelfcheck_coverage_mappings BEGIN SELECT RAISE(ABORT, 'coverage store unavailable'); END;");
+  const result = await h.rerun();
+  await unchanged(h, match, revision);
+  assert.match(logged("plex.manual-match.removal-failed")[0] || "", /coverage store unavailable/);
+  assert.equal((await coverage(h)).pending, 0, "nothing is carried");
+  assert.equal((result.report as { coverageRevision?: number }).coverageRevision, revision);
+});
+
+test("removals committed before a failed cached recheck stay, pending, until a later scan compares them", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  // Only the recheck writes a report at the new coverage revision.
+  db().exec(`CREATE TRIGGER fail_recheck BEFORE UPDATE OF report ON shelfcheck_scan_state WHEN json_extract(NEW.report, '$.coverageRevision') > ${revision} BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;`);
+  const result = await h.rerun();
+  assert.deepEqual(await h.mappings(), [], "the committed removal stays");
+  assert.equal(removals().length, 1);
+  assert.match(logged("plex.manual-match.recheck-failed")[0] || "", /report store unavailable/);
+  const state = await coverage(h);
+  assert.equal(state.revision, revision + 1);
+  assert.equal(state.pending, 1, "the affected members stay carried and pending");
+  assert.equal((result.report as { coverageRevision?: number }).coverageRevision, revision, "the scan's report keeps its own revision");
+  assert.ok(!(await h.mappings()).some(mapping => mapping.id === match.id));
+
+  db().exec("DROP TRIGGER fail_recheck;");
+  const later = await h.rerun();
+  const recovered = await coverage(h);
+  assert.equal(recovered.pending, 0, "a later scan compares the carried members");
+  assert.equal((later.report as { coverageRevision?: number }).coverageRevision, recovered.revision);
+  assert.deepEqual(h.missing(later, "other"), {});
+});
+
+test("a show whose catalogue downloaded but whose comparison failed proposes nothing", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  // Animaniacs' comparison fails after its fresh TVDB download, when it records its catalogue names.
+  db().exec("CREATE TRIGGER fail_comparison BEFORE UPDATE OF name ON shelfcheck_catalogue_candidates WHEN NEW.identity = 'ratingKey:other' BEGIN SELECT RAISE(ABORT, 'comparison store unavailable'); END;");
+  const result = await h.rerun();
+  assert.ok(h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21 was downloaded");
+  assert.ok((result as unknown as { coverage: Coverage }).coverage.issues.some(issue => issue.id === "comparison-failure:ratingKey:other"), "Animaniacs' comparison failed");
+  await unchanged(h, match, revision);
+});
+
+const resumePoint = () => (db().prepare("SELECT resume_point FROM shelfcheck_scan_state WHERE mode='plex'").get() as { resume_point: string | null }).resume_point;
+
+test("a single-show scan removes members its fresh download proves gone, and the full-run Resume point it prunes is still rejected", async t => {
+  const { h, revision } = await pinkyGone(t);
+  // A full scan that fails at its report save leaves a Resume point at this coverage revision.
+  db().exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
+  assert.equal((await h.scanToEnd()).scan.status, "error");
+  db().exec("DROP TRIGGER fail_report;");
+  assert.ok(resumePoint(), "the failed full scan saved a Resume point");
+  assert.deepEqual(removals(), []);
+  h.state.tvdbChanged = [];
+
+  const result = await h.rerun("ratingKey:other");
+  assert.deepEqual(await h.mappings(), [], "the single-show scan's fresh TVDB download removes the member");
+  assert.equal(removals().length, 1);
+  const state = await coverage(h);
+  assert.equal(state.revision, revision + 1);
+  assert.equal(state.pending, 0);
+  assert.equal((result.report as { coverageRevision?: number }).coverageRevision, state.revision);
+  assert.ok(resumePoint(), "the single-show scan pruned the Resume point and kept it");
+
+  await h.rerun();
+  assert.equal(logged("plex.checkpoint.resume").length, 0, "the full scan does not resume from a point of the old coverage revision");
+  assert.equal(logged("plex.checkpoint.discarded").length, 1);
+});
+
+test("ID-bearing unnumbered and special records count as listed, and an unreadable record proves nothing gone", async t => {
+  const v: Episode = { provider: "TVDB", id: 301, season: 2, episode: 1, name: "One" };
+  const h = await harness(t, [...library, v], owned);
+  await h.rerun();
+  await saved(h, [pinky, v]);
+  await h.rerun();
+  h.state.gone.add(v.id);
+  h.state.tvdbChanged = [20];
+  const kept = async (records: unknown[], why: string) => {
+    h.state.tvdbRecords = records;
+    h.requests.length = 0;
+    await h.rerun();
+    assert.ok(h.requests.includes("/v4/series/20/episodes/default"), "TVDB 20 was downloaded again");
+    assert.equal((await h.mappings())[0]?.members.length, 2, why);
+  };
+  await kept([{ id: v.id, name: "One" }], "a record without numbering still lists its episode");
+  await kept([{ id: v.id, seasonNumber: 0, number: 3, name: "One", aired: "2020-01-01" }], "a special still lists its episode");
+  await kept([{ seasonNumber: 1, number: 9, name: "No ID" }], "a record without an ID could be the member's");
+  assert.deepEqual(removals(), []);
+
+  // Once nothing lists it, the same download removes it.
+  h.state.tvdbRecords = [];
+  await h.rerun();
+  assert.deepEqual(await h.mappings(), []);
+  assert.equal(removals().length, 1);
 });

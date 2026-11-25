@@ -157,7 +157,10 @@ export type ProviderRequest = {
   candidates: number[];
   /** The catalogue override, else the lowest Plex-reported ID. */
   preferredId?: number;
-  /** This provider's refresh obligation for the show, as it was at resolution entry: it governs every attempt. */
+  /**
+   * This provider's refresh obligation for the show, as it was when the provider's choice started: it
+   * governs every attempt. `ResolverDependencies.refreshObligation`, when given, replaces it then.
+   */
   refreshObligation: RefreshObligation;
   /** How the preferred ID was found, for Coverage Issue provenance. */
   lookupSource: LookupSourceStep[];
@@ -268,6 +271,12 @@ export type ResolverDependencies<P extends CataloguePayloads> = {
    * does not reapply or roll it back, even when the overall outcome is pending.
    */
   onProviderResolved?: (progress: ProviderProgress<P>) => Promise<void>;
+  /**
+   * Awaited as each provider's choice starts, in resolution order, after the previous provider's
+   * progress: the provider's refresh obligation as it then stands, in place of the request's. A live
+   * scan waits here for that provider's freshness, whose retention can add to the obligation.
+   */
+  refreshObligation?: (provider: CatalogueProvider) => Promise<RefreshObligation>;
 };
 
 /** The progress sink could not persist a provider's obligation change; `cause` is the sink's rejection. */
@@ -295,6 +304,10 @@ export async function resolveComparisonCatalogues<P extends CataloguePayloads>(r
   // Without a Plex TMDB ID, TMDB is derived from the TVDB series compared, so that is chosen first.
   const order: readonly CatalogueProvider[] = !request.tmdb.candidates.length && severalCandidates(request.tvdb) ? ["tvdb", "tmdb"] : PROVIDERS;
   for (const provider of order) {
+    if (dependencies.refreshObligation) {
+      const refreshObligation = await dependencies.refreshObligation(provider);
+      resolving.request = { ...resolving.request, [provider]: { ...resolving.request[provider], refreshObligation } };
+    }
     const resolution = judged(request, provider, await resolveProvider(resolving, provider));
     resolving.identities[provider] = resolution.identity;
     try {

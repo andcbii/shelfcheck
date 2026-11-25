@@ -198,8 +198,20 @@ export type ScanRunContext<P> = {
    * logs `<prefix>.scan.complete`. A vetoed run is not a success: nothing is
    * committed or saved, and the run ends at once with the mode's vetoed error.
    */
-  complete(final: { commit(): void; processed: number; total: number; finishedAt: string; details: LogDetails }): "completed" | "vetoed";
+  complete(final: ScanRunCompletion): "completed" | "vetoed";
+  /**
+   * Completes the run as `complete` does, but awaits the mode's `finalize`
+   * after the commit and the `committed` hook, before the Resume point is
+   * settled and the completed status is recorded. The run keeps its ownership
+   * and the scan run lock until `finalize` settles. A vetoed run never commits
+   * or finalizes. A throw from `finalize` fails the run after its commit, so no
+   * Resume point is forced over the committed report.
+   */
+  completeAfter(final: ScanRunCompletion & { finalize(): Promise<void> }): Promise<"completed" | "vetoed">;
 };
+
+/** A run's completion: the mode's commit (its report write) and the completed status's counts and log details. */
+export type ScanRunCompletion = { commit(): void; processed: number; total: number; finishedAt: string; details: LogDetails };
 
 /** The run body: everything the Scan run does after it owns the lock. */
 export type ScanRunBody = (owner: ScanRunOwner) => Promise<void>;
@@ -396,31 +408,45 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         },
       },
       complete(final) {
-        if (!live()) return "vetoed";
-        if (hooks.veto?.()) {
-          // Ends the run at once rather than leaving it running until it reads as an Interrupted scan.
-          recordError(mode.vetoedError || mode.failureMessage, "veto");
-          runLogger.warn(event("scan.vetoed"), { processed, total });
-          return "vetoed";
-        }
-        final.commit();
-        committed = true;
-        hooks.committed?.();
-        const store = mode.resumePoint;
-        if (store) {
-          if (runOptions.fullRun) store.clear();
-          else if (storedPoint && runOptions.pruneResumePoint) {
-            const next = runOptions.pruneResumePoint(storedPoint);
-            if (next) store.write(next); else store.clear();
-          }
-        }
-        hooks.succeeded?.();
-        // A clean finish: replace, so no pause or active work survives the run.
-        mode.status.write({ status: "completed", processed: final.processed, total: final.total, startedAt, finishedAt: final.finishedAt } as S);
-        terminal = true;
-        runLogger.info(event("scan.complete"), final.details);
-        return "completed";
+        if (!commit(final)) return "vetoed";
+        return succeed(final);
       },
+      async completeAfter(final) {
+        if (!commit(final)) return "vetoed";
+        await final.finalize();
+        return succeed(final);
+      },
+    };
+    /** The veto check and the mode's commit. False, with the run ended, when it is vetoed or no longer live. */
+    const commit = (final: ScanRunCompletion) => {
+      if (!live()) return false;
+      if (hooks.veto?.()) {
+        // Ends the run at once rather than leaving it running until it reads as an Interrupted scan.
+        recordError(mode.vetoedError || mode.failureMessage, "veto");
+        runLogger.warn(event("scan.vetoed"), { processed, total });
+        return false;
+      }
+      final.commit();
+      committed = true;
+      hooks.committed?.();
+      return true;
+    };
+    /** After the commit: settles the Resume point, records the completed status and logs the completion. */
+    const succeed = (final: ScanRunCompletion): "completed" => {
+      const store = mode.resumePoint;
+      if (store) {
+        if (runOptions.fullRun) store.clear();
+        else if (storedPoint && runOptions.pruneResumePoint) {
+          const next = runOptions.pruneResumePoint(storedPoint);
+          if (next) store.write(next); else store.clear();
+        }
+      }
+      hooks.succeeded?.();
+      // A clean finish: replace, so no pause or active work survives the run.
+      mode.status.write({ status: "completed", processed: final.processed, total: final.total, startedAt, finishedAt: final.finishedAt } as S);
+      terminal = true;
+      runLogger.info(event("scan.complete"), final.details);
+      return "completed";
     };
     /**
      * One heartbeat tick. It runs from a timer, outside the run's error

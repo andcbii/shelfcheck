@@ -1,5 +1,5 @@
 import type { CoverageMapping, CoverageProvider } from "@/lib/manual-coverage-model";
-import { compareShows, type OrderedShow } from "@/lib/manual-match-order";
+import { compareShows, savedShows, type OrderedShow } from "@/lib/manual-match-order";
 
 /** A show filter option: one provider show used in saved Manual Matches. */
 export type ShowOption = OrderedShow & { label: string };
@@ -7,23 +7,14 @@ export type ShowOption = OrderedShow & { label: string };
 export type ShowPicks = Record<CoverageProvider, number[]>;
 export const noShowPicks: ShowPicks = { TMDB: [], TVDB: [] };
 
-// Creation time decides which saved name an option takes; edits and revisions never do.
-const newer = (a: CoverageMapping, b: CoverageMapping) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || (a.id > b.id ? 1 : a.id < b.id ? -1 : 0);
-
 /**
  * One option per show ID on `provider`'s side of the saved Manual Matches,
- * named as in the most recently created match holding it (ties: the higher
- * mapping ID), labelled "Show Name (Year)" when its Show year is known, and in
- * the report's show order.
+ * named as in the most recently created match holding it (see `savedShows`),
+ * labelled "Show Name (Year)" when its Show year is known, and in the report's
+ * show order.
  */
 export function showOptions(mappings: CoverageMapping[], provider: CoverageProvider): ShowOption[] {
-  const shows = new Map<number, OrderedShow>();
-  for (const mapping of [...mappings].sort(newer)) {
-    for (const { provider: side, show, showId, showYear } of mapping.members) {
-      if (side === provider) shows.set(showId, { show, showId, showYear });
-    }
-  }
-  return [...shows.values()].sort(compareShows).map(show => ({ ...show, label: show.showYear ? `${show.show} (${show.showYear})` : show.show }));
+  return [...savedShows(mappings, provider).values()].sort(compareShows).map(show => ({ ...show, label: show.showYear ? `${show.show} (${show.showYear})` : show.show }));
 }
 
 /**

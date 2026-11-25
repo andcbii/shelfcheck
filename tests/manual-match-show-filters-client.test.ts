@@ -204,3 +204,14 @@ test("Paging works over the filtered list and clamps the current page", async t 
   assert.deepEqual(report.cards(), ["archer-1", "archer-2"]);
   assert.match(report.container.querySelector(".report-pagination")!.textContent!, /Showing 1–2 of 2.*1 \/ 1/);
 });
+
+test("A show ID saved under two names keeps its cards together, in the show filter's option order", async t => {
+  const mappings = [
+    match("who-old-name", [{ showId: 121, show: "Dr. Who", showYear: 1963, episode: 1 }], [lost], day(1)),
+    match("downton", [{ showId: 33907, show: "Downton Abbey", showYear: 2010 }], [lost], day(2)),
+    match("who-new-name", [{ showId: 121, show: "Doctor Who", showYear: 1963, episode: 2 }], [lost], day(3)),
+  ];
+  const report = await mount(t, mappings);
+  assert.deepEqual(await report.optionLabels("TMDB shows"), ["Doctor Who (1963)", "Downton Abbey (2010)"]);
+  assert.deepEqual(report.cards(), ["who-old-name", "who-new-name", "downton"]);
+});

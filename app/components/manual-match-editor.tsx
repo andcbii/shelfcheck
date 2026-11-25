@@ -97,7 +97,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   if (savedPicks !== showPicks) changeShowPicks(savedPicks);
   // Only the report has a fixed show order and show filters; the Plex page keeps the saved order.
   const filtering = report && filteringShows(showPicks);
-  const listedMappings = report ? orderManualMatches(filtering ? filterByShows(scopedMappings, showPicks) : scopedMappings) : scopedMappings;
+  // Ordered before filtering, so each show is named as in every saved match, as its filter option is.
+  const listedMappings = report ? filterByShows(orderManualMatches(scopedMappings), showPicks) : scopedMappings;
   // Only listed Manual Matches stay ticked: one a refresh removes or the filters hide drops out
   // of the selection, so it is not ticked if it is listed again.
   const listedSelection = selected.filter(id => listedMappings.some(mapping => mapping.id === id));

@@ -30,14 +30,14 @@ type Answer = Response | (() => Response);
 type PlexShow = { ratingKey: string; title: string; tmdbId: number; episodes?: number[]; owns?: number[]; ownsTmdb?: number[]; tvdbId?: number; tvdbEpisodes?: number[] };
 
 /**
- * One Plex show (TMDB 10) and two saved Manual Matches, TMDB 101 with TVDB 201
- * and TMDB 102 with TVDB 202, behind a mocked fetch that records every request.
+ * One Plex show (TMDB 10, whose catalogue lists both TMDB members, so no member is a removal
+ * candidate) and two saved Manual Matches, TMDB 101 with TVDB 201 and TMDB 102 with TVDB 202, behind a mocked fetch that records every request.
  * `signIn` answers each TVDB login attempt in turn; `plex` may answer a Plex
  * request. A Manual Match member request is unexpected. `shows` lists
  * the Plex library, each show with its own TMDB catalogue of one episode; it may
  * change between scans.
  */
-async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "1", title: "Target", tmdbId: 10 }] as PlexShow[] } = {}) {
+async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "1", title: "Target", tmdbId: 10, episodes: [100, 101, 102] }] as PlexShow[] } = {}) {
   const dir = mkdtempSync(path.join(tmpdir(), "scan-sign-in-"));
   const previous = [process.env.SHELFCHECK_DATA_DIR, process.env.SHELFCHECK_CONFIG_DIR];
   process.env.SHELFCHECK_DATA_DIR = dir;

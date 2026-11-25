@@ -299,20 +299,93 @@ test("ID-bearing unnumbered and special records count as listed, and an unreadab
   assert.equal(removals().length, 1);
 });
 
-test("a TVDB series whose default order is not its Aired Order proves nothing gone", async t => {
-  // Save-time resolution places a TVDB member by its Aired Order numbers; any other default order
-  // (DVD, absolute, alternate) can leave out episodes the series still has.
+const kept = () => logged("plex.manual-match.removal-kept");
+
+test("a TVDB member missing from the default order but still at TVDB is kept; once TVDB answers 404 it is removed", async t => {
+  // TVDB 201 is an alternate cut (S2E1) of the aired TVDB 202 (S1E1): an episode need not exist in
+  // every season order, so the default listing can leave it out while TVDB still has it.
+  const tmdb101: Episode = { provider: "TMDB", id: 101, season: 1, episode: 1, name: "One" };
+  const alternate: Episode = { provider: "TVDB", id: 201, season: 2, episode: 1, name: "One (alternate cut)" };
+  const aired: Episode = { provider: "TVDB", id: 202, season: 1, episode: 1, name: "One" };
+  const h = await harness(t, [tmdb101, alternate, aired], [tmdb101]);
+  await h.rerun();
+  const match = await saved(h, [tmdb101, alternate]);
+  await h.rerun();
+  const revision = (await coverage(h)).revision;
+
+  h.state.unlisted.add(alternate.id);
+  h.state.tvdbChanged = [20];
+  h.requests.length = 0;
+  await h.rerun();
+  assert.ok(h.requests.includes("/v4/series/20/episodes/default"), "TVDB 20 was downloaded fresh");
+  assert.ok(h.requests.includes("/v4/episodes/201/extended"), "the candidate was looked up at TVDB");
+  assert.deepEqual((await h.mappings()).map(mapping => [mapping.id, mapping.members.map(key)]), [[match.id, [key(tmdb101), key(alternate)]]], "the match survives");
+  assert.equal((await coverage(h)).revision, revision, "no Manual Match change committed");
+  assert.deepEqual(removals(), []);
+  assert.match(kept()[0] || "", /provider="TVDB".*episodeId=201\b/);
+
+  h.state.gone.add(alternate.id);
+  await h.rerun();
+  assert.deepEqual(await h.mappings(), [], "TVDB's 404 confirms the member gone and deletes the match");
+  assert.match(removals()[0] || "", /episodeId=201\b.*matchDeleted=true/);
+});
+
+test("a TVDB member whose episode now belongs to another series is removed", async t => {
+  const { h, match } = await pinkyGone(t);
+  // Animaniacs S05E24 left TVDB 21's list because TVDB moved it to series 99, not because it was deleted.
+  h.state.gone.delete(animaniacs.id);
+  h.state.unlisted.add(animaniacs.id);
+  h.state.bodies.set("/v4/episodes/5524/extended", { data: { id: 5524, seriesId: 99, seasonNumber: 1, number: 1, name: "Moved" } });
+  await h.rerun();
+  assert.deepEqual(await h.mappings(), []);
+  assert.match(removals()[0] || "", new RegExp(`mappingId="${match.id}".*episodeId=5524\\b.*matchDeleted=true`));
+});
+
+test("a candidate whose lookup fails or answers unreadably is kept, and the scan completes", async t => {
   const { h, match, revision } = await pinkyGone(t);
-  for (const seasonType of [2, 3, undefined]) {
-    h.state.tvdbDefaultSeasonType = seasonType;
+  h.state.gone.delete(animaniacs.id);
+  h.state.unlisted.add(animaniacs.id);
+  const answers: [() => Response, RegExp][] = [
+    [() => new Response("{}", { status: 503, headers: { "Retry-After": "1" } }), /reason="lookup-failed".*503/],
+    [() => Response.json({ data: {} }), /reason="unreadable-answer"/],
+  ];
+  for (const [answer, why] of answers) {
+    h.state.respond = url => url.pathname === "/v4/episodes/5524/extended" ? answer() : undefined;
     h.requests.length = 0;
     await h.rerun();
-    assert.ok(h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21 was downloaded fresh");
+    assert.ok(h.requests.includes("/v4/episodes/5524/extended"), "the candidate was looked up");
     await unchanged(h, match, revision);
+    assert.equal(kept().length, 1, "the kept candidate is logged");
+    assert.match(kept()[0], /episodeId=5524\b/);
+    assert.match(kept()[0], why);
   }
-  h.state.tvdbDefaultSeasonType = 1;
+});
+
+test("a TMDB season shorter than its advertised episode count proves nothing gone", async t => {
+  const tmdb101: Episode = { provider: "TMDB", id: 101, season: 1, episode: 1, name: "One" };
+  const tmdb102: Episode = { provider: "TMDB", id: 102, season: 1, episode: 2, name: "Two" };
+  const tvdb201: Episode = { provider: "TVDB", id: 201, season: 2, episode: 1, name: "Two" };
+  const h = await harness(t, [tmdb101, tmdb102, tvdb201], [tmdb101, tmdb102]);
   await h.rerun();
-  assert.deepEqual(await h.mappings(), [], "an Aired Order listing proves the member gone");
+  const match = await saved(h, [tmdb102, tvdb201]);
+  await h.rerun();
+  const revision = (await coverage(h)).revision;
+
+  // TMDB still advertises two episodes in season 1 but returns only 101; 102 is gone at its lookup too.
+  h.state.gone.add(tmdb102.id);
+  h.state.bodies.set("/3/tv/10", { id: 10, name: "Target", number_of_episodes: 2, seasons: [{ season_number: 1, episode_count: 2 }] });
+  h.requests.length = 0;
+  // A single-show scan downloads every catalogue it compares.
+  await h.rerun("ratingKey:target");
+  assert.ok(h.requests.includes("/3/tv/10/season/1"), "TMDB 10 was downloaded fresh");
+  assert.deepEqual((await h.mappings()).map(mapping => [mapping.id, mapping.members.map(key)]), [[match.id, [key(tmdb102), key(tvdb201)]]]);
+  assert.equal((await coverage(h)).revision, revision);
+  assert.deepEqual(removals(), []);
+
+  // With counts that agree, the same download removes it.
+  h.state.bodies.set("/3/tv/10", { id: 10, name: "Target", number_of_episodes: 1, seasons: [{ season_number: 1, episode_count: 1 }] });
+  await h.rerun("ratingKey:target");
+  assert.deepEqual(await h.mappings(), []);
 });
 
 test("a failed download removes nothing", async t => {

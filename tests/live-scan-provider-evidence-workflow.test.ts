@@ -66,7 +66,7 @@ test("a live scan saves each provider relationship, the IMDb crosswalk results a
   const at = "2026-11-12T12:00:00.000Z";
   assert.deepEqual(relationships(), {
     [keys.tmdbSeriesByTvdb(20)]: { provider: "TMDB", value: empty, receivedAt: at },
-    [keys.tvdbSeries(20)]: { provider: "TVDB", value: { data: { id: 20, name: "Target", slug: "target", defaultSeasonType: 1 } }, receivedAt: at },
+    [keys.tvdbSeries(20)]: { provider: "TVDB", value: { data: { id: 20, name: "Target", slug: "target" } }, receivedAt: at },
     [keys.tvdbEpisodeExtended(301)]: { provider: "TVDB", value: imdbExtended, receivedAt: at },
     [keys.tvdbEpisodeExtended(302)]: { provider: "TVDB", value: { data: { id: 302, seriesId: 20, seasonNumber: 2, number: 2, name: "Two" } }, receivedAt: at },
     [keys.tvdbEpisodeExtended(303)]: { provider: "TVDB", value: { data: { id: 303, seriesId: 20, seasonNumber: 2, number: 3, name: "Three" } }, receivedAt: at },

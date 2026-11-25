@@ -72,7 +72,7 @@ _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
 The provider whose episode list is the library's own: TMDB. A TMDB episode is collected only by its own season and episode numbers or its own identity, never through a Manual Match.
 
 **Gone member**:
-A Manual Match member whose episode its own provider show no longer lists, as proven only by that show's catalogue downloaded fresh and complete in a scan run whose comparison of the show completed with a fresh result. A reused, saved, failed, incomplete or fallback catalogue never proves a member gone, and neither does a TVDB catalogue whose series' default order is not Aired Order. Once the scan has saved its report, it removes its gone members from their Manual Matches, deleting a Manual Match left without a TMDB or TVDB member.
+A Manual Match member whose episode its own provider show no longer lists, in that show's catalogue downloaded fresh and complete in a scan run whose comparison of the show completed with a fresh result, and whose provider then confirms the episode gone: a 404, a TVDB episode now in another series, or a TMDB episode number that now names another episode. A reused, saved, failed, incomplete, truncated or fallback catalogue never makes a member a candidate, and a member the provider still has, or that cannot be looked up, is kept. Once the scan has saved its report, it removes its gone members from their Manual Matches, deleting a Manual Match left without a TMDB or TVDB member.
 _Avoid_: Stale member, broken member, Needs review
 
 **Auto Match**:

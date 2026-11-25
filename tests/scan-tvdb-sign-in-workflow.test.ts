@@ -22,8 +22,12 @@ hook.deregister();
 
 type Scan = { scan: { status: string; error?: string }; report: { coverageRevision?: number; shows: { ratingKey: string }[] } | null; coverage: { revision: number; issues: { id: string; impacts?: string[]; causedBy?: string[] }[] } };
 type Answer = Response | (() => Response);
-/** A Plex show and its TMDB catalogue of season 1 `episodes` (one, `tmdbId * 10`, by default); `owns` lists the TVDB episodes it holds in Plex. */
-type PlexShow = { ratingKey: string; title: string; tmdbId: number; episodes?: number[]; owns?: number[] };
+/**
+ * A Plex show and its TMDB catalogue of season 1 `episodes` (one, `tmdbId * 10`, by default); `owns`
+ * and `ownsTmdb` list the TVDB and TMDB episodes it holds in Plex. A show with a `tvdbId` also has a
+ * TVDB catalogue of season 1 `tvdbEpisodes`.
+ */
+type PlexShow = { ratingKey: string; title: string; tmdbId: number; episodes?: number[]; owns?: number[]; ownsTmdb?: number[]; tvdbId?: number; tvdbEpisodes?: number[] };
 
 /**
  * One Plex show (TMDB 10) and two saved Manual Matches, TMDB 101 with TVDB 201
@@ -71,8 +75,9 @@ async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "
       if (held) return answer(held);
       if (url.pathname === "/library/sections") return Response.json({ MediaContainer: { Directory: [{ key: "1", type: "show" }] } });
       const leaves = url.pathname.match(/^\/library\/metadata\/([^/]+)\/allLeaves$/);
-      if (leaves) return Response.json({ MediaContainer: { Metadata: (f.shows.find(show => show.ratingKey === leaves[1])?.owns || []).map((id, index) => ({ ratingKey: `${leaves[1]}-${id}`, parentIndex: 1, index: index + 1, Guid: [{ id: `tvdb://${id}` }] })) } });
-      const metadata = f.shows.map(show => ({ ratingKey: show.ratingKey, title: show.title, Guid: [{ id: `tmdb://${show.tmdbId}` }] }));
+      const holder = leaves && f.shows.find(show => show.ratingKey === leaves[1]);
+      if (leaves) return Response.json({ MediaContainer: { Metadata: [...(holder?.owns || []).map(id => `tvdb://${id}`), ...(holder?.ownsTmdb || []).map(id => `tmdb://${id}`)].map((guid, index) => ({ ratingKey: `${leaves[1]}-${guid}`, parentIndex: 1, index: index + 1, Guid: [{ id: guid }] })) } });
+      const metadata = f.shows.map(show => ({ ratingKey: show.ratingKey, title: show.title, Guid: [{ id: `tmdb://${show.tmdbId}` }, ...(show.tvdbId ? [{ id: `tvdb://${show.tvdbId}` }] : [])] }));
       const one = url.pathname.match(/^\/library\/metadata\/([^/]+)$/);
       return Response.json({ MediaContainer: { Metadata: one ? metadata.filter(show => show.ratingKey === one[1]) : metadata } });
     }
@@ -81,6 +86,15 @@ async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "
     const show = catalogue && f.shows.find(show => show.tmdbId === Number(catalogue[1]));
     if (show && !catalogue![2]) return Response.json({ id: show.tmdbId, name: show.title, seasons: [{ season_number: 1 }] });
     if (show) return Response.json({ episodes: (show.episodes || [show.tmdbId * 10]).map((id, index) => ({ id, season_number: 1, episode_number: index + 1, name: `Episode ${id}`, air_date: "2020-01-01" })) });
+    const series = url.pathname.match(/^\/v4\/series\/(\d+)(\/episodes\/default)?$/);
+    const tvdbShow = series && f.shows.find(show => show.tvdbId === Number(series[1]));
+    if (tvdbShow && !series![2]) return Response.json({ data: { id: tvdbShow.tvdbId, name: tvdbShow.title, slug: `show-${tvdbShow.tvdbId}` } });
+    if (tvdbShow) return Response.json({ data: { episodes: (tvdbShow.tvdbEpisodes || []).map((id, index) => ({ id, seasonNumber: 1, number: index + 1, name: `Episode ${id}`, aired: "2020-01-01" })) } });
+    const found = url.pathname.match(/^\/3\/find\/(\d+)$/);
+    const foundShow = found && f.shows.find(show => show.tvdbId === Number(found[1]));
+    if (foundShow) return Response.json({ tv_results: [{ id: foundShow.tmdbId, name: foundShow.title }], tv_episode_results: [] });
+    // An uncovered TVDB episode's TMDB crosswalk finds nothing.
+    if (found) return Response.json({ tv_results: [], tv_episode_results: [] });
     if (url.pathname === "/3/tv/changes") return Response.json({ results: [], total_pages: 1 });
     if (url.pathname === "/v4/updates") return Response.json({ data: [] });
     unexpected.push(url.href);
@@ -131,30 +145,33 @@ async function assertSignInIssueAfterReload(f: Awaited<ReturnType<typeof fixture
 }
 
 /**
- * Three Plex shows. "Matched" (TMDB show 10) has TMDB episodes 100, 101 and 102 and holds none in
- * Plex; "Holder" holds TVDB episode 201. The first Manual Match (TMDB 101 with TVDB 201)
- * therefore covers Matched's episode 101 from another show. Matched lists both Manual Matches'
- * TMDB members, so its fresh download removes neither.
+ * Three Plex shows. "Matched" (TMDB show 10, TVDB series 20) has TVDB episodes 201 and 202 and
+ * holds none in Plex; "Holder" holds TMDB episode 101. The first Manual Match (TMDB 101 with
+ * TVDB 201) therefore covers Matched's TVDB episode 201 from another show, one way (ADR-0008).
+ * Matched lists both Manual Matches' members, so its fresh downloads remove none.
  */
 const crossShowLibrary = (): PlexShow[] => [
-  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100, 101, 102] },
+  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100, 101, 102], tvdbId: 20, tvdbEpisodes: [201, 202] },
   { ratingKey: "2", title: "Target", tmdbId: 30 },
-  { ratingKey: "3", title: "Holder", tmdbId: 40, owns: [201] },
+  { ratingKey: "3", title: "Holder", tmdbId: 40, ownsTmdb: [101] },
 ];
 type ReportedShow = { ratingKey: string; title: string; missing: unknown[]; coverageOutcomes?: { provider: string; id: number; status: string }[] };
 const row = (state: Scan, ratingKey: string) => (state.report as unknown as { shows: ReportedShow[] }).shows.find(show => show.ratingKey === ratingKey);
-/** The status of Manual Match member TMDB 101 in Matched's result. */
-const episode101 = (state: Scan) => row(state, "ratingKey:1")?.coverageOutcomes?.find(outcome => outcome.provider === "TMDB" && outcome.id === 101)?.status;
+/** The status of Manual Match member TVDB 201 in Matched's result. */
+const episode201 = (state: Scan) => row(state, "ratingKey:1")?.coverageOutcomes?.find(outcome => outcome.provider === "TVDB" && outcome.id === 201)?.status;
 
 test("a refused TVDB sign-in is the scan's one sign-in, requests no Manual Match member and stops no Manual Match covering", async (t) => {
   const f = await fixture(t, { shows: crossShowLibrary() });
   const revision = store.coverageState().revision;
+  // A good scan first saves Matched's TVDB catalogue.
+  f.signIn = [signedIn("good")];
+  assert.equal(episode201(await f.fullScan()), "manual", "the Manual Match covers Matched's episode from Holder");
   // A second sign-in would succeed and clear the issue: it must never be sent.
   f.signIn = [refused, signedIn("second")];
   const state = await f.fullScan();
   assert.deepEqual(f.tvdbPaths(), ["/v4/login"], "one sign-in request and no other TVDB request");
   assertSignInIssueOnly(f);
-  assert.equal(episode101(state), "manual", "the Manual Match covers Matched's episode from Holder");
+  assert.equal(episode201(state), "manual", "the Manual Match still covers Matched's episode from Holder");
   assert.equal(state.coverage.revision, revision, "the scan changes no Manual Match");
   assert.equal(state.report?.coverageRevision, revision);
   await assertSignInIssueAfterReload(f);
@@ -235,7 +252,7 @@ test("a scan that fails at its report keeps its sign-in issue after a reload", a
 
 test("a single-show scan signs in once, compares only its show and carries over the rest", async (t) => {
   const f = await fixture(t, { shows: crossShowLibrary() });
-  f.signIn = [refused];
+  f.signIn = [signedIn("good")];
   const full = await f.fullScan();
   f.signIn = [refused, signedIn("second")];
   const state = await f.showScan("ratingKey:2");
@@ -245,7 +262,7 @@ test("a single-show scan signs in once, compares only its show and carries over 
   assert.equal(state.report?.coverageRevision, state.coverage.revision);
   assert.deepEqual(f.cataloguesRead(), [30], "only the target is compared");
   for (const key of ["ratingKey:1", "ratingKey:3"]) assert.deepEqual(row(state, key), row(full, key), `${key} is carried over unchanged`);
-  assert.equal(episode101(state), "manual");
+  assert.equal(episode201(state), "manual");
 });
 
 test("a single-show scan after a successful TVDB sign-in clears the earlier sign-in issue", async (t) => {

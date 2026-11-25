@@ -3,6 +3,7 @@ import test from "node:test";
 import { act, createElement } from "react";
 import PlexPage from "../app/plex/page";
 import { mountDom } from "./dom-environment";
+import { pending, START } from "./scan-progress-harness";
 import { installWindowClock } from "./window-clock";
 
 // The Plex page keeps its last completed report, shows and incomplete coverage
@@ -12,8 +13,6 @@ import { installWindowClock } from "./window-clock";
 
 type Body = Record<string, unknown>;
 type Reply = Body | Error | Promise<Body>;
-
-const START = new Date("2026-11-24T12:00:00.000Z");
 
 // A coverage group survives on the page only through a visible missing episode
 // of a reported show, so each group names its own show's missing episode.
@@ -28,24 +27,20 @@ function reportWith(key: string, title: string, episodeId: number, lastScan: str
 }
 const REPORT_A = reportWith("a", "Andor", 100, "2026-11-20T12:00:00.000Z");
 const REPORT_B = reportWith("b", "Bluey", 200, "2026-11-24T13:00:00.000Z");
+const BOTH_REPORTS = { ...REPORT_A, shows: [...REPORT_A.shows, ...REPORT_B.shows], coverageGroups: [...REPORT_A.coverageGroups, ...REPORT_B.coverageGroups] };
 const EMPTY_REPORT = { shows: [], coverageGroups: [], lastScan: "2026-11-24T13:00:00.000Z", scanCache: {} };
 
 const running = { status: "running", processed: 41, total: 188, activeShows: [{ key: "1", show: "Silo", phase: "plex-inventory" }] };
 const completed = { status: "completed", processed: 188, total: 188 };
 const answer = (scan: Body, report: unknown, revision = 0): Body => ({ scan, report, coverage: { revision, pending: 0, issues: [] } });
 
-function pending() {
-  let resolve!: (body: Body) => void;
-  const promise = new Promise<Body>((done) => { resolve = done; });
-  return { promise, resolve };
-}
-
 async function mountPlex(t: test.TestContext, answers: Reply[], options: { patchRevision?: number } = {}) {
   const server = { answers, reads: 0, starts: 0 };
   const fetcher: typeof fetch = async (input, init) => {
     if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
     if (input === "/api/plex/config") return Response.json({ configured: true, plexUrl: "http://plex.example.test" });
-    if (input === "/api/plex/state") return Response.json(init?.method === "PATCH" ? (options.patchRevision === undefined ? {} : { coverageRevision: options.patchRevision }) : { settings: { ignoredShows: [], ignoredSeasons: [] } });
+    if (input === "/api/plex/state" && init?.method === "PATCH") return Response.json(options.patchRevision === undefined ? {} : { coverageRevision: options.patchRevision });
+    if (input === "/api/plex/state") return Response.json({ settings: { ignoredShows: [], ignoredSeasons: [] } });
     if (input === "/api/plex/manual-coverage") return Response.json({ revision: 1, mappings: [], pending: 0 });
     if (input === "/api/plex/scan" && init?.method === "POST") { server.starts += 1; return Response.json({}); }
     if (input === "/api/plex/scan") {
@@ -86,7 +81,7 @@ async function mountPlex(t: test.TestContext, answers: Reply[], options: { patch
   /** The progress box comes before the report's coverage groups and shows. */
   const boxAboveReport = () => {
     const report = container.querySelector('[aria-label="Incomplete coverage group"], .show-list, .empty');
-    return Boolean(box() && report && box()!.compareDocumentPosition(report) & 4);
+    return Boolean(box() && report && box()!.compareDocumentPosition(report) & browser.Node.DOCUMENT_POSITION_FOLLOWING);
   };
   return { server, container, advance, nextAnswers, click, box, shows, groups, empty, error, boxAboveReport };
 }
@@ -132,12 +127,17 @@ test("a first-ever Plex scan shows only the progress box, not the empty report s
   assert.ok(page.box());
   assert.equal(page.empty(), null, "no empty state contradicts the running scan");
   assert.deepEqual(page.shows(), []);
+  assert.deepEqual(page.groups(), []);
 });
 
 test("a completed empty Plex report is a report: a scan keeps it, and the page says nothing matches", async (t) => {
-  const page = await mountPlex(t, [answer(running, EMPTY_REPORT)]);
-  assert.ok(page.box());
+  const page = await mountPlex(t, [answer(completed, EMPTY_REPORT)]);
   assert.equal(page.empty(), "No matching episode gaps");
+  page.nextAnswers(answer(running, REPORT_B));
+  await page.click("New Plex search");
+  assert.ok(page.box());
+  assert.equal(page.empty(), "No matching episode gaps", "the empty report stays, not the first-scan state");
+  assert.deepEqual(page.shows(), []);
   assert.ok(page.boxAboveReport());
 });
 
@@ -173,8 +173,7 @@ test("a failed Plex scan or a lost connection keeps the old report", async (t) =
 });
 
 test("ignoring a show during a Plex scan removes it from the retained report, and completion does not bring it back", async (t) => {
-  const both = { ...REPORT_A, shows: [...REPORT_A.shows, ...REPORT_B.shows], coverageGroups: [...REPORT_A.coverageGroups, ...REPORT_B.coverageGroups] };
-  const page = await mountPlex(t, [answer(running, both)]);
+  const page = await mountPlex(t, [answer(running, BOTH_REPORTS)]);
   assert.deepEqual(page.shows(), ["Andor", "Bluey"]);
   assert.deepEqual(page.groups(), ["Andor", "Bluey"]);
 
@@ -187,17 +186,16 @@ test("ignoring a show during a Plex scan removes it from the retained report, an
 
   await page.advance(2);
   assert.deepEqual(page.shows(), ["Bluey"], "a running answer does not bring it back");
-  page.nextAnswers(answer(completed, both));
+  page.nextAnswers(answer(completed, BOTH_REPORTS));
   await page.advance();
   assert.deepEqual(page.shows(), ["Bluey"], "nor does completion");
 });
 
 test("a coverage change during a Plex scan refreshes the retained groups, and a stale answer after it cannot overwrite them", async (t) => {
   const stalePoll = pending();
-  const both = { ...REPORT_A, shows: [...REPORT_A.shows, ...REPORT_B.shows], coverageGroups: [...REPORT_A.coverageGroups, ...REPORT_B.coverageGroups] };
   // The server rechecked the saved report: Andor's mapping no longer leaves it incomplete.
-  const rechecked = { ...both, coverageGroups: REPORT_B.coverageGroups };
-  const page = await mountPlex(t, [answer(running, both, 1), stalePoll.promise, answer(running, rechecked, 2)], { patchRevision: 2 });
+  const rechecked = { ...BOTH_REPORTS, coverageGroups: REPORT_B.coverageGroups };
+  const page = await mountPlex(t, [answer(running, BOTH_REPORTS, 1), stalePoll.promise, answer(running, rechecked, 2)], { patchRevision: 2 });
   assert.deepEqual(page.groups(), ["Andor", "Bluey"]);
 
   // The saved Ignore rechecks cached comparisons and reports coverage revision 2.

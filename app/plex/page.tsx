@@ -195,6 +195,8 @@ export default function PlexPage() {
   const activelyRateLimitPaused = scanning && status.status === "running" && status.rateLimitPaused === true;
   const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
+  // A first-ever scan has no report yet: the progress box stands alone, without the empty state.
+  const awaitingFirstReport = scanning && !report;
 
   const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => visible.some(show => show.ratingKey === member.showKey && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
   const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
@@ -452,7 +454,7 @@ export default function PlexPage() {
             })}</div></>}
           </div>
         </article>;
-      })}</div> : scanning && !report ? null : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
+      })}</div> : awaitingFirstReport ? null : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
     </section>
     <footer><span>SHELFCHECK / PLEX API</span><span>Your credentials stay in your private configuration volume.</span></footer>
     {coverageUrls && <ManualCoverageManager initialMappingId={coverageMappingId} initialUrls={coverageUrls} scanActive={scanning} onClose={() => setCoverageUrls(null)} onChanged={coverageChanged} />}

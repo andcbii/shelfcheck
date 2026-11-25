@@ -36,7 +36,7 @@ test("manual coverage manager presents reviewed identities and deletes the selec
         deleted = String(input);
         return Response.json({ revision: 2 });
       }
-      return Response.json({ revision: 1, mappings: [{ id: "saved", revision: 1, health: "needs-review", healthMessage: "Provider confirmed deletion.", members, evidence:[{ratingKey:"file",showKey:"show",identities:members.map(m=>({provider:m.provider,id:m.id}))}] }, {id:"healthy",revision:2,members}], pending: 0 });
+      return Response.json({ revision: 1, mappings: [{ id: "saved", revision: 1, members, evidence:[{ratingKey:"file",showKey:"show",identities:members.map(m=>({provider:m.provider,id:m.id}))}] }, {id:"healthy",revision:2,members}], pending: 0 });
     } })) {
     old.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
     Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
@@ -59,13 +59,9 @@ test("manual coverage manager presents reviewed identities and deletes the selec
   assert.match(container.textContent || "", /Target/);
   assert.match(container.textContent || "", /Other/);
   assert.match(container.textContent || "", /200/);
-  assert.match(container.textContent || "", /Needs review/);
-  assert.match(container.textContent || "", /Provider confirmed deletion/);
+  assert.doesNotMatch(container.textContent || "", /Healthy|Pending|Needs review/);
+  assert.equal(container.querySelector('[aria-label="Health"]'),null,"No health filter");
   assert.equal(container.querySelectorAll("article").length,2);
-  const healthFilter = container.querySelector<HTMLSelectElement>('[aria-label="Health"]');
-  assert.ok(healthFilter);
-  await act(async () => {healthFilter.value="needs-review";healthFilter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
-  assert.equal(container.querySelectorAll("article").length,1);
   // Coverage evidence is no longer on the card, and ownership declarations are retired.
   assert.doesNotMatch(container.textContent || "", /Coverage evidence|TMDB 100, TVDB 200/);
   assert.equal([...container.querySelectorAll("button")].some(button=>/Declare/.test(button.textContent || "")),false,"no ownership declaration controls");
@@ -185,10 +181,10 @@ test("linking another split episode retains the selected episode when opening an
 });
 
 
-test("bulk cleanup selects Needs review across pages and confirms the exact count", async (t) => {
+test("bulk cleanup selects across pages and confirms the exact count", async (t) => {
   const browser = new Window({ url: "http://localhost/plex" });
   const old = new Map<string, PropertyDescriptor | undefined>();
-  let mappings = Array.from({length:13},(_,i)=>({id:`mapping-${i}`,revision:1,health:i===12 ? "healthy":"needs-review",members:[],createdAt:"now"}));
+  let mappings = Array.from({length:13},(_,i)=>({id:`mapping-${i}`,revision:1,members:[],createdAt:"now"}));
   let deleted: string[] = [];
   let fail = false;
   let changed = 0;
@@ -197,7 +193,7 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
       if(fail) return Response.json({error:"Please retry cleanup."},{status:503});
       if (!init.body) {
         const id = new URL(String(input), "http://localhost").searchParams.get("id");
-        mappings = mappings.filter(m => m.id !== id && m.id !== "mapping-0").map(m => m.id === "mapping-1" ? {...m, health:"healthy"} : m);
+        mappings = mappings.filter(m => m.id !== id && m.id !== "mapping-0" && m.id !== "mapping-1");
         return Response.json({deleted:[id],revision:2});
       }
       deleted = JSON.parse(String(init.body)).ids;
@@ -222,52 +218,45 @@ test("bulk cleanup selects Needs review across pages and confirms the exact coun
     assert.ok(button,`button ${label}`);
     await act(async()=>button.click());
   };
-  const filter=container.querySelector<HTMLSelectElement>('[aria-label="Health"]')!;
-  const changeFilter=async(value:string)=>act(async()=>{filter.value=value;filter.dispatchEvent(new browser.Event("change",{bubbles:true}) as unknown as Event);});
   const next=()=>click("Next \u2192");
-  await changeFilter("needs-review");
+  assert.equal(container.querySelector('[aria-label="Health"]'),null,"No health filter");
   assert.equal(container.querySelectorAll("article").length,10);
   assert.equal(container.querySelector('[aria-label="Selected Manual Matches"]'),null,"No bulk bar before a card is ticked");
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  await click("Select all 12 matching Manual Matches");
-  assert.match(container.textContent||"",/12 selected/);
+  await click("Select all 13 Manual Matches");
+  assert.match(container.textContent||"",/13 selected/);
   await next();
-  assert.equal(container.querySelectorAll("article").length,2);
+  assert.equal(container.querySelectorAll("article").length,3);
   assert.ok([...container.querySelectorAll<HTMLInputElement>('article input[type="checkbox"]')].every(input=>input.checked));
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  assert.match(container.textContent||"",/11 selected/);
-  await click("Delete 11 selected matches");
-  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Delete 11 matches\?/);
+  assert.match(container.textContent||"",/12 selected/);
+  await click("Delete 12 selected matches");
+  assert.match(container.querySelector('[role="dialog"]')?.textContent||"",/Delete 12 matches\?/);
   await click("Cancel");
   assert.deepEqual(deleted,[]);
-  // A refresh after a row deletion also removes vanished and newly healthy
-  // identities from the selection and clamps the former last page.
+  // A refresh after a row deletion also removes vanished identities from the
+  // selection and clamps the former last page.
   await click("Delete");
   await click("Delete match");
-  assert.match(container.textContent||"",/9 selected/);
-  assert.match(container.textContent||"",/Showing 1.9 of 9/);
-  assert.equal(container.querySelectorAll("article").length,9);
+  assert.match(container.textContent||"",/10 selected/);
+  assert.match(container.textContent||"",/Showing 1.10 of 10/);
+  assert.equal(container.querySelectorAll("article").length,10);
   changed=0;
-  await changeFilter("all");
+  await click("Clear selection");
   assert.equal(container.querySelector('[aria-label="Selected Manual Matches"]'),null);
-  assert.match(container.textContent||"",/Selection cleared/);
-  await changeFilter("needs-review");
   await act(async()=>container.querySelector<HTMLInputElement>('article input[type="checkbox"]')!.click());
-  await click("Select all 9 matching Manual Matches");
-  await click("Delete 9 selected matches");
+  await click("Select all 10 Manual Matches");
+  await click("Delete 10 selected matches");
   fail=true;
-  await click("Delete 9 matches");
+  await click("Delete 10 matches");
   assert.match(container.querySelector('[role="alert"]')?.textContent||"",/Please retry/);
   assert.equal(changed,0);
   fail=false;
-  await click("Delete 9 selected matches");
-  await click("Delete 9 matches");
-  assert.deepEqual(deleted,[...Array.from({length:8},(_,i)=>`mapping-${i+2}`),"mapping-11"]);
+  await click("Delete 10 selected matches");
+  await click("Delete 10 matches");
+  assert.deepEqual(deleted,[...Array.from({length:8},(_,i)=>`mapping-${i+2}`),"mapping-11","mapping-12"]);
   assert.equal(changed,1);
-  assert.match(container.textContent||"",/Deleted 9 Manual Matches/);
+  assert.match(container.textContent||"",/Deleted 10 Manual Matches/);
   assert.equal(container.querySelector('[aria-label="Selected Manual Matches"]'),null);
   assert.equal(container.querySelectorAll("article").length,0);
-  await changeFilter("all");
-  assert.equal(container.querySelectorAll("article").length,2);
-  assert.match(container.textContent||"",/Showing 1.2 of 2/);
 });

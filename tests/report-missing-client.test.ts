@@ -12,7 +12,7 @@ const tvdb = { provider: "TVDB", id: 200, showId: 20, show: "Animaniacs", title:
 
 async function mount(t: test.TestContext, options: { members?: typeof tmdb[]; resolved?: typeof tmdb[]; scan?: () => string; dialog?: boolean } = {}) {
   const browser = new Window({ url: "http://localhost/plex" });
-  let mapping = { id: "match", revision: 2, health: "healthy", members: options.members || [tmdb, tvdb] };
+  let mapping = { id: "match", revision: 2, members: options.members || [tmdb, tvdb] };
   const posts: Record<string, unknown>[] = [];
   const previous = new Map<string, PropertyDescriptor | undefined>();
   let dismissed = 0;

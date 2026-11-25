@@ -11,7 +11,7 @@ import type { CoverageEvidence, CoverageMapping, CoverageProvider } from "../lib
 const tmdb = (id: number, number: number, title: string, airDate: string, runtime: number): ProviderEpisode => ({ source: "TMDB", season: 1, episode: number, providerEpisodeId: id, title, airDate, runtime });
 const tvdb = (id: number, number: number, title: string | undefined, runtime?: number): ProviderEpisode => ({ source: "TVDB", season: 1, episode: number, providerEpisodeId: id, ...(title === undefined ? {} : { title }), airDate: "1995-01-16", ...(runtime ? { runtime } : {}) });
 const member = (provider: CoverageProvider, id: number, reportMissing?: boolean) => ({ provider, id, showId: 1, show: "Show", title: `${provider} ${id}`, season: 1, episode: 1, url: "", ...(reportMissing ? { reportMissing } : {}) });
-/** A Healthy Manual Match from `provider`/`id` to one directly owned member on the other side. */
+/** A Manual Match from `provider`/`id` to one directly owned member on the other side. */
 const manualMatch = (provider: CoverageProvider, id: number, other: number, reportMissing?: boolean): CoverageMapping => ({ id: `${provider}-${id}`, revision: 1, createdAt: "2026-01-01T00:00:00.000Z", members: [member(provider, id, reportMissing), member(provider === "TVDB" ? "TMDB" : "TVDB", other)] });
 const owns = (provider: CoverageProvider, id: number): CoverageEvidence => ({ ratingKey: `item-${provider}-${id}`, showKey: "other-show", identities: [{ provider, id }] });
 

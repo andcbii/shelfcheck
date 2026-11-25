@@ -13,7 +13,6 @@ const sqlite = await import("../lib/sqlite");
 const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const scan = await import("../app/api/plex/scan/route");
-const { scanProviderClient } = await import("../lib/scan-provider-client");
 hook.deregister();
 test("reviewed one-to-one mappings are durable and membership conflicts leave saved mappings intact", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "coverage-"));
@@ -41,8 +40,7 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   });
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
   let unavailableSource = false;
-  let healthFailure = 0;
-  let movedTmdb = false;
+  let memberGone = false;
   let missingTmdbCoordinate = false;
   let reverse = false;
   let owned = false;
@@ -62,9 +60,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "ratingKey:2", title: "Ignored source" }], diagnosticsEnabled: false });
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
-    if (u.pathname === "/v4/episodes/200/extended" && healthFailure) return Response.json({}, {status: healthFailure, headers: healthFailure === 429 ? {"Retry-After":"86400"} : undefined});
+    if (u.pathname === "/v4/episodes/200/extended" && memberGone) return Response.json({}, {status: 404});
     if (u.pathname === "/3/tv/10/season/1/episode/1" && missingTmdbCoordinate) return Response.json({}, {status:404});
-    if (u.pathname === "/3/tv/10/season/1/episode/1" && movedTmdb) return Response.json({id:999,season_number:1,episode_number:1,name:"Similar title"});
     let body: unknown;
     if (u.hostname === "plex") {
       if (unavailableSource && u.pathname.includes("/2/allLeaves")) return Response.json({error:"Plex source unavailable"},{status:404});
@@ -214,88 +211,31 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
   cache.__shelfcheckDatabase?.close();
   delete cache.__shelfcheckDatabase;
   assert.equal((await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings.length, 2);
-  // Provider outages retain identities and pending state; only native episode 404 confirms deletion.
   const mappingList = async () => (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings;
   const rerun = async () => {
     await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
     return wait();
   };
-  healthFailure = 401;
-  const outage = await rerun();
-  assert.equal(outage.coverage.pending, 1);
-  assert.ok(outage.coverage.issues.some((issue:{operation:string;mappingId:string;provider:string;episode?:{id:number;provider:string};cause:string})=>issue.operation === "member-verification" && issue.mappingId === saved.mapping.id && issue.provider === "TVDB" && issue.episode?.provider === "TVDB" && issue.episode.id === 200 && issue.cause.includes("401")));
-  assert.ok(outage.coverage.issues.some((issue:{id:string;operation:string})=>issue.operation === "member-verification" && issue.id === `member-verification:${saved.mapping.id}:TVDB:200`), "The member's stored issue ID keeps its saved form");
-  assert.ok(outage.coverage.issues.every((issue:{causedBy?:string[]})=>issue.causedBy === undefined), "A member refused after a good TVDB sign-in is not filed under the sign-in");
-  assert.equal((await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id).health, "pending");
-  assert.equal(outage.report.shows[0].missing[0].tmdbEpisodeId, 100);
-  healthFailure = 429;
-  assert.equal((await rerun()).coverage.pending,1,"Long cooldowns retain pending state without deleting mappings");
-  assert.equal((await mappingList()).find((m: {id:string})=>m.id===saved.mapping.id).health,"pending");
-  // TVDB asked for a day; a server restart forgets that provider cooldown, so the next scan contacts TVDB again.
-  scanProviderClient.forgetProviderDeadlines();
-  healthFailure = 404;
-  const deletedMember = await rerun();
-  let broken = (await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id);
-  assert.equal(broken.health, "needs-review");
-  sayNoMapping(broken.healthMessage);
-  const missingMember = (await (await scan.GET()).json()).coverage.issues.find((issue:{operation:string;provider:string;episode?:{id:number}})=>issue.operation === "member-verification" && issue.provider === "TVDB" && issue.episode?.id === 200);
-  assert.equal(missingMember.category,"Provider Lookup");
-  assert.equal(missingMember.lookup.status,404);
-  assert.match(missingMember.cause,/record not found/);
-  assert.doesNotMatch(missingMember.cause,/no longer exists|deleted|merged/);
-  assert.deepEqual(broken.members.map((m: {id:number;title:string}) => [m.id,m.title]), [[100,"Missing"],[200,"Equivalent"]]);
-  assert.equal(deletedMember.report.shows[0].missing[0].tmdbEpisodeId, 100);
-  (cache.__shelfcheckDatabase as DatabaseSync | undefined)?.close();
-  delete cache.__shelfcheckDatabase;
-  const reopenedBroken = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
-  assert.equal(reopenedBroken.health,"needs-review");
-  assert.deepEqual(reopenedBroken.members,broken.members);
-  // Automatic decisions still apply while a mapping needs repair.
-  automatic = true;
-  owned = false;
-  assert.deepEqual((await rerun()).report.shows[0].missing, []);
-  automatic = false;
-  owned = true;
-  const invalidRepair = await api.POST(request({action:"resolve",id:broken.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:200"]}));
+  // Manual Matches have no health (ADR-0008): a scan requests no member, so a member its provider
+  // no longer finds still lets the match cover, with no member Scan Issue.
+  memberGone = true;
+  missingTmdbCoordinate = true;
+  const withoutMembers = await rerun();
+  assert.deepEqual(withoutMembers.report.shows[0].missing, [], "The Manual Match still covers");
+  assert.ok(!withoutMembers.coverage.issues.some((issue:{operation:string})=>issue.operation === "member-verification"), "No member Scan Issue");
+  const kept = (await mappingList()).find((m: {id:string}) => m.id === saved.mapping.id);
+  assert.equal("health" in kept || "healthMessage" in kept, false, "A listed Manual Match has no health");
+  assert.deepEqual(kept.members.map((m: {id:number;title:string}) => [m.id,m.title]), [[100,"Missing"],[200,"Equivalent"]]);
+  // Saving still checks the episodes against their providers.
+  const invalidRepair = await api.POST(request({action:"resolve",id:kept.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:200"]}));
   assert.equal(invalidRepair.status, 503);
   sayNoMapping((await invalidRepair.json()).error);
-  const afterRejectedRepair = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
-  assert.deepEqual(afterRejectedRepair.members,broken.members);
-  assert.equal(afterRejectedRepair.revision,broken.revision);
-  const expiredHealthPreview = await api.POST(request({action:"save",id:broken.id,revision:broken.revision,preview:preview.preview}));
-  assert.equal(expiredHealthPreview.status,503,"A previously reviewed preview cannot save a now-deleted member");
-  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).revision,broken.revision);
-  healthFailure = 0;
-  // Health stays Needs review until a user resolves and reviews a whole replacement.
-  await rerun();
-  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).health,"needs-review");
-  const repairPreview = await (await api.POST(request({action:"resolve",id:broken.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:202"]}))).json();
-  const repairResponse = await api.POST(request({action:"save",id:broken.id,revision:broken.revision,preview:repairPreview.preview}));
-  assert.equal(repairResponse.status,200);
-  saved.mapping = (await repairResponse.json()).mapping;
-  sourceId = 202;
-  assert.deepEqual((await rerun()).report.shows[0].missing, []);
-  assert.ok(saved.mapping.revision > broken.revision);
-  assert.notEqual(saved.mapping.health,"needs-review");
-  // Coordinates returning another ID cannot silently replace the saved canonical TMDB member.
-  movedTmdb = true;
-  const moved = await rerun();
-  assert.equal(moved.coverage.pending,1);
-  broken = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
-  assert.equal(broken.health,"pending");
-  assert.deepEqual(broken.members.map((m: {id:number})=>m.id),[100,202]);
-  movedTmdb = false;
-  missingTmdbCoordinate = true;
-  assert.equal((await rerun()).coverage.pending,1);
-  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).health,"pending","A TMDB coordinate 404 cannot prove canonical deletion");
+  const expiredPreview = await api.POST(request({action:"save",id:kept.id,revision:kept.revision,preview:preview.preview}));
+  assert.equal(expiredPreview.status,503,"A previously reviewed preview cannot save a now-deleted member");
+  assert.deepEqual((await mappingList()).find((m: {id:string})=>m.id===kept.id), kept, "A rejected save changes nothing");
+  memberGone = false;
   missingTmdbCoordinate = false;
-  await rerun();
-  assert.equal((await mappingList()).find((m: {id:string})=>m.id===broken.id).health,"healthy");
-  const returnPreview = await (await api.POST(request({action:"resolve",id:broken.id,urls:["tmdb:100 show:10 season:1 episode:1","tvdb:200"]}))).json();
-  const current = (await mappingList()).find((m: {id:string})=>m.id===broken.id);
-  saved.mapping = (await (await api.POST(request({action:"save",id:current.id,revision:current.revision,preview:returnPreview.preview}))).json()).mapping;
-  sourceId = 200;
-  await rerun();
+  saved.mapping = kept;
   // Automatic ownership keeps its existing result and is not relabelled manual.
   automatic = true;
   owned = false;
@@ -555,26 +495,4 @@ test("upgrading discards saved ownership corrections and keeps every Manual Matc
   assert.equal(sqlite.database().prepare("SELECT 1 FROM sqlite_master WHERE name='shelfcheck_coverage_corrections'").get(), undefined, "Saved corrections are discarded");
   const repeat = await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
   assert.equal(repeat.revision, upgraded.revision, "The migration runs once");
-});
-
-test("a needs-review message saved before Manual Match wording reads as a Manual Match", async (t) => {
-  const dir = mkdtempSync(path.join(tmpdir(), "coverage-wording-"));
-  const previous = process.env.SHELFCHECK_DATA_DIR;
-  process.env.SHELFCHECK_DATA_DIR = dir;
-  const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
-  t.after(() => {
-    cache.__shelfcheckDatabase?.close();
-    delete cache.__shelfcheckDatabase;
-    if (previous === undefined) delete process.env.SHELFCHECK_DATA_DIR;
-    else process.env.SHELFCHECK_DATA_DIR = previous;
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const member = (provider: string, id: number) => ({ provider, id, showId: 10, show: "Example", title: "Episode " + id, season: 1, episode: 1, url: "https://example.com/" + id });
-  // Needs-review matches are skipped by health rechecks, so this text stays stored until the match is repaired.
-  const stored = { id: "broken", revision: 1, createdAt: "2026-01-01T00:00:00.000Z", health: "needs-review", healthMessage: "A provider episode record was not found. Resolve and review replacements to repair this mapping.", members: [member("TMDB", 100), member("TVDB", 200)] };
-  const db = sqlite.database();
-  db.prepare("INSERT INTO shelfcheck_coverage_mappings VALUES(?,?)").run(stored.id, JSON.stringify(stored));
-  for (const m of stored.members) db.prepare("INSERT INTO shelfcheck_coverage_members(provider,episode_id,mapping_id) VALUES(?,?,?)").run(m.provider, m.id, stored.id);
-  const listed = (await (await api.GET(new Request("http://localhost/api/plex/manual-coverage"))).json()).mappings[0];
-  assert.equal(listed.healthMessage, "A provider episode record was not found. Resolve and review replacements to repair this Manual Match.");
 });

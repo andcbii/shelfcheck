@@ -7,8 +7,8 @@ import type { CoverageMapping } from "../lib/manual-coverage-model";
 import { mountDom } from "./dom-environment";
 
 const member = (provider: "TMDB" | "TVDB", id: number, title: string, episode: number) => ({ provider, id, showId: provider === "TMDB" ? 107124 : 72879, show: "Animaniacs", title, season: 3, episode, url: `https://example.com/${id}` });
-const murderPals: CoverageMapping = { id: "murder-pals", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245050, "Murder Pals", 18), member("TVDB", 9623972, "Murder Pals (2)", 20), member("TVDB", 9623973, "Murder Pals (3)", 22)] };
-const hooray: CoverageMapping = { id: "hooray", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245001, "Hooray for North Hollywood", 1), member("TVDB", 9623001, "Hooray for North Hollywood (1)", 1)] };
+const murderPals: CoverageMapping = { id: "murder-pals", revision: 1, createdAt: "now", members: [member("TMDB", 4245050, "Murder Pals", 18), member("TVDB", 9623972, "Murder Pals (2)", 20), member("TVDB", 9623973, "Murder Pals (3)", 22)] };
+const hooray: CoverageMapping = { id: "hooray", revision: 1, createdAt: "now", members: [member("TMDB", 4245001, "Hooray for North Hollywood", 1), member("TVDB", 9623001, "Hooray for North Hollywood (1)", 1)] };
 
 // The Manual Matches page over a stubbed API that records each DELETE request.
 async function mountPage(t: test.TestContext) {
@@ -119,7 +119,7 @@ function mountList(t: test.TestContext) {
   const { container, root } = mountDom(t);
   const confirmations: (string[] | null)[] = [];
   const render = (matches: CoverageMapping[], confirmation: string[] | null = null) => act(async () => root.render(createElement(ManualMatchList, {
-    matches, report: true, filterSelectAndPage: true, locked: false, pending: false, healthFilter: "all", onHealthFilterChange() {},
+    matches, report: true, filterSelectAndPage: true, locked: false, pending: false,
     paging: { page: 1, pageSize: 10, onPageChange() {}, onPageSizeChange() {} },
     selection: { selected: confirmation || [], onSelectionChange() {}, confirmation, onConfirmationChange: ids => { confirmations.push(ids); } },
     onDeleteSelected() {}, onEdit() {}, onDelete() {},

@@ -63,10 +63,6 @@ export function comparisonInputsIssueId(ratingKey: string) {
 export function comparisonFailureIssueId(ratingKey: string) {
   return issueId(`comparison-failure:${ratingKey}`);
 }
-/** One Manual Match member episode could not be verified at its provider. */
-export function memberVerificationIssueId(mappingId: string, member: { provider: "TMDB" | "TVDB"; id: number }) {
-  return issueId(`member-verification:${mappingId}:${member.provider}:${member.id}`);
-}
 
 /** A show's catalogue-refresh and catalogue-fallback-refresh Coverage Issue IDs for one provider. */
 export function catalogueIssueIds(provider: CatalogueProvider, ratingKey: string) {

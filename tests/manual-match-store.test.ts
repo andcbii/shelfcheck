@@ -95,7 +95,7 @@ test("stale, conflicting, one-sided, invalid and scan-time saves roll back with 
   temporaryStore(t);
   const tmdb = member("TMDB", 101), tmdb2 = member("TMDB", 102), tvdb = member("TVDB", 201), tvdb2 = member("TVDB", 202);
   const first = store.saveCoverageMapping([tmdb, tmdb2, tvdb, tvdb2]).mapping;
-  seedStoredCoverageIssues(database(), { id: "mapping-health:x", operation: "comparison", scope: "library", cause: "c", action: "a", mappingId: first.id });
+  seedStoredCoverageIssues(database(), { id: "comparison:x", operation: "comparison", scope: "library", cause: "c", action: "a" });
   const before = snapshot();
   const rejected: [string, () => unknown][] = [
     ["stale-revision", () => store.saveCoverageMapping([member("TMDB", 103), tvdb], { id: first.id, revision: first.revision - 1 })],

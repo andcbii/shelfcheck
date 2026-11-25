@@ -4,6 +4,8 @@ import { ManualMatchForm } from "@/app/components/manual-match-form";
 import { ManualMatchList, plural } from "@/app/components/manual-match-list";
 import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+import { ManualMatchShowFilter } from "@/app/components/manual-match-show-filter";
+import { filterByShows, filteringShows, noShowPicks, showOptions, type ShowPicks } from "@/lib/manual-match-filters";
 import { orderManualMatches } from "@/lib/manual-match-order";
 type Props = {
   initialUrls: string[];
@@ -64,6 +66,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [pageSize, setPageSize] = useState(10);
   const [selected, setSelected] = useState<string[]>([]);
   const [confirmation, setConfirmation] = useState<string[] | null>(null);
+  // The report's show filters. Page state only: kept while this editor stays mounted.
+  const [showPicks, setShowPicks] = useState<ShowPicks>(noShowPicks);
   // Report Missing selections are a draft until the Manual Match is saved.
   const [draftFlags, setDraftFlags] = useState<string[]>([]);
   // The Manual Match the popup just saved, whose card briefly says so.
@@ -87,8 +91,22 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const flagsChanged = draftFlags.join() !== (editing ? flaggedKeys(editing.members) : []).join();
   const dirty = flagsChanged || Boolean(preview) || (editing ? !savedUrls : urls.join() !== defaultUrls.join());
   const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
-  // Only the report has a fixed show order; the Plex page keeps the saved order.
-  const listedMappings = report ? orderManualMatches(scopedMappings) : scopedMappings;
+  // Only the report has a fixed show order and show filters; the Plex page keeps the saved order.
+  const filtering = report && filteringShows(showPicks);
+  const listedMappings = report ? orderManualMatches(filtering ? filterByShows(scopedMappings, showPicks) : scopedMappings) : scopedMappings;
+  function changeShowPicks(picks: ShowPicks) {
+    setShowPicks(picks);
+    const shown = filteringShows(picks) ? filterByShows(scopedMappings, picks).length : scopedMappings.length;
+    setPage(current => Math.min(current, Math.max(1, Math.ceil(shown / pageSize))));
+  }
+  const showFilters = report ? {
+    controls: <div className="match-filter manual-match-show-filters" role="group" aria-label="Filter by show">
+      {(["TMDB", "TVDB"] as const).map(provider => <ManualMatchShowFilter key={provider} label={`${provider} shows`} options={showOptions(scopedMappings, provider)} picked={showPicks[provider]} onChange={picked => changeShowPicks({ ...showPicks, [provider]: picked })}/>)}
+    </div>,
+    total: scopedMappings.length,
+    active: filtering,
+    onClear: () => changeShowPicks(noShowPicks),
+  } : undefined;
   function changeSelection(ids: string[]) {
     setSelected(ids);
     setConfirmation(null);
@@ -339,6 +357,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
  <ManualMatchList matches={listedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
-   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedNote?.id}/>
+   onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedNote?.id} showFilters={showFilters}/>
  </section>;
 }

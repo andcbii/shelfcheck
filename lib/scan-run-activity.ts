@@ -39,12 +39,23 @@ export function parseActiveScanRun(value: unknown): ActiveScanRun | null | undef
   return { kind, startedAt };
 }
 
+/** One preparation step's progress: how many of its items have settled, out of a total fixed once they are discovered. */
+export type ScanPreparationCount = { settled: number; total: number };
+
+/**
+ * A Plex scan's preparation progress: library records read or failed out of
+ * every record in the library, and shows whose TMDB and TVDB episode lists are
+ * prepared (downloaded, reused or failed) out of the shows it compares.
+ */
+export type ScanPreparationProgress = { inventory: ScanPreparationCount; catalogues: ScanPreparationCount };
+
 /**
  * The parts of a Scan run status a page's progress box shows. Every field is
  * optional and loosely typed: an older saved status may lack them.
  */
 export type ScanProgressStatus = {
   activeShows?: unknown;
+  preparation?: unknown;
   currentPhase?: string;
   rateLimitPaused?: boolean;
   rateLimitProvider?: ProviderName;
@@ -62,8 +73,10 @@ const SCAN_STEP_WORDING: Record<string, string> = {
   "episode-crosswalk": "Matching episode numbers between providers",
 };
 
-const SCAN_PREPARATION_WORDING: Record<string, string> = {
+/** What the progress box says while no show is being checked, by the Scan run's phase. */
+const SCAN_RUN_PHASE_WORDING: Record<string, string> = {
   initializing: "Getting ready…",
+  "manual-match-removal": "Removing unused Manual Match members…",
 };
 
 /** A show's current step in plain English; a step without wording reads neutrally rather than by its raw name. */
@@ -72,11 +85,45 @@ export function scanStepWording(phase: string): string {
 }
 
 /**
- * What the progress box says while no show is being checked and the Scan run
- * is still preparing, from its current phase; null once it is past preparing.
+ * What the progress box says while no show is being checked and nothing more
+ * specific is known, from the Scan run's current phase: getting ready before
+ * its preparation is reported, or removing unused Manual Match members after a
+ * Plex scan's report is saved. Null in any other phase.
  */
-export function scanPreparationWording(currentPhase: string | undefined): string | null {
-  return currentPhase !== undefined && Object.hasOwn(SCAN_PREPARATION_WORDING, currentPhase) ? SCAN_PREPARATION_WORDING[currentPhase] : null;
+export function scanRunPhaseWording(status: ScanProgressStatus): string | null {
+  const { currentPhase } = status;
+  if (currentPhase === "initializing" && scanPreparationProgress(status.preparation)) return null;
+  return currentPhase !== undefined && Object.hasOwn(SCAN_RUN_PHASE_WORDING, currentPhase) ? SCAN_RUN_PHASE_WORDING[currentPhase] : null;
+}
+
+const SCAN_PREPARATION_WORDING: Record<keyof ScanPreparationProgress, string> = {
+  inventory: "Reading Plex library",
+  catalogues: "Preparing TMDB and TVDB episode lists",
+};
+
+/** A status's preparation progress, or undefined when it has none or it is malformed. */
+function scanPreparationProgress(value: unknown): ScanPreparationProgress | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { inventory, catalogues } = value as Record<string, unknown>;
+  const count = (item: unknown): item is ScanPreparationCount => {
+    if (!item || typeof item !== "object") return false;
+    const { settled, total } = item as Record<string, unknown>;
+    return Number.isInteger(settled) && Number.isInteger(total) && (settled as number) >= 0 && (total as number) >= 0;
+  };
+  return count(inventory) && count(catalogues) ? { inventory, catalogues } : undefined;
+}
+
+/**
+ * The preparation lines of a preparing Scan run, such as "Reading Plex library
+ * 210/666": one for each step still under way, none once every step has
+ * settled (a library with no shows settles at 0/0) or without progress.
+ */
+export function scanPreparationLines(value: unknown): string[] {
+  const preparation = scanPreparationProgress(value);
+  if (!preparation) return [];
+  return (Object.keys(SCAN_PREPARATION_WORDING) as (keyof ScanPreparationProgress)[])
+    .filter((step) => preparation[step].settled < preparation[step].total)
+    .map((step) => `${SCAN_PREPARATION_WORDING[step]} ${preparation[step].settled}/${preparation[step].total}`);
 }
 
 /** The well-formed shows of a status's `activeShows`, skipping anything an older or damaged status holds instead. */

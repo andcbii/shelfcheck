@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { ActiveScanTracker, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
 import type { ScanLogger } from "@/lib/scan-log";
-import { SCAN_RUN_LABELS, scanRunLockMessage, type ScanRunKind } from "@/lib/scan-run-activity";
+import { SCAN_RUN_LABELS, scanRunLockMessage, type ScanPreparationProgress, type ScanRunKind } from "@/lib/scan-run-activity";
 
 /**
  * The scan run lifecycle: the one place that decides whether a Scan run, Trakt
@@ -68,6 +68,8 @@ export type ScanRunStatus = {
   currentShow?: string;
   currentPhase?: string;
   activeShows?: ActiveScanWork[];
+  /** A preparing run's progress through its preparation steps, if the mode reports one. */
+  preparation?: ScanPreparationProgress;
   heartbeatAt?: string;
 };
 
@@ -176,6 +178,8 @@ export type ScanRunContext<P> = {
   progress(processed: number, total: number): void;
   /** The phase the heartbeat shows while no show is active; undefined shows "processing". */
   setPhase(phase: string | undefined): void;
+  /** Records the run's preparation progress, shown alongside its active shows. */
+  reportPreparation(preparation: ScanPreparationProgress): void;
   /** A provider rate-limit pause starting or ending for this run, with when it ends if the provider said. */
   reportRateLimit(provider: string, paused: boolean, resumeAt?: string): void;
   resumePoint: {
@@ -352,7 +356,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     const recordError = (message: string, what: "failure" | "veto") => {
       terminal = true;
       try {
-        update({ status: "error", finishedAt: iso(), error: message, rateLimitPaused: false, rateLimitProvider: undefined, rateLimitResumeAt: undefined, activeShows: undefined, currentShow: undefined });
+        update({ status: "error", finishedAt: iso(), error: message, rateLimitPaused: false, rateLimitProvider: undefined, rateLimitResumeAt: undefined, activeShows: undefined, currentShow: undefined, preparation: undefined });
         return true;
       } catch (storeError) {
         report(`The ${label} scan could not record its ${what}.`, storeError);
@@ -378,6 +382,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         update({ status: "running", processed, total });
       },
       setPhase(next) { if (live()) phase = next; },
+      reportPreparation(preparation) { if (live()) update({ preparation }); },
       reportRateLimit(provider, paused, resumeAt) {
         if (!live()) return;
         const current = mode.status.read();
@@ -532,7 +537,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     // Explained from the last running status, then reset like any terminal error: no pause, provider, resume time or active work survives.
     const error = mode.interruptedError(status);
     const interrupted: S = { ...status, status: "error", finishedAt: iso(), error, rateLimitPaused: false };
-    for (const field of ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow"] as const) delete interrupted[field];
+    for (const field of ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow", "preparation"] as const) delete interrupted[field];
     mode.status.write(interrupted);
     try { mode.onInterrupted?.(interrupted); } catch (error) { report(`The ${SCAN_RUN_LABELS[mode.kind]} interrupted scan hook failed.`, error); }
     return interrupted;

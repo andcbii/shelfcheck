@@ -65,12 +65,8 @@ A fifth-scan safeguard whose required TMDB change list could not be retrieved. I
 _Avoid_: Missed safeguard, overdue refresh
 
 **Manual Match**:
-A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes.
+A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes. Every saved Manual Match can grant coverage; it has no health or verification status.
 _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
-
-**Manual Match health**:
-Whether a Manual Match's members were last confirmed to still exist at their providers: **Healthy** when every member was confirmed, **Pending** when a member could not be checked, and **Needs review** when a provider confirmed a member was deleted. Only a Healthy match can add coverage; a Needs review match stays so until a reviewed edit repairs it.
-_Avoid_: Mapping status, verification state
 
 **Auto Match**:
 A match determined and controlled by Shelfcheck through automatic matching.

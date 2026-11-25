@@ -37,7 +37,8 @@ export function ManualMatchPanels({ members, idPrefix, draft }: Props) {
     const side = members.filter(member => member.provider === provider);
     const shows = side.filter((member, index) => side.findIndex(other => other.showId === member.showId) === index);
     const headerId = `${uid}-${idPrefix}-${provider}`;
-    const showName = (show: CoverageMember) => <><strong>{show.show}</strong><span className="manual-match-show-id">Show {show.showId}</span></>;
+    // The Show year is part of the show's name, in the same element and style; no known year, name only.
+    const showName = (show: CoverageMember) => <><strong>{show.show}{Number.isInteger(show.showYear) && show.showYear! > 0 ? ` (${show.showYear})` : ""}</strong><span className="manual-match-show-id">Show {show.showId}</span></>;
     const line = (member: CoverageMember, describedBy: string) => {
       const contextId = `${uid}-${idPrefix}-${memberKey(member)}`;
       const reported = !draft && member.reportMissing ? <span className="manual-match-tag missing">Reported missing</span> : null;

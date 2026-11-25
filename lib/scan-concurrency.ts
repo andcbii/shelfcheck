@@ -15,7 +15,10 @@ type Clock = { now: () => number; sleep: (milliseconds: number) => Promise<void>
 
 export class ProviderStartGate<TProvider> {
   private readonly gates = new Map<TProvider, Promise<void>>();
+  /** When each provider's next spaced request may start: the last spaced start plus its spacing. */
   private readonly nextStarts = new Map<TProvider, number>();
+  /** Deadlines no request to the provider starts before, spaced or not: cooldowns, Retry-After and retry back-off. */
+  private readonly deadlines = new Map<TProvider, number>();
 
   constructor(private readonly clock: Clock = { now: Date.now, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) }) {}
 
@@ -34,23 +37,36 @@ export class ProviderStartGate<TProvider> {
     this.gates.set(provider, new Promise<void>((resolve) => { release = resolve; }));
     await previous;
     try {
-      check?.();
-      let waitMs = 0;
-      // A completed sleep counts as reaching its target even if the clock reads earlier (a frozen or
-      // differently mocked clock); only a later deadline set meanwhile, such as a cooldown, waits again.
-      let now = this.clock.now();
-      for (let target = this.nextStarts.get(provider) || 0; target > now; target = this.nextStarts.get(provider) || 0) {
-        waitMs += target - now;
-        const completed = await this.sleep(provider, target - now);
-        check?.();
-        now = completed ? Math.max(this.clock.now(), target) : this.clock.now();
-      }
-      const startedAt = now;
+      const { waitMs, startedAt } = await this.waitFor(provider, () => Math.max(this.nextStarts.get(provider) || 0, this.deadlines.get(provider) || 0), check);
       this.nextStarts.set(provider, startedAt + (typeof spacingMs === "function" ? spacingMs() : spacingMs));
       return { waitMs, startedAt };
     } finally {
       release();
     }
+  }
+
+  /**
+   * Waits only for this provider's deadlines, not its turn: the request
+   * neither queues behind spaced requests nor moves their next start.
+   * `check` runs as for `wait`.
+   */
+  waitUnspaced(provider: TProvider, check?: () => void) {
+    return this.waitFor(provider, () => this.deadlines.get(provider) || 0, check);
+  }
+
+  private async waitFor(provider: TProvider, target: () => number, check?: () => void) {
+    check?.();
+    let waitMs = 0;
+    // A completed sleep counts as reaching its target even if the clock reads earlier (a frozen or
+    // differently mocked clock); only a later deadline set meanwhile, such as a cooldown, waits again.
+    let now = this.clock.now();
+    for (let until = target(); until > now; until = target()) {
+      waitMs += until - now;
+      const completed = await this.sleep(provider, until - now);
+      check?.();
+      now = completed ? Math.max(this.clock.now(), until) : this.clock.now();
+    }
+    return { waitMs, startedAt: now };
   }
 
   /** Sleeps for this provider until the time passes (true) or `wake` ends it early (false). */
@@ -70,11 +86,12 @@ export class ProviderStartGate<TProvider> {
     for (const woken of [...(this.sleepers.get(provider) || [])]) woken();
   }
 
-  /** Forgets every provider's next start, as a server restart does. */
-  reset() { this.nextStarts.clear(); }
+  /** Forgets every provider's next start and deadlines, as a server restart does. */
+  reset() { this.nextStarts.clear(); this.deadlines.clear(); }
 
+  /** No request to this provider, spaced or unspaced, starts before `timestamp`. */
   delayUntil(provider: TProvider, timestamp: number) {
-    this.nextStarts.set(provider, Math.max(this.nextStarts.get(provider) || 0, timestamp));
+    this.deadlines.set(provider, Math.max(this.deadlines.get(provider) || 0, timestamp));
   }
 }
 

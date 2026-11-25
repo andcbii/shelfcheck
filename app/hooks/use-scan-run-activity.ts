@@ -109,7 +109,15 @@ export function useScanRunActivity(page: ScanRunKind, options: ScanRunActivityOp
   const isLocked = useCallback(() => locks(activeRef.current, page), [page]);
 
   const locking = activeScanRun && activeScanRun.kind !== page ? activeScanRun : null;
-  return { locked: locks(activeScanRun, page), lockMessage: locking ? scanRunLockMessage(locking.kind, page) : "", isLocked, refresh, report };
+  return {
+    locked: locks(activeScanRun, page),
+    /** Whether a known Scan run of the other kind owns the lock: not before the first observation, nor after a failed first one. */
+    lockedByOtherKind: locking !== null,
+    lockMessage: locking ? scanRunLockMessage(locking.kind, page) : "",
+    isLocked,
+    refresh,
+    report,
+  };
 }
 
 /** An unknown owner (undefined) or the other kind's Scan run locks the page's scan controls. */

@@ -16,6 +16,7 @@ const PLEX_RUN = { kind: "plex", startedAt: "2026-11-18T12:00:00.000Z" } as cons
 const TRAKT_RUN = { kind: "trakt", startedAt: "2026-11-18T12:00:00.000Z" } as const;
 const PLEX_LOCKS_TRAKT = "A Plex scan is running. You can start a Trakt scan when it finishes.";
 const TRAKT_LOCKS_PLEX = "A Trakt scan is running. You can start a Plex scan when it finishes.";
+const ANOTHER_SCAN = "Another scan is in progress";
 
 const traktShow = { title: "Example", year: 2020, ids: { trakt: 7, slug: "example" } };
 const traktReport = { shows: [{ show: traktShow }], missing: [{ show: traktShow, season: 1, episode: 2 }], lastScan: "2026-11-17T12:00:00.000Z", scanCache: { 7: {} } };
@@ -74,12 +75,14 @@ async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partia
   const lockMessage = () => container.querySelector(".scan-run-lock")?.textContent || "";
   const radar = () => container.querySelector(".radar small")?.textContent || "";
   const scanButtonText = () => container.querySelector("button.primary")?.textContent || "";
-  const traktProgressLine = () => container.querySelector(".loading p")?.textContent ?? null;
+  /** The page's own scan button, in the scan panel. */
+  const scanButton = () => container.querySelector<HTMLButtonElement>(".scan-panel button.primary");
+  const progressBox = () => container.querySelector(".scan-progress");
   /** Replaces the status answers and restarts their count, so the next poll gets the first. */
   const nextStatuses = (...statuses: Server["statuses"]) => { server.statuses = statuses; server.statusRequests = 0; };
   const advance = async (ms: number) => { await act(async () => { t.mock.timers.tick(ms); }); await settle(); };
   const unmount = async () => { await act(async () => { root.unmount(); }); };
-  return { server, container, button, click, lockMessage, radar, scanButtonText, traktProgressLine, nextStatuses, advance, unmount };
+  return { server, container, button, click, lockMessage, radar, scanButtonText, scanButton, progressBox, nextStatuses, advance, unmount };
 }
 
 async function settle() {
@@ -99,7 +102,7 @@ test("an idle Trakt page locks its scan controls within a second of a Plex scan 
 
   page.server.activity = PLEX_RUN;
   await page.advance(1000);
-  assert.equal(page.button("Quick scan")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
   assert.equal(page.button("Run Deep Scan")?.disabled, true);
   assert.equal(page.lockMessage(), PLEX_LOCKS_TRAKT);
 
@@ -113,9 +116,9 @@ test("an idle Trakt page locks its scan controls within a second of a Plex scan 
 test("a Trakt page opened during a Plex scan run shows locked controls without waiting for a poll", async (t) => {
   const page = await mountPage(t, "trakt", { activity: PLEX_RUN });
   assert.equal(page.server.activityRequests, 1, "activity is fetched on mount");
-  assert.equal(page.button("Quick scan")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
   assert.equal(page.lockMessage(), PLEX_LOCKS_TRAKT);
-  assert.ok(!page.button("Quick scan")?.textContent?.includes("Checking"), "the other kind's run never looks like this page scanning");
+  assert.ok(!page.scanButton()?.textContent?.includes("Checking"), "the other kind's run never looks like this page scanning");
 });
 
 test("an open Deep Scan confirmation and show menu cannot start a scan once a Plex scan run locks the Trakt page", async (t) => {
@@ -157,11 +160,11 @@ test("a Trakt start refused by a race shows the server's message and locks the p
   assert.equal(page.server.starts.length, 1);
   assert.ok(page.container.querySelector(".error")?.textContent?.includes(PLEX_LOCKS_TRAKT));
   assert.equal(page.lockMessage(), PLEX_LOCKS_TRAKT, "the 409's owner locks the page immediately");
-  assert.equal(page.button("Quick scan")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
 
   late.resolve(Response.json({ activeScanRun: null }));
   await settle();
-  assert.equal(page.button("Quick scan")?.disabled, true, "a response older than the 409 does not unlock the page");
+  assert.equal(page.scanButton()?.disabled, true, "a response older than the 409 does not unlock the page");
   assert.equal(page.server.activityRequests, before + 1, "activity is observed again at once, without waiting for the next poll");
   refreshed.resolve(Response.json({ activeScanRun: PLEX_RUN }));
   await settle();
@@ -175,7 +178,7 @@ test("a failed observation keeps the Trakt page locked", async (t) => {
   assert.equal(page.lockMessage(), PLEX_LOCKS_TRAKT);
   page.server.activity = () => Promise.reject(new TypeError("network down"));
   await page.advance(1000);
-  assert.equal(page.button("Quick scan")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
   page.server.activity = null;
   await page.advance(1000);
   assert.equal(page.button("Quick scan")?.disabled, false, "observation keeps going after failures");
@@ -231,7 +234,7 @@ test("unmounting the Trakt page stops observation, and a response arriving after
 
 test("a Plex page locks New Plex search and single-show checks during a Trakt scan run, while clearing its cache stays available", async (t) => {
   const page = await mountPage(t, "plex", { activity: TRAKT_RUN });
-  assert.equal(page.button("New Plex search")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
   assert.equal(page.lockMessage(), TRAKT_LOCKS_PLEX);
   await page.click("Example Show");
   assert.equal(page.button("Force check now")?.disabled, true);
@@ -251,7 +254,7 @@ test("a Plex start refused by a race shows the server's message and locks the pa
   assert.equal(page.server.starts.length, 1);
   assert.ok(page.container.querySelector(".error")?.textContent?.includes(TRAKT_LOCKS_PLEX));
   assert.equal(page.lockMessage(), TRAKT_LOCKS_PLEX);
-  assert.equal(page.button("New Plex search")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
 });
 
 // Two tabs race to start the same kind: the loser's start is refused while it is
@@ -302,7 +305,7 @@ test("a Plex page follows a Plex scan run started in another tab once, then refr
 test("a page's scan controls stay locked, with no lock message, until the first activity observation arrives", async (t) => {
   const first = deferred();
   const page = await mountPage(t, "trakt", { activity: () => first.promise });
-  assert.equal(page.button("Quick scan")?.disabled, true, "scan controls are locked from the first render");
+  assert.equal(page.scanButton()?.disabled, true, "scan controls are locked from the first render");
   assert.equal(page.button("Run Deep Scan")?.disabled, true);
   assert.equal(page.lockMessage(), "", "an unknown owner shows no lock message");
   await act(async () => { page.button("Quick scan")?.removeAttribute("disabled"); page.button("Quick scan")?.click(); });
@@ -317,14 +320,14 @@ test("a page's scan controls stay locked, with no lock message, until the first 
 
 test("a failed first observation keeps the page locked, and polling retries until an owner is known", async (t) => {
   const page = await mountPage(t, "plex", { activity: () => Response.json({ error: "unavailable" }, { status: 500 }) });
-  assert.equal(page.button("New Plex search")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
   assert.equal(page.lockMessage(), "");
   await page.click("Plex preferences");
   assert.equal(page.button("Clear scan cache")?.disabled, false, "clearing the cache is not affected by an unknown owner");
 
   page.server.activity = () => Promise.reject(new TypeError("network down"));
   await page.advance(1000);
-  assert.equal(page.button("New Plex search")?.disabled, true);
+  assert.equal(page.scanButton()?.disabled, true);
 
   page.server.activity = null;
   await page.advance(1000);
@@ -334,18 +337,18 @@ test("a failed first observation keeps the page locked, and polling retries unti
 // A rate-limit pause shows only while the page is scanning: each page states its
 // own pause check, so these cases drive the rendered pages through their polls.
 
-test("a running Trakt scan paused for the rate limit says so on the radar, scan button and progress line", async (t) => {
+test("a running Trakt scan paused for the rate limit says so on the radar and scan button", async (t) => {
   const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RATE_LIMIT_PAUSED_SCAN, statuses: [RATE_LIMIT_PAUSED_SCAN] });
   assert.equal(page.radar(), "PAUSED - RATE LIMIT");
   assert.match(page.scanButtonText(), /^Paused due to Rate Limit/);
-  assert.equal(page.traktProgressLine(), "Paused due to Rate Limit");
+  assert.ok(page.progressBox(), "the progress box shows");
 });
 
 test("a running Trakt scan without a pause shows the ordinary scanning wording", async (t) => {
   const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RUNNING_SCAN, statuses: [RUNNING_SCAN] });
   assert.equal(page.radar(), "SCANNING");
   assert.match(page.scanButtonText(), /^Checking 1 of 4/);
-  assert.match(page.traktProgressLine() || "", /^Comparing show 1 of 4\./);
+  assert.ok(page.progressBox(), "the progress box shows");
 });
 
 test("a Trakt page that stops scanning with its last status still paused no longer shows the pause", async (t) => {
@@ -361,7 +364,7 @@ test("a Trakt page that stops scanning with its last status still paused no long
   assert.equal(page.server.statusRequests, 1, "the failed status request was made");
   assert.equal(page.radar(), "MISSING");
   assert.ok(!page.scanButtonText().includes("Paused"), `the scan button is not paused: ${page.scanButtonText()}`);
-  assert.equal(page.traktProgressLine(), null, "the progress line is gone");
+  assert.equal(page.progressBox(), null, "the progress box is gone");
 });
 
 test("a running Plex scan paused for a provider's rate limit says so on the radar and scan button", async (t) => {
@@ -402,4 +405,83 @@ test("a Plex page still polling shows scanning, not a pause, when an idle status
   assert.equal(page.server.statusRequests, 2, "polling continues after an idle status");
   assert.equal(page.radar(), "SCANNING");
   assert.match(page.scanButtonText(), /^Checking 2 of 4/);
+});
+
+// While the other kind of Scan run owns the lock, the scan button says so and
+// is marked locked (solid grey in the CSS); the lock line under it stays.
+
+const PAGES = [
+  { page: "trakt", other: PLEX_RUN, own: TRAKT_RUN, idleLabel: "Quick scan", lockLine: PLEX_LOCKS_TRAKT },
+  { page: "plex", other: TRAKT_RUN, own: PLEX_RUN, idleLabel: "New Plex search", lockLine: TRAKT_LOCKS_PLEX },
+] as const;
+
+/** The scan button's look: its words and whether it is marked locked by the other kind's Scan run. */
+function look(button: HTMLButtonElement | null) {
+  return { text: button?.textContent?.replace("→", "").trim(), locked: button?.classList.contains("scan-locked") ?? false, disabled: button?.disabled };
+}
+
+for (const { page: kind, other, own, idleLabel, lockLine } of PAGES) {
+  test(`a ${kind} page's scan button reads "${ANOTHER_SCAN}" and looks locked while the other kind runs, then returns to normal`, async (t) => {
+    const page = await mountPage(t, kind);
+    assert.deepEqual(look(page.scanButton()), { text: idleLabel, locked: false, disabled: false });
+
+    page.server.activity = other;
+    await page.advance(1000);
+    assert.deepEqual(look(page.scanButton()), { text: ANOTHER_SCAN, locked: true, disabled: true });
+    assert.equal(page.lockMessage(), lockLine, "the lock line naming the running scan stays");
+    assert.equal(page.progressBox(), null, "the other kind's run shows no progress box on this page");
+
+    page.server.activity = null;
+    await page.advance(1000);
+    assert.deepEqual(look(page.scanButton()), { text: idleLabel, locked: false, disabled: false });
+    assert.equal(page.lockMessage(), "");
+  });
+
+  test(`a ${kind} page opened during the other kind's run shows "${ANOTHER_SCAN}" at once, and keeps it through a failed observation`, async (t) => {
+    const page = await mountPage(t, kind, { activity: other });
+    assert.deepEqual(look(page.scanButton()), { text: ANOTHER_SCAN, locked: true, disabled: true });
+    page.server.activity = () => Response.json({ error: "unavailable" }, { status: 500 });
+    await page.advance(1000);
+    page.server.activity = () => Promise.reject(new TypeError("network down"));
+    await page.advance(1000);
+    assert.deepEqual(look(page.scanButton()), { text: ANOTHER_SCAN, locked: true, disabled: true }, "the last known owner keeps the locked wording");
+    assert.equal(page.lockMessage(), lockLine);
+  });
+
+  test(`a ${kind} page following its own kind's run from another tab shows progress, not "${ANOTHER_SCAN}"`, async (t) => {
+    // The page itself has no saved running status: only the observation reveals its own kind's run.
+    const page = await mountPage(t, kind, { activity: own, statuses: [RUNNING_SCAN] });
+    assert.match(page.scanButtonText(), /^Checking 1 of 4/);
+    assert.equal(look(page.scanButton()).locked, false);
+    assert.ok(page.progressBox(), "its own run's progress box shows");
+    assert.equal(page.lockMessage(), "");
+  });
+
+  test(`a ${kind} page shows its normal scan button, not "${ANOTHER_SCAN}", before the first observation and after a failed one`, async (t) => {
+    const first = deferred();
+    const page = await mountPage(t, kind, { activity: () => first.promise });
+    assert.deepEqual(look(page.scanButton()), { text: idleLabel, locked: false, disabled: true }, "an unknown owner locks without claiming another scan runs");
+
+    first.resolve(Response.json({ error: "unavailable" }, { status: 500 }));
+    await settle();
+    assert.deepEqual(look(page.scanButton()), { text: idleLabel, locked: false, disabled: true }, "a failed first observation claims nothing either");
+    assert.equal(page.lockMessage(), "");
+  });
+
+  test(`a ${kind} start refused because the other kind just began shows "${ANOTHER_SCAN}" and the lock line`, async (t) => {
+    const page = await mountPage(t, kind, { start: () => Response.json({ error: lockLine, activeScanRun: { ...other, status: { status: "running", processed: 1, total: 5 } } }, { status: 409 }) });
+    // The observation the 409 triggers stays pending, so only the 409's owner can lock the page.
+    const refreshed = deferred();
+    page.server.activity = () => refreshed.promise;
+    await page.click(idleLabel);
+    assert.equal(page.server.starts.length, 1);
+    assert.deepEqual(look(page.scanButton()), { text: ANOTHER_SCAN, locked: true, disabled: true });
+    assert.equal(page.lockMessage(), lockLine);
+  });
+}
+
+test(`Deep Scan stays a locked link, not "${ANOTHER_SCAN}", while a Plex scan run locks the Trakt page`, async (t) => {
+  const page = await mountPage(t, "trakt", { activity: PLEX_RUN });
+  assert.equal(page.button("Run Deep Scan")?.disabled, true);
+  assert.equal(page.button("Run Deep Scan")?.classList.contains("scan-locked"), false);
 });

@@ -4,6 +4,7 @@ import { ManualMatchForm } from "@/app/components/manual-match-form";
 import { ManualMatchList, plural } from "@/app/components/manual-match-list";
 import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
+import { orderManualMatches } from "@/lib/manual-match-order";
 type Props = {
   initialUrls: string[];
   initialMappingId?: string;
@@ -86,6 +87,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const flagsChanged = draftFlags.join() !== (editing ? flaggedKeys(editing.members) : []).join();
   const dirty = flagsChanged || Boolean(preview) || (editing ? !savedUrls : urls.join() !== defaultUrls.join());
   const scopedMappings = episodeScope ? mappings.filter(mapping => mapping.id === editing?.id) : mappings;
+  // Only the report has a fixed show order; the Plex page keeps the saved order.
+  const listedMappings = report ? orderManualMatches(scopedMappings) : scopedMappings;
   function changeSelection(ids: string[]) {
     setSelected(ids);
     setConfirmation(null);
@@ -333,7 +336,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
    <p className="modal-copy">{editedName ? <>You changed <strong>{editedName}</strong> but haven&apos;t saved it.</> : "You haven't saved this new Manual Match."} Closing now throws those changes away.</p>
    <div className="modal-actions"><button className="secondary" onClick={() => setDiscardPromptOpen(false)}>Keep editing</button><button className="danger" onClick={closeForm}>Discard changes</button></div>
  </Popup>}
- <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
+ <ManualMatchList matches={listedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
    onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedNote?.id}/>

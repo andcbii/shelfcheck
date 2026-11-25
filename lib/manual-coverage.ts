@@ -1,6 +1,7 @@
 import { COMPARISON_PENDING_ISSUE } from "@/lib/coverage-issue-ids";
 import { listCoverageIssues, type CoverageIssue } from "@/lib/coverage-issues";
 import { isPlexScanActive } from "@/lib/plex-scan-active";
+import { scanRuns, type ScanRunOwner } from "@/lib/scan-run";
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { database } from "@/lib/sqlite";
@@ -208,6 +209,84 @@ export function deleteCoverageMappings(ids: unknown): ManualMatchDeletion {
     if (deleted.length) commitCoverageChange(db, coverageState().revision + 1, affectedMembers);
     db.exec("COMMIT");
     return { deleted, missing, affectedMembers };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** A member a Plex Scan run proposes to remove from its Manual Match, at the Manual Match revision the scan read. */
+export type ManualMatchMemberRemoval = { mappingId: string; member: CoverageIdentity; expectedRevision: number };
+/** A committed removal: the saved member (with its show placement) and whether removing it deleted its whole Manual Match. */
+export type CommittedMemberRemoval = { mappingId: string; member: CoverageMember; matchDeleted: boolean };
+/**
+ * What a scan-owned removal committed: the removed members, the Manual Matches
+ * deleted because a side became empty, every member the change affects (each
+ * former member of a changed Manual Match, once per show) and the new coverage
+ * revision; `revision` is undefined when nothing changed.
+ */
+export type ManualMatchRemovalResult = { removed: CommittedMemberRemoval[]; deletedMappings: string[]; affectedMembers: CoverageMember[]; revision?: number };
+
+/**
+ * Scan-owned change: remove these members from their Manual Matches in one
+ * transaction, for the Plex Scan run `owner` that holds the scan run lock. It
+ * skips the public scan-active guard, so only the lock owner may call it.
+ * Proposals are deduplicated; each must name its Manual Match's current
+ * revision, or the whole change is refused as stale. A side left empty deletes
+ * the whole Manual Match. Remaining members keep their Report Missing flags:
+ * this is not a manual save, so the both-sides rule is not applied. Every
+ * changed Manual Match and the global coverage revision move to one new
+ * revision, and every former member of a changed Manual Match is carried. No
+ * proposals, or nothing left to remove, writes nothing.
+ */
+export function removeManualMatchMembers(proposals: ManualMatchMemberRemoval[], owner: ScanRunOwner): ManualMatchRemovalResult {
+  const active = scanRuns.activeScanRun();
+  if (owner.kind !== "plex" || active?.kind !== "plex" || active.runId !== owner.runId)
+    throw new CoverageError("Only the Plex Scan run that holds the scan run lock can remove Manual Match members.", 409, "not-scan-owner");
+  const nothing: ManualMatchRemovalResult = { removed: [], deletedMappings: [], affectedMembers: [] };
+  if (!proposals.length) return nothing;
+  const db = database();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Per Manual Match: the revision the scan read and the member keys to remove.
+    const byMapping = new Map<string, { expectedRevision: number; keys: Set<string> }>();
+    for (const { mappingId, member, expectedRevision } of proposals) {
+      const entry = byMapping.get(mappingId) || { expectedRevision, keys: new Set<string>() };
+      if (entry.expectedRevision !== expectedRevision)
+        throw new CoverageError("A Manual Match was proposed at two revisions.", 409, "stale-revision", mappingId);
+      entry.keys.add(memberKey(member));
+      byMapping.set(mappingId, entry);
+    }
+    const revision = coverageState().revision + 1;
+    const removed: CommittedMemberRemoval[] = [];
+    const deletedMappings: string[] = [];
+    const former: CoverageMember[] = [];
+    for (const [mappingId, { expectedRevision, keys }] of byMapping) {
+      const saved = savedManualMatch(db, mappingId);
+      if (!saved || saved.revision !== expectedRevision)
+        throw new CoverageError("This Manual Match changed since the Plex Scan run read it.", 409, "stale-revision", mappingId);
+      const leaving = saved.members.filter(member => keys.has(memberKey(member)));
+      if (!leaving.length) continue;
+      const members = saved.members.filter(member => !keys.has(memberKey(member)));
+      const matchDeleted = !members.some(member => member.provider === "TMDB") || !members.some(member => member.provider === "TVDB");
+      if (matchDeleted) {
+        db.prepare("DELETE FROM shelfcheck_coverage_mappings WHERE id=?").run(mappingId);
+        deletedMappings.push(mappingId);
+      } else {
+        db.prepare("UPDATE shelfcheck_coverage_mappings SET payload=? WHERE id=?").run(JSON.stringify({ ...saved, members, revision }), mappingId);
+        for (const member of leaving) db.prepare("DELETE FROM shelfcheck_coverage_members WHERE provider=? AND episode_id=? AND mapping_id=?").run(member.provider, member.id, mappingId);
+      }
+      removed.push(...leaving.map(member => ({ mappingId, member, matchDeleted })));
+      former.push(...saved.members);
+    }
+    if (!removed.length) {
+      db.exec("ROLLBACK");
+      return nothing;
+    }
+    const affectedMembers = distinctMembers(former);
+    commitCoverageChange(db, revision, affectedMembers);
+    db.exec("COMMIT");
+    return { removed, deletedMappings, affectedMembers, revision };
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;

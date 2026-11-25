@@ -4,7 +4,7 @@ import test from "node:test";
 import { TVDB_AUTHENTICATION_ISSUE } from "../lib/coverage-issue-ids";
 import type { SeriesAssociation } from "../lib/comparison-catalogue-resolver";
 import { applyObligationPatch, type RefreshObligation } from "../lib/refresh-obligation";
-import { inMemoryCatalogueSource } from "./in-memory-catalogue-source";
+import { fixtureEpisodeIds, inMemoryCatalogueSource } from "./in-memory-catalogue-source";
 
 // The resolver builds Coverage Issue values with the production lookup helper, a server-only module.
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
@@ -1477,3 +1477,39 @@ for (const recorded of ["none", "gone"] as const) {
     assert.equal(resolved.showStatus, "unmatched", "the recheck never changes an Unmatched show's status by itself");
   });
 }
+
+test("a fresh complete download keeps its episode-ID evidence for the series it reports: preferred, single Plex ID and derived alike", async () => {
+  // TMDB preferred among several, TVDB derived from TMDB 11's catalogue.
+  const several = inMemoryCatalogueSource({ now: NOW, episodeIds: true, tvdbOfTmdb: { 11: 7 } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, { candidates: [] }), { source: several.source });
+  assert.deepEqual(resolved.tmdb.catalogue?.episodeIds, fixtureEpisodeIds("tmdb", 11));
+  assert.equal(resolved.tvdb.use.action === "set" && resolved.tvdb.use.use.state, "derived");
+  assert.deepEqual(resolved.tvdb.catalogue?.episodeIds, fixtureEpisodeIds("tvdb", 7));
+
+  // A single Plex ID TMDB answers as another series: the evidence names the series it reports.
+  const single = inMemoryCatalogueSource({ now: NOW, episodeIds: true, reports: { tmdb: { 11: 21 } } });
+  const loaded = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11 }, { candidates: [1], preferredId: 1 }), { source: single.source });
+  assert.deepEqual([loaded.tmdb.catalogue?.id, loaded.tmdb.catalogue?.episodeIds], [21, fixtureEpisodeIds("tmdb", 21)]);
+  assert.deepEqual(loaded.tvdb.catalogue?.episodeIds, fixtureEpisodeIds("tvdb", 1));
+});
+
+test("reused and saved catalogues carry no episode-ID evidence", async () => {
+  const reused = inMemoryCatalogueSource({ now: NOW, episodeIds: true, saved: { tmdb: { 11: before(DAY) }, tvdb: { 1: before(DAY) } } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11 }, { candidates: [1], preferredId: 1 }), { source: reused.source });
+  assert.equal(resolved.tmdb.catalogue?.origin, "reused");
+  assert.equal(resolved.tmdb.catalogue && "episodeIds" in resolved.tmdb.catalogue, false);
+  assert.equal(resolved.tvdb.catalogue && "episodeIds" in resolved.tvdb.catalogue, false);
+
+  const failed = inMemoryCatalogueSource({ now: NOW, episodeIds: true, saved: { tmdb: { 11: before(DAY) }, tvdb: tvdbSaved }, failing: { tmdb: { 11: notFound(11) } } });
+  const kept = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11, refreshObligation: true }, tvdbOnly), { source: failed.source });
+  assert.equal(kept.tmdb.catalogue?.origin, "saved");
+  assert.equal(kept.tmdb.catalogue && "episodeIds" in kept.tmdb.catalogue, false);
+});
+
+test("a fallback catalogue carries no episode-ID evidence, even freshly downloaded for its own series", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, episodeIds: true, failing: { tmdb: { 11: notFound(11) } } });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [10, 11], preferredId: 11 }, tvdbOnly), { source });
+  assert.equal(resolved.tmdb.use.action === "set" && resolved.tmdb.use.use.state, "fallback");
+  assert.deepEqual([resolved.tmdb.catalogue?.id, resolved.tmdb.catalogue?.origin], [10, "downloaded"]);
+  assert.equal(resolved.tmdb.catalogue && "episodeIds" in resolved.tmdb.catalogue, false);
+});

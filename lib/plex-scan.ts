@@ -32,7 +32,8 @@ import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelecti
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { catalogueIssueIds, comparisonFailureIssueId, comparisonInputsIssueId, INITIAL_COMPARISON_INPUTS_ISSUE, inventoryDetailsIssueId, lookupFailureIssueId, plexInventoryIssueId, providerVerificationIssueId, SCAN_FAILURE_ISSUE, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
 import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePayloads, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderLookupStatus, type ProviderRequest, type ShowMatchStatus } from "@/lib/comparison-catalogue-resolver";
-import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
+import { downloadCatalogueSource, type DownloadCataloguePayloads, type DownloadedEpisodes } from "@/lib/download-catalogue-source";
+import { episodeIdEnumeration } from "@/lib/episode-id-universe";
 import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
 import { ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
@@ -162,7 +163,7 @@ async function requestTmdbShowForTvdb(tvdbId: number, token: string): Promise<Tm
   return (await tmdbJson<{ tv_results?: TmdbShow[] }>(providerLookup.tmdbSeriesByTvdbSeries(tvdbId), token)).tv_results?.[0];
 }
 
-async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCatalogue> {
+async function tmdbEpisodes(show: TmdbShow, token: string): Promise<DownloadedEpisodes> {
   if (!Number.isFinite(show.id) || !Array.isArray(show.seasons)) throw new Error("TMDB returned an incomplete show catalogue.");
   const seasons = show.seasons;
   const responses = await Promise.all(seasons.map(async (season) => {
@@ -171,8 +172,9 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCa
     return { season: season.season_number, episodes: response.episodes };
   }));
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
-  for (const response of responses) normaliseTmdbRecords(show, response.season, response.episodes, catalogue);
-  return usableCatalogue("TMDB", show.id, catalogue);
+  const enumeration = episodeIdEnumeration("TMDB", show.id);
+  for (const response of responses) { enumeration.add(response.episodes); normaliseTmdbRecords(show, response.season, response.episodes, catalogue); }
+  return { ...usableCatalogue("TMDB", show.id, catalogue), episodeIds: enumeration.complete() };
 }
 
 /** A failed request or interpretation within one episode's crosswalk, with the typed lookup it concerns (absent when unknown). */
@@ -202,8 +204,9 @@ async function findEpisodeViaTrakt(evidence: ComparisonEvidence, tvdbEpisodeId: 
   return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds, validationFailures };
 }
 
-async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<NormalisedCatalogue & { slug?: string; name?: string }> {
+async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<DownloadedEpisodes & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
+  const enumeration = episodeIdEnumeration("TVDB", seriesId);
   const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string } }>(`${TVDB_API}/series/${seriesId}`, token);
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
@@ -212,12 +215,13 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
     // Specials (season 0) are kept so Report Missing can be evaluated on them; the
     // comparator still ignores unflagged specials, as before.
+    enumeration.add(body.data.episodes);
     normaliseTvdbRecords(seriesId, series?.data?.name || showTitle, page, body.data.episodes, catalogue);
     if (!body.links?.next) break;
     page += 1;
     if (page >= 100) throw new Error("TVDB episode catalogue exceeded the safe pagination limit.");
   }
-  return { ...usableCatalogue("TVDB", seriesId, catalogue), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
+  return { ...usableCatalogue("TVDB", seriesId, catalogue), episodeIds: enumeration.complete(), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
 }
 
 /**

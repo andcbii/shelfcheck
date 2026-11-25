@@ -2,6 +2,7 @@ import { catalogueUseExplanation } from "@/lib/catalogue-description";
 import { chooseAvailableCatalogue, chooseSavedCatalogue, failedSingleIdUse, multipleIdUse, savedCatalogueUse, singleIdUse, type CatalogueChoice } from "@/lib/catalogue-fallback";
 import { OTHER_PROVIDER, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { catalogueIssueIds, type CoverageIssueId } from "@/lib/coverage-issue-ids";
+import type { EpisodeIdUniverse } from "@/lib/episode-id-universe";
 import type { CatalogueUse } from "@/lib/catalogue-selection-store";
 import { providerLookupContext, type CatalogueRefreshState, type CoverageIssue, type LookupSourceStep } from "@/lib/coverage-issues";
 import { CATALOGUE_AGE_LIMIT_TEXT, GONE_RECORD_NOT_FOUND_DAYS, goneProviderRecord, MULTIPLE_ID_REFRESH_AGE } from "@/lib/plex-catalogue-policy";
@@ -52,6 +53,8 @@ export type SeriesAssociationSettings = {
 export type CatalogueLoad<T> =
   | {
       outcome: "downloaded" | "reused"; id: number; catalogue: T; downloadedAt: string; associatedTvdbId?: number;
+      /** A download's run-bound evidence of every episode ID the provider returned, when it was fresh and complete for the series it reports. */
+      episodeIds?: EpisodeIdUniverse;
       /** The lookup provenance of the series loaded, when the load extended it; the provider's identity then reports it. */
       lookupSource?: LookupSourceStep[];
     }
@@ -185,8 +188,12 @@ export type ComparisonCatalogueRequest = {
   tvdb: ProviderRequest;
 };
 
-/** What the comparison runs against; `saved` is a saved copy compared because its load failed. */
-export type ComparedCatalogue<T> = { id: number; origin: "downloaded" | "reused" | "saved"; downloadedAt: string; catalogue: T; associatedTvdbId?: number };
+/**
+ * What the comparison runs against; `saved` is a saved copy compared because its load failed.
+ * `episodeIds` is present only on a catalogue downloaded fresh and complete in this scan run for its
+ * own series, never a fallback: run-bound evidence of every episode ID the provider returned.
+ */
+export type ComparedCatalogue<T> = { id: number; origin: "downloaded" | "reused" | "saved"; downloadedAt: string; catalogue: T; associatedTvdbId?: number; episodeIds?: EpisodeIdUniverse };
 
 /** A proposed change to the provider's recorded catalogue use. */
 export type CatalogueUseProposal = { action: "set"; use: CatalogueUse } | { action: "clear" } | { action: "unchanged" };
@@ -386,8 +393,15 @@ class FailedLoad {
   constructor(readonly failure: Failure) {}
 }
 const failureOf = (error: unknown): Failure => error instanceof FailedLoad ? error.failure : { outcome: "failed", error };
-const comparedFrom = <T>(load: SavedCatalogue<T>, origin: ComparedCatalogue<T>["origin"]): ComparedCatalogue<T> =>
-  ({ id: load.id, origin, downloadedAt: load.downloadedAt, catalogue: load.catalogue, ...(load.associatedTvdbId !== undefined ? { associatedTvdbId: load.associatedTvdbId } : {}) });
+const comparedFrom = <T>(load: SavedCatalogue<T> & { episodeIds?: EpisodeIdUniverse }, origin: ComparedCatalogue<T>["origin"]): ComparedCatalogue<T> =>
+  ({ id: load.id, origin, downloadedAt: load.downloadedAt, catalogue: load.catalogue, ...(load.associatedTvdbId !== undefined ? { associatedTvdbId: load.associatedTvdbId } : {}),
+    ...(origin === "downloaded" && load.episodeIds?.showId === load.id ? { episodeIds: load.episodeIds } : {}) });
+/** A fallback catalogue is compared in place of the preferred series, so it carries no episode-ID evidence. */
+const withoutEpisodeIds = <T>(catalogue: ComparedCatalogue<T>): ComparedCatalogue<T> => {
+  const compared = { ...catalogue };
+  delete compared.episodeIds;
+  return compared;
+};
 
 async function resolveProvider<P extends CataloguePayloads, K extends CatalogueProvider>(resolving: Resolving<P>, provider: K): Promise<ProviderChoice<P[K]>> {
   const resolution = await chooseProviderCatalogue(resolving, provider);
@@ -689,7 +703,7 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
   const preferredState: CandidateState = choice.preferredError ? "failed-this-attempt" : "loaded";
   // The preferred series' download time comes from its saved record, even one too incomplete to compare.
   const use = multipleIdUse(choice, preferredId, source.savedRecordDownloadedAt(provider, preferredId), now);
-  const catalogue = choice.loaded?.value;
+  const catalogue = choice.loaded && (choice.state === "fallback" ? withoutEpisodeIds(choice.loaded.value) : choice.loaded.value);
   const identity = catalogue ? catalogue.id : preferredId;
   const kind = PROVIDER_TERMS[provider].requestedKind;
   const { refreshId, fallbackId } = catalogueIssueIds(provider, request.show.ratingKey);

@@ -483,7 +483,7 @@ test("a scan whose process ends while applying its removals reads as interrupted
   const heartbeatAt = new Date(Date.now() - 120_000).toISOString();
   db().prepare("UPDATE shelfcheck_scan_state SET status=? WHERE mode='plex'").run(JSON.stringify({ status: "running", processed: 2, total: 2, startedAt: heartbeatAt, heartbeatAt, currentPhase: "manual-match-removal" }));
 
-  const interrupted = await h.status() as unknown as { scan: { status: string; error?: string }; coverage: Coverage & { issues: { id: string; cause?: string; action?: string }[] } };
+  const interrupted = await h.status() as unknown as { scan: { status: string; error?: string }; coverage: { issues: { id: string; cause?: string; action?: string }[] } };
   assert.equal(interrupted.scan.status, "error", "never recorded as completed");
   assert.match(interrupted.scan.error!, /saved its report but was interrupted while applying its Manual Match removals/);
   const failure = interrupted.coverage.issues.find(issue => issue.id === "scan-failure");

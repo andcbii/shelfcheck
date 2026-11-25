@@ -46,10 +46,13 @@ export type DownloadCatalogueSourceOptions = {
   now: string;
   /** A single-show scan downloads every catalogue it compares. */
   targeted: boolean;
-  /** Verified TMDB changes, retained deferrals and verification recovery. */
-  tmdbChanges: ReadonlySet<number>;
-  /** Verified and retained pending TVDB changes. */
-  tvdbChanges: ReadonlySet<number>;
+  /**
+   * The series whose saved catalogues the scan treats as changed, for one provider: TMDB's verified
+   * changes, retained deferrals and verification recovery; TVDB's verified and retained pending changes.
+   * Read only by that provider's own loads, so a live scan may answer once that provider's freshness is
+   * known, whatever the other provider's.
+   */
+  catalogueChanges(provider: CatalogueProvider): ReadonlySet<number>;
   /** The scan's TVDB authentication failure: TVDB downloads are not attempted and fail with it. */
   tvdbAuthenticationError?: unknown;
   show: { ratingKey: string; title?: string };
@@ -108,15 +111,15 @@ export type DownloadCatalogueSource = ComparisonCatalogueSource<DownloadCatalogu
  * the cause of the loads it prevents. One source serves one show of one scan.
  */
 export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions): DownloadCatalogueSource {
-  const { inputs, requests, now, targeted, tmdbChanges, tvdbChanges, tvdbAuthenticationError, show, titles, logger, seriesNotFound } = options;
+  const { inputs, requests, now, targeted, catalogueChanges, tvdbAuthenticationError, show, titles, logger, seriesNotFound } = options;
   let comparedEpisodes: readonly ProviderEpisode[] = [];
   /** TMDB series this source found by a find request: the scan downloads the series it finds. */
   const foundByRequest = new Set<number>();
   const authentication = (error: unknown) => tvdbAuthenticationError !== undefined && error === tvdbAuthenticationError ? { causedBy: TVDB_AUTHENTICATION_CAUSE } : {};
   /** Whether a provider's verified changes include a series' saved catalogue. */
   const changed: Record<CatalogueProvider, (id: number) => boolean> = {
-    tmdb: id => { const saved = inputs.tmdb[String(id)]; return !!saved && tmdbChanges.has(saved.show.id); },
-    tvdb: id => tvdbChanges.has(id),
+    tmdb: id => { const saved = inputs.tmdb[String(id)]; return !!saved && catalogueChanges("tmdb").has(saved.show.id); },
+    tvdb: id => catalogueChanges("tvdb").has(id),
   };
   const reuse = (provider: CatalogueProvider, id: number, settings: CatalogueLoadSettings) => {
     const saved = inputs[provider][String(id)];
@@ -152,7 +155,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
     const saved = inputs.tmdb[String(id)];
     const reused = !foundByRequest.has(id) && reuse("tmdb", id, settings);
     if (reused) {
-      if (tmdbChanges.has(saved.show.id)) {
+      if (catalogueChanges("tmdb").has(saved.show.id)) {
         inputs.deferredTmdbChanges[String(saved.show.id)] = true;
         saveDeferredTmdbChanges(inputs.deferredTmdbChanges);
       }

@@ -84,25 +84,41 @@ const savedOverride = (db: Db, identity: string, provider: CatalogueProvider) =>
 export function observeCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean, saveRemovals?: (selections: Record<CatalogueProvider, CatalogueSelection>) => void): Record<CatalogueProvider, CatalogueSelection> {
   const db = database();
   return transaction(db, () => {
-    const selections = Object.fromEntries(PROVIDERS.map(provider => {
-      const previous = candidateIds(db, identity, provider);
-      const selection = selectComparisonCatalogue({
-        ...(previous.length ? { previous } : {}),
-        observed: observed[provider].filter(id => Number.isSafeInteger(id) && id > 0),
-        complete,
-        override: savedOverride(db, identity, provider),
-      });
+    const selections = selectionsFor(db, identity, observed, complete);
+    for (const provider of PROVIDERS) {
+      const selection = selections[provider];
       if (selection.commit) {
+        const previous = candidateIds(db, identity, provider);
         const keep = new Set(selection.candidates);
         for (const id of previous) if (!keep.has(id)) db.prepare("DELETE FROM shelfcheck_catalogue_candidates WHERE identity=? AND provider=? AND series_id=?").run(identity, provider, id);
         for (const id of selection.candidates) db.prepare("INSERT OR IGNORE INTO shelfcheck_catalogue_candidates(identity,provider,series_id) VALUES(?,?,?)").run(identity, provider, id);
       }
       if (selection.overrideCleared) db.prepare("DELETE FROM shelfcheck_catalogue_overrides WHERE identity=? AND provider=?").run(identity, provider);
-      return [provider, selection];
-    })) as Record<CatalogueProvider, CatalogueSelection>;
+    }
     if (PROVIDERS.some(provider => selections[provider].removed.length)) saveRemovals?.(selections);
     return selections;
   });
+}
+
+/**
+ * What `observeCatalogueCandidates` would choose for this observation, saving nothing. While a Plex
+ * scan runs, only that scan observes candidates and overrides cannot change, so its later observation
+ * of the same show chooses the same.
+ */
+export function previewCatalogueCandidates(identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection> {
+  return selectionsFor(database(), identity, observed, complete);
+}
+
+function selectionsFor(db: Db, identity: string, observed: ShowProviderIds, complete: boolean): Record<CatalogueProvider, CatalogueSelection> {
+  return Object.fromEntries(PROVIDERS.map(provider => {
+    const previous = candidateIds(db, identity, provider);
+    return [provider, selectComparisonCatalogue({
+      ...(previous.length ? { previous } : {}),
+      observed: observed[provider].filter(id => Number.isSafeInteger(id) && id > 0),
+      complete,
+      override: savedOverride(db, identity, provider),
+    })];
+  })) as Record<CatalogueProvider, CatalogueSelection>;
 }
 
 /**

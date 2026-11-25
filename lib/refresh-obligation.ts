@@ -156,6 +156,18 @@ export function patchSavedObligation(saved: SavedRefreshObligations, provider: C
   setProviderEntry(saved, provider, "requestedIds", requested.length ? Object.fromEntries(requested) : undefined);
 }
 
+/**
+ * Copy one provider's stored obligation, its requested-candidate evidence included, from `from` into
+ * `to`, in place, leaving the other provider's unchanged.
+ */
+export function copySavedObligation(to: SavedRefreshObligations, from: SavedRefreshObligations | undefined, provider: CatalogueProvider): void {
+  if (from?.[provider]) to[provider] = true; else delete to[provider];
+  const specificIds = from?.specificIds?.[provider], requestedIds = from?.requestedIds?.[provider];
+  setProviderEntry(to, provider, "specificIds", specificIds && [...specificIds]);
+  setProviderEntry(to, provider, "everyAttempted", from?.everyAttempted?.[provider]);
+  setProviderEntry(to, provider, "requestedIds", requestedIds && { ...requestedIds });
+}
+
 /** Sets or removes one provider's entry under a per-provider key, removing the key once empty. */
 function setProviderEntry<K extends "specificIds" | "everyAttempted" | "requestedIds">(saved: SavedRefreshObligations, provider: CatalogueProvider, key: K, value: NonNullable<SavedRefreshObligations[K]>[CatalogueProvider] | undefined) {
   const entries: Partial<Record<CatalogueProvider, unknown>> = { ...saved[key] };

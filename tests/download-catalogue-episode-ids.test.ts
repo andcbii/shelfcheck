@@ -39,7 +39,7 @@ function source(requests: Partial<CatalogueRequests>, options: { targeted?: bool
   const inputs = readPlexInputs();
   const unexpected = () => Promise.reject(new Error("unexpected request"));
   const catalogueSource = downloadCatalogueSource({
-    inputs, now: NOW, targeted: options.targeted ?? true, tmdbChanges: new Set(), tvdbChanges: new Set(),
+    inputs, now: NOW, targeted: options.targeted ?? true, catalogueChanges: () => new Set(),
     requests: { tmdbShow: unexpected, tmdbShowForTvdb: unexpected, tmdbEpisodes: unexpected, tvdbSeries: unexpected, tvdbEnglishTitle: unexpected, ...requests },
     show: { ratingKey: "1", title: "Target" }, titles: { autoCompoundEpisodes: false, localEpisodes: [] },
     logger: createScanLogger(false), seriesNotFound: seriesNotFoundHistory(),

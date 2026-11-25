@@ -5,13 +5,14 @@ import type { CoverageEvidence, CoverageMapping, CoverageProvider } from "../lib
 
 // Episodes a Manual Match covers take no part in combined/split (compound) matching
 // (ADR-0007): a covered part is never an input, not even only to prove coverage for an
-// uncovered sibling, and a covered TMDB combined-side record is not one either. Only a
-// remaining relationship that meets the existing rules covers the remaining parts.
+// uncovered sibling. Only a remaining relationship that meets the existing rules covers the
+// remaining parts. Manual Matches cover one way (ADR-0008): only TVDB episodes, so a TMDB
+// combined-side record is never covered and stays a relationship input.
 
 const tmdb = (id: number, number: number, title: string, airDate: string, runtime: number): ProviderEpisode => ({ source: "TMDB", season: 1, episode: number, providerEpisodeId: id, title, airDate, runtime });
 const tvdb = (id: number, number: number, title: string | undefined, runtime?: number): ProviderEpisode => ({ source: "TVDB", season: 1, episode: number, providerEpisodeId: id, ...(title === undefined ? {} : { title }), airDate: "1995-01-16", ...(runtime ? { runtime } : {}) });
 const member = (provider: CoverageProvider, id: number, reportMissing?: boolean) => ({ provider, id, showId: 1, show: "Show", title: `${provider} ${id}`, season: 1, episode: 1, url: "", ...(reportMissing ? { reportMissing } : {}) });
-/** A Healthy Manual Match from `provider`/`id` to one directly owned member on the other side. */
+/** A Manual Match from `provider`/`id` to one directly owned member on the other side. */
 const manualMatch = (provider: CoverageProvider, id: number, other: number, reportMissing?: boolean): CoverageMapping => ({ id: `${provider}-${id}`, revision: 1, createdAt: "2026-01-01T00:00:00.000Z", members: [member(provider, id, reportMissing), member(provider === "TVDB" ? "TMDB" : "TVDB", other)] });
 const owns = (provider: CoverageProvider, id: number): CoverageEvidence => ({ ratingKey: `item-${provider}-${id}`, showKey: "other-show", identities: [{ provider, id }] });
 
@@ -71,17 +72,18 @@ test("an uncovered untitled part still withholds the relationship, with no cover
   assert.deepEqual(missing(result), ["TVDB:102", "TMDB:901"]);
 });
 
-test("a covered TMDB combined-side episode is not the combined side of a relationship; its Plex item stays inventory", () => {
+test("a TMDB combined-side episode in a Manual Match with owned TVDB members is not covered by it, so it stays the combined side", () => {
   const result = comparePlexShow(input(twoParts(), {
     mappings: [manualMatch("TMDB", 900, 777), manualMatch("TVDB", 300, 900)],
     manualInventory: [owns("TVDB", 777), owns("TMDB", 900)],
     providerEpisodes: [tmdb(900, 1, "Caretaker", "1995-01-16", 92), tmdb(901, 4, "Parallax", "1995-01-23", 46), ...twoParts(), { ...tvdb(300, 5, "Other", 46), airDate: "1995-02-01" }],
   }));
-  assert.equal(statusOf(result, "TMDB", 900), "manual");
-  assert.deepEqual(compound(result), [], "the parts are not covered through the covered combined episode");
-  assert.deepEqual(missing(result), ["TVDB:101", "TVDB:102", "TMDB:901"]);
+  assert.equal(statusOf(result, "TMDB", 900), "automatic", "owning TVDB 777 never covers TMDB 900; its own Plex item does");
+  assert.deepEqual(compound(result), [101, 102], "the parts are covered through the uncovered combined episode");
+  assert.deepEqual(missing(result), ["TMDB:901"]);
   assert.equal(statusOf(result, "TVDB", 300), "manual", "the directly owned TMDB item still covers another Manual Match");
-  assert.deepEqual(result.autoMatches, []);
+  assert.deepEqual(result.manualCoverage.map(item => item.mappingId), ["TVDB-300"]);
+  assert.deepEqual(result.autoMatches.map(match => match.tvdb.id), [101, 102]);
 });
 
 test("in a three-part relationship, a covered end part leaves the remaining parts to the existing rules", () => {
@@ -109,12 +111,13 @@ test("in a three-part relationship, a covered middle part leaves non-consecutive
   assert.deepEqual(missing(result), ["TVDB:101", "TVDB:103", "TMDB:901", "TMDB:902"]);
 });
 
-test("covered TMDB episodes still count toward the show's typical runtime", () => {
+test("TMDB episodes in Manual Matches with owned TVDB members stay uncovered and still count toward the show's typical runtime", () => {
   const tmdbExtra = [tmdb(901, 4, "Parallax", "1995-01-23", 46), tmdb(902, 5, "Time and Again", "1995-01-30", 46)];
   const result = comparePlexShow(input(threeParts(), { combinedRuntime: 138, tmdbExtra, mappings: [manualMatch("TMDB", 901, 801), manualMatch("TMDB", 902, 802)], manualInventory: [owns("TVDB", 801), owns("TVDB", 802)] }));
-  assert.equal(statusOf(result, "TMDB", 901), "manual");
+  assert.equal(statusOf(result, "TMDB", 901), "missing");
+  assert.deepEqual(result.manualCoverage, []);
   assert.deepEqual(compound(result), [101, 102, 103], "the double-length threshold is unchanged");
-  assert.deepEqual(missing(result), []);
+  assert.deepEqual(missing(result), ["TMDB:901", "TMDB:902"]);
 });
 
 test("Report Missing on a part outranks its Manual Match, so the part stays a relationship input", () => {

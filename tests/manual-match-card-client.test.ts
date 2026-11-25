@@ -11,7 +11,7 @@ import { mountDom } from "./dom-environment";
 const combined = { provider: "TMDB" as const, id: 4245050, showId: 107124, show: "Animaniacs", title: "Murder Pals", season: 3, episode: 18, url: "https://www.themoviedb.org/tv/107124/season/3/episode/18" };
 const part2 = { provider: "TVDB" as const, id: 9623972, showId: 72879, show: "Animaniacs", title: "Murder Pals (2)", season: 8, episode: 20, url: "https://thetvdb.com/series/animaniacs/episodes/9623972" };
 const part3 = { provider: "TVDB" as const, id: 9623973, showId: 72879, show: "Animaniacs", title: "Murder Pals (3)", season: 8, episode: 22, url: "https://thetvdb.com/series/animaniacs/episodes/9623973" };
-const split: CoverageMapping = { id: "murder-pals", revision: 3, health: "healthy", members: [combined, part2, part3], createdAt: "2026-11-01T00:00:00Z", evidence: [{ showKey: "show", ratingKey: "42", identities: [{ provider: "TVDB", id: 9623972 }] }] } as CoverageMapping;
+const split: CoverageMapping = { id: "murder-pals", revision: 3, members: [combined, part2, part3], createdAt: "2026-11-01T00:00:00Z", evidence: [{ showKey: "show", ratingKey: "42", identities: [{ provider: "TVDB", id: 9623972 }] }] } as CoverageMapping;
 
 async function renderCard(t: test.TestContext, match: CoverageMapping, extra: { selection?: { selected: boolean; onChange: (selected: boolean) => void } } = {}) {
   const { container, root } = mountDom(t);
@@ -23,29 +23,22 @@ async function renderCard(t: test.TestContext, match: CoverageMapping, extra: { 
   return { card, calls, panel, lines };
 }
 
-test("the card header holds the select checkbox, the health label and the Edit and Delete buttons", async t => {
+test("the card header holds the select checkbox and the Edit and Delete buttons, with no health status", async t => {
   const ticks: boolean[] = [];
   const ui = await renderCard(t, split, { selection: { selected: false, onChange: selected => ticks.push(selected) } });
   const header = ui.card.querySelector(":scope > header")!;
   const box = header.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
   assert.ok(box, "The select checkbox is in the header");
-  assert.equal(header.querySelector(".manual-match-health")?.textContent, "Healthy");
+  assert.equal(header.querySelector(".manual-match-health"), null, "Manual Matches have no health label");
+  assert.doesNotMatch(ui.card.textContent || "", /Healthy|Pending|Needs review/);
   assert.deepEqual([...header.querySelectorAll("button")].map(button => button.textContent), ["Edit", "Delete"]);
   assert.equal(header.querySelector("button.manual-match-delete")?.textContent, "Delete", "Delete carries the card's own danger styling");
   await act(async () => box.click());
   for (const button of header.querySelectorAll("button")) await act(async () => button.click());
   assert.deepEqual(ticks, [true]);
   assert.deepEqual(ui.calls, ["edit", "delete"]);
-  assert.equal(ui.card.querySelector(".manual-match-health-message"), null, "No message line without a message");
   assert.doesNotMatch(ui.card.textContent || "", /Coverage evidence|Plex item|Revision/, "Coverage evidence is no longer on the card");
   assert.equal(ui.card.querySelector("details"), null);
-});
-
-test("a Needs review message sits on its own line under the header", async t => {
-  const ui = await renderCard(t, { ...split, health: "needs-review", healthMessage: "TVDB no longer lists one of these episodes." });
-  assert.equal(ui.card.querySelector(".manual-match-health")?.textContent, "Needs review");
-  const message = ui.card.querySelector(":scope > header + .manual-match-health-message");
-  assert.equal(message?.textContent, "TVDB no longer lists one of these episodes.");
 });
 
 test("each provider column names its show and episode count once and gives every episode one line", async t => {

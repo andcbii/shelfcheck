@@ -65,12 +65,15 @@ A fifth-scan safeguard whose required TMDB change list could not be retrieved. I
 _Avoid_: Missed safeguard, overdue refresh
 
 **Manual Match**:
-A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes.
+A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes. Every saved Manual Match can grant coverage, one way: it covers its TVDB episodes when every TMDB episode in it is directly owned, and never covers a TMDB episode. It has no health or verification status.
 _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
 
-**Manual Match health**:
-Whether a Manual Match's members were last confirmed to still exist at their providers: **Healthy** when every member was confirmed, **Pending** when a member could not be checked, and **Needs review** when a provider confirmed a member was deleted. Only a Healthy match can add coverage; a Needs review match stays so until a reviewed edit repairs it.
-_Avoid_: Mapping status, verification state
+**Official order**:
+The provider whose episode list is the library's own: TMDB. A TMDB episode is collected only by its own season and episode numbers or its own identity, never through a Manual Match.
+
+**Gone member**:
+A Manual Match member whose episode its own provider show no longer lists, in that show's catalogue downloaded fresh and complete in a scan run whose comparison of the show completed with a fresh result, and whose provider then confirms the episode gone: a 404, a TVDB episode now in another series, or a TMDB episode number that now names another episode. A reused, saved, failed, incomplete, truncated or fallback catalogue never makes a member a candidate, and a member the provider still has, or that cannot be looked up, is kept. Once the scan has saved its report, it removes its gone members from their Manual Matches, deleting a Manual Match left without a TMDB or TVDB member.
+_Avoid_: Stale member, broken member, Needs review
 
 **Auto Match**:
 A match determined and controlled by Shelfcheck through automatic matching.
@@ -112,7 +115,7 @@ An episode record containing content that another provider lists as multiple epi
 One of the parts of a combined episode, listed as a separate episode by a provider.
 
 **Coverage mapping**:
-A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content. Directly owning every record in one set covers every record in the other, even when a Plex item also carries an identity from the other set; owning only part of a set adds no coverage.
+A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content. Directly owning every record in the TMDB set covers every record in the TVDB set, even when a Plex item also carries an identity from the TVDB set; owning only part of the set adds no coverage. Owning the TVDB set never covers a TMDB record, since TMDB is the official order.
 
 **Show mapping**:
 An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.

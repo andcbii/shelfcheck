@@ -11,14 +11,15 @@ export type ManualMatchCoverage = { match: CoverageMapping; source: CoverageEvid
 export type ManualMatchCoverageRule = (episode: CoverageIdentity) => ManualMatchCoverage | undefined;
 
 /**
- * The shared Manual Match coverage rule (ADR-0007). The first Healthy Manual Match
- * containing the episode decides it; a Manual Match with no saved health counts as
- * Healthy, and Pending or Needs review matches are passed over. It covers the episode
- * only when every member on the other provider side is directly owned by a record in
+ * The shared Manual Match coverage rule (ADR-0007, ADR-0008), used by scans and cached
+ * rechecks alike. It is one way: it covers only TVDB episodes, never a TMDB episode, which
+ * is matched only by episode number or identity. The first Manual Match containing the
+ * episode decides it; every saved Manual Match is eligible. It covers the TVDB episode
+ * only when every TMDB member of that match is directly owned by a record in
  * `directInventory`, the comparison's library-wide direct identities, including
  * records in other or ignored shows.
  *
- * It reads only the comparison's Manual Match health snapshot (`mappings`) and those
+ * It reads only the comparison's Manual Match snapshot (`mappings`) and those
  * direct identities: never season and episode numbers, inferred matches, or coverage
  * granted by another Manual Match. Report Missing is not applied here.
  *
@@ -36,9 +37,11 @@ export function manualMatchCoverageRule({ mappings, directInventory }: { mapping
   };
 
   function coverageOf(episode: CoverageIdentity): ManualMatchCoverage | undefined {
-    const match = mappings.find(mapping => (!mapping.health || mapping.health === "healthy") && mapping.members.some(member => sameEpisode(member, episode)));
+    // One way (ADR-0008): TMDB is the Library's official order, so only TVDB members are covered.
+    if (episode.provider !== "TVDB") return undefined;
+    const match = mappings.find(mapping => mapping.members.some(member => sameEpisode(member, episode)));
     if (!match) return undefined;
-    const sourceMembers = match.members.filter(member => member.provider !== episode.provider);
+    const sourceMembers = match.members.filter(member => member.provider === "TMDB");
     const owns = (item: CoverageEvidence, member: CoverageIdentity) => item.identities.some(identity => sameEpisode(identity, member));
     const source = directInventory.filter(item => sourceMembers.some(member => owns(item, member)));
     const complete = sourceMembers.length > 0 && sourceMembers.every(member => source.some(item => owns(item, member)));

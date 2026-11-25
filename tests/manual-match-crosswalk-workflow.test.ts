@@ -6,12 +6,10 @@ const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? 
 const config = await import("../lib/server-config");
 hook.deregister();
 
-// ADR-0007 through the Plex scan workflow: a TVDB episode a Healthy Manual Match covers
+// ADR-0007 and ADR-0008 through the Plex scan workflow: a TVDB episode a Manual Match covers
 // leaves the IMDb, Trakt and TMDB episode crosswalk candidates, so a live scan spends no
-// provider request on it. The Manual Match health recheck still runs every scan and asks
-// TVDB for each TVDB member's extended episode, the same endpoint as the IMDb crosswalk,
-// so requests are told apart by when they are made: the health recheck runs right after
-// the scan's one TVDB sign-in and before the scan reads any show's Plex episodes.
+// provider request on it. Manual Matches have no health, so a scan makes no request for a
+// Manual Match member either.
 
 // TMDB numbers the season S1; TVDB numbers the same episodes S2, so each TVDB episode
 // reaches the crosswalks. Plex owns both TMDB episodes, and also reports an IMDb ID no
@@ -38,15 +36,11 @@ async function setup(t: test.TestContext, catalogue: Episode[] = [tmdb1, tmdb2, 
   const h = await harness(t, catalogue, owned);
   await connectTrakt();
   h.state.imdb.set(tmdb2.id, "tt0000002");
-  /** Runs a live scan; splits its requests into the health recheck's and the scan's own. */
+  /** Runs a live scan and returns its result and every request it made. */
   const scan = async (ratingKey?: string) => {
     h.requests.length = 0;
     const result = await h.rerun(ratingKey);
-    const signIn = h.requests.indexOf("/v4/login");
-    assert.ok(signIn >= 0, "the scan signed in to TVDB");
-    const showRead = h.requests.findIndex((path, index) => index > signIn && path.startsWith("/library/metadata/"));
-    assert.ok(showRead > signIn, "the scan read a show's Plex episodes after the health recheck");
-    return { result, health: h.requests.slice(signIn + 1, showRead), scanned: [...h.requests.slice(0, signIn + 1), ...h.requests.slice(showRead)] };
+    return { result, scanned: [...h.requests] };
   };
   const saveMatch = async (members: Episode[]) => {
     const saved = await h.save(members);
@@ -56,13 +50,12 @@ async function setup(t: test.TestContext, catalogue: Episode[] = [tmdb1, tmdb2, 
   return { ...h, owned, scan, saveMatch };
 }
 
-test("a live scan makes the health recheck's requests but no IMDb, Trakt or TMDB crosswalk request for a TVDB episode a Manual Match covers", async t => {
+test("a live scan makes no Manual Match member request and no IMDb, Trakt or TMDB crosswalk request for a TVDB episode a Manual Match covers", async t => {
   const h = await setup(t);
   await h.saveMatch([tmdb1, tvdb1]);
-  const { result, health, scanned } = await h.scan();
+  const { result, scanned } = await h.scan();
 
-  assert.ok(health.includes("/v4/episodes/301/extended"), "the health recheck verifies the TVDB member");
-  assert.ok(health.includes("/3/tv/10/season/1/episode/1"), "the health recheck verifies the TMDB member's coordinates");
+  assert.ok(!scanned.includes("/3/tv/10/season/1/episode/1"), "the TMDB member's coordinates are not looked up");
   assert.deepEqual(crosswalkWork(scanned, 301), [], "the covered TVDB episode gets no crosswalk work");
   assert.deepEqual(crosswalkWork(scanned, 302).sort(), allCrosswalks(302).sort(), "an uncovered TVDB episode is looked up through IMDb, Trakt and TMDB");
   assert.deepEqual(manual(result), [301]);
@@ -96,9 +89,18 @@ const losses: { change: string; lose: (h: Awaited<ReturnType<typeof setup>>, map
     assert.equal(edited.status, 200, await edited.clone().text());
   } },
   { change: "Plex no longer owns the other side directly", covered: [], lose: async h => { h.owned.splice(h.owned.indexOf(tmdb1), 1); } },
-  { change: "the Manual Match becomes Pending", covered: [], lose: async h => { h.state.statuses.set("/3/tv/10/season/1/episode/1", 404); } },
-  { change: "the Manual Match becomes Needs review", covered: [], lose: async h => { h.state.statuses.set("/v4/episodes/301/extended", 404); } },
 ];
+// A provider that cannot find a member's episode record no longer disqualifies its Manual Match.
+for (const failing of ["/3/tv/10/season/1/episode/1", "/v4/episodes/301/extended"]) test(`a Manual Match keeps covering TVDB 301 when ${failing} answers 404`, async t => {
+  const h = await setup(t);
+  await h.saveMatch([tmdb1, tvdb1]);
+  h.state.statuses.set(failing, 404);
+  const { result, scanned } = await h.scan();
+  assert.ok(!scanned.includes(failing), "the member's provider record is not requested");
+  assert.deepEqual(manual(result), [301]);
+  assert.ok(!target(result).missing.some(episode => episode.tvdbEpisodeId === 301));
+});
+
 for (const { change, lose, covered } of losses) test(`normal crosswalk work resumes for TVDB 301 when ${change}`, async t => {
   const h = await setup(t);
   const mapping = await h.saveMatch([tmdb1, tvdb1]);
@@ -123,9 +125,8 @@ test("a single-show scan and a cross-show Manual Match whose source is in an ign
   await h.saveMatch([tmdbOther, tvdb1]);
 
   for (const ratingKey of [undefined, "ratingKey:target"]) {
-    const { result, health, scanned } = await h.scan(ratingKey);
+    const { result, scanned } = await h.scan(ratingKey);
     const scope = ratingKey ? "single-show scan" : "full scan";
-    assert.ok(health.includes("/v4/episodes/301/extended"), `${scope}: the health recheck still runs`);
     assert.deepEqual(crosswalkWork(scanned, 301), [], `${scope}: the covered TVDB episode gets no crosswalk work`);
     assert.ok(crosswalkWork(scanned, 302).includes("/3/find/302"), `${scope}: uncovered episodes keep their crosswalks`);
     assert.deepEqual(manual(result), [301], `${scope}: the cross-show Manual Match covers TVDB 301`);

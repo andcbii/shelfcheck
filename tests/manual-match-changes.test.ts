@@ -79,14 +79,15 @@ const rejection = async (promise: Promise<unknown>) => promise.then(() => assert
 test("a reviewed save revalidates only the reviewed episodes and rechecks its show from saved inputs", async (t) => {
   const h = await setup(t);
   assert.deepEqual((await h.results()).target, ALL_MISSING_IN_TARGET);
-  const previewToken = await h.preview([tmdbA, otherTvdb]);
+  const previewToken = await h.preview([otherTmdb, tvdbA]);
   let saved!: Awaited<ReturnType<typeof changes.saveManualMatch>>;
   const requests = await h.requestsDuring(async () => { saved = await changes.saveManualMatch({ preview: previewToken }); });
   assert.equal(saved.created, true);
-  assert.deepEqual(saved.manualMatch.members.map(m => `${m.provider}:${m.id}`), ["TMDB:101", "TVDB:211"]);
+  assert.deepEqual(saved.manualMatch.members.map(m => `${m.provider}:${m.id}`), ["TMDB:111", "TVDB:201"]);
   // Only the reviewed TMDB and TVDB episodes (and their shows) are looked up again; the recheck asks nothing.
-  assert.deepEqual([...new Set(requests)].sort(), ["/3/tv/10", "/3/tv/10/season/1/episode/1", "/v4/episodes/211/extended", "/v4/login", "/v4/series/21"]);
-  assert.deepEqual((await h.results()).target, { "TVDB:201": "missing", "TMDB:102": "missing", "TVDB:202": "missing" });
+  assert.deepEqual([...new Set(requests)].sort(), ["/3/tv/11", "/3/tv/11/season/3/episode/5", "/v4/episodes/201/extended", "/v4/login", "/v4/series/20"]);
+  // The owned TMDB member covers the target's TVDB member, one way (ADR-0008).
+  assert.deepEqual((await h.results()).target, { "TMDB:101": "missing", "TMDB:102": "missing", "TVDB:202": "missing" });
   assert.equal(store.coverageState().pending, 0);
 });
 
@@ -101,17 +102,14 @@ test("replacing members rechecks the shows of both the former and the new member
   assert.deepEqual(results.other, { "TMDB:111": "reported-missing", "TVDB:211": "reported-missing" });
 });
 
-test("a flag-only edit makes no provider request, keeps saved health and rechecks every member's show", async (t) => {
+test("a flag-only edit makes no provider request and rechecks every member's show", async (t) => {
   const h = await setup(t);
-  const first = (await h.reviewedSave([tmdbA, otherTvdb])).manualMatch;
-  store.updateCoverageHealth(first, "needs-review", store.MISSING_MEMBER_MESSAGE);
+  await h.reviewedSave([tmdbA, otherTvdb]);
   const current = store.listCoverageMappings()[0];
   let saved!: Awaited<ReturnType<typeof changes.saveManualMatch>>;
   const requests = await h.requestsDuring(async () => { saved = await changes.saveManualMatch({ edit: { id: current.id, revision: current.revision }, reportMissing: [flag(tmdbA), flag(otherTvdb)] }); });
   assert.deepEqual(requests, []);
   assert.equal(saved.created, false);
-  assert.equal(saved.manualMatch.health, "needs-review");
-  assert.equal(store.listCoverageMappings()[0].health, "needs-review");
   const results = await h.results();
   assert.equal(results.target["TMDB:101"], "reported-missing");
   assert.deepEqual(results.other, { "TVDB:211": "reported-missing" });
@@ -179,9 +177,10 @@ test("stale, conflicting, one-sided and provider-rejected saves change nothing a
 
 test("deletes recheck the shows of the Manual Matches actually deleted; a delete that removes nothing starts no recheck", async (t) => {
   const h = await setup(t);
-  const first = (await h.reviewedSave([tmdbA, otherTvdb])).manualMatch;
-  const second = (await h.reviewedSave([otherTmdb, tvdbB])).manualMatch;
-  assert.deepEqual((await h.results()).target, { "TVDB:201": "missing", "TMDB:102": "missing" });
+  // The first match covers the target's TVDB 201 from owned TMDB 111 (ADR-0008); the second covers nothing there.
+  const first = (await h.reviewedSave([otherTmdb, tvdbA])).manualMatch;
+  const second = (await h.reviewedSave([tmdbB, otherTvdb])).manualMatch;
+  assert.deepEqual((await h.results()).target, { "TMDB:101": "missing", "TMDB:102": "missing", "TVDB:202": "missing" });
 
   let before = h.markPending();
   assert.equal(await rejection(changes.deleteManualMatches({ id: "gone" })), "not-found");
@@ -190,7 +189,7 @@ test("deletes recheck the shows of the Manual Matches actually deleted; a delete
   h.unchangedSince(before, "batch delete with nothing deleted");
 
   assert.deepEqual(await changes.deleteManualMatches({ ids: [first.id, "gone", first.id] }), { deleted: [first.id], missing: ["gone"] });
-  assert.deepEqual((await h.results()).target, { "TMDB:101": "missing", "TVDB:201": "missing", "TMDB:102": "missing" });
+  assert.deepEqual((await h.results()).target, ALL_MISSING_IN_TARGET);
   assert.equal(store.coverageState().pending, 0);
 
   before = h.markPending();

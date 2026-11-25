@@ -1,3 +1,5 @@
+import { SHELFCHECK_USER_AGENT } from "@/lib/user-agent";
+
 const ALLOWED_HOST = /(^|\.)trakt\.tv$/i;
 
 export const runtime = "nodejs";
@@ -14,12 +16,12 @@ export async function GET(request: Request) {
     }
 
     const upstream = await fetch(imageUrl, {
-      headers: { Accept: "image/avif,image/webp,image/*" },
+      headers: { Accept: "image/avif,image/webp,image/*", "User-Agent": SHELFCHECK_USER_AGENT },
       signal: AbortSignal.timeout(15_000),
     });
     const contentType = upstream.headers.get("Content-Type") || "";
     if (!upstream.ok || !upstream.body || !contentType.toLowerCase().startsWith("image/")) {
-      return new Response("Poster unavailable", { status: upstream.status || 502 });
+      return new Response("Poster unavailable", { status: upstream.ok ? 502 : upstream.status || 502 });
     }
 
     return new Response(upstream.body, {

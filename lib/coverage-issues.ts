@@ -50,7 +50,6 @@ export type CoverageIssue = {
   impacts?: string[];
   show?: { ratingKey?: string; title?: string; tmdbId?: number; tvdbId?: number };
   episode?: { provider?: "TMDB" | "TVDB"; id?: number; showId?: number; season?: number; episode?: number; title?: string };
-  mappingId?: string;
   /** Catalogue-refresh issues: the age and 404 progress of the catalogue in use, else of the failed series (ADR-0006). */
   catalogueRefresh?: CatalogueRefreshState;
 };

@@ -262,6 +262,8 @@ test("incomplete coverage displays one identity-preserving group and opens its s
   assert.match(group.textContent||"",/Part two/);
   assert.match(group.textContent||"",/Alternative complete TMDB set/);
   assert.match(group.textContent||"",/Alternative complete TVDB set/);
+  assert.doesNotMatch(group.textContent||"",/either alternative complete set covers/,"coverage is one way");
+  assert.match(group.textContent||"",/Owning every TMDB episode in this Manual Match covers its TVDB episodes; owning TVDB episodes never covers a TMDB episode\./);
   assert.deepEqual([...group.querySelectorAll('a')].map(a=>a.getAttribute('href')),members.map(m=>m.url));
   assert.equal(container.querySelectorAll('.plex-episode-item').length,1,"the ungrouped provider at the same coordinates keeps its tile");
   assert.equal(container.querySelectorAll('.show-list article').length,2,"Plex show comparisons remain separate");

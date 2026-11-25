@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { api, harness, type Episode } from "./report-missing-harness";
 
-// ADR-0007 through the Scan Issues the app returns: an episode crosswalk check a Healthy
+// ADR-0007 through the Scan Issues the app returns: an episode crosswalk check a
 // Manual Match made unnecessary is not a failure, as for Report Missing. Its cause leaves
 // Scan Issues, and so does the Provider Lookup root behind it once no uncovered episode
 // still depends on that root. Unrelated causes, episodes and shows keep theirs.
@@ -137,24 +137,17 @@ test("a shared Trakt validation request's root stays while an uncovered episode 
   assert.ok(!h.requests.includes("/3/tv/10/season/1/episode/2"), "the retired request was skipped, not answered");
 });
 
-test("covering an episode clears only its own crosswalk issues: other episodes', shows', catalogue and Manual Match health issues stay", async t => {
+test("covering an episode clears only its own crosswalk issues: other episodes', shows' and catalogue issues stay", async t => {
   const tmdbOther: Episode = { provider: "TMDB", id: 9101, season: 1, episode: 1, name: "Pilot", show: "other" };
   const tvdbOther: Episode = { provider: "TVDB", id: 401, season: 2, episode: 1, name: "Pilot", show: "other" };
   const h = await harness(t, [tmdb1, tmdb2, tmdb3, tvdb1, tvdb2, tvdb3, tmdbOther, tvdbOther], [tmdb1, tmdb2, tmdbOther]);
-  // A Manual Match whose TMDB member TMDB stops answering is Pending: a Manual Match health issue.
-  const pendingMatch = await h.save([tmdb3, tvdb3]);
-  assert.ok(pendingMatch.ok, await pendingMatch.clone().text());
-  await settled(h.status);
-  h.state.statuses.set("/3/tv/10/season/1/episode/3", 404);
   for (const id of [301, 302, 401]) h.state.statuses.set(`/3/find/${id}`, 404);
   // A malformed TVDB catalogue record: a Provider Catalogue issue.
   h.state.tvdbRecords = [{ id: 399, seasonNumber: 2, name: "Unnumbered" }];
-  const pendingId = ((await pendingMatch.json()).mapping as { id: string }).id;
   const unrelated = [
     "episode-check:ratingKey:target:catalogue-record:TVDB:20:399",
     "episode-identity:ratingKey:other:tmdb-episode-by-tvdb:401",
     root302,
-    `member-verification:${pendingId}:TMDB:9003`,
   ];
   assert.deepEqual(issueIds(await h.rerun()), [...unrelated, root301].sort());
 

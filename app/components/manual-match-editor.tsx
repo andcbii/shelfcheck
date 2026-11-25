@@ -1,7 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { ManualMatchForm } from "@/app/components/manual-match-form";
-import { matchesHealthFilter, type HealthFilter } from "@/app/components/manual-match-card";
 import { ManualMatchList, plural } from "@/app/components/manual-match-list";
 import { Popup } from "@/app/components/popup";
 import { memberKey, reportMissingSelectionProblem, type CoverageMapping, type CoverageMember } from "@/lib/manual-coverage-model";
@@ -60,7 +59,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [message, setMessage] = useState("");
   const acceptedRevision = useRef(0);
   const [pending, setPending] = useState(false);
-  const [healthFilter, setHealthFilter] = useState<HealthFilter>("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [selected, setSelected] = useState<string[]>([]);
@@ -94,9 +92,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   function acceptMappings(next: CoverageMapping[]) {
     setMappings(next);
-    const matchingCount = next.filter(mapping => matchesHealthFilter(mapping, healthFilter)).length;
-    setPage(current => Math.min(current, Math.max(1, Math.ceil(matchingCount / pageSize))));
-    setSelected(current => current.filter(id => next.some(mapping => mapping.id === id && matchesHealthFilter(mapping, healthFilter))));
+    setPage(current => Math.min(current, Math.max(1, Math.ceil(next.length / pageSize))));
+    setSelected(current => current.filter(id => next.some(mapping => mapping.id === id)));
     setConfirmation(null);
   }
   // Loads a saved Manual Match into the draft. Opening the form is separate, so a
@@ -265,7 +262,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           // The popup closes, and the saved card's own note confirms the save.
           closeForm();
           setSavedNote(result.mapping ? { id: result.mapping.id } : null);
-        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details." : "Saved. Affected cached Plex comparisons have been rechecked.");
         await load();
       }
     } catch (error) {
@@ -290,7 +287,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setPreview(null);
       }
       onChanged(body.revision);
-      setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Scan Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+      setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Scan Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked.");
       await load();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not delete the Manual Match.");
@@ -310,7 +307,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       changeSelection([]);
       acceptedRevision.current = Math.max(acceptedRevision.current, body.revision);
       onChanged(body.revision);
-      setMessage(`Deleted ${plural(body.deleted.length, "Manual Match", "Manual Matches")}.${body.missing.length ? ` ${plural(body.missing.length, "selected Manual Match was", "selected Manual Matches were")} already removed.` : ""} Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.`);
+      setMessage(`Deleted ${plural(body.deleted.length, "Manual Match", "Manual Matches")}.${body.missing.length ? ` ${plural(body.missing.length, "selected Manual Match was", "selected Manual Matches were")} already removed.` : ""} Affected cached Plex comparisons have been rechecked.`);
       await load();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not delete the selected Manual Matches.");
@@ -337,12 +334,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
    <div className="modal-actions"><button className="secondary" onClick={() => setDiscardPromptOpen(false)}>Keep editing</button><button className="danger" onClick={closeForm}>Discard changes</button></div>
  </Popup>}
  <ManualMatchList matches={scopedMappings} report={report} filterSelectAndPage={!episodeScope} locked={locked} pending={pending}
-   healthFilter={healthFilter} onHealthFilterChange={filter => {
-    setHealthFilter(filter);
-    setPage(1);
-    changeSelection([]);
-    setMessage("Selection cleared because the health filter changed.");
-  }}
    paging={{ page, pageSize, onPageChange: setPage, onPageSizeChange: size => { setPageSize(size); setPage(1); } }}
    selection={{ selected, onSelectionChange: changeSelection, confirmation, onConfirmationChange: setConfirmation }}
    onDeleteSelected={ids => void removeSelected(ids)} onEdit={editMapping} onDelete={id => void remove(id)} savedId={savedNote?.id}/>

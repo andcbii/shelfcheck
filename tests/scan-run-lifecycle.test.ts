@@ -251,6 +251,78 @@ for (const hook of ["committed", "succeeded"] as const) {
   });
 }
 
+test("completeAfter settles the Resume point after the commit, then awaits finalization in its own phase, owning the lock and running, before it records completion", async () => {
+  const h = harness();
+  h.point = { savedAt: h.iso(-1_000), shows: ["earlier"] };
+  const order: string[] = [];
+  const finalizing = deferred();
+  let outcome: Promise<string> | undefined;
+  const started = h.startRun(async (run) => {
+    outcome = run.completeAfter({ commit: () => order.push("commit"), phase: "finalizing", finalize: async () => { order.push("finalize"); await finalizing.promise; order.push("finalized"); }, processed: 4, total: 4, finishedAt: h.iso(20_000), details: { shows: 4 } });
+    await outcome;
+  }, { hooks: { committed: () => order.push("committed"), succeeded: () => order.push("succeeded") } });
+  await Promise.resolve();
+  assert.deepEqual(order, ["commit", "committed", "finalize"]);
+  assert.equal(h.runs.activeScanRun()?.runId, started.owner.runId, "the run still owns the scan run lock");
+  assert.equal(h.status()?.status, "running");
+  assert.equal(h.status()?.currentPhase, "finalizing");
+  assert.equal(h.point, null, "the committed run's Resume point is already settled");
+  h.tick();
+  assert.equal(h.status()?.currentPhase, "finalizing", "the heartbeat keeps reporting the finalization phase");
+  assert.ok(!h.events().includes("plex.scan.complete"));
+  finalizing.resolve();
+  await started.settled;
+  assert.equal(await outcome, "completed");
+  assert.deepEqual(order, ["commit", "committed", "finalize", "finalized", "succeeded"]);
+  assert.equal(h.status()?.status, "completed");
+  assert.equal(h.point, null);
+  assert.equal(h.runs.activeScanRun(), null);
+});
+
+test("a run whose process ends during finalization is never recorded as completed: it reads as interrupted in its finalization phase", async () => {
+  const h = harness();
+  h.point = { savedAt: h.iso(-1_000), shows: ["earlier"] };
+  const finalizing = deferred();
+  const committed: string[] = [];
+  const started = h.startRun(async (run) => {
+    await run.completeAfter({ commit: () => committed.push("report"), phase: "finalizing", finalize: () => finalizing.promise, processed: 4, total: 4, finishedAt: h.iso(), details: {} });
+  });
+  await Promise.resolve();
+  assert.deepEqual(committed, ["report"]);
+  // The process ends here: the next process has no owner record, and no heartbeat arrives.
+  const next = createScanRunLifecycle({ clock: { now: () => Date.parse(h.iso(91_000)) }, state: {} });
+  const status = next.readStatus(h.mode);
+  assert.equal(status?.status, "error");
+  assert.equal(status?.error, "Interrupted during finalizing.");
+  assert.equal(h.interruptions.length, 1);
+  assert.equal(h.point, null, "no Resume point survives the committed report");
+  finalizing.resolve();
+  await started.settled;
+});
+
+test("completeAfter never finalizes a vetoed run", async () => {
+  const h = harness();
+  let outcome: string | undefined;
+  await h.startRun(async (run) => {
+    outcome = await run.completeAfter({ commit: () => assert.fail("a vetoed run commits nothing"), phase: "finalizing", finalize: async () => assert.fail("a vetoed run finalizes nothing"), processed: 1, total: 1, finishedAt: h.iso(), details: {} });
+  }, { hooks: { veto: () => true } }).settled;
+  assert.equal(outcome, "vetoed");
+  assert.equal(h.status()?.status, "error");
+});
+
+test("a finalization that throws fails the run after its commit, forcing no Resume point over the committed report", async () => {
+  const h = harness();
+  h.point = { savedAt: h.iso(-1_000), shows: ["earlier"] };
+  await h.startRun(async (run) => {
+    run.resumePoint.provideSnapshot((savedAt) => ({ point: { savedAt, shows: ["a"] }, details: {} }));
+    await run.completeAfter({ commit: () => {}, phase: "finalizing", finalize: async () => { throw new Error("coverage store down"); }, processed: 4, total: 4, finishedAt: h.iso(), details: {} });
+  }).settled;
+  assert.equal(h.status()?.status, "error");
+  assert.equal(h.status()?.error, "coverage store down");
+  assert.ok(!h.events().includes("plex.checkpoint.saved"));
+  assert.equal(h.point, null, "the Resume point was settled with the committed report");
+});
+
 test("rate-limit reporting stores the resume time with the pause and clears it with the pause; a provider may give none", async () => {
   const h = harness();
   const work = deferred();

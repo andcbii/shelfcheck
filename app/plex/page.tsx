@@ -23,8 +23,11 @@ import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { resultsView } from "@/lib/results-view";
 import { scanProgressPercent } from "@/lib/scan-progress";
+import { plexPosterSrc } from "@/lib/plex-poster";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
+import { ScanProgressBox } from "@/app/components/scan-progress-box";
+import { OTHER_SCAN_RUN_BUTTON_LABEL, type ScanProgressStatus } from "@/lib/scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useClearCache } from "@/app/hooks/use-clear-cache";
 import { useLocalToday } from "@/app/hooks/use-local-today";
@@ -34,7 +37,9 @@ import { parsePlexPreferences } from "@/lib/preferences";
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
 type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string; catalogueSelection?: ShowCatalogueSelection; providerResolution?: PlexProviderResolution };
 type Report = { shows: Show[]; lastScan: string; coverageGroups?: CoverageGroup[]; scanCache?: Record<string, unknown> };
-type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" };
+type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" } & ScanProgressStatus;
+// A Plex scan checks up to three shows at once.
+const PLEX_ACTIVE_SHOWS = 3;
 type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: boolean; tvdbApiKeySaved: boolean; tvdbPinSaved: boolean; configured: boolean };
 type FieldKey = "plexUrl" | "plexToken" | "tmdbToken" | "tvdbApiKey" | "tvdbPin";
 type IgnoredShow = { ratingKey: string; title: string } & IgnoreTiming;
@@ -188,8 +193,12 @@ export default function PlexPage() {
   const visible = useMemo(() => view.shows.map((show) => ({ ...show.source, missing: show.episodes, percent: show.percent })), [view]);
   const missingCount = view.totals.missingEpisodes;
   const activelyRateLimitPaused = scanning && status.status === "running" && status.rateLimitPaused === true;
+  // The scan button says another scan holds the lock only when it knows one does, and this page is not following its own.
+  const otherScanLocked = !scanning && activity.lockedByOtherKind;
   const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
+  // A first-ever scan has no report yet: the progress box stands alone, without the empty state.
+  const awaitingFirstReport = scanning && !report;
 
   const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => visible.some(show => show.ratingKey === member.showKey && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
   const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
@@ -212,6 +221,8 @@ export default function PlexPage() {
     reportInvalidations.current = new Set(activeIgnores(settings.ignoredShows).map((item) => item.ratingKey));
     abort();
     setError("");
+    // A run whose polling failed left its shows and pause behind; the new run starts without them.
+    setStatus((current) => ({ status: current.status, processed: current.processed, total: current.total }));
     try {
       const response = await fetch("/api/plex/scan", {
         method: "POST",
@@ -397,7 +408,7 @@ export default function PlexPage() {
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
-      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
+      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className={otherScanLocked ? "primary scan-locked" : "primary"} onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : otherScanLocked ? OTHER_SCAN_RUN_BUTTON_LABEL : "New Plex search"}{!otherScanLocked && <b>→</b>}</button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
     </section>
     <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{view.totals.shows}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
       {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: ignoreManagerKey("show", show.ratingKey), title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: ignoreManagerKey("seasons", show.ratingKey), title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={restoreManagerItem} />}
@@ -407,19 +418,19 @@ export default function PlexPage() {
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
       <CoverageWarning issues={shownScanIssues(coverageIssues, report?.shows || [])} />
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
-      {!scanning && coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
+      {scanning && <ScanProgressBox progress={progress} status={status} paused={activelyRateLimitPaused} maxShows={PLEX_ACTIVE_SHOWS} />}
+      {coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>
-        <p>Every episode in either alternative complete set covers this content. Automatic matches keep their status and do not count as directly owned members.</p>
-        {group.health && group.health !== "healthy" && <p>{group.health === "pending" ? "Coverage pending recheck" : "Mapping needs review"}</p>}
+        <p>Owning every TMDB episode in this Manual Match covers its TVDB episodes; owning TVDB episodes never covers a TMDB episode. Automatic matches keep their status and do not count as directly owned members.</p>
         {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{String(member.season).padStart(2, "0")}E{String(member.episode).padStart(2, "0")} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "reported-missing" ? "Reported missing" : member.status === "incomplete" ? INCOMPLETE_LABEL : member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong>{member.status === "incomplete" && member.missingParts?.length ? <small>{missingPartsExplanation(group.members, member.missingParts)}</small> : null}</li>)}</ul></section>)}
       </section>)}
-      {scanning ? <div className="loading"><span style={{ width: `${progress}%` }} /><p>SCANNING PLEX AND PROVIDERS…</p></div> : visible.length ? <div className="show-list">{visible.map((show, index) => {
+      {visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);
         const showCollapsed = collapsedShows.has(show.ratingKey);
         const percentCollected = Math.round(show.percent * 100);
         return <article key={show.ratingKey}>
           <div className="collection-percent"><strong>{`${percentCollected}%`}</strong><span>COLLECTED</span></div>
-          <div className="show-index">{show.thumb ? <img src={`/api/plex/poster?thumb=${encodeURIComponent(show.thumb)}`} alt="" /> : String(index + 1).padStart(2, "0")}</div>
+          <div className="show-index">{show.thumb ? <img src={plexPosterSrc(show.thumb)} alt="" /> : String(index + 1).padStart(2, "0")}</div>
           <div className="show-info" data-show-menu-id={show.ratingKey}>
             <div className="show-title-line"><button className="show-name-button" onClick={() => setOpenShowMenu((current) => current === show.ratingKey ? null : show.ratingKey)}>{show.title}</button>{show.year && <small>{show.year}</small>}{show.tmdbId && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.tmdbId}`} target="_blank" rel="noreferrer" title="View show on TMDB"><img src="/tmdb-blue-square.svg" alt="TMDB" /></a>}{show.tvdbSlug && <a className="brand-link" href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}`} target="_blank" rel="noreferrer" title="View show on TVDB"><img src={TVDB_LOGO} alt="TVDB" /></a>}<button className="show-collapse-toggle" onClick={() => toggleShow(show.ratingKey)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button></div>
             {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey) && <div className="ignored-season-status">Ignored {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey)!.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}</div>}
@@ -444,7 +455,7 @@ export default function PlexPage() {
             })}</div></>}
           </div>
         </article>;
-      })}</div> : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
+      })}</div> : awaitingFirstReport ? null : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
     </section>
     <footer><span>SHELFCHECK / PLEX API</span><span>Your credentials stay in your private configuration volume.</span></footer>
     {coverageUrls && <ManualCoverageManager initialMappingId={coverageMappingId} initialUrls={coverageUrls} scanActive={scanning} onClose={() => setCoverageUrls(null)} onChanged={coverageChanged} />}

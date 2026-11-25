@@ -37,12 +37,13 @@ test("a failed automatic-evidence decision leaves the episode missing without di
 
 test("a covering Manual Match decides an episode before automatic evidence, so a failing later check is never reached", () => {
   // ADR-0007: the Manual Match is checked right after Report Missing. Before, it came last and
-  // collected episode 2 only after its automatic-evidence check had failed.
+  // collected TVDB episode 200 only after its automatic-evidence check had failed.
   const mapping = { id: "m", members: [{ provider: "TMDB" as const, id: 2 }, { provider: "TVDB" as const, id: 200 }] };
-  const result = comparePlexShow(input({ libraryTmdbEpisodeIds: new FailingIds([3], 2), mappings: [mapping] as PlexComparisonInput["mappings"], manualInventory: [{ identities: [{ provider: "TVDB", id: 200 }] }] as PlexComparisonInput["manualInventory"] }));
+  const tvdb200: ProviderEpisode = { source: "TVDB", season: 1, episode: 6, providerEpisodeId: 200, title: "Episode 6" };
+  const result = comparePlexShow(input({ providerEpisodes: [tmdb(1, 1), tvdb200, tmdb(4, 4)], directTvdbSatisfied: new FailingIds([], 200), mappings: [mapping] as PlexComparisonInput["mappings"], manualInventory: [{ identities: [{ provider: "TMDB", id: 2 }] }] as PlexComparisonInput["manualInventory"] }));
   assert.deepEqual(missingIds(result), [4]);
   assert.deepEqual(result.manualCoverage.map(item => item.mappingId), ["m"]);
-  assert.equal(result.coverageOutcomes.find(outcome => outcome.id === 2)?.status, "manual");
+  assert.equal(result.coverageOutcomes.find(outcome => outcome.id === 200)?.status, "manual");
   assert.deepEqual(result.episodeFailures, []);
 });
 
@@ -55,9 +56,9 @@ test("when Report Missing and Manual Matches cannot be evaluated, numbers and au
   const result = comparePlexShow(input({ mappings: [throwing] as unknown as PlexComparisonInput["mappings"], providerEpisodes: [tmdb(1, 1), tmdb(2, 2), tmdb(3, 3), tmdb(4, 4), special] }));
   // Coordinates collect 1 and owned TMDB identity collects 3; 2 and 4 stay missing; the unflagged special is not listed.
   assert.deepEqual(missingIds(result), [2, 4]);
-  // The unreadable Manual Matches also fail the Manual Match check, which now runs right after
-  // Report Missing for every listed episode (ADR-0007), before numbers or automatic evidence collect it.
-  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["report-missing:1", "manual-match:1", "report-missing:2", "manual-match:2", "report-missing:3", "manual-match:3", "report-missing:4", "manual-match:4", "report-missing:5"]);
+  // A Manual Match never covers a TMDB episode (ADR-0008), so its Manual Match check reads no
+  // Manual Match and cannot fail; only the Report Missing check does.
+  assert.deepEqual(result.episodeFailures.map(failure => `${failure.method}:${failure.episode.id}`), ["report-missing:1", "report-missing:2", "report-missing:3", "report-missing:4", "report-missing:5"]);
   assert.match(impactOf(result, 1), /Plex season and episode numbering established coverage for this episode, so it remains collected/);
   assert.match(impactOf(result, 3), /Automatic provider evidence established coverage for this episode, so it remains collected/);
   assert.match(impactOf(result, 2), /remains in missing results/);

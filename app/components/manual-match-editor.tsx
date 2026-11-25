@@ -262,7 +262,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           // The popup closes, and the saved card's own note confirms the save.
           closeForm();
           setSavedNote(result.mapping ? { id: result.mapping.id } : null);
-        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details. Fresh provider verification will run on the next Plex search." : "Saved. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+        } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details." : "Saved. Affected cached Plex comparisons have been rechecked.");
         await load();
       }
     } catch (error) {
@@ -287,7 +287,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         setPreview(null);
       }
       onChanged(body.revision);
-      setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Scan Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.");
+      setMessage(body.pending ? "Deleted. Some coverage checks need attention. See Scan Issues for details." : "Deleted. Affected cached Plex comparisons have been rechecked.");
       await load();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not delete the Manual Match.");
@@ -307,7 +307,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
       changeSelection([]);
       acceptedRevision.current = Math.max(acceptedRevision.current, body.revision);
       onChanged(body.revision);
-      setMessage(`Deleted ${plural(body.deleted.length, "Manual Match", "Manual Matches")}.${body.missing.length ? ` ${plural(body.missing.length, "selected Manual Match was", "selected Manual Matches were")} already removed.` : ""} Affected cached Plex comparisons have been rechecked. Fresh provider verification will run on the next Plex search.`);
+      setMessage(`Deleted ${plural(body.deleted.length, "Manual Match", "Manual Matches")}.${body.missing.length ? ` ${plural(body.missing.length, "selected Manual Match was", "selected Manual Matches were")} already removed.` : ""} Affected cached Plex comparisons have been rechecked.`);
       await load();
     } catch (error) {
       setError(error instanceof Error ? error.message : "Could not delete the selected Manual Matches.");

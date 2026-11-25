@@ -61,6 +61,7 @@ test("the Manual Matches page says Manual Match through its list, selection, edi
   await ui.click("Delete 2 selected matches");
   await ui.click("Delete 2 matches");
   assert.match(ui.container.textContent || "", /Deleted 1 Manual Match\. 1 selected Manual Match was already removed\./);
+  assert.doesNotMatch(ui.container.textContent || "", /verification|Plex search/i, "Manual Matches have no verification, and a scan is a Plex scan run");
   ui.sayNoMapping("Bulk delete");
 
   const deleteButton = ui.container.querySelector<HTMLButtonElement>("article .manual-match-delete")!;

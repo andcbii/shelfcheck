@@ -37,6 +37,12 @@ test("a show with no known year is named only, never (0) or (NaN)", async t => {
   assert.doesNotMatch(ui.card.textContent || "", /\((0|NaN|undefined)\)/);
 });
 
+test("a show whose year is not a four-digit year is named only, as everywhere else", async t => {
+  const ui = await renderCard(t, [{ ...tmdb, showYear: 20050 }, { ...tvdb, showYear: 999 }]);
+  assert.equal(ui.panel("TMDB").querySelector("header strong")?.textContent, "Doctor Who");
+  assert.equal(ui.panel("TVDB").querySelector("header strong")?.textContent, "Doctor Who");
+});
+
 test("a column holding several shows labels each show with its own year", async t => {
   const classic: CoverageMember = { ...tvdb, id: 2002, showId: 76107, show: "Doctor Who", url: "https://thetvdb.com/series/doctor-who/episodes/2002", showYear: 1963 };
   const unknown: CoverageMember = { ...tvdb, id: 2003, showId: 99999, show: "Doctor Who", url: "https://thetvdb.com/series/doctor-who-x/episodes/2003", showYear: undefined };

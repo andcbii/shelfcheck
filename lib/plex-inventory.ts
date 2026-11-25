@@ -1,5 +1,6 @@
 import { distinctSortedIds } from "@/lib/catalogue-selection";
 import { isProviderId } from "@/lib/provider-lookup";
+import { usableShowYear } from "@/lib/usable-show-year";
 export type PlexMetadata = { ratingKey?: string; key?: string; guid?: string; title?: string; year?: number; thumb?: string; updatedAt?: number; duration?: number; type?: string; parentIndex?: number; index?: number; Guid?: { id?: string }[] };
 export type PlexShowGroup = { identity: string; plexGuid?: string; records: PlexMetadata[] };
 
@@ -71,11 +72,6 @@ export function plexFingerprint(group: PlexShowGroup): string | undefined {
 export function plexEpisodeFingerprint(episodes: PlexMetadata[]): string | undefined {
   if (episodes.some((episode) => !episode.ratingKey || !Number.isFinite(episode.updatedAt))) return undefined;
   return episodes.map((episode) => `${episode.ratingKey}:${episode.updatedAt}`).sort().join("|");
-}
-
-/** A usable show year: a four-digit calendar year. Zero, a malformed value or none is no year. */
-export function usableShowYear(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1000 && value <= 9999 ? value : undefined;
 }
 
 /**

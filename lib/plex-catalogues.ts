@@ -8,6 +8,7 @@ import { PROVIDERS } from "@/lib/catalogue-selection";
 import { EVERY_ATTEMPTED_REQUIRED, patchSavedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
 import type { SharedCrosswalkStore } from "@/lib/tmdb-crosswalk-coordinator";
 import type { SharedCrosswalkRecord } from "@/lib/tmdb-crosswalk-policy";
+import { usableShowYear } from "@/lib/usable-show-year";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
@@ -142,7 +143,7 @@ const isIdList = (value: unknown): value is number[] => Array.isArray(value) && 
 export function readPlexShowYears(): PlexShowYear[] {
   const rows = readPlexGeneratedInputs<{shows?: unknown}>(PLEX_SHOW_YEARS)?.shows;
   return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<PlexShowYear> | null) => row && typeof row.identity === "string" && isIdList(row.tmdb) && isIdList(row.tvdb)
-    ? [{identity: row.identity, ...(Number.isInteger(row.year) ? {year: row.year} : {}), tmdb: row.tmdb, tvdb: row.tvdb}] : []);
+    ? [{identity: row.identity, ...(usableShowYear(row.year) === undefined ? {} : {year: row.year}), tmdb: row.tmdb, tvdb: row.tvdb}] : []);
 }
 /** Replaces the published Plex years; only a completed full scan's report save calls it. */
 export function savePlexShowYears(shows: PlexShowYear[]) {
@@ -157,7 +158,7 @@ const PROVIDER_SHOW_YEARS = "provider-show-years";
 /** The saved provider years; a row that is not readable is skipped. */
 export function readProviderShowYears(): ProviderShowYear[] {
   const rows = readPlexGeneratedInputs<{shows?: unknown}>(PROVIDER_SHOW_YEARS)?.shows;
-  return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<ProviderShowYear> | null) => row && (row.provider === "TMDB" || row.provider === "TVDB") && Number.isSafeInteger(row.showId) && Number.isInteger(row.year) && Number.isFinite(row.observedAt)
+  return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<ProviderShowYear> | null) => row && (row.provider === "TMDB" || row.provider === "TVDB") && Number.isSafeInteger(row.showId) && usableShowYear(row.year) !== undefined && Number.isFinite(row.observedAt)
     ? [{provider: row.provider, showId: row.showId!, year: row.year!, observedAt: row.observedAt!}] : []);
 }
 /** Replaces the saved provider years. */

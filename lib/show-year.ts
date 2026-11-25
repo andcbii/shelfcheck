@@ -2,9 +2,14 @@ import "server-only";
 import type { CoverageMapping, CoverageProvider } from "@/lib/manual-coverage-model";
 import { readPlexShowYears, readProviderShowYears, savePlexShowYears, saveProviderShowYears, type PlexShowYear } from "@/lib/plex-catalogues";
 import { inDatabaseTransaction } from "@/lib/sqlite";
-import { usableShowYear } from "@/lib/plex-inventory";
+import { usableShowYear } from "@/lib/usable-show-year";
 import type { PlexShowResult } from "@/lib/plex-scan";
 import { providerLookup, type ProviderLookup } from "@/lib/provider-lookup";
+import { runWorkerPool } from "@/lib/scan-concurrency";
+import { plexGroupYear, showProviderIds, type PlexShowGroup } from "@/lib/plex-inventory";
+
+/** How many year lookups of unvisited Manual Match shows a full scan has in flight at once. */
+export const SHOW_YEAR_LOOKUP_WORKERS = 3;
 
 /**
  * Show year (GLOSSARY.md): the year shown with a provider show's name on Manual Matches. It is a
@@ -27,7 +32,7 @@ export type ProviderShow = { provider: CoverageProvider; showId: number };
  * a conflict between Plex groups with different years; held by Plex but with no known year; or
  * absent, held by no Plex group.
  */
-export type PlexYear = { kind: "year"; year: number } | { kind: "conflict"; years: number[] } | { kind: "unknown" } | { kind: "absent" };
+export type PlexYear = { kind: "year"; year: number } | { kind: "conflict" } | { kind: "unknown" } | { kind: "absent" };
 
 /** Resolves the Show year of a provider show, or undefined when it has none (shown by name only). */
 export type ShowYears = (show: ProviderShow) => number | undefined;
@@ -43,18 +48,24 @@ function heldProviderShows(show: PlexShowResult): { tmdb: number[]; tvdb: number
 }
 
 /**
- * Publish the Plex years of a completed full scan's saved report. A group whose show the report
- * still holds without a usable year keeps its last known year; a group the report no longer holds
- * is dropped, so its provider shows become absent. Call it only where a completed full scan saves
- * its report, in the same transaction.
+ * Publish the Plex years of a completed full scan's library: each show it compared, then each
+ * library show it did not (an ignored show: an Ignore excludes missing episodes, not the show), whose
+ * Plex GUIDs name the provider shows it holds. A group the library still holds without a usable year
+ * keeps its last known year; a group the library no longer holds is dropped, so its provider shows
+ * become absent. Call it only once a completed full scan has saved its report.
  */
-export function publishPlexShowYears(shows: PlexShowResult[]): void {
+export function publishPlexShowYears(compared: PlexShowResult[], library: PlexShowGroup[]): void {
   const previous = new Map(readPlexShowYears().map(row => [row.identity, row.year]));
   const published = new Map<string, PlexShowYear>();
-  for (const show of shows) {
-    if (published.has(show.ratingKey)) continue;
-    const known = usableShowYear(show.year) ?? previous.get(show.ratingKey);
-    published.set(show.ratingKey, { identity: show.ratingKey, ...(known === undefined ? {} : { year: known }), ...heldProviderShows(show) });
+  const publish = (identity: string, year: number | undefined, held: { tmdb: number[]; tvdb: number[] }) => {
+    if (published.has(identity)) return;
+    const known = usableShowYear(year) ?? previous.get(identity);
+    published.set(identity, { identity, ...(known === undefined ? {} : { year: known }), ...held });
+  };
+  for (const show of compared) publish(show.ratingKey, show.year, heldProviderShows(show));
+  for (const group of library) {
+    const ids = group.records.map(record => showProviderIds(record.Guid));
+    publish(group.identity, plexGroupYear(group.records), { tmdb: [...new Set(ids.flatMap(id => id.tmdb))].sort((a, b) => a - b), tvdb: [...new Set(ids.flatMap(id => id.tvdb))].sort((a, b) => a - b) });
   }
   savePlexShowYears([...published.values()]);
 }
@@ -65,7 +76,7 @@ function plexYear(snapshot: PlexShowYear[], { provider, showId }: ProviderShow):
   if (!groups.length) return { kind: "absent" };
   const years = [...new Set(groups.flatMap(row => row.year === undefined ? [] : [row.year]))].sort((a, b) => a - b);
   if (years.length === 1) return { kind: "year", year: years[0] };
-  return years.length ? { kind: "conflict", years } : { kind: "unknown" };
+  return years.length ? { kind: "conflict" } : { kind: "unknown" };
 }
 
 /**
@@ -83,7 +94,7 @@ const providerShowKey = ({ provider, showId }: ProviderShow) => `${provider}:${s
 export function showDetailsYear(provider: CoverageProvider, details: unknown): number | undefined {
   const value = details && typeof details === "object" ? (details as Record<string, unknown>)[provider === "TMDB" ? "first_air_date" : "year"] : undefined;
   const match = typeof value === "string" ? value.match(provider === "TMDB" ? /^(\d{4})-\d{2}-\d{2}$/ : /^(\d{4})$/) : null;
-  return match ? Number(match[1]) : undefined;
+  return match ? usableShowYear(Number(match[1])) : undefined;
 }
 
 /** The provider show a show-details lookup asks about, if it is one. */
@@ -101,9 +112,9 @@ function showDetailsLookupShow(lookup: ProviderLookup): ProviderShow | undefined
  * show-details requests through `watch` (typed lookups) or `request` (a show's details by other
  * means) as it sends them: each fresh successful answer is noted with the time it arrived. Saved
  * or reused answers never reach it, so they never write a year. Before saving its report, the scan
- * looks up once each Manual Match provider show it did not visit (`lookUpUnvisited`); a failed
- * lookup only keeps the saved year. `record` saves what was noted; call it only where a
- * completed full scan saves its report, in the same transaction.
+ * looks up once each Manual Match provider show it did not visit (`lookUpUnvisited`, a few at a
+ * time, the one request ADR-0008 allows for this); a failed lookup only keeps the saved year.
+ * `record` saves what was noted; call it only once a completed full scan has saved its report.
  */
 export function fullScanProviderYears(mappings: CoverageMapping[]) {
   const wanted = new Map(mappings.flatMap(mapping => mapping.members.map(({ provider, showId }) => [providerShowKey({ provider, showId }), { provider, showId }] as const)));
@@ -142,7 +153,8 @@ export function fullScanProviderYears(mappings: CoverageMapping[]) {
       }
       const watched = watch(transport);
       const unvisited = [...wanted].flatMap(([key, show]) => visited.has(key) ? [] : [show]);
-      await Promise.all(unvisited.map(show => watched(show.provider === "TMDB" ? providerLookup.tmdbSeriesSummary(show.showId) : providerLookup.tvdbSeriesSummary(show.showId)).catch((error: unknown) => failed(show, error))));
+      // A few at a time, like removal-candidate confirmations, so a long list never floods a provider.
+      await runWorkerPool(unvisited, SHOW_YEAR_LOOKUP_WORKERS, show => watched(show.provider === "TMDB" ? providerLookup.tmdbSeriesSummary(show.showId) : providerLookup.tvdbSeriesSummary(show.showId)).then(() => {}, (error: unknown) => failed(show, error)));
     },
     record: () => recordProviderYears([...observed.values()]),
   };

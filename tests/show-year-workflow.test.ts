@@ -54,6 +54,8 @@ async function fixture(t: test.TestContext) {
     failures: new Map<string, number>(),
     /** Requests, by path, held until released, to stop a scan part-way. */
     held: new Map<string, () => void>(),
+    /** Request paths answered once with a 429 asking for a one-second wait, then normally. */
+    rateLimitedOnce: new Set<string>(),
   };
   const requests: URL[] = [];
   const records = () => state.libraries.flat();
@@ -61,6 +63,7 @@ async function fixture(t: test.TestContext) {
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input)); requests.push(u);
     if (state.held.has(u.pathname)) await new Promise<void>(release => state.held.set(u.pathname, release));
+    if (state.rateLimitedOnce.delete(u.pathname)) return Response.json({}, { status: 429, headers: { "Retry-After": "1" } });
     const failure = state.failures.get(u.pathname);
     if (failure) return Response.json({}, { status: failure });
     const summaryYear = (key: string, fallback: string) => state.summaryYears.has(key) ? state.summaryYears.get(key) : fallback;
@@ -467,4 +470,51 @@ test("Manual Matches saved before provider years existed gain them from the next
   assert.equal((await f.run()).scan.status, "completed");
   f.restart();
   assert.deepEqual(await f.years(), { "TMDB 10": 1999, "TVDB 20": 1999, "TMDB 12": 1999, "TVDB 22": 1999 });
+});
+
+test("a full scan paused by a provider cooldown publishes nothing until it completes", async t => {
+  const f = await fixture(t);
+  const who: PlexRecord = { ratingKey: "1", title: "Doctor Who", year: 2005, guid: "plex://show/who", ids: ["tmdb://57243", "tvdb://78804"] };
+  f.state.libraries = [[who]];
+  await f.save(57243, 78804);
+  assert.equal((await f.run()).scan.status, "completed");
+  who.year = 2010;
+  f.state.rateLimitedOnce.add("/3/tv/changes");
+  await scan.POST(new Request("http://localhost/api/plex/scan", { method: "POST", body: "{}" }));
+  let paused = false;
+  for (let i = 0; i < 500 && !paused; i++) { paused = Boolean((await (await scan.GET()).json()).scan.rateLimitPaused); if (!paused) await new Promise(r => setTimeout(r, 5)); }
+  assert.ok(paused, "the scan paused for the provider cooldown");
+  assert.deepEqual(await f.years(), { "TMDB 57243": 2005, "TVDB 78804": 2005 }, "a paused full scan publishes nothing");
+  assert.equal((await f.settled()).scan.status, "completed");
+  assert.deepEqual(await f.years(), { "TMDB 57243": 2010, "TVDB 78804": 2010 }, "it publishes its years once it completes");
+});
+
+test("a full scan whose year save fails still saves its report", async t => {
+  const f = await fixture(t);
+  const who: PlexRecord = { ratingKey: "1", title: "Doctor Who", year: 2005, guid: "plex://show/who", ids: ["tmdb://57243", "tvdb://78804"] };
+  f.state.libraries = [[who]];
+  await f.save(57243, 78804);
+  assert.equal((await f.run()).scan.status, "completed");
+  who.year = 2010;
+  f.state.summaryYears.set("TMDB 57243", "2001-01-01");
+  for (const event of ["INSERT", "UPDATE"])
+    db().exec(`CREATE TRIGGER fail_years_${event} BEFORE ${event} ON shelfcheck_plex_generated_inputs WHEN NEW.cache_key IN ('plex-show-years', 'provider-show-years') BEGIN SELECT RAISE(ABORT, 'year store unavailable'); END;`);
+  const result = await f.run();
+  for (const event of ["INSERT", "UPDATE"]) db().exec(`DROP TRIGGER fail_years_${event};`);
+  assert.equal(result.scan.status, "completed", result.scan.error || "");
+  assert.equal(result.report.shows[0].year, 2010, "the report of the scan is saved");
+  assert.deepEqual(await f.years(), { "TMDB 57243": 2005, "TVDB 78804": 2005 }, "the saved years are kept");
+});
+
+test("an ignored Plex show keeps giving its Manual Match shows its Plex year", async t => {
+  const f = await fixture(t);
+  const who: PlexRecord = { ratingKey: "1", title: "Doctor Who", year: 2005, guid: "plex://show/who", ids: ["tmdb://57243", "tvdb://78804"] };
+  f.state.libraries = [[who]];
+  await f.save(57243, 78804);
+  ignoreResults.savedScanState("plex").options.patch({ ignoredShows: [{ ratingKey: "plex://show/who", title: "Doctor Who" }] });
+  assert.equal((await f.run()).scan.status, "completed");
+  assert.deepEqual(await f.years(), { "TMDB 57243": 2005, "TVDB 78804": 2005 }, "an Ignore excludes missing episodes, not the show's Plex year");
+  who.year = 2010;
+  assert.equal((await f.run()).scan.status, "completed");
+  assert.deepEqual(await f.years(), { "TMDB 57243": 2010, "TVDB 78804": 2010 }, "a completed full scan publishes the ignored show's new Plex year");
 });

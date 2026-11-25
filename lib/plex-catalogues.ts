@@ -148,6 +148,22 @@ export function readPlexShowYears(): PlexShowYear[] {
 export function savePlexShowYears(shows: PlexShowYear[]) {
   writePlexGeneratedInputs(PLEX_SHOW_YEARS, {shows});
 }
+/**
+ * One provider show's own year for Show years (TMDB first air year or TVDB series year), as the
+ * newest fresh successful provider answer gave it, with the time that answer was received.
+ */
+export type ProviderShowYear = { provider: CoverageProvider; showId: number; year: number; observedAt: number };
+const PROVIDER_SHOW_YEARS = "provider-show-years";
+/** The saved provider years; a row that is not readable is skipped. */
+export function readProviderShowYears(): ProviderShowYear[] {
+  const rows = readPlexGeneratedInputs<{shows?: unknown}>(PROVIDER_SHOW_YEARS)?.shows;
+  return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<ProviderShowYear> | null) => row && (row.provider === "TMDB" || row.provider === "TVDB") && Number.isSafeInteger(row.showId) && Number.isInteger(row.year) && Number.isFinite(row.observedAt)
+    ? [{provider: row.provider, showId: row.showId!, year: row.year!, observedAt: row.observedAt!}] : []);
+}
+/** Replaces the saved provider years. */
+export function saveProviderShowYears(shows: ProviderShowYear[]) {
+  writePlexGeneratedInputs(PROVIDER_SHOW_YEARS, {shows});
+}
 /** Snapshot writer for local rechecks. Full scans write only their changed rows. */
 export function savePlexInputs(inputs: PlexGeneratedInputs) {
   for (const [id,catalogue] of Object.entries(inputs.tmdb)) savePlexCatalogue("tmdb", Number(id), catalogue);
@@ -177,11 +193,11 @@ export const sharedTmdbCrosswalks: SharedCrosswalkStore = {
   save: saveSharedTmdbCrosswalk,
 };
 /**
- * Scan accounting, provider verification positions, pending safeguards and published Plex show
- * years survive a full catalogue Clear cache; everything else goes, shared crosswalk evidence
+ * Scan accounting, provider verification positions, pending safeguards, published Plex show years
+ * and saved provider years survive a full catalogue Clear cache; everything else goes, shared crosswalk evidence
  * included (ADR-0004).
  */
-const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards", PLEX_SHOW_YEARS] as const;
+const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards", PLEX_SHOW_YEARS, PROVIDER_SHOW_YEARS] as const;
 /** Clears one show's saved comparison (adding the every-attempted requirement), or all generated inputs except `keptByFullClear`; returns the cleared show's relationship keys. */
 export function clearPlexInputs(ratingKey?: string): string[] {
   if (!ratingKey) { deletePlexGeneratedInputsExcept(keptByFullClear); return []; }

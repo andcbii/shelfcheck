@@ -1,6 +1,7 @@
 import "server-only";
 import type { CoverageMapping, CoverageProvider } from "@/lib/manual-coverage-model";
-import { readPlexShowYears, savePlexShowYears, type PlexShowYear } from "@/lib/plex-catalogues";
+import { readPlexShowYears, readProviderShowYears, savePlexShowYears, saveProviderShowYears, type PlexShowYear } from "@/lib/plex-catalogues";
+import { inDatabaseTransaction } from "@/lib/sqlite";
 import { usableShowYear } from "@/lib/plex-inventory";
 import type { PlexShowResult } from "@/lib/plex-scan";
 
@@ -11,7 +12,9 @@ import type { PlexShowResult } from "@/lib/plex-scan";
  *
  * Plex years come from a snapshot that only a completed full scan publishes, when it saves its
  * report: one row per Plex show group, with the provider shows the group holds and its last known
- * Plex year. Reads resolve years from that snapshot alone and make no network request.
+ * Plex year. Provider years are saved per provider show from fresh successful provider answers
+ * (a Manual Match save's show lookups). Reads resolve years from these two stores alone and make
+ * no network request.
  */
 
 /** A provider show: its provider and show ID. */
@@ -64,14 +67,51 @@ function plexYear(snapshot: PlexShowYear[], { provider, showId }: ProviderShow):
 }
 
 /**
- * The Show year resolver over the published Plex years, read once. Only a single known Plex year
- * gives a year; a provider-year fallback for conflicting, unknown and absent shows plugs in here.
+ * A fresh successful provider answer about one provider show's own year: `year` is the raw value
+ * the provider gave (a missing or malformed one is ignored), `observedAt` when the answer arrived.
+ */
+export type ProviderYearObservation = ProviderShow & { year: unknown; observedAt: number };
+
+const providerShowKey = ({ provider, showId }: ProviderShow) => `${provider}:${showId}`;
+
+/**
+ * Save provider years from fresh successful provider answers. Only a usable year (an integer from
+ * 1000 to 9999) is written, and only when it is at least as new as the saved one: a missing or
+ * malformed year, or an older answer, keeps the saved value. Never clears a year, never touches
+ * coverage. Joins an open database transaction, so a full scan can stage observations during its
+ * run and record them where it commits its report.
+ */
+export function recordProviderYears(observations: ProviderYearObservation[]): void {
+  const fresh = observations.flatMap(observation => {
+    const year = usableShowYear(observation.year);
+    return year === undefined ? [] : [{ provider: observation.provider, showId: observation.showId, year, observedAt: observation.observedAt }];
+  });
+  if (!fresh.length) return;
+  inDatabaseTransaction(() => {
+    const saved = new Map(readProviderShowYears().map(row => [providerShowKey(row), row]));
+    let changed = false;
+    for (const observation of fresh) {
+      const previous = saved.get(providerShowKey(observation));
+      if (previous && previous.observedAt > observation.observedAt) continue;
+      if (previous?.year === observation.year && previous.observedAt === observation.observedAt) continue;
+      saved.set(providerShowKey(observation), observation);
+      changed = true;
+    }
+    if (changed) saveProviderShowYears([...saved.values()]);
+  });
+}
+
+/**
+ * The Show year resolver, read once with no network request. A single known Plex year wins; a
+ * provider show that Plex groups with different years hold, that Plex holds with no known year,
+ * or that no Plex group holds, takes its saved provider year; with neither it has no year.
  */
 export function readShowYears(): ShowYears {
   const snapshot = readPlexShowYears();
+  const providerYears = new Map(readProviderShowYears().map(row => [providerShowKey(row), row.year]));
   return show => {
     const plex = plexYear(snapshot, show);
-    return plex.kind === "year" ? plex.year : undefined;
+    return plex.kind === "year" ? plex.year : providerYears.get(providerShowKey(show));
   };
 }
 

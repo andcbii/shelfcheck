@@ -23,7 +23,9 @@ export async function POST(request: Request) {
     if (body.action !== "resolve" && body.action !== "save" && body.action !== undefined)
       throw new CoverageError("This Manual Match action is not supported.", 400, "unsupported-action");
     if (body.action === "resolve") {
-      const resolved = await resolveCoverageUrls(body.urls);
+      // Provider years are saved only by a save, so a resolution returns its preview and members alone.
+      const { preview, members } = await resolveCoverageUrls(body.urls);
+      const resolved = { preview, members };
       const existingMapping = body.id === undefined ? listCoverageMappings().find(mapping => mapping.members.some(member => resolved.members.some(candidate => candidate.provider === member.provider && candidate.id === member.id))) : undefined;
       return Response.json({ ...resolved, ...(existingMapping ? { existingMapping } : {}) }, { headers });
     }

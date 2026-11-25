@@ -6,8 +6,16 @@ import { database } from "@/lib/sqlite";
 import { CoverageError } from "@/lib/manual-coverage";
 import { ProviderClient } from "@/lib/provider-client";
 import type { CoverageMember } from "@/lib/manual-coverage-model";
+import type { ProviderYearObservation } from "@/lib/show-year";
 const client = new ProviderClient();
-export async function resolveCoverageUrls(urls: unknown) {
+/** A resolution: the stored preview token, its reviewed members, and the provider years its show lookups gave. */
+export type ResolvedCoverage = { preview: string; members: CoverageMember[]; showYears: ProviderYearObservation[] };
+/** The year of a TMDB `first_air_date` ("2005-03-26") or a TVDB series `year` ("2005"); anything else gives none. */
+const yearOf = (value: unknown, pattern: RegExp) => {
+  const match = typeof value === "string" ? value.match(pattern) : null;
+  return match ? Number(match[1]) : undefined;
+};
+export async function resolveCoverageUrls(urls: unknown): Promise<ResolvedCoverage> {
   // A failed attempt, even one a provider cooldown ended, must not disable later user-requested retries.
   client.forgetProviderDeadlines();
   client.startRun();
@@ -18,7 +26,7 @@ export async function resolveCoverageUrls(urls: unknown) {
     throw new CoverageError(`${error instanceof Error ? error.message : "Provider resolution failed."} Check the episode URL or ID and provider credentials, then retry. No Manual Match was saved.`, 503, "provider-unavailable");
   }
 }
-async function resolveCoverageInputs(urls: unknown) {
+async function resolveCoverageInputs(urls: unknown): Promise<ResolvedCoverage> {
   if (!Array.isArray(urls) || urls.length < 2 || urls.some(url => typeof url !== "string"))
     throw new CoverageError("Supply nonempty complete TMDB and TVDB episode sets using URLs or provider-qualified IDs.");
   const config = await readPlexProviders();
@@ -27,6 +35,8 @@ async function resolveCoverageInputs(urls: unknown) {
   let token: Promise<string> | undefined;
   const tvdbToken = () => token ||= authenticateTvdb(client, config.tvdbApiKey, config.tvdbPin);
   const members: CoverageMember[] = [];
+  // The show lookups below are required for identity; the year they carry is optional and never rejects.
+  const showYears: ProviderYearObservation[] = [];
   for (const value of urls) {
     const input = value.trim();
     // TMDB has no native episode-ID lookup. Coordinates locate a record; its
@@ -67,11 +77,13 @@ async function resolveCoverageInputs(urls: unknown) {
       const show = await client.json<{
         id?: number;
         name?: string;
+        first_air_date?: unknown;
       }>(`https://api.themoviedb.org/3/tv/${showId}`, init, "TMDB");
       if (!Number.isSafeInteger(record.id) || !record.id || show.id !== showId || record.season_number !== season || record.episode_number !== episode)
         throw new CoverageError("TMDB could not resolve that episode.");
       if (expectedTmdbId !== undefined && record.id !== expectedTmdbId)
         throw new CoverageError(`TMDB context resolved episode ${record.id}, not ${expectedTmdbId}. Check the episode ID and show/season/episode context.`);
+      showYears.push({ provider: "TMDB", showId, year: yearOf(show.first_air_date, /^(\d{4})-\d{2}-\d{2}$/), observedAt: Date.now() });
       members.push({ provider: "TMDB", id: record.id, showId, show: show.name || `TMDB series ${showId}`, title: record.name || "Untitled episode", season, episode, url: `https://www.themoviedb.org/tv/${showId}/season/${season}/episode/${episode}` });
     } else if (host === "thetvdb.com") {
       const match = url.pathname.match(/^\/series\/[^/]+\/episodes\/(\d+)\/?$/);
@@ -95,10 +107,12 @@ async function resolveCoverageInputs(urls: unknown) {
           id?: number;
           name?: string;
           slug?: string;
+          year?: unknown;
         };
       }>(`https://api4.thetvdb.com/v4/series/${record.seriesId}`, init, "TVDB");
       if (show?.id !== record.seriesId || !show.slug)
         throw new CoverageError("TVDB could not resolve the parent show.");
+      showYears.push({ provider: "TVDB", showId: record.seriesId, year: yearOf(show.year, /^(\d{4})$/), observedAt: Date.now() });
       members.push({ provider: "TVDB", id: record.id, showId: record.seriesId, show: show.name || `TVDB series ${record.seriesId}`, title: record.name || "Untitled episode", season: record.seasonNumber!, episode: record.number!, url: `https://thetvdb.com/series/${encodeURIComponent(show.slug)}/episodes/${record.id}` });
     } else
       throw new CoverageError("Use an episode URL from TMDB or TVDB.");
@@ -109,7 +123,7 @@ async function resolveCoverageInputs(urls: unknown) {
   db.prepare("DELETE FROM shelfcheck_coverage_previews WHERE expires<?").run(Date.now());
   const preview = randomUUID();
   db.prepare("INSERT INTO shelfcheck_coverage_previews VALUES(?,?,?)").run(preview, JSON.stringify(members), Date.now() + 30 * 60000);
-  return { preview, members };
+  return { preview, members, showYears };
 }
 
 export function reviewedCoverageMembers(preview: unknown): CoverageMember[] {

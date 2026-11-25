@@ -13,9 +13,11 @@ import { IgnoreDurationModal } from "@/app/components/ignore-duration-modal";
 import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
+import { TraktPoster } from "@/app/components/trakt-poster";
 import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, traktLocalAirDate, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
+import { usePlexArtwork } from "@/app/hooks/use-plex-artwork";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useLocalToday } from "@/app/hooks/use-local-today";
@@ -98,6 +100,7 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [shows, setShows] = useState<CollectionShow[]>([]);
   const [missing, setMissing] = useState<MissingEpisode[]>([]);
+  const plexArtwork = usePlexArtwork();
   const [error, setError] = useState("");
   const [errorContext, setErrorContext] = useState<"scan" | "auth">("scan");
   const [lastScan, setLastScan] = useState<string | null>(null);
@@ -571,15 +574,7 @@ export default function Home() {
           const seasons = [...new Set(episodes.map((episode) => episode.season))].sort((a, b) => a - b);
           return <article key={show.ids.trakt}>
           <div className="collection-percent"><strong>{percentCollected === null ? "—" : `${percentCollected}%`}</strong><span>COLLECTED</span></div>
-          <div className="show-index">
-            <span>{show.title.slice(0, 2).toUpperCase()}</span>
-            {show.images?.poster?.[0] && <img
-              src={`/api/poster?src=${encodeURIComponent(show.images.poster[0])}`}
-              alt={`${show.title} poster`}
-              loading="lazy"
-              onError={(event) => { event.currentTarget.style.display = "none"; }}
-            />}
-          </div>
+          <TraktPoster title={show.title} traktPoster={show.images?.poster?.[0]} plexThumb={plexArtwork(show.ids)} />
           <div className="show-info" data-show-menu-id={show.ids.trakt}>
             <div className="show-title-line">
               <button className="show-name-button" type="button" onClick={() => setOpenShowMenu((current) => current === show.ids.trakt ? null : show.ids.trakt)} aria-haspopup="menu" aria-expanded={openShowMenu === show.ids.trakt}>{show.title}</button>

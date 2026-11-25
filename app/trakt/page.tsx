@@ -13,12 +13,14 @@ import { IgnoreDurationModal } from "@/app/components/ignore-duration-modal";
 import { ScanSortControl } from "@/app/components/scan-sort-control";
 import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
+import { ScanProgressBox } from "@/app/components/scan-progress-box";
 import { TraktPoster } from "@/app/components/trakt-poster";
 import { compactMissingEpisodes, compactTraktLibrary, compactTraktShow, traktLocalAirDate, type CollectionShow, type MissingEpisode, type TraktShow } from "@/lib/trakt-model";
 import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { usePlexArtwork } from "@/app/hooks/use-plex-artwork";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
+import type { ScanProgressStatus } from "@/lib/scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useLocalToday } from "@/app/hooks/use-local-today";
 import { useClearCache } from "@/app/hooks/use-clear-cache";
@@ -26,7 +28,9 @@ import { useMenuClosing } from "@/app/hooks/use-menu-closing";
 import { activeIgnores, applyIgnore, changeIgnoreDuration as changeIgnoreRuleDuration, decodeTraktManagerKey, ignoreManagerKey, openSeasonIgnore as openSeasonIgnoreRule, restoreIgnore, saveSeasonIgnore, type IgnoreDuration, type IgnoreTiming } from "@/lib/ignored-shows";
 
 type ScanReport = { shows: CollectionShow[]; missing: MissingEpisode[]; lastScan: string; scanCache?: Record<string, unknown> };
-type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitPaused?: boolean };
+type ScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string } & ScanProgressStatus;
+// A Trakt scan checks up to six shows at once.
+const TRAKT_ACTIVE_SHOWS = 6;
 type IgnoredTraktShow = TraktShow & IgnoreTiming;
 type IgnoredTraktSeasons = { traktId: number; title: string; seasons: number[] } & IgnoreTiming;
 const traktShowKey = (show: TraktShow) => show.ids.trakt;
@@ -126,6 +130,7 @@ export default function Home() {
   const [collapsedSeasons, setCollapsedSeasons] = useState<Set<string>>(new Set());
   const [fullRescanConfirmOpen, setFullRescanConfirmOpen] = useState(false);
   const [rateLimitPaused, setRateLimitPaused] = useState(false);
+  const [scanProgress, setScanProgress] = useState<ScanProgressStatus>({});
   const [scanCacheCount, setScanCacheCount] = useState(0);
   // Restoring a show does not make responses from this scan safe to reuse.
   const reportInvalidations = useRef(new Set<number>());
@@ -141,15 +146,20 @@ export default function Home() {
     url: "/api/scan",
     onPollingChange: (polling) => { scanInProgress.current = polling; setScanning(polling); },
     onResponse: async ({ scan }) => {
-      setProcessed(scan.processed);
-      setTotal(scan.total);
-      setRateLimitPaused(scan.rateLimitPaused === true);
-      setProgress(scanProgressPercent(scan.processed, scan.total, scan.status === "running"));
+      showScanStatus(scan);
       if (scan.status === "completed") { await loadServerReport(); setRateLimitPaused(false); return true; }
       if (scan.status === "error") { setRateLimitPaused(false); throw new Error(scan.error || "The server-side scan failed."); }
       return false;
     },
   });
+  // Shows a status's counts, pause and progress detail, whether polled or from the saved state.
+  function showScanStatus(scan: ScanStatus) {
+    setProcessed(scan.processed);
+    setTotal(scan.total);
+    setRateLimitPaused(scan.rateLimitPaused === true);
+    setScanProgress(scan);
+    setProgress(scanProgressPercent(scan.processed, scan.total, scan.status === "running"));
+  }
   const activity = useScanRunActivity("trakt", {
     isFollowing: () => scanInProgress.current || scanRequestPending.current,
     poll: () => pollServerScan().catch((pollError) => {
@@ -194,9 +204,12 @@ export default function Home() {
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
         replaceReportCache(new Set(Object.keys(remoteReport.scanCache || {})));
       }
-      if (state.scan?.status === "running") void pollServerScan().catch((pollError) => {
-        if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
-      });
+      if (state.scan?.status === "running") {
+        showScanStatus(state.scan);
+        void pollServerScan().catch((pollError) => {
+          if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
+        });
+      }
     }).catch(() => { /* local browser copy remains available */ });
     return () => {
       abortScanPoll();
@@ -491,6 +504,9 @@ export default function Home() {
     setFullRescanConfirmOpen(false);
     setErrorContext("scan");
     setError("");
+    // A run whose polling failed left its shows and pause behind; the new run starts without them.
+    setRateLimitPaused(false);
+    setScanProgress({});
     try {
       const response = await fetch("/api/scan", {
         method: "POST",
@@ -567,7 +583,7 @@ export default function Home() {
         {error && <div className="error"><span>!</span><p><strong>{errorContext === "auth" ? "Trakt login failed" : "Scan interrupted"}</strong>{error}</p></div>}
         {cacheMessage && !settingsOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
-        {scanning && <div className="loading"><span style={{ width: `${progress}%` }} /><p>{activelyRateLimitPaused ? "Paused due to Rate Limit" : `Comparing show ${processed} of ${total || shows.length || "…"}. Progress is saved periodically.`}</p></div>}
+        {scanning && <ScanProgressBox progress={progress} status={scanProgress} paused={activelyRateLimitPaused} maxShows={TRAKT_ACTIVE_SHOWS} />}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => {
           const percentCollected = show.collection?.aired ? Math.round((show.collection.completed / show.collection.aired) * 100) : null;
           const showCollapsed = collapsedShows.has(show.ids.trakt);

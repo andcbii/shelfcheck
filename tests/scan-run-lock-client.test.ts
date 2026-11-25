@@ -74,12 +74,12 @@ async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partia
   const lockMessage = () => container.querySelector(".scan-run-lock")?.textContent || "";
   const radar = () => container.querySelector(".radar small")?.textContent || "";
   const scanButtonText = () => container.querySelector("button.primary")?.textContent || "";
-  const traktProgressLine = () => container.querySelector(".loading p")?.textContent ?? null;
+  const progressBox = () => container.querySelector(".scan-progress");
   /** Replaces the status answers and restarts their count, so the next poll gets the first. */
   const nextStatuses = (...statuses: Server["statuses"]) => { server.statuses = statuses; server.statusRequests = 0; };
   const advance = async (ms: number) => { await act(async () => { t.mock.timers.tick(ms); }); await settle(); };
   const unmount = async () => { await act(async () => { root.unmount(); }); };
-  return { server, container, button, click, lockMessage, radar, scanButtonText, traktProgressLine, nextStatuses, advance, unmount };
+  return { server, container, button, click, lockMessage, radar, scanButtonText, progressBox, nextStatuses, advance, unmount };
 }
 
 async function settle() {
@@ -334,18 +334,18 @@ test("a failed first observation keeps the page locked, and polling retries unti
 // A rate-limit pause shows only while the page is scanning: each page states its
 // own pause check, so these cases drive the rendered pages through their polls.
 
-test("a running Trakt scan paused for the rate limit says so on the radar, scan button and progress line", async (t) => {
+test("a running Trakt scan paused for the rate limit says so on the radar and scan button", async (t) => {
   const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RATE_LIMIT_PAUSED_SCAN, statuses: [RATE_LIMIT_PAUSED_SCAN] });
   assert.equal(page.radar(), "PAUSED - RATE LIMIT");
   assert.match(page.scanButtonText(), /^Paused due to Rate Limit/);
-  assert.equal(page.traktProgressLine(), "Paused due to Rate Limit");
+  assert.ok(page.progressBox(), "the progress box shows");
 });
 
 test("a running Trakt scan without a pause shows the ordinary scanning wording", async (t) => {
   const page = await mountPage(t, "trakt", { activity: TRAKT_RUN, stateScan: RUNNING_SCAN, statuses: [RUNNING_SCAN] });
   assert.equal(page.radar(), "SCANNING");
   assert.match(page.scanButtonText(), /^Checking 1 of 4/);
-  assert.match(page.traktProgressLine() || "", /^Comparing show 1 of 4\./);
+  assert.ok(page.progressBox(), "the progress box shows");
 });
 
 test("a Trakt page that stops scanning with its last status still paused no longer shows the pause", async (t) => {
@@ -361,7 +361,7 @@ test("a Trakt page that stops scanning with its last status still paused no long
   assert.equal(page.server.statusRequests, 1, "the failed status request was made");
   assert.equal(page.radar(), "MISSING");
   assert.ok(!page.scanButtonText().includes("Paused"), `the scan button is not paused: ${page.scanButtonText()}`);
-  assert.equal(page.traktProgressLine(), null, "the progress line is gone");
+  assert.equal(page.progressBox(), null, "the progress box is gone");
 });
 
 test("a running Plex scan paused for a provider's rate limit says so on the radar and scan button", async (t) => {

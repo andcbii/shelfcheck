@@ -224,6 +224,7 @@ test("removals committed before a failed cached recheck stay, pending, until a l
   const state = await coverage(h);
   assert.equal(state.revision, revision + 1);
   assert.equal(state.pending, 1, "the affected members stay carried and pending");
+  assert.ok(state.issues.some(issue => issue.id === "comparison-pending"), "the comparison-pending Coverage Issue reports them");
   assert.equal((result.report as { coverageRevision?: number }).coverageRevision, revision, "the scan's report keeps its own revision");
   assert.ok(!(await h.mappings()).some(mapping => mapping.id === match.id));
 
@@ -296,4 +297,205 @@ test("ID-bearing unnumbered and special records count as listed, and an unreadab
   await h.rerun();
   assert.deepEqual(await h.mappings(), []);
   assert.equal(removals().length, 1);
+});
+
+test("a TVDB series whose default order is not its Aired Order proves nothing gone", async t => {
+  // Save-time resolution places a TVDB member by its Aired Order numbers; any other default order
+  // (DVD, absolute, alternate) can leave out episodes the series still has.
+  const { h, match, revision } = await pinkyGone(t);
+  for (const seasonType of [2, 3, undefined]) {
+    h.state.tvdbDefaultSeasonType = seasonType;
+    h.requests.length = 0;
+    await h.rerun();
+    assert.ok(h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21 was downloaded fresh");
+    await unchanged(h, match, revision);
+  }
+  h.state.tvdbDefaultSeasonType = 1;
+  await h.rerun();
+  assert.deepEqual(await h.mappings(), [], "an Aired Order listing proves the member gone");
+});
+
+test("a failed download removes nothing", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  h.state.statuses.set("/v4/series/21/episodes/default", 404);
+  h.requests.length = 0;
+  await h.rerun();
+  assert.ok(h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21's download was attempted");
+  await unchanged(h, match, revision);
+});
+
+test("a show compared with a saved copy for one provider proposes nothing, even from the other provider's fresh download", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  // TMDB 11 cannot be downloaded, so Animaniacs is compared with its saved TMDB copy and keeps its
+  // last-good saved comparison, while TVDB 21 downloads fresh and complete without S05E24.
+  h.state.statuses.set("/3/tv/11/season/1", 404);
+  h.requests.length = 0;
+  // A single-show scan downloads every catalogue it compares.
+  await h.rerun("ratingKey:other");
+  assert.ok(h.requests.includes("/3/tv/11/season/1") && h.requests.includes("/v4/series/21/episodes/default"));
+  await unchanged(h, match, revision);
+});
+
+test("an incomplete TMDB enumeration removes nothing", async t => {
+  // TMDB still lists another Pinky and the Brain episode: a download with no episodes at all proves nothing.
+  const pinkyNext: Episode = { provider: "TMDB", id: 4010, season: 4, episode: 10, name: "Pinky and the Brain S04E10" };
+  const h = await harness(t, [...library, pinkyNext], owned);
+  await h.rerun();
+  const match = await saved(h, [pinky, animaniacs]);
+  await h.rerun();
+  const revision = (await coverage(h)).revision;
+  h.state.gone.add(pinky.id);
+  // TMDB 10's season 4 also returns a record whose ID cannot be read: it could be S04E09.
+  h.state.tmdbRecords = { 4: [{ season_number: 4, episode_number: 11, name: "No ID" }] };
+  h.requests.length = 0;
+  // A single-show scan downloads every catalogue it compares.
+  await h.rerun("ratingKey:target");
+  assert.ok(h.requests.includes("/3/tv/10/season/4"), "TMDB 10 was downloaded fresh");
+  assert.deepEqual((await h.mappings()).map(mapping => [mapping.id, mapping.members.map(key)]), [[match.id, [key(pinky), key(animaniacs)]]]);
+  assert.equal((await coverage(h)).revision, revision);
+  assert.deepEqual(removals(), []);
+
+  h.state.tmdbRecords = {};
+  await h.rerun("ratingKey:target");
+  assert.deepEqual(await h.mappings(), [], "a readable enumeration without S04E09 removes it");
+});
+
+test("a fallback catalogue removes nothing, even one downloaded fresh and complete for the member's own series", async t => {
+  // Animaniacs has TVDB IDs 21 (preferred) and 22. TVDB 21 cannot be loaded, so TVDB 22 is
+  // compared in its place; the member is an episode of TVDB 22.
+  const alternate: Episode = { provider: "TVDB", id: 7701, season: 1, episode: 1, name: "Alternate" };
+  const h = await harness(t, [pinky, pinkyTvdb, animaniacsTmdb], [pinky, pinkyTvdb, animaniacsTmdb]);
+  let listed = true;
+  const target = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
+  const other = { ratingKey: "other", title: "Other", Guid: [{ id: "tmdb://11" }, { id: "tvdb://21" }, { id: "tvdb://22" }] };
+  const record = (episode: Episode) => ({ id: episode.id, seasonNumber: episode.season, number: episode.episode, name: episode.name, aired: "2020-01-01" });
+  h.state.respond = url => {
+    if (url.hostname === "plex" && url.pathname.startsWith("/library/sections/")) return Response.json({ MediaContainer: { Metadata: [target, other] } });
+    if (url.pathname === "/library/metadata/other") return Response.json({ MediaContainer: { Metadata: [other] } });
+    if (url.pathname.startsWith("/v4/series/21")) return Response.json({}, { status: 404 });
+    if (url.pathname === "/v4/series/22") return Response.json({ data: { id: 22, name: "Other alternate", slug: "other-alternate", defaultSeasonType: 1 } });
+    if (url.pathname === "/v4/series/22/episodes/default") return Response.json({ data: { episodes: [...(listed ? [record(alternate)] : []), { id: 7702, seasonNumber: 1, number: 2, name: "Still listed", aired: "2020-01-01" }] } });
+    if (url.pathname === "/v4/episodes/7701/extended") return Response.json({ data: { id: 7701, seriesId: 22, seasonNumber: 1, number: 1, name: "Alternate" } });
+    return undefined;
+  };
+  await h.rerun();
+  // TVDB 21's standing Coverage Issue keeps coverage pending, so the save is not awaited as settled.
+  const response = await h.save([pinky, alternate]);
+  assert.equal(response.status, 201, await response.clone().text());
+  const match = (await response.json()).mapping as { id: string };
+  await h.rerun();
+  const revision = (await coverage(h)).revision;
+
+  listed = false;
+  h.state.tvdbChanged = [22];
+  h.requests.length = 0;
+  const result = await h.rerun();
+  assert.ok(h.requests.includes("/v4/series/22/episodes/default"), "TVDB 22 was downloaded fresh");
+  assert.equal((result.report.shows.find(show => show.ratingKey === "ratingKey:other") as { tvdbId?: number }).tvdbId, 22, "Animaniacs was compared with the fallback");
+  assert.deepEqual((await h.mappings()).map(mapping => [mapping.id, mapping.members.map(key)]), [[match.id, [key(pinky), key(alternate)]]]);
+  assert.equal((await coverage(h)).revision, revision);
+  assert.deepEqual(removals(), []);
+});
+
+test("a scan that fails after comparing a show, before its report is saved, applies no removal", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  // Target's inventory is held until Animaniacs has been compared, then fails, and so does recording why.
+  compareSecond(h, "/library/metadata/target");
+  h.state.statuses.set("/library/metadata/target", 404);
+  db().exec("CREATE TRIGGER fail_target BEFORE INSERT ON shelfcheck_coverage_issues WHEN NEW.id LIKE '%ratingKey:target%' BEGIN SELECT RAISE(ABORT, 'issue store unavailable'); END;");
+  const failed = await h.scanToEnd();
+  assert.equal(failed.scan.status, "error");
+  assert.equal(failed.scan.error, "issue store unavailable");
+  assert.ok(h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21 was downloaded");
+  await unchanged(h, match, revision);
+});
+
+/** Simulates the process ending: the next process starts with an empty owner record, and the abandoned run settles later. */
+function abandonRunningScan(): Promise<void> {
+  const global = globalThis as typeof globalThis & { __shelfcheckScanRun?: { owner?: unknown } };
+  const abandoned = global.__shelfcheckScanRun!;
+  global.__shelfcheckScanRun = {};
+  return (async () => { while (abandoned.owner) await new Promise(resolve => setTimeout(resolve, 10)); })();
+}
+const processed = async (h: Harness) => ((await h.status()) as unknown as { scan: { processed: number } }).scan.processed;
+
+test("an interrupted scan applies no removal, and the next scan's reused list removes nothing", async t => {
+  const { h, match, revision } = await pinkyGone(t);
+  // The process ends while Target's inventory is outstanding, after Animaniacs was compared.
+  let release!: () => void;
+  h.state.hold.set("/library/metadata/target", new Promise<void>(resolve => { release = resolve; }));
+  await h.start();
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline && await processed(h) < 1;) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(await processed(h), 1, "Animaniacs was compared");
+  assert.ok(h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21 was downloaded fresh");
+  const abandoned = abandonRunningScan();
+  try {
+    h.restart();
+    await unchanged(h, match, revision);
+
+    // The next process reuses the catalogue the interrupted scan downloaded: it proves nothing gone.
+    h.state.tvdbChanged = [];
+    h.state.hold.delete("/library/metadata/target");
+    h.requests.length = 0;
+    await h.rerun();
+    assert.ok(!h.requests.includes("/v4/series/21/episodes/default"), "TVDB 21 was reused");
+    await unchanged(h, match, revision);
+  } finally {
+    // The abandoned run must not commit after the test: a Manual Match change vetoes it.
+    db().exec("UPDATE shelfcheck_coverage_state SET revision=revision+1 WHERE id=1");
+    release();
+    await abandoned;
+  }
+});
+
+test("after a failed cached recheck, the affected shows keep their last-good rows until a later scan compares them", async t => {
+  // Counterexample A: Target's v1 is matched to t1 (owned) and t2 (Other, not owned); t2 is then gone from TMDB 11.
+  const t1: Episode = { provider: "TMDB", id: 9001, season: 1, episode: 1, name: "One" };
+  const v1: Episode = { provider: "TVDB", id: 301, season: 2, episode: 1, name: "One" };
+  const t2: Episode = { provider: "TMDB", id: 9102, season: 1, episode: 2, name: "Two", show: "other" };
+  const o1: Episode = { provider: "TMDB", id: 9101, season: 1, episode: 1, name: "Other one", show: "other" };
+  const ov: Episode = { provider: "TVDB", id: 401, season: 1, episode: 1, name: "Other one", show: "other" };
+  const h = await harness(t, [t1, v1, t2, o1, ov], [t1, o1, ov]);
+  await h.rerun();
+  await saved(h, [t1, t2, v1]);
+  const revision = (await coverage(h)).revision;
+  h.state.gone.add(t2.id);
+  db().exec(`CREATE TRIGGER fail_recheck BEFORE UPDATE OF report ON shelfcheck_scan_state WHEN json_extract(NEW.report, '$.coverageRevision') > ${revision} BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;`);
+  const result = await h.rerun();
+  assert.deepEqual((await h.mappings())[0].members.map(key), [key(t1), key(v1)], "the removal of t2 is committed");
+  assert.deepEqual(h.missing(result), { [key(v1)]: "missing" }, "Target keeps the row the scan compared while t2 was a member");
+  const state = await coverage(h);
+  assert.equal(state.pending, 1);
+  assert.ok(state.issues.some(issue => issue.id === "comparison-pending"));
+
+  db().exec("DROP TRIGGER fail_recheck;");
+  const later = await h.rerun();
+  assert.deepEqual(h.missing(later), {}, "a later scan finds t1 alone now covers v1");
+  assert.equal((await coverage(h)).pending, 0);
+});
+
+test("a scan whose process ends while applying its removals reads as interrupted there; committed removals stay pending until a later scan", async t => {
+  const { h, revision } = await pinkyGone(t);
+  // The removal commits; the process then ends before the cached recheck, still running in the removal phase.
+  db().exec(`CREATE TRIGGER fail_recheck BEFORE UPDATE OF report ON shelfcheck_scan_state WHEN json_extract(NEW.report, '$.coverageRevision') > ${revision} BEGIN SELECT RAISE(ABORT, 'process ended'); END;`);
+  await h.rerun();
+  db().exec("DROP TRIGGER fail_recheck;");
+  const heartbeatAt = new Date(Date.now() - 120_000).toISOString();
+  db().prepare("UPDATE shelfcheck_scan_state SET status=? WHERE mode='plex'").run(JSON.stringify({ status: "running", processed: 2, total: 2, startedAt: heartbeatAt, heartbeatAt, currentPhase: "manual-match-removal" }));
+
+  const interrupted = await h.status() as unknown as { scan: { status: string; error?: string }; coverage: { issues: { id: string; cause?: string; action?: string }[] }; report: { coverageRevision?: number } };
+  assert.equal(interrupted.scan.status, "error", "never recorded as completed");
+  assert.match(interrupted.scan.error!, /saved its report but was interrupted while applying its Manual Match removals/);
+  const failure = interrupted.coverage.issues.find(issue => issue.id === "scan-failure");
+  assert.equal(failure?.cause, interrupted.scan.error);
+  assert.match(failure?.action || "", /compare the shows the removals affect/);
+  assert.ok(interrupted.coverage.issues.some(issue => issue.id === "comparison-pending"), "the committed removal's shows stay pending");
+  assert.deepEqual(await h.mappings(), [], "the committed removal stays");
+  assert.equal(interrupted.report.coverageRevision, revision, "the saved report is the scan's own");
+
+  const later = await h.rerun();
+  const state = await coverage(h);
+  assert.equal(state.pending, 0, "a later scan compares the affected shows");
+  assert.deepEqual(state.issues, []);
+  assert.equal((later.report as { coverageRevision?: number }).coverageRevision, state.revision);
 });

@@ -17,7 +17,7 @@ test("a TVDB enumeration counts every episode ID it returned, including records 
 
   const universe = enumeration.complete();
   assert.deepEqual(ids(universe), [101, 102, 103, 104, 105, 106, 107]);
-  assert.deepEqual({ ...universe, ids: undefined }, { provider: "TVDB", showId: 20, ids: undefined, complete: true, origin: "fresh-download" });
+  assert.deepEqual({ ...universe, ids: undefined }, { provider: "TVDB", showId: 20, ids: undefined });
   // The comparison's own list leaves some of them out, so it can never stand in for the evidence.
   const compared = normalised.episodes.map((episode: { providerEpisodeId?: number }) => episode.providerEpisodeId);
   assert.ok(!compared.includes(104) && !compared.includes(105) && !compared.includes(106));

@@ -896,7 +896,11 @@ test("upgrading a version 6 database adds an empty carried-member table and keep
 const HEALTH_LOG = "Shelfcheck retired Manual Match health: every saved Manual Match can now grant coverage. Its member checks and the Plex Resume point were cleared; the next Plex scan is an ordinary scan.";
 const memberIssue = (id: string) => ({ id, operation: "member-verification", provider: "TVDB", scope: "episode", mappingId: "pending", cause: "503 — TVDB request failed", action: "Retry the Plex scan or review this Manual Match's episode context." });
 
-/** A version 7 database with Manual Matches of every health, their member checks and a Plex Resume point. */
+const coverageGroup = { mappingId: "pending", members: [{ provider: "TMDB", id: 10, status: "missing" }], missing: [{ provider: "TMDB", id: 10, status: "missing", showKey: "target" }] };
+/** The saved Plex report as version 7 left it: each coverage group carried its Manual Match's health. */
+const plexReportV7 = { ...plexReportV5, coverageGroups: [{ ...coverageGroup, health: "pending" }, { ...coverageGroup, mappingId: "unset" }] };
+
+/** A version 7 database with Manual Matches of every health, their member checks, a saved report and a Plex Resume point. */
 function versionSeven(file: string) {
   ignoreResults.savedScanState("plex").snapshot();
   closeCached();
@@ -917,7 +921,7 @@ function versionSeven(file: string) {
       { id: "provider-authentication:TVDB", operation: "provider-authentication", scope: "library", cause: "c", action: "a" },
     ]) db.prepare("INSERT INTO shelfcheck_coverage_issues VALUES(?,?)").run(issue.id, JSON.stringify(issue));
     db.prepare("INSERT INTO shelfcheck_scan_state(mode,report,resume_point,status,options,state_updated_at) VALUES('plex',?,?,?,?,'2026-11-01 00:00:00')")
-      .run(JSON.stringify(plexReportV5), JSON.stringify(plexResumePointV5), JSON.stringify({ status: "completed" }), JSON.stringify(plexLegacySettings));
+      .run(JSON.stringify(plexReportV7), JSON.stringify(plexResumePointV5), JSON.stringify({ status: "completed" }), JSON.stringify(plexLegacySettings));
   });
 }
 
@@ -930,7 +934,7 @@ test("upgrading a version 7 database drops Manual Match health, member checks an
   const requests = t.mock.method(globalThis, "fetch", async () => { throw new Error("The upgrade made a provider request"); });
 
   const plex = ignoreResults.savedScanState("plex").snapshot()!;
-  assert.deepEqual([plex.report, plex.resumePoint, plex.status, plex.options], [plexReportV5, null, { status: "completed" }, plexLegacySettings], "Only the Resume point is rejected; the report keeps its scan cache");
+  assert.deepEqual([plex.report, plex.resumePoint, plex.status, plex.options], [{ ...plexReportV5, coverageGroups: [coverageGroup, { ...coverageGroup, mappingId: "unset" }] }, null, { status: "completed" }, plexLegacySettings], "Only the Resume point is rejected; the report keeps its scan cache and loses only its coverage groups' health");
   assert.deepEqual(logged(info), [[HEALTH_LOG]]);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(requests.mock.callCount(), 0, "No scan starts and nothing is requested");

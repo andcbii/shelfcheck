@@ -200,14 +200,16 @@ export type ScanRunContext<P> = {
    */
   complete(final: ScanRunCompletion): "completed" | "vetoed";
   /**
-   * Completes the run as `complete` does, but awaits the mode's `finalize`
-   * after the commit and the `committed` hook, before the Resume point is
-   * settled and the completed status is recorded. The run keeps its ownership
-   * and the scan run lock until `finalize` settles. A vetoed run never commits
-   * or finalizes. A throw from `finalize` fails the run after its commit, so no
-   * Resume point is forced over the committed report.
+   * Completes the run as `complete` does, but after the commit, the
+   * `committed` hook and settling the Resume point, reports `phase` and awaits
+   * the mode's `finalize` before it records the completed status. The run keeps
+   * its ownership and the scan run lock until `finalize` settles. A vetoed run
+   * never commits or finalizes. A throw from `finalize` fails the run after its
+   * commit, so no Resume point is forced over the committed report. A process
+   * that ends during `finalize` leaves the run running in `phase`, so a later
+   * read records it as interrupted there, never as completed.
    */
-  completeAfter(final: ScanRunCompletion & { finalize(): Promise<void> }): Promise<"completed" | "vetoed">;
+  completeAfter(final: ScanRunCompletion & { phase: string; finalize(): Promise<void> }): Promise<"completed" | "vetoed">;
 };
 
 /** A run's completion: the mode's commit (its report write) and the completed status's counts and log details. */
@@ -409,10 +411,14 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       },
       complete(final) {
         if (!commit(final)) return "vetoed";
+        settleResumePoint();
         return succeed(final);
       },
       async completeAfter(final) {
         if (!commit(final)) return "vetoed";
+        settleResumePoint();
+        phase = final.phase;
+        update({ currentPhase: phase });
         await final.finalize();
         return succeed(final);
       },
@@ -431,16 +437,18 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
       hooks.committed?.();
       return true;
     };
-    /** After the commit: settles the Resume point, records the completed status and logs the completion. */
-    const succeed = (final: ScanRunCompletion): "completed" => {
+    /** After the commit: a full run clears the Resume point; a single-show run prunes its show from it. */
+    const settleResumePoint = () => {
       const store = mode.resumePoint;
-      if (store) {
-        if (runOptions.fullRun) store.clear();
-        else if (storedPoint && runOptions.pruneResumePoint) {
-          const next = runOptions.pruneResumePoint(storedPoint);
-          if (next) store.write(next); else store.clear();
-        }
+      if (!store) return;
+      if (runOptions.fullRun) store.clear();
+      else if (storedPoint && runOptions.pruneResumePoint) {
+        const next = runOptions.pruneResumePoint(storedPoint);
+        if (next) store.write(next); else store.clear();
       }
+    };
+    /** After the commit and the settled Resume point: records the completed status and logs the completion. */
+    const succeed = (final: ScanRunCompletion): "completed" => {
       hooks.succeeded?.();
       // A clean finish: replace, so no pause or active work survives the run.
       mode.status.write({ status: "completed", processed: final.processed, total: final.total, startedAt, finishedAt: final.finishedAt } as S);

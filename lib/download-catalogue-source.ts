@@ -73,9 +73,8 @@ class SeriesNotFound {
   constructor(readonly error: unknown, readonly countedDays: number) {}
 }
 
-/** A download's episode-ID evidence, only when it enumerated this provider's own series; never saved with the record. */
-const evidenceFor = (provider: EpisodeIdUniverse["provider"], showId: number, downloaded: DownloadedEpisodes) =>
-  downloaded.episodeIds?.provider === provider && downloaded.episodeIds.showId === showId ? { episodeIds: downloaded.episodeIds } : {};
+/** A download's episode-ID evidence, handed to the resolver as enumerated and never saved with the record; the resolver decides whose it is. */
+const evidenceOf = (downloaded: DownloadedEpisodes) => downloaded.episodeIds ? { episodeIds: downloaded.episodeIds } : {};
 
 type TmdbRecord = PlexGeneratedInputs["tmdb"][string];
 type TvdbRecord = PlexGeneratedInputs["tvdb"][string];
@@ -169,7 +168,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
     seriesNotFound.resetAfterCompleteDownload("tmdb", id);
     delete inputs.deferredTmdbChanges[String(downloaded.id)];
     saveDeferredTmdbChanges(inputs.deferredTmdbChanges);
-    return { outcome: "downloaded", id: downloaded.id, catalogue: { show: downloaded, episodes, malformed }, downloadedAt: record.downloadedAt, ...associated(downloaded), ...evidenceFor("TMDB", downloaded.id, enumerated) };
+    return { outcome: "downloaded", id: downloaded.id, catalogue: { show: downloaded, episodes, malformed }, downloadedAt: record.downloadedAt, ...associated(downloaded), ...evidenceOf(enumerated) };
   }
 
   async function loadTvdb(id: number, settings: CatalogueLoadSettings): Promise<CatalogueLoad<TvdbCatalogue>> {
@@ -198,7 +197,7 @@ export function downloadCatalogueSource(options: DownloadCatalogueSourceOptions)
       savePlexCatalogue("tvdb", id, inputs.tvdb[String(id)]);
       seriesNotFound.resetAfterCompleteDownload("tvdb", id);
     }
-    return { outcome: reused ? "reused" : "downloaded", id, catalogue: { episodes: recovery.episodes, malformed: tvdb.malformed, slug: tvdb.slug, titleRecovery: { state: recovery.unresolved, carried: false } }, downloadedAt: inputs.tvdb[String(id)].downloadedAt, ...(reused ? {} : evidenceFor("TVDB", id, tvdb)) };
+    return { outcome: reused ? "reused" : "downloaded", id, catalogue: { episodes: recovery.episodes, malformed: tvdb.malformed, slug: tvdb.slug, titleRecovery: { state: recovery.unresolved, carried: false } }, downloadedAt: inputs.tvdb[String(id)].downloadedAt, ...(reused ? {} : evidenceOf(tvdb)) };
   }
 
   const loaders: { [K in CatalogueProvider]: (id: number, settings: CatalogueLoadSettings) => Promise<CatalogueLoad<DownloadCataloguePayloads[K]>> } = { tmdb: loadTmdb, tvdb: loadTvdb };

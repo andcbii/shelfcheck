@@ -62,6 +62,9 @@ const SCAN_STEP_WORDING: Record<string, string> = {
   "episode-crosswalk": "Matching episode numbers between providers",
 };
 
+/** The Plex progress box's heading while the Scan run is preparing and no show has started. */
+export const PLEX_PREPARING_HEADING = "Scanning Plex and providers";
+
 const SCAN_PREPARATION_WORDING: Record<string, string> = {
   initializing: "Getting ready…",
 };

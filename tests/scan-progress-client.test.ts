@@ -140,11 +140,13 @@ test("a Plex page opened before the first show starts says it is getting ready, 
   const nextPoll = pending();
   const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing" }), nextPoll.promise] });
   assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, "Getting ready…", "shown from the first load, before any poll answers");
+  assert.equal(page.box()?.querySelector(".scan-progress-head strong")?.textContent, "Scanning Plex and providers");
   assert.deepEqual(page.lines(), []);
 
   nextPoll.resolve(running({ processed: 0, total: 188, currentPhase: "plex-inventory", activeShows: active(["Bluey", "plex-inventory"]) }));
   await page.advance();
   assert.equal(page.box()?.querySelector(".scan-progress-solo"), null);
+  assert.equal(page.box()?.querySelector(".scan-progress-head strong")?.textContent, "Now checking");
   assert.deepEqual(page.lines(), [["Bluey", "Reading episodes in Plex"]]);
 });
 

@@ -11,25 +11,28 @@ type ScanProgressBoxProps = {
   paused: boolean;
   /** How many shows the page's scan checks at once; more lines than that are not shown. */
   maxShows: number;
+  /** The heading while the Scan run is preparing and no show has started; "Now checking" when not given. */
+  preparingHeading?: string;
 };
 
 /**
  * The box under a report heading while the page follows a Scan run: the shows
  * it is checking right now, each with its step in plain English, or what it is
- * doing before the first show starts, over the acid progress bar. The scan
+ * doing before the first show starts, over the acid progress bar. The heading reads
+ * "Now checking", or the page's preparing heading before the first show starts. The scan
  * button already shows the "N of M" count, so the box does not repeat it.
  *
  * During a rate-limit pause the box is marked paused (its show lines dim), its
  * heading reads "Waiting", and a notice names the provider with the resume time
  * and a countdown when the status says when the pause ends.
  */
-export function ScanProgressBox({ progress, status, paused, maxShows }: ScanProgressBoxProps) {
+export function ScanProgressBox({ progress, status, paused, maxShows, preparingHeading }: ScanProgressBoxProps) {
   const shows = activeScanShows(status.activeShows).slice(0, maxShows);
   const preparing = shows.length === 0 ? scanPreparationWording(status.currentPhase) : null;
   const resumeAt = paused && status.rateLimitResumeAt ? Date.parse(status.rateLimitResumeAt) : NaN;
   const resumesAt = Number.isFinite(resumeAt) ? new Date(resumeAt) : null;
   return <div className="scan-progress" data-paused={paused ? "true" : undefined}>
-    <div className="scan-progress-head"><strong>{paused ? "Waiting" : "Now checking"}</strong><span>Progress is saved periodically.</span></div>
+    <div className="scan-progress-head"><strong>{paused ? "Waiting" : (preparing && preparingHeading) || "Now checking"}</strong><span>Progress is saved periodically.</span></div>
     {paused && <p className="scan-progress-pause">
       <span aria-hidden="true">⏸</span>
       <span className="scan-progress-pause-text">{rateLimitPauseWording(status.rateLimitProvider, resumesAt)}</span>

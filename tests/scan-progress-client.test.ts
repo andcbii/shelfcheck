@@ -1,81 +1,11 @@
 import assert from "node:assert/strict";
-import test, { type TestContext } from "node:test";
-import { act, createElement, type FunctionComponent } from "react";
-import PlexPage from "../app/plex/page";
-import TraktPage from "../app/trakt/page";
-import { mountDom } from "./dom-environment";
-import { installWindowClock } from "./window-clock";
+import test from "node:test";
+import { active, mountPage, mountPaused, paused, pending, running, SHOWS, START } from "./scan-progress-harness";
 
 // The progress box under each report heading shows the shows the Scan run is
 // checking and their step, from the page's status answers. Every server answer
 // is faked; the clock (Date and the page's window timers) moves only when a
 // test moves it, one second at a time.
-
-type Status = Record<string, unknown>;
-type Reply = Status | Error | Promise<Status>;
-
-const START = new Date("2026-11-24T12:00:00.000Z");
-const SHOWS = ["Severance", "The Bear", "Slow Horses", "Andor", "Shrinking", "Fallout", "Silo"];
-const running = (extra: Status = {}): Status => ({ status: "running", processed: 41, total: 312, rateLimitPaused: false, ...extra });
-const active = (...shows: [show: string, phase: string][]) => shows.map(([show, phase], index) => ({ key: String(index + 1), show, phase }));
-
-type Server = {
-  /** The page's own status answers, in order; the last one repeats. */
-  statuses: Reply[];
-  statusRequests: number;
-  /** The Trakt status the page bootstraps from /api/state. */
-  stateScan: Status;
-};
-
-async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partial<Server> = {}) {
-  const server: Server = { statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, stateScan: { status: "idle", processed: 0, total: 0 }, ...initial };
-  const status = async () => {
-    const reply = server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
-    if (reply instanceof Error) throw reply;
-    return reply;
-  };
-  const fetcher: typeof fetch = async (input) => {
-    if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
-    if (input === "/api/config") return Response.json({ connected: true, applicationConfigured: true });
-    if (input === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0, scan: server.stateScan } });
-    if (input === "/api/scan") return Response.json({ scan: await status() });
-    if (input === "/api/plex/config") return Response.json({ configured: true, plexUrl: "http://plex.example.test" });
-    if (input === "/api/plex/state") return Response.json({ settings: { ignoredShows: [], ignoredSeasons: [] } });
-    if (input === "/api/plex/scan") return Response.json({ scan: await status(), report: null, coverage: { revision: 0, pending: 0, issues: [] } });
-    throw new Error(`Unexpected request: ${String(input)}`);
-  };
-  const { browser, container, root } = mountDom(t, { fetch: fetcher });
-  for (const [key, value] of Object.entries({ self: browser, navigator: browser.navigator, Element: browser.Element })) {
-    const previous = Object.getOwnPropertyDescriptor(globalThis, key);
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-    t.after(() => { if (previous) Object.defineProperty(globalThis, key, previous); else Reflect.deleteProperty(globalThis, key); });
-  }
-  const clock = installWindowClock(t, browser, START);
-  await act(async () => { root.render(createElement((page === "trakt" ? TraktPage : PlexPage) as FunctionComponent)); });
-  await settle();
-  const box = () => container.querySelector(".scan-progress");
-  const lines = () => Array.from(container.querySelectorAll(".scan-progress-shows li")).map((line) => [line.querySelector(".scan-progress-show")?.textContent, line.querySelector(".scan-progress-step")?.textContent]);
-  /** Moves the clock one second at a time, settling fetch and React work after each. */
-  const advance = async (seconds = 1) => {
-    for (let second = 0; second < seconds; second += 1) {
-      await act(async () => { clock.advanceTo(new Date(Date.now() + 1000)); });
-      await settle();
-    }
-  };
-  /** Replaces the status answers and restarts their count, so the next poll gets the first. */
-  const nextStatuses = (...statuses: Reply[]) => { server.statuses = statuses; server.statusRequests = 0; };
-  return { server, container, root, box, lines, advance, nextStatuses };
-}
-
-async function settle() {
-  for (let index = 0; index < 5; index += 1) await act(async () => { await new Promise((resolve) => setImmediate(resolve)); });
-}
-
-function pending() {
-  let resolve!: (status: Status) => void;
-  const promise = new Promise<Status>((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 test("a Trakt page opened mid-scan lists the shows being checked before its first poll answers", async (t) => {
   const firstPoll = pending();
@@ -239,3 +169,94 @@ test("the Plex box goes away when the scan completes or fails", async (t) => {
     assert.match(page.container.querySelector(".error")?.textContent || "", /Plex is unreachable\./);
   });
 });
+
+// A rate-limit pause: the box names the provider, with the resume time and a
+// countdown that ticks on its own while the next status answer is held pending.
+
+const at = (seconds: number) => new Date(START.getTime() + seconds * 1000).toISOString();
+const PAGES = [
+  { page: "trakt", provider: "Trakt", radar: "PAUSED - RATE LIMIT", button: /^Paused due to Rate Limit/ },
+  { page: "plex", provider: "TMDB", radar: "PAUSED · TMDB", button: /^Paused for TMDB rate limit/ },
+] as const;
+for (const { page, provider, radar, button } of PAGES) {
+  test(`a paused ${page} scan names the provider and counts down to the resume time between status answers`, async (t) => {
+    const view = await mountPaused(t, page, paused(provider, at(250)));
+    assert.equal(view.box()?.getAttribute("data-paused"), "true", "the box is marked paused, which dims its show lines");
+    assert.equal(view.heading(), "Waiting");
+    assert.match(view.notes() || "", new RegExp(`^Paused: ${provider} rate limit\\. Resumes at \\d{2}:\\d{2}\\.$`));
+    assert.equal(view.countdown(), "4m 10s");
+    assert.deepEqual(view.lines().map(([show]) => show), ["Severance", "Bluey"], "the show lines stay, dimmed");
+    assert.equal(view.radar(), radar, "the radar is unchanged");
+    assert.match(view.button(), button, "the scan button is unchanged");
+
+    await view.advance();
+    assert.equal(view.countdown(), "4m 9s", "the countdown ticks while the next status answer is pending");
+    await view.advance(3);
+    assert.equal(view.countdown(), "4m 6s");
+  });
+
+  test(`a paused ${page} scan without a known end says it is waiting for the limit to clear`, async (t) => {
+    const view = await mountPaused(t, page, paused(provider, undefined));
+    assert.equal(view.notes(), `Paused: ${provider} rate limit. Waiting for it to clear.`);
+    assert.equal(view.countdown(), null, "no made-up time");
+    assert.equal(view.heading(), "Waiting");
+  });
+
+  test(`a ${page} pause with a new provider or deadline replaces the old one`, async (t) => {
+    const view = await mountPaused(t, page, paused(provider, at(250)));
+    view.nextPoll.resolve(paused("TVDB", at(91)));
+    await view.advance();
+    assert.match(view.notes() || "", /^Paused: TVDB rate limit\. Resumes at \d{2}:\d{2}\.$/);
+    assert.equal(view.countdown(), "1m 30s");
+    view.nextStatuses(paused("TVDB", undefined));
+    await view.advance();
+    assert.equal(view.notes(), "Paused: TVDB rate limit. Waiting for it to clear.");
+    assert.equal(view.countdown(), null);
+  });
+
+  test(`a ${page} countdown stops at zero and the box stays paused until a status clears the pause`, async (t) => {
+    const view = await mountPaused(t, page, paused(provider, at(2)));
+    assert.equal(view.countdown(), "2s");
+    await view.advance(4);
+    assert.equal(view.countdown(), "0s");
+    assert.equal(view.box()?.getAttribute("data-paused"), "true");
+    assert.equal(view.heading(), "Waiting");
+
+    view.nextPoll.resolve(running({ activeShows: active(["Severance", "poster"]) }));
+    await view.advance();
+    assert.equal(view.notice(), null, "the notice goes away");
+    assert.equal(view.box()?.hasAttribute("data-paused"), false, "the show lines return to normal");
+    assert.equal(view.heading(), "Now checking");
+    assert.deepEqual(view.lines(), [["Severance", "Fetching the poster"]]);
+  });
+
+  test(`a paused ${page} box goes away when the scan completes or fails`, async (t) => {
+    await t.test("completes", async (t) => {
+      const view = await mountPaused(t, page, paused(provider, at(250)));
+      view.nextPoll.resolve({ status: "completed", processed: 312, total: 312 });
+      await view.advance();
+      assert.equal(view.box(), null);
+    });
+    await t.test("fails", async (t) => {
+      const view = await mountPaused(t, page, paused(provider, at(250)));
+      view.nextPoll.resolve({ status: "error", processed: 41, total: 312, error: "The scan failed." });
+      await view.advance();
+      assert.equal(view.box(), null);
+    });
+  });
+
+  test(`a ${page} countdown stops its timer when the page closes`, async (t) => {
+    const view = await mountPaused(t, page, paused(provider, at(250)));
+    const nextTick = Date.now() + 1000;
+    assert.ok(view.clock.pending().includes(nextTick), "the countdown waits for its next second");
+    await view.unmount();
+    assert.ok(!view.clock.pending().includes(nextTick), "the countdown's timer is cleared");
+  });
+
+  test(`an older ${page} status paused with no provider, end or shows still shows the notice`, async (t) => {
+    const view = await mountPaused(t, page, { status: "running", processed: 3, total: 12, rateLimitPaused: true });
+    assert.equal(view.notes(), "Paused: rate limit. Waiting for it to clear.");
+    assert.deepEqual(view.lines(), []);
+    assert.equal(view.heading(), "Waiting");
+  });
+}

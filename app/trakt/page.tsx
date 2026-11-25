@@ -575,7 +575,7 @@ export default function Home() {
         {error && <div className="error"><span>!</span><p><strong>{errorContext === "auth" ? "Trakt login failed" : "Scan interrupted"}</strong>{error}</p></div>}
         {cacheMessage && !settingsOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
         {!lastScan && !scanning && !error && <div className="empty"><div>✓</div><h3>No report yet</h3><p>Connect Trakt and run your first scan. Shelfcheck will list every aired episode missing from your collection.</p></div>}
-        {scanning && <ScanProgressBox progress={progress} status={scanProgress} maxShows={TRAKT_ACTIVE_SHOWS} />}
+        {scanning && <ScanProgressBox progress={progress} status={scanProgress} paused={activelyRateLimitPaused} maxShows={TRAKT_ACTIVE_SHOWS} />}
         {lastScan && grouped.length > 0 && <div className="show-list">{grouped.map(({ show, episodes }) => {
           const percentCollected = show.collection?.aired ? Math.round((show.collection.completed / show.collection.aired) * 100) : null;
           const showCollapsed = collapsedShows.has(show.ids.trakt);

@@ -85,3 +85,20 @@ export function activeScanShows(value: unknown): ActiveScanShow[] {
     return typeof key === "string" && typeof show === "string" && typeof phase === "string";
   });
 }
+
+/** The pause notice: the provider, if the status names one, and the local HH:MM it resumes at, if known. */
+export function rateLimitPauseWording(provider: string | undefined, resumesAt: Date | null): string {
+  const paused = provider ? `Paused: ${provider} rate limit.` : "Paused: rate limit.";
+  if (!resumesAt) return `${paused} Waiting for it to clear.`;
+  const time = `${String(resumesAt.getHours()).padStart(2, "0")}:${String(resumesAt.getMinutes()).padStart(2, "0")}`;
+  return `${paused} Resumes at ${time}.`;
+}
+
+/** Whole seconds left in a pause, as "1h 2m 3s", "4m 10s" or "9s". */
+export function pauseCountdownWording(seconds: number): string {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${rest}s`;
+  return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
+}

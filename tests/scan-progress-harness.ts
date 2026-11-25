@@ -21,19 +21,22 @@ type Server = {
   /** The page's own status answers, in order; the last one repeats. */
   statuses: Reply[];
   statusRequests: number;
+  /** How many scans the page started. */
+  starts: number;
   /** The Trakt status the page bootstraps from /api/state. */
   stateScan: Status;
 };
 
 export async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partial<Server> = {}) {
-  const server: Server = { statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, stateScan: { status: "idle", processed: 0, total: 0 }, ...initial };
+  const server: Server = { statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, starts: 0, stateScan: { status: "idle", processed: 0, total: 0 }, ...initial };
   const status = async () => {
     const reply = server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
     if (reply instanceof Error) throw reply;
     return reply;
   };
-  const fetcher: typeof fetch = async (input) => {
+  const fetcher: typeof fetch = async (input, init) => {
     if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
+    if (init?.method === "POST") { server.starts += 1; return Response.json({}); }
     if (input === "/api/config") return Response.json({ connected: true, applicationConfigured: true });
     if (input === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0, scan: server.stateScan } });
     if (input === "/api/scan") return Response.json({ scan: await status() });

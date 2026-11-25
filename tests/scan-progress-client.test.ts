@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act } from "react";
 import { active, mountPage, mountPaused, paused, pending, running, SHOWS, START } from "./scan-progress-harness";
 
 // The progress box under each report heading shows the shows the Scan run is
@@ -258,5 +259,26 @@ for (const { page, provider, radar, button } of PAGES) {
     assert.equal(view.notes(), "Paused: rate limit. Waiting for it to clear.");
     assert.deepEqual(view.lines(), []);
     assert.equal(view.heading(), "Waiting");
+  });
+}
+
+for (const { page, start } of [{ page: "trakt", start: "Quick scan" }, { page: "plex", start: "New Plex search" }] as const) {
+  test(`a new ${page} scan does not show the shows or pause of a run whose polling failed`, async (t) => {
+    const view = await mountPage(t, page, page === "trakt"
+      ? { stateScan: paused("Trakt", undefined), statuses: [new TypeError("network down")] }
+      : { statuses: [paused("TMDB", undefined), new TypeError("network down")] });
+    await view.advance();
+    assert.equal(view.box(), null, "polling ended");
+
+    const firstPoll = pending();
+    view.nextStatuses(firstPoll.promise);
+    const button = Array.from(view.container.querySelectorAll("button")).find((item) => item.textContent?.includes(start));
+    assert.ok(button, `${start} is shown`);
+    await act(async () => { button.click(); });
+    await view.advance();
+    assert.equal(view.server.starts, 1);
+    assert.ok(view.box(), "the new scan's box shows while its first poll is pending");
+    assert.deepEqual(view.lines(), [], "no show lines from the failed run");
+    assert.equal(view.box()?.hasAttribute("data-paused"), false, "no pause from the failed run");
   });
 }

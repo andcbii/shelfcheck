@@ -36,7 +36,7 @@ import { parsePlexPreferences } from "@/lib/preferences";
 type Missing = { season: number; episode: number; title?: string; airDate?: string; tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: ("TMDB" | "TVDB")[] };
 type Show = { ratingKey: string; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number; missing: Missing[]; warning?: string; catalogueSelection?: ShowCatalogueSelection; providerResolution?: PlexProviderResolution };
 type Report = { shows: Show[]; lastScan: string; coverageGroups?: CoverageGroup[]; scanCache?: Record<string, unknown> };
-type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" } & Omit<ScanProgressStatus, "rateLimitProvider">;
+type Status = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; error?: string; rateLimitProvider?: "Plex" | "TMDB" | "TVDB" } & ScanProgressStatus;
 // A Plex scan checks up to three shows at once.
 const PLEX_ACTIVE_SHOWS = 3;
 type ConfigStatus = { plexUrl: string; plexTokenSaved: boolean; tmdbTokenSaved: boolean; tvdbApiKeySaved: boolean; tvdbPinSaved: boolean; configured: boolean };
@@ -216,6 +216,8 @@ export default function PlexPage() {
     reportInvalidations.current = new Set(activeIgnores(settings.ignoredShows).map((item) => item.ratingKey));
     abort();
     setError("");
+    // A run whose polling failed left its shows and pause behind; the new run starts without them.
+    setStatus((current) => ({ status: current.status, processed: current.processed, total: current.total }));
     try {
       const response = await fetch("/api/plex/scan", {
         method: "POST",

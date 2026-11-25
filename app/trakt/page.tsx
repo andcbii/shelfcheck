@@ -201,10 +201,12 @@ export default function Home() {
         setShows(remoteReport.shows); setMissing(remoteReport.missing); setLastScan(remoteReport.lastScan); setSettingsOpen(false);
         replaceReportCache(new Set(Object.keys(remoteReport.scanCache || {})));
       }
-      if (state.scan?.status === "running") showScanStatus(state.scan);
-      if (state.scan?.status === "running") void pollServerScan().catch((pollError) => {
-        if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
-      });
+      if (state.scan?.status === "running") {
+        showScanStatus(state.scan);
+        void pollServerScan().catch((pollError) => {
+          if (!(pollError instanceof DOMException && pollError.name === "AbortError")) setError(pollError instanceof Error ? pollError.message : "Shelfcheck could not resume scan progress.");
+        });
+      }
     }).catch(() => { /* local browser copy remains available */ });
     return () => {
       abortScanPoll();
@@ -499,6 +501,9 @@ export default function Home() {
     setFullRescanConfirmOpen(false);
     setErrorContext("scan");
     setError("");
+    // A run whose polling failed left its shows and pause behind; the new run starts without them.
+    setRateLimitPaused(false);
+    setScanProgress({});
     try {
       const response = await fetch("/api/scan", {
         method: "POST",

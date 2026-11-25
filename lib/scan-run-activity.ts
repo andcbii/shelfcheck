@@ -1,10 +1,13 @@
 /**
  * The single source of the Scan run kinds, their labels and the words a page
  * or a refused start uses for the Scan run that owns the lock, and what GET
- * /api/scan-runs reports about it. Browser-safe: pages import it, so it must
- * not import the lifecycle module (which is server code); the lifecycle
- * imports its kinds, labels and messages from here.
+ * /api/scan-runs reports about it; and the words a page's progress box uses
+ * for a running Scan run's steps and rate-limit pauses. Browser-safe: pages
+ * import it, so it must not import the lifecycle module (which is server
+ * code); the lifecycle imports its kinds, labels and messages from here.
  */
+import type { ActiveScanWork } from "@/lib/scan-concurrency";
+import type { ProviderName } from "@/lib/provider-policy";
 
 export type ScanRunKind = "trakt" | "plex";
 
@@ -33,9 +36,6 @@ export function parseActiveScanRun(value: unknown): ActiveScanRun | null | undef
   return { kind, startedAt };
 }
 
-/** One show a Scan run is checking right now, and the step it is on. */
-export type ActiveScanShow = { key: string; show: string; phase: string };
-
 /**
  * The parts of a Scan run status a page's progress box shows. Every field is
  * optional and loosely typed: an older saved status may lack them.
@@ -44,7 +44,7 @@ export type ScanProgressStatus = {
   activeShows?: unknown;
   currentPhase?: string;
   rateLimitPaused?: boolean;
-  rateLimitProvider?: string;
+  rateLimitProvider?: ProviderName;
   rateLimitResumeAt?: string;
 };
 
@@ -77,9 +77,9 @@ export function scanPreparationWording(currentPhase: string | undefined): string
 }
 
 /** The well-formed shows of a status's `activeShows`, skipping anything an older or damaged status holds instead. */
-export function activeScanShows(value: unknown): ActiveScanShow[] {
+export function activeScanShows(value: unknown): ActiveScanWork[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((item): item is ActiveScanShow => {
+  return value.filter((item): item is ActiveScanWork => {
     if (!item || typeof item !== "object") return false;
     const { key, show, phase } = item as Record<string, unknown>;
     return typeof key === "string" && typeof show === "string" && typeof phase === "string";

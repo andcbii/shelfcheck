@@ -18,6 +18,8 @@ export const running = (extra: Status = {}): Status => ({ status: "running", pro
 export const active = (...shows: [show: string, phase: string][]) => shows.map(([show, phase], index) => ({ key: String(index + 1), show, phase }));
 
 type Server = {
+  /** What GET /api/scan-runs answers: the Scan run that owns the lock, if any. */
+  activity: { kind: "trakt" | "plex"; startedAt: string } | null;
   /** The page's own status answers, in order; the last one repeats. */
   statuses: Reply[];
   statusRequests: number;
@@ -25,24 +27,30 @@ type Server = {
   starts: number;
   /** The Trakt status the page bootstraps from /api/state. */
   stateScan: Status;
+  /** The saved Trakt report /api/state carries, and the saved Plex report every Plex status answer carries. */
+  traktReport?: unknown;
+  plexReport: unknown;
+  /** The Plex artwork index the Trakt page reads for poster fallbacks. */
+  artwork: unknown[];
 };
 
 export async function mountPage(t: TestContext, page: "trakt" | "plex", initial: Partial<Server> = {}) {
-  const server: Server = { statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, starts: 0, stateScan: { status: "idle", processed: 0, total: 0 }, ...initial };
+  const server: Server = { activity: null, statuses: [{ status: "completed", processed: 1, total: 1 }], statusRequests: 0, starts: 0, stateScan: { status: "idle", processed: 0, total: 0 }, plexReport: null, artwork: [], ...initial };
   const status = async () => {
     const reply = server.statuses[Math.min(server.statusRequests++, server.statuses.length - 1)];
     if (reply instanceof Error) throw reply;
     return reply;
   };
   const fetcher: typeof fetch = async (input, init) => {
-    if (input === "/api/scan-runs") return Response.json({ activeScanRun: null });
+    if (input === "/api/scan-runs") return Response.json({ activeScanRun: server.activity });
     if (init?.method === "POST") { server.starts += 1; return Response.json({}); }
     if (input === "/api/config") return Response.json({ connected: true, applicationConfigured: true });
-    if (input === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0, scan: server.stateScan } });
+    if (input === "/api/state") return Response.json({ state: { ignoredShows: [], ignoredSeasons: [], diagnosticsEnabled: true, airingGraceDays: 0, report: server.traktReport, scan: server.stateScan } });
     if (input === "/api/scan") return Response.json({ scan: await status() });
     if (input === "/api/plex/config") return Response.json({ configured: true, plexUrl: "http://plex.example.test" });
     if (input === "/api/plex/state") return Response.json({ settings: { ignoredShows: [], ignoredSeasons: [] } });
-    if (input === "/api/plex/scan") return Response.json({ scan: await status(), report: null, coverage: { revision: 0, pending: 0, issues: [] } });
+    if (input === "/api/plex/scan") return Response.json({ scan: await status(), report: server.plexReport, coverage: { revision: 0, pending: 0, issues: [] } });
+    if (input === "/api/plex/artwork") return Response.json({ shows: server.artwork });
     throw new Error(`Unexpected request: ${String(input)}`);
   };
   const { browser, container, root } = mountDom(t, { fetch: fetcher });

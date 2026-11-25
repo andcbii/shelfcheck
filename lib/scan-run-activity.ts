@@ -27,6 +27,9 @@ export function scanRunLockMessage(running: ScanRunKind, requested: ScanRunKind)
     : `A ${label} scan is running. You can start a ${SCAN_RUN_LABELS[requested]} scan when it finishes.`;
 }
 
+/** What a page's scan button reads while a Scan run of the other kind owns the lock; the lock message under it names that run. */
+export const OTHER_SCAN_RUN_BUTTON = "Another scan is in progress";
+
 /** Reads a /api/scan-runs body, or a 409 body's `activeScanRun`; anything else is not an observation. */
 export function parseActiveScanRun(value: unknown): ActiveScanRun | null | undefined {
   if (value === null) return null;

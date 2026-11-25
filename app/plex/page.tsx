@@ -27,7 +27,7 @@ import { plexPosterSrc } from "@/lib/plex-poster";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { ScanProgressBox } from "@/app/components/scan-progress-box";
-import type { ScanProgressStatus } from "@/lib/scan-run-activity";
+import { OTHER_SCAN_RUN_BUTTON, type ScanProgressStatus } from "@/lib/scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useClearCache } from "@/app/hooks/use-clear-cache";
 import { useLocalToday } from "@/app/hooks/use-local-today";
@@ -193,6 +193,8 @@ export default function PlexPage() {
   const visible = useMemo(() => view.shows.map((show) => ({ ...show.source, missing: show.episodes, percent: show.percent })), [view]);
   const missingCount = view.totals.missingEpisodes;
   const activelyRateLimitPaused = scanning && status.status === "running" && status.rateLimitPaused === true;
+  // The scan button says another scan holds the lock only when it knows one does, and this page is not following its own.
+  const otherScanLocked = !scanning && activity.lockedByOtherKind;
   const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
   // A first-ever scan has no report yet: the progress box stands alone, without the empty state.
@@ -406,7 +408,7 @@ export default function PlexPage() {
     </header>
     <section className="hero">
       <div><p className="eyebrow">PLEX LIBRARY AUDIT</p><h1>Find what Plex<br />doesn’t have.</h1><p className="intro">Shelfcheck scans every show in your Plex TV libraries, resolves its TMDB and TVDB IDs, and compares your files with every non-special episode listed by both providers.</p></div>
-      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className="primary" onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : "New Plex search"}<b>→</b></button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
+      <div className="scan-panel"><div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? `PAUSED · ${status.rateLimitProvider}` : scanning ? "SCANNING" : "MISSING"}</small></div><button className={otherScanLocked ? "primary scan-locked" : "primary"} onClick={() => void scan()} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? `Paused for ${status.rateLimitProvider} rate limit` : scanning ? `Checking ${status.processed} of ${status.total}…` : otherScanLocked ? OTHER_SCAN_RUN_BUTTON : "New Plex search"}{!otherScanLocked && <b>→</b>}</button><p>{report ? `Last scan ${new Date(report.lastScan).toLocaleString()}` : "Only library metadata is read from Plex."}</p>{activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}</div>
     </section>
     <div className="summary-wrap"><section className="summary scan-summary"><div><span>SHOWS IN COLLECTION</span><strong>{report?.shows.length || 0}</strong></div><div><span>SHOWS WITH MISSING EPISODES</span><strong>{view.totals.shows}</strong></div><div><span>MISSING EPISODES</span><strong>{missingCount}</strong></div><div className="ignored-stat"><button type="button" onClick={() => setIgnoredOpen((open) => !open)}><span>IGNORED SHOWS ↗</span><strong>{activeIgnoredShows.length + activeIgnoredSeasons.length}</strong></button></div></section>
       {ignoredOpen && <IgnoredShowsManager items={[...activeIgnoredShows.map((show) => ({ ...show, key: ignoreManagerKey("show", show.ratingKey), title: show.title })), ...activeIgnoredSeasons.map((show) => ({ ...show, key: ignoreManagerKey("seasons", show.ratingKey), title: show.title, detail: `▤ ${show.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}` }))]} onClose={() => setIgnoredOpen(false)} onChangeDuration={changeIgnoreDuration} onRestore={restoreManagerItem} />}

@@ -20,7 +20,7 @@ import { scanProgressPercent } from "@/lib/scan-progress";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { usePlexArtwork } from "@/app/hooks/use-plex-artwork";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
-import type { ScanProgressStatus } from "@/lib/scan-run-activity";
+import { OTHER_SCAN_RUN_BUTTON, type ScanProgressStatus } from "@/lib/scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useLocalToday } from "@/app/hooks/use-local-today";
 import { useClearCache } from "@/app/hooks/use-clear-cache";
@@ -318,6 +318,8 @@ export default function Home() {
   const grouped = useMemo(() => view.shows.map((show) => ({ show: show.source, episodes: show.episodes })), [view]);
   const missingCount = view.totals.missingEpisodes;
   const activelyRateLimitPaused = scanning && rateLimitPaused === true;
+  // The scan button says another scan holds the lock only when it knows one does, and this page is not following its own.
+  const otherScanLocked = !scanning && activity.lockedByOtherKind;
 
   function chooseSort(field: "title" | "percent") {
     if (field === sortField) setSortAscending((ascending) => !ascending);
@@ -555,7 +557,7 @@ export default function Home() {
         </div>
         <div className="scan-panel">
           <div className="radar"><span>{scanning ? `${progress}%` : missingCount}</span><small>{activelyRateLimitPaused ? "PAUSED - RATE LIMIT" : scanning ? "SCANNING" : "MISSING"}</small></div>
-          <button className="primary" onClick={() => scanLibrary(false)} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : "Quick scan"}<b>→</b></button>
+          <button className={otherScanLocked ? "primary scan-locked" : "primary"} onClick={() => scanLibrary(false)} disabled={scanning || activity.locked}>{activelyRateLimitPaused ? "Paused due to Rate Limit" : scanning ? `Checking ${processed} of ${total || shows.length}…` : otherScanLocked ? OTHER_SCAN_RUN_BUTTON : "Quick scan"}{!otherScanLocked && <b>→</b>}</button>
           <p>{lastScan ? `Last scan ${formatLastScan(lastScan)}` : "Only your collection metadata is read."}</p>
           {lastScan && <button type="button" className="force-rescan" onClick={() => setFullRescanConfirmOpen(true)} disabled={scanning || activity.locked}>Run Deep Scan</button>}
           {activity.lockMessage && <p className="scan-run-lock" role="status">{activity.lockMessage}</p>}

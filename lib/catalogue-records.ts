@@ -1,6 +1,6 @@
 import type { ProviderEpisode } from "@/lib/plex-comparison";
 import type { CoverageProvider } from "@/lib/manual-coverage-model";
-import { isRecord } from "@/lib/value-guards";
+import { isRecord, positiveId } from "@/lib/value-guards";
 
 /**
  * One provider catalogue record that could not be used in full. Only fields the
@@ -21,7 +21,6 @@ export type MalformedCatalogueRecord = {
 };
 export type NormalisedCatalogue = { episodes: ProviderEpisode[]; malformed: MalformedCatalogueRecord[] };
 
-const positiveId = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 const episodeNumber = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 const nonBlankText = (value: unknown) => typeof value === "string" && value.trim() ? value : undefined;
 const positiveRuntime = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;

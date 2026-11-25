@@ -15,6 +15,11 @@ export function responseRecordList(body: unknown, field: string): { records: Rec
   return { records: list };
 }
 
+/** A positive safe integer ID, or undefined for anything else. */
+export function positiveId(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
 /** The readable cause of a caught error, never its stack. */
 export function coverageIssueCause(error: unknown) {
   return error instanceof Error ? error.message : String(error);

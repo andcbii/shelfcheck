@@ -23,6 +23,7 @@ import { SeasonIgnoreModal } from "@/app/components/season-ignore-modal";
 import { ShowActionsMenu } from "@/app/components/show-actions-menu";
 import { resultsView } from "@/lib/results-view";
 import { scanProgressPercent } from "@/lib/scan-progress";
+import { plexPosterSrc } from "@/lib/plex-poster";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
@@ -419,7 +420,7 @@ export default function PlexPage() {
         const percentCollected = Math.round(show.percent * 100);
         return <article key={show.ratingKey}>
           <div className="collection-percent"><strong>{`${percentCollected}%`}</strong><span>COLLECTED</span></div>
-          <div className="show-index">{show.thumb ? <img src={`/api/plex/poster?thumb=${encodeURIComponent(show.thumb)}`} alt="" /> : String(index + 1).padStart(2, "0")}</div>
+          <div className="show-index">{show.thumb ? <img src={plexPosterSrc(show.thumb)} alt="" /> : String(index + 1).padStart(2, "0")}</div>
           <div className="show-info" data-show-menu-id={show.ratingKey}>
             <div className="show-title-line"><button className="show-name-button" onClick={() => setOpenShowMenu((current) => current === show.ratingKey ? null : show.ratingKey)}>{show.title}</button>{show.year && <small>{show.year}</small>}{show.tmdbId && <a className="brand-link" href={`https://www.themoviedb.org/tv/${show.tmdbId}`} target="_blank" rel="noreferrer" title="View show on TMDB"><img src="/tmdb-blue-square.svg" alt="TMDB" /></a>}{show.tvdbSlug && <a className="brand-link" href={`https://thetvdb.com/series/${encodeURIComponent(show.tvdbSlug)}`} target="_blank" rel="noreferrer" title="View show on TVDB"><img src={TVDB_LOGO} alt="TVDB" /></a>}<button className="show-collapse-toggle" onClick={() => toggleShow(show.ratingKey)} aria-expanded={!showCollapsed} aria-label={`${showCollapsed ? "Expand" : "Collapse"} ${show.title}`}>{showCollapsed ? "+" : "−"}</button></div>
             {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey) && <div className="ignored-season-status">Ignored {activeIgnoredSeasons.find((item) => item.ratingKey === show.ratingKey)!.seasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}</div>}

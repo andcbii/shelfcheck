@@ -5,9 +5,11 @@ import TraktPage from "../app/trakt/page";
 import { TraktPoster } from "../app/components/trakt-poster";
 import { mountDom } from "./dom-environment";
 import { installWindowClock } from "./window-clock";
+import type { PlexArtworkEntry } from "../lib/plex-artwork";
+import type { TraktShow } from "../lib/trakt-model";
 
-type Ids = { trakt: number; slug: string; tmdb?: number; tvdb?: number | null; plex?: { guid?: string | null; slug?: string | null } | null };
-type IndexEntry = { ratingKey: string; plexGuids: string[]; tmdbId?: number; tvdbId?: number; thumb?: string };
+type Ids = TraktShow["ids"];
+type IndexEntry = PlexArtworkEntry;
 
 const GUID = "5d9c083cffd9ef001e990367";
 const OTHER_GUID = "6e9c083cffd9ef001e990368";
@@ -200,5 +202,7 @@ test("a poster tries a replaced source again after an earlier failure", async (t
   await render({ title: "Golf", traktPoster: traktPoster(42), plexThumb: null });
   assert.equal(poster(), traktSrc(42), "a replaced Trakt link is tried");
   await render({ title: "Golf", traktPoster: traktPoster(41), plexThumb: thumb("41") });
+  assert.equal(poster(), traktSrc(41), "a Trakt link that went away and came back is tried afresh");
+  await fail();
   assert.equal(poster(), plexSrc(thumb("41")), "a newly matched Plex image is tried");
 });

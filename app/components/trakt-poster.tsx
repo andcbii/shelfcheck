@@ -4,6 +4,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useState } from "react";
+import { plexPosterSrc } from "@/lib/plex-poster";
 
 type TraktPosterProps = {
   title: string;
@@ -16,14 +17,19 @@ type TraktPosterProps = {
 /**
  * A Trakt show's poster box: the Trakt poster first, then the matched Plex
  * artwork when there is no Trakt link or it fails to load, then the show's
- * initials. Each image source is tried once; a changed source is tried afresh.
+ * initials. Each image source is tried once while it stays; re-renders with
+ * the same sources never retry.
  */
 export function TraktPoster({ title, traktPoster, plexThumb }: TraktPosterProps) {
-  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
   const sources = [
     traktPoster ? `/api/poster?src=${encodeURIComponent(traktPoster)}` : null,
-    plexThumb ? `/api/plex/poster?thumb=${encodeURIComponent(plexThumb)}` : null,
+    plexThumb ? plexPosterSrc(plexThumb) : null,
   ];
+  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  // A failure counts only while its source stays: a source that goes away and
+  // comes back, as after a report replacement, is tried afresh.
+  const stillFailed = [...failed].filter((url) => sources.includes(url));
+  if (stillFailed.length !== failed.size) setFailed(new Set(stillFailed));
   const source = sources.find((candidate): candidate is string => candidate !== null && !failed.has(candidate));
   return <div className="show-index">
     <span>{title.slice(0, 2).toUpperCase()}</span>
@@ -32,7 +38,7 @@ export function TraktPoster({ title, traktPoster, plexThumb }: TraktPosterProps)
       src={source}
       alt={`${title} poster`}
       loading="lazy"
-      onError={() => setFailed((current) => new Set(current).add(source))}
+      onError={() => setFailed((latest) => new Set(latest).add(source))}
     />}
   </div>;
 }

@@ -100,7 +100,7 @@ export default function Home() {
   const [progress, setProgress] = useState(0);
   const [shows, setShows] = useState<CollectionShow[]>([]);
   const [missing, setMissing] = useState<MissingEpisode[]>([]);
-  const plexArtwork = usePlexArtwork();
+  const plexThumbFor = usePlexArtwork();
   const [error, setError] = useState("");
   const [errorContext, setErrorContext] = useState<"scan" | "auth">("scan");
   const [lastScan, setLastScan] = useState<string | null>(null);
@@ -574,7 +574,7 @@ export default function Home() {
           const seasons = [...new Set(episodes.map((episode) => episode.season))].sort((a, b) => a - b);
           return <article key={show.ids.trakt}>
           <div className="collection-percent"><strong>{percentCollected === null ? "—" : `${percentCollected}%`}</strong><span>COLLECTED</span></div>
-          <TraktPoster title={show.title} traktPoster={show.images?.poster?.[0]} plexThumb={plexArtwork(show.ids)} />
+          <TraktPoster title={show.title} traktPoster={show.images?.poster?.[0]} plexThumb={plexThumbFor(show.ids)} />
           <div className="show-info" data-show-menu-id={show.ids.trakt}>
             <div className="show-title-line">
               <button className="show-name-button" type="button" onClick={() => setOpenShowMenu((current) => current === show.ids.trakt ? null : show.ids.trakt)} aria-haspopup="menu" aria-expanded={openShowMenu === show.ids.trakt}>{show.title}</button>

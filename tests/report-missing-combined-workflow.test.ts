@@ -5,7 +5,9 @@ import { api, flag, harness as workflow, key, type Episode } from "./report-miss
 // One combined episode is the same content as three split episodes, A, B and C.
 // The local Plex file is the complete combined episode, so normal matching
 // collects every part through the Manual Match. A separate one-to-one Manual
-// Match ("other") is unrelated to the combined episode.
+// Match ("other") is unrelated to the combined episode. Manual Matches cover one
+// way (ADR-0008), from owned TMDB episodes to TVDB episodes, so the combined
+// episode Plex owns is the TMDB one.
 const directions = {
   "TMDB combined": {
     combined: { provider: "TMDB", id: 100, season: 1, episode: 1, name: "Whole" },
@@ -15,15 +17,6 @@ const directions = {
       { provider: "TVDB", id: 202, season: 2, episode: 3, name: "Part C" },
     ],
     other: [{ provider: "TMDB", id: 101, season: 1, episode: 2, name: "Other" }, { provider: "TVDB", id: 203, season: 2, episode: 4, name: "Other (TVDB)" }],
-  },
-  "TVDB combined": {
-    combined: { provider: "TVDB", id: 300, season: 3, episode: 1, name: "Whole (TVDB)" },
-    parts: [
-      { provider: "TMDB", id: 110, season: 2, episode: 1, name: "Part A" },
-      { provider: "TMDB", id: 111, season: 2, episode: 2, name: "Part B" },
-      { provider: "TMDB", id: 112, season: 2, episode: 3, name: "Part C" },
-    ],
-    other: [{ provider: "TVDB", id: 301, season: 3, episode: 2, name: "Other (TVDB)" }, { provider: "TMDB", id: 113, season: 2, episode: 4, name: "Other" }],
   },
 } satisfies Record<string, { combined: Episode; parts: Episode[]; other: Episode[] }>;
 type Direction = (typeof directions)[keyof typeof directions];

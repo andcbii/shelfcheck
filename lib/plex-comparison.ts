@@ -130,7 +130,8 @@ export function comparePlexShow(input: PlexComparisonInput) {
   if (autoCompoundEpisodes && tmdbShow && ((coordinateMissingTvdbIds.size && localTmdbEpisodeIds.size) || input.compoundCausesRecorded)) {
     // Episodes a Manual Match covers take no part in combined/split matching (ADR-0007),
     // including in the pass forced by recorded compound causes: a covered part never proves
-    // coverage for an uncovered sibling, and a covered TMDB record is never the combined side.
+    // coverage for an uncovered sibling. Only TVDB episodes are ever covered (ADR-0008), so
+    // every TMDB record stays eligible as the combined side.
     const covered = new Set(providerEpisodes.filter(decidedByManualMatch).map(identityOf));
     const { coverage: compoundCovered, failures } = compoundTvdbEvidence(providerEpisodes, localProviderEpisodes, { excluded: episode => covered.has(identityOf(episode)) });
     // A failed relationship is only a failed check when compound evidence was still

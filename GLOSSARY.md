@@ -65,8 +65,11 @@ A fifth-scan safeguard whose required TMDB change list could not be retrieved. I
 _Avoid_: Missed safeguard, overdue refresh
 
 **Manual Match**:
-A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes. Every saved Manual Match can grant coverage; it has no health or verification status.
+A match explicitly set and controlled by the user, including matches created through Manual Coverage or Link Episodes. Every saved Manual Match can grant coverage, one way: it covers its TVDB episodes when every TMDB episode in it is directly owned, and never covers a TMDB episode. It has no health or verification status.
 _Avoid_: Manual Coverage, Link Episodes, mapping (as names for the saved match)
+
+**Official order**:
+The provider whose episode list is the library's own: TMDB. A TMDB episode is collected only by its own season and episode numbers or its own identity, never through a Manual Match.
 
 **Auto Match**:
 A match determined and controlled by Shelfcheck through automatic matching.
@@ -108,7 +111,7 @@ An episode record containing content that another provider lists as multiple epi
 One of the parts of a combined episode, listed as a separate episode by a provider.
 
 **Coverage mapping**:
-A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content. Directly owning every record in one set covers every record in the other, even when a Plex item also carries an identity from the other set; owning only part of a set adds no coverage.
+A relationship between two complete sets of episode records that represent the same content. Each set is an alternative complete representation of that content. Directly owning every record in the TMDB set covers every record in the TVDB set, even when a Plex item also carries an identity from the TVDB set; owning only part of the set adds no coverage. Owning the TVDB set never covers a TMDB record, since TMDB is the official order.
 
 **Show mapping**:
 An association between provider show records that identifies related catalogues for episode matching. It can relate multiple records on either provider side without declaring individual episodes equivalent.

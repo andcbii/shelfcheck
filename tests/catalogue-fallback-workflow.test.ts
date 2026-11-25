@@ -58,6 +58,8 @@ async function fixture(t: TestContext) {
   t.mock.method(ActiveScanTracker.prototype,"update",function(this: InstanceType<typeof ActiveScanTracker>, key: string, show: string, phase: string) { timeline.push(`phase ${phase}`); return reportPhase.call(this,key,show,phase); });
   /** TVDB series whose requests are held until released; a released request fails. */
   const heldTvdb = new Map<number,{started:boolean;release:()=>void}>();
+  /** When set, each Plex record's episode inventory is answered only once this settles for its rating key. */
+  let holdLeaves: ((ratingKey: string) => Promise<void>) | undefined;
   const guids = (ids: {tmdb:number[];tvdb:number[]}) => [...ids.tmdb.map(id=>({id:`tmdb://${id}`})),...ids.tvdb.map(id=>({id:`tvdb://${id}`}))];
   t.mock.method(globalThis,"fetch",async (input:string|URL|Request) => {
     const u = new URL(String(input)); requests.push(u.pathname); timeline.push(u.pathname);
@@ -65,6 +67,7 @@ async function fixture(t: TestContext) {
     if(u.hostname === "plex") {
       if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
       if(u.pathname === "/library/sections/1/all") return Response.json({MediaContainer:{Metadata:shows}});
+      if(u.pathname.includes("allLeaves")) await holdLeaves?.(u.pathname.split("/")[3]);
       if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:[{ratingKey:"ep",parentIndex:1,index:1,Guid:[]}]}});
       const key = u.pathname.match(/^\/library\/metadata\/(\d+)$/)?.[1];
       if(metadata === "fail") return Response.json({},{status:404});
@@ -106,6 +109,7 @@ async function fixture(t: TestContext) {
   return {
     plex, tmdb, tvdb, find, timeline, identity, requests, heldTvdb,
     setSecond(value: typeof second) { second = value; },
+    holdLeaves(value: typeof holdLeaves) { holdLeaves = value; },
     failTvdbLogin(value: boolean) { tvdbLoginFails = value; },
     setMetadata(value: typeof metadata) { metadata = value; },
     changes(ids: number[]) { tmdbChanges = ids; },
@@ -1157,6 +1161,8 @@ for (const recorded of ["none","gone"] as const) test(`a Manual Match cached rec
 
   // Another show with TMDB series 11 downloads it in the next scan; Scooby asks for series 11 first and still gets a 404.
   f.at(day(63)); f.setSecond({tmdb:11,tvdb:2});
+  // Other's episodes come in only once Scooby has asked for series 11, so Other's preparation asks after it.
+  f.holdLeaves(async key => { for (let i=0; key === "2" && i<500 && !f.requests.includes("/3/tv/11"); i++) await new Promise(r=>setTimeout(r,10)); });
   Object.defineProperty(f.tmdb[11],"fail",{get: () => f.requests.filter(p=>p === "/3/tv/11").length < 2,configurable:true});
   show = await f.run() as Judged;
   assert.equal(show.providerResolution?.status,"unmatched","Scooby's scan judged TMDB before Other downloaded series 11");

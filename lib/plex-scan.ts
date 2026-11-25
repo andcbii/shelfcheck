@@ -26,7 +26,7 @@ import { withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-rec
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
-import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
+import { PLEX_INVENTORY_REQUESTS, PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
 import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
 import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
@@ -36,7 +36,7 @@ import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePa
 import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
 import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
-import { ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
+import { ProviderResponseError, type ProviderAuth, type ProviderRequestPolicy } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isEpisodeCoordinate, isProviderId, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
@@ -112,8 +112,8 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
  * lookups: sent with the scan run's credentials, never answered from or saved as a comparison relationship.
  * A comparison's own lookups go through its evidence source instead.
  */
-async function plexJson(path: string, url: string, token: string): Promise<PlexContainer> {
-  const body = await scanProviderClient.json<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex");
+async function plexJson(path: string, url: string, token: string, policy?: ProviderRequestPolicy): Promise<PlexContainer> {
+  const body = await scanProviderClient.json<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex", undefined, policy);
   const pathname = path.split("?")[0];
   const field = pathname === "/library/sections" ? "Directory" : "Metadata";
   const collection = /^\/library\/(?:sections(?:\/[^/]+\/all)?|metadata\/[^/]+\/allLeaves)$/.test(pathname);
@@ -785,25 +785,26 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const localResponsesByRatingKey = new Map<string, PlexContainer>();
   const inventoryFailureCauses: CoverageIssueId[] = [];
   run.progress(processed, candidates.length);
-  await runWorkerPool(allShows, PLEX_SCAN_WORKERS, async (group) => {
-    const responses = await Promise.allSettled(group.records.map(async (record) => ({
-      ratingKey: record.ratingKey,
-      response: await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken),
-    })));
-    for (const [index,result] of responses.entries()) {
-      // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
-      const issueId = plexInventoryIssueId(group.identity, group.records[index].ratingKey);
-      if (result.status === "fulfilled") {
-        const { ratingKey, response } = result.value;
-        if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);
-        resolveCoverageIssue(issueId);
-      } else {
-        inventoryFailureCauses.push(issueId);
-        setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
-        logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
-      }
-    }
+  // One job per physical record, merged and ignored shows included, each holding its slot across retries.
+  const inventoryJobs = allShows.flatMap((group) => group.records.map((record) => ({ group, record })));
+  const inventoryResults = new Array<PromiseSettledResult<PlexContainer>>(inventoryJobs.length);
+  await runWorkerPool(inventoryJobs, PLEX_INVENTORY_REQUESTS, async ({ record }, index) => {
+    inventoryResults[index] = await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken, { spacing: "none" })
+      .then((value) => ({ status: "fulfilled", value }), (reason: unknown) => ({ status: "rejected", reason }));
   });
+  for (const [index, { group, record }] of inventoryJobs.entries()) {
+    const result = inventoryResults[index];
+    // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
+    const issueId = plexInventoryIssueId(group.identity, record.ratingKey);
+    if (result.status === "fulfilled") {
+      if (record.ratingKey) localResponsesByRatingKey.set(record.ratingKey, result.value);
+      resolveCoverageIssue(issueId);
+    } else {
+      inventoryFailureCauses.push(issueId);
+      setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
+      logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
+    }
+  }
   const manualInventory: CoverageEvidence[] = [];
   for (const group of allShows) for (const record of group.records) {
     for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {

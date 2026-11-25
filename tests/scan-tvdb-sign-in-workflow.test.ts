@@ -131,12 +131,13 @@ async function assertSignInIssueAfterReload(f: Awaited<ReturnType<typeof fixture
 }
 
 /**
- * Three Plex shows. "Matched" (TMDB show 10) has TMDB episodes 100 and 101 and holds none in
+ * Three Plex shows. "Matched" (TMDB show 10) has TMDB episodes 100, 101 and 102 and holds none in
  * Plex; "Holder" holds TVDB episode 201. The first Manual Match (TMDB 101 with TVDB 201)
- * therefore covers Matched's episode 101 from another show.
+ * therefore covers Matched's episode 101 from another show. Matched lists both Manual Matches'
+ * TMDB members, so its fresh download removes neither.
  */
 const crossShowLibrary = (): PlexShow[] => [
-  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100, 101] },
+  { ratingKey: "1", title: "Matched", tmdbId: 10, episodes: [100, 101, 102] },
   { ratingKey: "2", title: "Target", tmdbId: 30 },
   { ratingKey: "3", title: "Holder", tmdbId: 40, owns: [201] },
 ];

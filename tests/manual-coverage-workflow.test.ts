@@ -75,7 +75,10 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
         body = { MediaContainer: { Metadata: [show] } };
     }
     else if (u.pathname === "/3/tv/10")
-      body = { id: 10, name: "Target", seasons: [{ season_number: 1 }] };
+      body = { id: 10, name: "Target", seasons: [{ season_number: 0 }, { season_number: 1 }] };
+    // TMDB still lists the other Manual Matches' members, as specials, so a fresh download removes none of them.
+    else if (u.pathname === "/3/tv/10/season/0")
+      body = { episodes: [{ id: 101, season_number: 0, episode_number: 2, name: "Independent", air_date: "2020-01-01" }, { id: 102, season_number: 0, episode_number: 3, name: "Cleanup", air_date: "2020-01-01" }] };
     else if (u.pathname === "/3/tv/10/season/1") {
       if (blockSeason) {
         entered();
@@ -100,7 +103,8 @@ test("reviewed one-to-one mappings are durable and membership conflicts leave sa
     else if (u.pathname === "/v4/episodes/200/extended")
       body = { data: { id: 200, seriesId: 20, seasonNumber: 8, number: 8, name: "Equivalent" } };
     else if (u.pathname === "/v4/series/20/episodes/default")
-      body = { data: { episodes: [{ id: 200, seasonNumber: 8, number: 8, name: "Equivalent", aired: "2020-01-01" }] } };
+      // TVDB still lists the other Manual Matches' members, as specials, so a fresh download removes none of them.
+      body = { data: { episodes: [{ id: 200, seasonNumber: 8, number: 8, name: "Equivalent", aired: "2020-01-01" }, ...[201, 202, 203].map((id, index) => ({ id, seasonNumber: 0, number: index + 1, name: "Special", aired: "2020-01-01" }))] } };
     else if (u.pathname === "/v4/series/20")
       body = { data: { id: 20, name: "Other show", slug: "other-show" } };
     else if (u.pathname === "/3/tv/changes")

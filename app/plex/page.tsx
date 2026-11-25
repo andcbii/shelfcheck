@@ -195,6 +195,8 @@ export default function PlexPage() {
   const activelyRateLimitPaused = scanning && status.status === "running" && status.rateLimitPaused === true;
   const progress = scanProgressPercent(status.processed, status.total, scanning && status.status === "running");
   const cacheCount = Object.keys(report?.scanCache || {}).length;
+  // A first-ever scan has no report yet: the progress box stands alone, without the empty state.
+  const awaitingFirstReport = scanning && !report;
 
   const visibleCoverageMissing = (member: CoverageGroup["missing"][number]) => visible.some(show => show.ratingKey === member.showKey && show.missing.some(episode => member.provider === "TMDB" ? episode.tmdbEpisodeId === member.id : episode.tvdbEpisodeId === member.id));
   const coverageGroups = (report?.coverageGroups || []).filter(group => group.missing.some(visibleCoverageMissing)).map(group => ({
@@ -414,13 +416,14 @@ export default function PlexPage() {
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
       <CoverageWarning issues={shownScanIssues(coverageIssues, report?.shows || [])} />
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
-      {!scanning && coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
+      {scanning && <ScanProgressBox progress={progress} status={status} paused={activelyRateLimitPaused} maxShows={PLEX_ACTIVE_SHOWS} />}
+      {coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>
         <p>Every episode in either alternative complete set covers this content. Automatic matches keep their status and do not count as directly owned members.</p>
         {group.health && group.health !== "healthy" && <p>{group.health === "pending" ? "Coverage pending recheck" : "Mapping needs review"}</p>}
         {(["TMDB", "TVDB"] as const).map(provider => <section key={provider}><h4>Alternative complete {provider} set</h4><ul>{group.members.filter(member => member.provider === provider).map(member => <li key={`${member.provider}:${member.id}`}><a href={member.url} target="_blank" rel="noreferrer">{member.provider} · {member.show} · S{String(member.season).padStart(2, "0")}E{String(member.episode).padStart(2, "0")} · {member.title} · Episode ID {member.id}</a><strong>{member.status === "reported-missing" ? "Reported missing" : member.status === "incomplete" ? INCOMPLETE_LABEL : member.status === "direct" ? "Directly owned" : member.status === "automatic" ? "Satisfied automatically" : member.status === "manual" ? "Covered by complete alternative set" : member.status === "missing" ? "Missing" : "Alternative · outside this comparison"}</strong>{member.status === "incomplete" && member.missingParts?.length ? <small>{missingPartsExplanation(group.members, member.missingParts)}</small> : null}</li>)}</ul></section>)}
       </section>)}
-      {scanning ? <ScanProgressBox progress={progress} status={status} paused={activelyRateLimitPaused} maxShows={PLEX_ACTIVE_SHOWS} /> : visible.length ? <div className="show-list">{visible.map((show, index) => {
+      {visible.length ? <div className="show-list">{visible.map((show, index) => {
         const seasons = [...new Set(ungroupedMissing(show).map((episode) => episode.season))].sort((a, b) => a - b);
         const showCollapsed = collapsedShows.has(show.ratingKey);
         const percentCollected = Math.round(show.percent * 100);
@@ -451,7 +454,7 @@ export default function PlexPage() {
             })}</div></>}
           </div>
         </article>;
-      })}</div> : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
+      })}</div> : awaitingFirstReport ? null : <div className="empty"><div>✓</div><h3>{report ? "No matching episode gaps" : "Ready for a new Plex search"}</h3><p>{report ? "No episodes match the current airing and ignored-show preferences." : "Configure your providers, then scan every TV show library."}</p></div>}
     </section>
     <footer><span>SHELFCHECK / PLEX API</span><span>Your credentials stay in your private configuration volume.</span></footer>
     {coverageUrls && <ManualCoverageManager initialMappingId={coverageMappingId} initialUrls={coverageUrls} scanActive={scanning} onClose={() => setCoverageUrls(null)} onChanged={coverageChanged} />}

@@ -27,7 +27,7 @@ import { plexPosterSrc } from "@/lib/plex-poster";
 import { useScanPoller } from "@/app/hooks/use-scan-poller";
 import { useScanRunActivity } from "@/app/hooks/use-scan-run-activity";
 import { ScanProgressBox } from "@/app/components/scan-progress-box";
-import { OTHER_SCAN_RUN_BUTTON_LABEL, PLEX_SCAN_PREPARING_BUTTON_LABEL, type ScanProgressStatus } from "@/lib/scan-run-activity";
+import { OTHER_SCAN_RUN_BUTTON_LABEL, PLEX_PREPARING_HEADING, PLEX_SCAN_PREPARING_BUTTON_LABEL, type ScanProgressStatus } from "@/lib/scan-run-activity";
 import { useIgnoreClock } from "@/app/hooks/use-ignore-clock";
 import { useClearCache } from "@/app/hooks/use-clear-cache";
 import { useLocalToday } from "@/app/hooks/use-local-today";
@@ -418,7 +418,7 @@ export default function PlexPage() {
       {error && <div className="error"><span>!</span><p><strong>Scan error</strong>{error}</p></div>}
       <CoverageWarning issues={shownScanIssues(coverageIssues, report?.shows || [])} />
       {cacheMessage && !preferencesOpen && <p className="cache-message show-cache-message">{cacheMessage}</p>}
-      {scanning && <ScanProgressBox progress={progress} status={status} paused={activelyRateLimitPaused} maxShows={PLEX_ACTIVE_SHOWS} />}
+      {scanning && <ScanProgressBox progress={progress} status={status} paused={activelyRateLimitPaused} maxShows={PLEX_ACTIVE_SHOWS} preparingHeading={PLEX_PREPARING_HEADING} />}
       {coverageGroups.map(group => <section key={group.mappingId} className="coverage-result-group" aria-label="Incomplete coverage group">
         <div className="coverage-group-heading"><h3>Incomplete episode coverage</h3><button onClick={() => { setCoverageMappingId(group.mappingId); setCoverageUrls([]); }}>Edit coverage mapping</button></div>
         <p>Owning every TMDB episode in this Manual Match covers its TVDB episodes; owning TVDB episodes never covers a TMDB episode. Automatic matches keep their status and do not count as directly owned members.</p>

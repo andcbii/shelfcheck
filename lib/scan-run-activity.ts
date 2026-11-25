@@ -30,6 +30,9 @@ export function scanRunLockMessage(running: ScanRunKind, requested: ScanRunKind)
 /** What a page's scan button reads while a Scan run of the other kind owns the lock; the lock message under it names that run. */
 export const OTHER_SCAN_RUN_BUTTON_LABEL = "Another scan is in progress";
 
+/** What the Plex scan button reads while its scan runs but its comparison counter has not started. */
+export const PLEX_SCAN_PREPARING_BUTTON_LABEL = "Preparing scan…";
+
 /** Reads a /api/scan-runs body, or a 409 body's `activeScanRun`; anything else is not an observation. */
 export function parseActiveScanRun(value: unknown): ActiveScanRun | null | undefined {
   if (value === null) return null;
@@ -84,22 +87,41 @@ export function scanStepWording(phase: string): string {
   return Object.hasOwn(SCAN_STEP_WORDING, phase) ? SCAN_STEP_WORDING[phase] : "Working on it";
 }
 
+/** What the progress box says once a Plex scan's library is read and it has no show to compare. */
+export const SCAN_NO_SHOWS_TO_COMPARE_WORDING = "No shows to compare. Finishing up…";
+
 /**
  * What the progress box says while no show is being checked and nothing more
- * specific is known, from the Scan run's current phase: getting ready before
- * its preparation is reported, or removing unused Manual Match members after a
- * Plex scan's report is saved. Null in any other phase.
+ * specific is known: nothing while a preparation line says what the run is
+ * doing; that there is nothing to compare once a Plex scan's library is read
+ * and no show is left to compare; otherwise from the Scan run's current phase,
+ * getting ready before its preparation is reported, or removing unused Manual
+ * Match members after a Plex scan's report is saved. Null in any other phase.
+ *
+ * This is the one place that decides a reported preparation replaces "Getting
+ * ready…"; the box shows it whenever no show is being checked.
  */
 export function scanRunPhaseWording(status: ScanProgressStatus): string | null {
   const { currentPhase } = status;
-  if (currentPhase === "initializing" && scanPreparationProgress(status.preparation)) return null;
+  const preparation = scanPreparationProgress(status.preparation);
+  if (preparation) {
+    if (preparationUnderWay(preparation)) return null;
+    if (preparation.catalogues.total === 0) return SCAN_NO_SHOWS_TO_COMPARE_WORDING;
+    if (currentPhase === "initializing") return null;
+  }
   return currentPhase !== undefined && Object.hasOwn(SCAN_RUN_PHASE_WORDING, currentPhase) ? SCAN_RUN_PHASE_WORDING[currentPhase] : null;
 }
 
-const SCAN_PREPARATION_WORDING: Record<keyof ScanPreparationProgress, string> = {
+/** The words of each preparation step's line, in the order the lines are shown. */
+const SCAN_PREPARATION_WORDING: Record<ScanPreparationStep, string> = {
   inventory: "Reading Plex library",
   catalogues: "Preparing TMDB and TVDB episode lists",
 };
+
+/** One of a Plex scan's preparation steps. */
+export type ScanPreparationStep = keyof ScanPreparationProgress;
+
+const SCAN_PREPARATION_STEPS = Object.keys(SCAN_PREPARATION_WORDING) as ScanPreparationStep[];
 
 /** A status's preparation progress, or undefined when it has none or it is malformed. */
 function scanPreparationProgress(value: unknown): ScanPreparationProgress | undefined {
@@ -113,17 +135,27 @@ function scanPreparationProgress(value: unknown): ScanPreparationProgress | unde
   return count(inventory) && count(catalogues) ? { inventory, catalogues } : undefined;
 }
 
+/** The preparation steps still under way: some of their items have not settled. */
+function stepsUnderWay(preparation: ScanPreparationProgress): ScanPreparationStep[] {
+  return SCAN_PREPARATION_STEPS.filter((step) => preparation[step].settled < preparation[step].total);
+}
+
+function preparationUnderWay(preparation: ScanPreparationProgress): boolean {
+  return stepsUnderWay(preparation).length > 0;
+}
+
+/** One preparation line of the progress box, keyed by its step. */
+export type ScanPreparationLine = { step: ScanPreparationStep; text: string };
+
 /**
  * The preparation lines of a preparing Scan run, such as "Reading Plex library
  * 210/666": one for each step still under way, none once every step has
  * settled (a library with no shows settles at 0/0) or without progress.
  */
-export function scanPreparationLines(value: unknown): string[] {
+export function scanPreparationLines(value: unknown): ScanPreparationLine[] {
   const preparation = scanPreparationProgress(value);
   if (!preparation) return [];
-  return (Object.keys(SCAN_PREPARATION_WORDING) as (keyof ScanPreparationProgress)[])
-    .filter((step) => preparation[step].settled < preparation[step].total)
-    .map((step) => `${SCAN_PREPARATION_WORDING[step]} ${preparation[step].settled}/${preparation[step].total}`);
+  return stepsUnderWay(preparation).map((step) => ({ step, text: `${SCAN_PREPARATION_WORDING[step]} ${preparation[step].settled}/${preparation[step].total}` }));
 }
 
 /** The well-formed shows of a status's `activeShows`, skipping anything an older or damaged status holds instead. */

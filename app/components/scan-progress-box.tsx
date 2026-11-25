@@ -18,7 +18,8 @@ type ScanProgressBoxProps = {
  * it is checking right now, each with its step in plain English, under how far
  * a Plex scan's preparation has got while it runs ("Reading Plex library
  * 210/666"), or what the run is doing while neither is known (getting ready,
- * removing unused Manual Match members), over the acid progress bar. The scan
+ * nothing left to compare, removing unused Manual Match members), over the
+ * acid progress bar. The scan
  * button already shows the "N of M" count, so the box does not repeat it.
  *
  * During a rate-limit pause the box is marked paused (its preparation and show lines dim), its
@@ -28,7 +29,7 @@ type ScanProgressBoxProps = {
 export function ScanProgressBox({ progress, status, paused, maxShows }: ScanProgressBoxProps) {
   const shows = activeScanShows(status.activeShows).slice(0, maxShows);
   const preparation = scanPreparationLines(status.preparation);
-  const solo = shows.length === 0 && preparation.length === 0 ? scanRunPhaseWording(status) : null;
+  const solo = shows.length === 0 ? scanRunPhaseWording(status) : null;
   const resumeAt = paused && status.rateLimitResumeAt ? Date.parse(status.rateLimitResumeAt) : NaN;
   const resumesAt = Number.isFinite(resumeAt) ? new Date(resumeAt) : null;
   return <div className="scan-progress" data-paused={paused ? "true" : undefined}>
@@ -39,7 +40,7 @@ export function ScanProgressBox({ progress, status, paused, maxShows }: ScanProg
       {/* Keyed by the deadline, so a new deadline starts a fresh countdown from the current clock. */}
       {resumesAt && <PauseCountdown key={resumeAt} resumeAt={resumeAt} />}
     </p>}
-    {preparation.length > 0 && <ul className="scan-progress-preparation">{preparation.map((line) => <li key={line.slice(0, line.lastIndexOf(" "))}>{line}</li>)}</ul>}
+    {preparation.length > 0 && <ul className="scan-progress-preparation">{preparation.map((line) => <li key={line.step}>{line.text}</li>)}</ul>}
     {shows.length > 0 && <ul className="scan-progress-shows">{shows.map((item) => <li key={item.key}>
       <span className="scan-progress-show">{item.show}</span>
       <span className="scan-progress-step">{scanStepWording(item.phase)}</span>

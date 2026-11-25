@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
+import type { ScanPreparationCount } from "../lib/scan-run-activity";
 const hook = registerHooks({ resolve(s, c, next) { return s === "server-only" ? { url: "data:text/javascript,export%20%7B%7D", shortCircuit: true } : next(s, c); } });
 const plex = await import("../lib/plex-scan");
 const config = await import("../lib/server-config");
@@ -18,8 +19,7 @@ hook.deregister();
 
 const cache = globalThis as typeof globalThis & { __shelfcheckDatabase?: DatabaseSync };
 
-type Count = { settled: number; total: number };
-type Written = { status: string; processed: number; total: number; preparation?: { inventory?: Count; catalogues?: Count } };
+type Written = { status: string; processed: number; total: number; preparation?: { inventory?: ScanPreparationCount; catalogues?: ScanPreparationCount } };
 
 /** Polls `condition` every 5 ms for at most `milliseconds`; true once it holds. */
 async function within(milliseconds: number, condition: () => boolean) {

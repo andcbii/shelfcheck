@@ -1137,10 +1137,12 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     inventory: { settled: 0, total: allShows.reduce((records, group) => records + group.records.length, 0) },
     catalogues: { settled: 0, total: candidates.length },
   };
-  const settle = (count: keyof ScanPreparationProgress) => {
-    const progress = preparationProgress[count];
+  /** Reports a snapshot of the preparation progress, so later settlements never change a reported status. */
+  const reportPreparation = () => run.reportPreparation({ inventory: { ...preparationProgress.inventory }, catalogues: { ...preparationProgress.catalogues } });
+  const settle = (step: keyof ScanPreparationProgress) => {
+    const progress = preparationProgress[step];
     progress.settled = Math.min(progress.total, progress.settled + 1);
-    run.reportPreparation({ inventory: { ...preparationProgress.inventory }, catalogues: { ...preparationProgress.catalogues } });
+    reportPreparation();
   };
   /**
    * The run's progress events. A show's preparation settles once, downloaded (any catalogue downloaded
@@ -1177,7 +1179,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     settled: (group, result) => preparationEvents.preparationSettled(group, preparationOutcome(result)),
   });
   drains.push(() => preparation.drain());
-  run.reportPreparation({ inventory: { ...preparationProgress.inventory }, catalogues: { ...preparationProgress.catalogues } });
+  reportPreparation();
   // One job per physical record, merged and ignored shows included, each holding its slot across retries.
   const inventoryJobs = allShows.flatMap((group) => group.records.map((record) => ({ group, record })));
   const inventoryResults = new Array<PromiseSettledResult<PlexContainer>>(inventoryJobs.length);

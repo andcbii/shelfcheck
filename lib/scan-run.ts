@@ -73,6 +73,16 @@ export type ScanRunStatus = {
   heartbeatAt?: string;
 };
 
+/**
+ * The fields a status holds only while its run is live: its rate-limit pause's
+ * provider and resume time, its active work and its preparation. A terminal
+ * error, recorded or interrupted, clears every one.
+ */
+const TRANSIENT_STATUS_FIELDS = ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow", "preparation"] as const satisfies readonly (keyof ScanRunStatus)[];
+
+/** An update that clears every transient field. */
+const CLEARED_TRANSIENT_STATUS: Partial<ScanRunStatus> = Object.fromEntries(TRANSIENT_STATUS_FIELDS.map((field) => [field, undefined]));
+
 type LogDetails = Record<string, unknown>;
 
 /** Why a Resume point was saved outside the interval cadence. */
@@ -356,7 +366,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     const recordError = (message: string, what: "failure" | "veto") => {
       terminal = true;
       try {
-        update({ status: "error", finishedAt: iso(), error: message, rateLimitPaused: false, rateLimitProvider: undefined, rateLimitResumeAt: undefined, activeShows: undefined, currentShow: undefined, preparation: undefined });
+        update({ status: "error", finishedAt: iso(), error: message, rateLimitPaused: false, ...CLEARED_TRANSIENT_STATUS });
         return true;
       } catch (storeError) {
         report(`The ${label} scan could not record its ${what}.`, storeError);
@@ -537,7 +547,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     // Explained from the last running status, then reset like any terminal error: no pause, provider, resume time or active work survives.
     const error = mode.interruptedError(status);
     const interrupted: S = { ...status, status: "error", finishedAt: iso(), error, rateLimitPaused: false };
-    for (const field of ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow", "preparation"] as const) delete interrupted[field];
+    for (const field of TRANSIENT_STATUS_FIELDS) delete interrupted[field];
     mode.status.write(interrupted);
     try { mode.onInterrupted?.(interrupted); } catch (error) { report(`The ${SCAN_RUN_LABELS[mode.kind]} interrupted scan hook failed.`, error); }
     return interrupted;

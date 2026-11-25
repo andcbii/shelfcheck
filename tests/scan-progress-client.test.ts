@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 import { active, mountPage, mountPaused, paused, pending, running, SHOWS, START } from "./scan-progress-harness";
+import { PLEX_SCAN_PREPARING_BUTTON_LABEL, SCAN_NO_SHOWS_TO_COMPARE_WORDING } from "../lib/scan-run-activity";
 
 // The progress box under each report heading shows the shows the Scan run is
 // checking and their step, from the page's status answers. Every server answer
@@ -168,7 +169,7 @@ test("a preparing Plex scan shows both preparation lines, then the counter once 
   assert.deepEqual(preparationLines(page), ["Reading Plex library 210/666", "Preparing TMDB and TVDB episode lists 140/653"]);
   assert.equal(page.box()?.querySelector(".scan-progress-solo"), null, "not getting ready any more");
   assert.deepEqual(page.lines(), [["Bluey", "Getting the episode list from TMDB"]], "a show prepared early keeps its line");
-  assert.match(page.container.querySelector("button.primary")?.textContent || "", /^Preparing scan…/, "no comparison counter before comparisons begin");
+  assert.match(page.container.querySelector("button.primary")?.textContent || "", new RegExp(`^${PLEX_SCAN_PREPARING_BUTTON_LABEL}`), "no comparison counter before comparisons begin");
 
   page.nextStatuses(running({ processed: 0, total: 653, preparation: preparation([666, 666], [300, 653]) }));
   await page.advance();
@@ -181,11 +182,21 @@ test("a preparing Plex scan shows both preparation lines, then the counter once 
   assert.deepEqual(page.lines(), [["Bluey", "Matching episode numbers between providers"]]);
 });
 
-test("a Plex scan of a library with no shows shows no preparation lines", async (t) => {
-  const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: preparation([0, 0], [0, 0]) })] });
-  assert.ok(page.box());
-  assert.deepEqual(preparationLines(page), []);
-  assert.equal(page.box()?.querySelector(".scan-progress-solo"), null, "0/0 ends preparation, so it is not getting ready either");
+test("a Plex scan with no shows to compare says so once its library is read, until it completes", async (t) => {
+  await t.test("an empty library", async (t) => {
+    const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: preparation([0, 0], [0, 0]) })] });
+    assert.deepEqual(preparationLines(page), []);
+    assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, SCAN_NO_SHOWS_TO_COMPARE_WORDING, "the box is not left empty");
+  });
+  await t.test("every show ignored", async (t) => {
+    const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: preparation([2, 5], [0, 0]) })] });
+    assert.deepEqual(preparationLines(page), ["Reading Plex library 2/5"]);
+    assert.equal(page.box()?.querySelector(".scan-progress-solo"), null, "the library line says what it is doing");
+    page.nextStatuses(running({ processed: 0, total: 0, currentPhase: "processing", preparation: preparation([5, 5], [0, 0]) }));
+    await page.advance();
+    assert.deepEqual(preparationLines(page), []);
+    assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, SCAN_NO_SHOWS_TO_COMPARE_WORDING);
+  });
 });
 
 test("malformed Plex preparation progress is ignored", async (t) => {

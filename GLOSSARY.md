@@ -166,6 +166,10 @@ _Avoid_: Derived flag, inferred missing
 A Manual Match whose TMDB and TVDB sides each list two or more episodes, so neither side is a single combined episode. Shelfcheck never guesses which opposite-side episode contains a reported-missing episode, so no status is derived: each Report Missing flag affects only its own episode. A manual save must leave either no flags or at least one explicit flag on each provider side (the **both-sides-or-none rule**); derived status never satisfies it. The rule checks manual saves, including membership edits that change the mapping into this shape, and never rejects reading or comparing saved flags, so a one-sided state left by automatic cleanup stays active until the next manual save repairs or clears it.
 _Avoid_: Partial selection, guessed correspondence
 
+**Show year**:
+The year shown with a show's name on Plex pages and Manual Matches: the year Plex gives the show in the latest completed full scan, kept until a later scan gives one. A provider show that no Plex show holds, or that Plex shows with different years hold, takes its provider's own year. The Trakt page and provider-candidate lists show their source's own year instead.
+_Avoid_: Release year, premiere year
+
 **Air date**:
 The date a provider lists for an episode's first broadcast, whether past or future. Also called the premiere date; TMDB shows it as "Air Date" and TVDB as "First Aired". An episode may have none.
 _Avoid_: Release date, aired date

@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { MATCH_HEALTH_LABELS, ManualMatchCard, matchesHealthFilter, type HealthFilter, type MatchHealth } from "@/app/components/manual-match-card";
+import { ManualMatchCard } from "@/app/components/manual-match-card";
 import { Popup } from "@/app/components/popup";
 import { ReportPagination } from "@/app/reports/report-pagination";
 import type { CoverageMapping } from "@/lib/manual-coverage-model";
@@ -21,12 +21,10 @@ export type ManualMatchSelection = {
 type Props = {
   matches: CoverageMapping[];
   report: boolean;
-  // Without the health filter, selection and paging the list shows every card, unticked.
+  // Without selection and paging the list shows every card, unticked.
   filterSelectAndPage: boolean;
   locked: boolean;
   pending: boolean;
-  healthFilter: HealthFilter;
-  onHealthFilterChange: (filter: HealthFilter) => void;
   paging: ManualMatchPaging;
   selection: ManualMatchSelection;
   onDeleteSelected: (ids: string[]) => void;
@@ -52,11 +50,10 @@ function DeleteConfirmation({ matches, locked, onCancel, onConfirm }: { matches:
   </Popup>;
 }
 
-export function ManualMatchList({ matches, report, filterSelectAndPage, locked, pending, healthFilter, onHealthFilterChange, paging: { page, pageSize, onPageChange, onPageSizeChange }, selection: { selected, onSelectionChange, confirmation, onConfirmationChange }, onDeleteSelected, onEdit, onDelete, savedId }: Props) {
-  const visibleMatches = matches.filter(match => matchesHealthFilter(match, healthFilter));
-  const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleMatches.length / pageSize)));
-  const selectedIds = selected.filter(id => visibleMatches.some(match => match.id === id));
-  const pageMatches = visibleMatches.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+export function ManualMatchList({ matches, report, filterSelectAndPage, locked, pending, paging: { page, pageSize, onPageChange, onPageSizeChange }, selection: { selected, onSelectionChange, confirmation, onConfirmationChange }, onDeleteSelected, onEdit, onDelete, savedId }: Props) {
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(matches.length / pageSize)));
+  const selectedIds = selected.filter(id => matches.some(match => match.id === id));
+  const pageMatches = matches.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   // The one Manual Match whose Delete awaits confirmation; a refresh that removes it closes the confirmation.
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const deleting = matches.find(match => match.id === deletingId) || null;
@@ -68,11 +65,10 @@ export function ManualMatchList({ matches, report, filterSelectAndPage, locked, 
   const staleConfirmation = Boolean(confirmation && !bulkConfirmation);
   useEffect(() => { if (staleConfirmation) onConfirmationChange(null); }, [staleConfirmation, onConfirmationChange]);
   return <>
- {filterSelectAndPage && <><label>Health<select aria-label="Health" value={healthFilter} disabled={locked} onChange={event => onHealthFilterChange(event.target.value as HealthFilter)}><option value="all">All Manual Matches</option>{(Object.keys(MATCH_HEALTH_LABELS) as MatchHealth[]).map(health => <option key={health} value={health}>{MATCH_HEALTH_LABELS[health]}</option>)}</select></label>
- <p role="status">{pending ? <>Some coverage checks need attention. <a href="/reports/coverage-issues">See Scan Issues</a> for details.</> : ""}</p><h3>{report ? "Manual Matches" : "Saved Manual Matches"} ({matches.length})</h3>{!matches.length && <div className="empty auto-match-empty"><h3>{report ? "No Manual Matches" : "No Manual Matches saved."}</h3><p>Create a Manual Match to link complete episode sets, even before either set is owned.</p></div>}
- {selectedIds.length > 0 && <section className="manual-match-bulk-bar" aria-label="Selected Manual Matches"><p role="status">{selectedIds.length} selected · Selection spans pages; changing the health filter clears it.</p><button disabled={locked || selectedIds.length === visibleMatches.length} onClick={() => onSelectionChange(visibleMatches.map(match => match.id))}>Select all {plural(visibleMatches.length, "matching Manual Match", "matching Manual Matches")}</button><button disabled={locked} onClick={() => onSelectionChange([])}>Clear selection</button><button className="danger" disabled={locked} onClick={() => onConfirmationChange([...selectedIds])}>Delete {plural(selectedIds.length, "selected match", "selected matches")}</button></section>}
+ {filterSelectAndPage && <><p role="status">{pending ? <>Some coverage checks need attention. <a href="/reports/coverage-issues">See Scan Issues</a> for details.</> : ""}</p><h3>{report ? "Manual Matches" : "Saved Manual Matches"} ({matches.length})</h3>{!matches.length && <div className="empty auto-match-empty"><h3>{report ? "No Manual Matches" : "No Manual Matches saved."}</h3><p>Create a Manual Match to link complete episode sets, even before either set is owned.</p></div>}
+ {selectedIds.length > 0 && <section className="manual-match-bulk-bar" aria-label="Selected Manual Matches"><p role="status">{selectedIds.length} selected · Selection spans pages.</p><button disabled={locked || selectedIds.length === matches.length} onClick={() => onSelectionChange(matches.map(match => match.id))}>Select all {plural(matches.length, "Manual Match", "Manual Matches")}</button><button disabled={locked} onClick={() => onSelectionChange([])}>Clear selection</button><button className="danger" disabled={locked} onClick={() => onConfirmationChange([...selectedIds])}>Delete {plural(selectedIds.length, "selected match", "selected matches")}</button></section>}
  {bulkConfirmation && <DeleteConfirmation matches={bulkConfirmation} locked={locked} onCancel={() => onConfirmationChange(null)} onConfirm={() => { onConfirmationChange(null); onDeleteSelected(bulkConfirmation.map(match => match.id)); }}/>}
- <ReportPagination total={visibleMatches.length} page={currentPage} pageSize={pageSize} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange}/>
+ <ReportPagination total={matches.length} page={currentPage} pageSize={pageSize} onPageChange={onPageChange} onPageSizeChange={onPageSizeChange}/>
  </>}
  {pageMatches.map(match => <ManualMatchCard key={match.id} match={match} locked={locked} saved={match.id === savedId} selection={filterSelectAndPage ? { selected: selectedIds.includes(match.id), onChange: checked => onSelectionChange(checked ? [...selectedIds, match.id] : selectedIds.filter(id => id !== match.id)) } : undefined} onEdit={() => onEdit(match)} onDelete={() => setDeletingId(match.id)}/>)}
  {deleting && <DeleteConfirmation matches={[deleting]} locked={locked} onCancel={() => setDeletingId(null)} onConfirm={() => { setDeletingId(null); onDelete(deleting.id); }}/>}

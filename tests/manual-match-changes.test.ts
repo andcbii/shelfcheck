@@ -101,17 +101,14 @@ test("replacing members rechecks the shows of both the former and the new member
   assert.deepEqual(results.other, { "TMDB:111": "reported-missing", "TVDB:211": "reported-missing" });
 });
 
-test("a flag-only edit makes no provider request, keeps saved health and rechecks every member's show", async (t) => {
+test("a flag-only edit makes no provider request and rechecks every member's show", async (t) => {
   const h = await setup(t);
-  const first = (await h.reviewedSave([tmdbA, otherTvdb])).manualMatch;
-  store.updateCoverageHealth(first, "needs-review", store.MISSING_MEMBER_MESSAGE);
+  await h.reviewedSave([tmdbA, otherTvdb]);
   const current = store.listCoverageMappings()[0];
   let saved!: Awaited<ReturnType<typeof changes.saveManualMatch>>;
   const requests = await h.requestsDuring(async () => { saved = await changes.saveManualMatch({ edit: { id: current.id, revision: current.revision }, reportMissing: [flag(tmdbA), flag(otherTvdb)] }); });
   assert.deepEqual(requests, []);
   assert.equal(saved.created, false);
-  assert.equal(saved.manualMatch.health, "needs-review");
-  assert.equal(store.listCoverageMappings()[0].health, "needs-review");
   const results = await h.results();
   assert.equal(results.target["TMDB:101"], "reported-missing");
   assert.deepEqual(results.other, { "TVDB:211": "reported-missing" });

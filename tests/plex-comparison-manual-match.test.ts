@@ -5,14 +5,14 @@ import type { CoverageEvidence, CoverageMapping, CoverageProvider } from "../lib
 import { lookupFailureIssueId } from "../lib/coverage-issue-ids";
 import { providerLookup } from "../lib/provider-lookup";
 
-// How the per-show comparison grants Manual Match coverage: a Healthy Manual Match
+// How the per-show comparison grants Manual Match coverage: a Manual Match
 // covers an episode when every member on the other provider side is directly owned
 // somewhere in the Library inventory. It is checked right after Report Missing, so it
 // decides an episode ahead of numbers and automatic evidence (ADR-0007).
 
 const episode = (source: CoverageProvider, id: number, number: number): ProviderEpisode => ({ source, season: 1, episode: number, providerEpisodeId: id, title: `Episode ${number}` });
 const member = (provider: CoverageProvider, id: number) => ({ provider, id, showId: 1, show: "Show", title: `${provider} ${id}`, season: 1, episode: 1, url: "" });
-const mapping = (id: string, members: [CoverageProvider, number][], health?: CoverageMapping["health"]): CoverageMapping => ({ id, revision: 1, createdAt: "2026-01-01T00:00:00.000Z", members: members.map(([provider, memberId]) => member(provider, memberId)), ...(health ? { health } : {}) });
+const mapping = (id: string, members: [CoverageProvider, number][]): CoverageMapping => ({ id, revision: 1, createdAt: "2026-01-01T00:00:00.000Z", members: members.map(([provider, memberId]) => member(provider, memberId)) });
 const owned = (ratingKey: string, showKey: string, ...identities: [CoverageProvider, number][]): CoverageEvidence => ({ ratingKey, showKey, identities: identities.map(([provider, id]) => ({ provider, id })) });
 
 function input(overrides: Partial<PlexComparisonInput> = {}): PlexComparisonInput {
@@ -61,20 +61,9 @@ test("a many-to-many Manual Match covers each episode only when every member on 
   assert.deepEqual(missing(partial), ["TMDB:1", "TMDB:2"]);
 });
 
-test("a Manual Match with no saved health counts as Healthy; Pending and Needs review grant nothing", () => {
+test("the first Manual Match containing the episode decides it", () => {
   const providerEpisodes = [episode("TMDB", 2, 2)];
-  const manualInventory = [owned("a", "show", ["TVDB", 200])];
-  for (const [health, expected] of [[undefined, []], ["healthy", []], ["pending", ["TMDB:2"]], ["needs-review", ["TMDB:2"]]] as const) {
-    const result = comparePlexShow(input({ providerEpisodes, manualInventory, mappings: [mapping("m", [["TMDB", 2], ["TVDB", 200]], health)] }));
-    assert.deepEqual(missing(result), expected, `health ${health}`);
-  }
-});
-
-test("the first Healthy Manual Match containing the episode decides it; a Pending one before it is passed over", () => {
-  const providerEpisodes = [episode("TMDB", 2, 2)];
-  const pendingFirst = comparePlexShow(input({ providerEpisodes, manualInventory: [owned("a", "show", ["TVDB", 201])], mappings: [mapping("p", [["TMDB", 2], ["TVDB", 200]], "pending"), mapping("h", [["TMDB", 2], ["TVDB", 201]])] }));
-  assert.deepEqual(pendingFirst.manualCoverage.map(item => item.mappingId), ["h"]);
-  // An incomplete first Healthy match is not replaced by a later one.
+  // An incomplete first match is not replaced by a later one.
   const incompleteFirst = comparePlexShow(input({ providerEpisodes, manualInventory: [owned("a", "show", ["TVDB", 201])], mappings: [mapping("first", [["TMDB", 2], ["TVDB", 200]]), mapping("second", [["TMDB", 2], ["TVDB", 201]])] }));
   assert.deepEqual(missing(incompleteFirst), ["TMDB:2"]);
 });
@@ -172,13 +161,11 @@ test("explicit Report Missing and a derived Incomplete combined episode still wi
   assert.deepEqual(incomplete.autoMatches, []);
 });
 
-test("Pending, Needs review and a partly owned other side fall through to numbers, automatic evidence and missing results", () => {
+test("a partly owned other side falls through to numbers, automatic evidence and missing results", () => {
   const tvdbEpisodes = [episode("TVDB", 200, 2), episode("TVDB", 201, 3), episode("TVDB", 202, 4)];
   const evidence: Partial<PlexComparisonInput> = { localEpisodes: new Set(["1:2"]), directImdbSatisfied: new Set([201]), autoMatchEvidence: new Map([[201, { method: "Matched via IMDb" as const, tmdbEpisodeId: 3 }]]) };
   const partOwned = [owned("a", "show", ["TMDB", 2]), owned("b", "show", ["TMDB", 3]), owned("c", "show", ["TMDB", 4])];
   const cases: [string, CoverageMapping[], CoverageEvidence[]][] = [
-    ["pending", [mapping("m", [["TVDB", 200], ["TVDB", 201], ["TVDB", 202], ["TMDB", 2], ["TMDB", 3], ["TMDB", 4]], "pending")], partOwned],
-    ["needs review", [mapping("m", [["TVDB", 200], ["TVDB", 201], ["TVDB", 202], ["TMDB", 2], ["TMDB", 3], ["TMDB", 4]], "needs-review")], partOwned],
     ["partly owned", [mapping("m", [["TVDB", 200], ["TVDB", 201], ["TVDB", 202], ["TMDB", 2], ["TMDB", 3], ["TMDB", 4], ["TMDB", 5]])], partOwned],
   ];
   for (const [label, mappings, manualInventory] of cases) {

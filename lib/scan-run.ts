@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { ActiveScanTracker, type ActiveScanWork } from "@/lib/scan-concurrency";
 import { shouldSaveCheckpoint } from "@/lib/scan-cache";
 import type { ScanLogger } from "@/lib/scan-log";
-import { SCAN_RUN_LABELS, scanRunLockMessage, type ScanRunKind } from "@/lib/scan-run-activity";
+import { SCAN_RUN_LABELS, scanRunLockMessage, type ScanPreparationProgress, type ScanRunKind } from "@/lib/scan-run-activity";
 
 /**
  * The scan run lifecycle: the one place that decides whether a Scan run, Trakt
@@ -68,8 +68,20 @@ export type ScanRunStatus = {
   currentShow?: string;
   currentPhase?: string;
   activeShows?: ActiveScanWork[];
+  /** A preparing run's progress through its preparation steps, if the mode reports one. */
+  preparation?: ScanPreparationProgress;
   heartbeatAt?: string;
 };
+
+/**
+ * The fields a status holds only while its run is live: its rate-limit pause's
+ * provider and resume time, its active work and its preparation. A terminal
+ * error, recorded or interrupted, clears every one.
+ */
+const TRANSIENT_STATUS_FIELDS = ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow", "preparation"] as const satisfies readonly (keyof ScanRunStatus)[];
+
+/** An update that clears every transient field. */
+const CLEARED_TRANSIENT_STATUS: Partial<ScanRunStatus> = Object.fromEntries(TRANSIENT_STATUS_FIELDS.map((field) => [field, undefined]));
 
 type LogDetails = Record<string, unknown>;
 
@@ -176,6 +188,8 @@ export type ScanRunContext<P> = {
   progress(processed: number, total: number): void;
   /** The phase the heartbeat shows while no show is active; undefined shows "processing". */
   setPhase(phase: string | undefined): void;
+  /** Records the run's preparation progress, shown alongside its active shows. */
+  reportPreparation(preparation: ScanPreparationProgress): void;
   /** A provider rate-limit pause starting or ending for this run, with when it ends if the provider said. */
   reportRateLimit(provider: string, paused: boolean, resumeAt?: string): void;
   resumePoint: {
@@ -198,8 +212,22 @@ export type ScanRunContext<P> = {
    * logs `<prefix>.scan.complete`. A vetoed run is not a success: nothing is
    * committed or saved, and the run ends at once with the mode's vetoed error.
    */
-  complete(final: { commit(): void; processed: number; total: number; finishedAt: string; details: LogDetails }): "completed" | "vetoed";
+  complete(final: ScanRunCompletion): "completed" | "vetoed";
+  /**
+   * Completes the run as `complete` does, but after the commit, the
+   * `committed` hook and settling the Resume point, reports `phase` and awaits
+   * the mode's `finalize` before it records the completed status. The run keeps
+   * its ownership and the scan run lock until `finalize` settles. A vetoed run
+   * never commits or finalizes. A throw from `finalize` fails the run after its
+   * commit, so no Resume point is forced over the committed report. A process
+   * that ends during `finalize` leaves the run running in `phase`, so a later
+   * read records it as interrupted there, never as completed.
+   */
+  completeAfter(final: ScanRunCompletion & { phase: string; finalize(): Promise<void> }): Promise<"completed" | "vetoed">;
 };
+
+/** A run's completion: the mode's commit (its report write) and the completed status's counts and log details. */
+export type ScanRunCompletion = { commit(): void; processed: number; total: number; finishedAt: string; details: LogDetails };
 
 /** The run body: everything the Scan run does after it owns the lock. */
 export type ScanRunBody = (owner: ScanRunOwner) => Promise<void>;
@@ -338,7 +366,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     const recordError = (message: string, what: "failure" | "veto") => {
       terminal = true;
       try {
-        update({ status: "error", finishedAt: iso(), error: message, rateLimitPaused: false, rateLimitProvider: undefined, rateLimitResumeAt: undefined, activeShows: undefined, currentShow: undefined });
+        update({ status: "error", finishedAt: iso(), error: message, rateLimitPaused: false, ...CLEARED_TRANSIENT_STATUS });
         return true;
       } catch (storeError) {
         report(`The ${label} scan could not record its ${what}.`, storeError);
@@ -364,6 +392,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         update({ status: "running", processed, total });
       },
       setPhase(next) { if (live()) phase = next; },
+      reportPreparation(preparation) { if (live()) update({ preparation }); },
       reportRateLimit(provider, paused, resumeAt) {
         if (!live()) return;
         const current = mode.status.read();
@@ -396,31 +425,51 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
         },
       },
       complete(final) {
-        if (!live()) return "vetoed";
-        if (hooks.veto?.()) {
-          // Ends the run at once rather than leaving it running until it reads as an Interrupted scan.
-          recordError(mode.vetoedError || mode.failureMessage, "veto");
-          runLogger.warn(event("scan.vetoed"), { processed, total });
-          return "vetoed";
-        }
-        final.commit();
-        committed = true;
-        hooks.committed?.();
-        const store = mode.resumePoint;
-        if (store) {
-          if (runOptions.fullRun) store.clear();
-          else if (storedPoint && runOptions.pruneResumePoint) {
-            const next = runOptions.pruneResumePoint(storedPoint);
-            if (next) store.write(next); else store.clear();
-          }
-        }
-        hooks.succeeded?.();
-        // A clean finish: replace, so no pause or active work survives the run.
-        mode.status.write({ status: "completed", processed: final.processed, total: final.total, startedAt, finishedAt: final.finishedAt } as S);
-        terminal = true;
-        runLogger.info(event("scan.complete"), final.details);
-        return "completed";
+        if (!commit(final)) return "vetoed";
+        settleResumePoint();
+        return succeed(final);
       },
+      async completeAfter(final) {
+        if (!commit(final)) return "vetoed";
+        settleResumePoint();
+        phase = final.phase;
+        update({ currentPhase: phase });
+        await final.finalize();
+        return succeed(final);
+      },
+    };
+    /** The veto check and the mode's commit. False, with the run ended, when it is vetoed or no longer live. */
+    const commit = (final: ScanRunCompletion) => {
+      if (!live()) return false;
+      if (hooks.veto?.()) {
+        // Ends the run at once rather than leaving it running until it reads as an Interrupted scan.
+        recordError(mode.vetoedError || mode.failureMessage, "veto");
+        runLogger.warn(event("scan.vetoed"), { processed, total });
+        return false;
+      }
+      final.commit();
+      committed = true;
+      hooks.committed?.();
+      return true;
+    };
+    /** After the commit: a full run clears the Resume point; a single-show run prunes its show from it. */
+    const settleResumePoint = () => {
+      const store = mode.resumePoint;
+      if (!store) return;
+      if (runOptions.fullRun) store.clear();
+      else if (storedPoint && runOptions.pruneResumePoint) {
+        const next = runOptions.pruneResumePoint(storedPoint);
+        if (next) store.write(next); else store.clear();
+      }
+    };
+    /** After the commit and the settled Resume point: records the completed status and logs the completion. */
+    const succeed = (final: ScanRunCompletion): "completed" => {
+      hooks.succeeded?.();
+      // A clean finish: replace, so no pause or active work survives the run.
+      mode.status.write({ status: "completed", processed: final.processed, total: final.total, startedAt, finishedAt: final.finishedAt } as S);
+      terminal = true;
+      runLogger.info(event("scan.complete"), final.details);
+      return "completed";
     };
     /**
      * One heartbeat tick. It runs from a timer, outside the run's error
@@ -498,7 +547,7 @@ export function createScanRunLifecycle(options: { clock?: ScanRunClock; state?: 
     // Explained from the last running status, then reset like any terminal error: no pause, provider, resume time or active work survives.
     const error = mode.interruptedError(status);
     const interrupted: S = { ...status, status: "error", finishedAt: iso(), error, rateLimitPaused: false };
-    for (const field of ["rateLimitProvider", "rateLimitResumeAt", "activeShows", "currentShow"] as const) delete interrupted[field];
+    for (const field of TRANSIENT_STATUS_FIELDS) delete interrupted[field];
     mode.status.write(interrupted);
     try { mode.onInterrupted?.(interrupted); } catch (error) { report(`The ${SCAN_RUN_LABELS[mode.kind]} interrupted scan hook failed.`, error); }
     return interrupted;

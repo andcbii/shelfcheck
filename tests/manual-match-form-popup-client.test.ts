@@ -10,7 +10,7 @@ const tvdb = { provider: "TVDB", id: 9623973, showId: 386114, show: "Animaniacs"
 // The Manual Matches page with one saved Manual Match. A Plex scan runs while scan.running is set,
 // and saves wait for saveGate when one is given.
 async function mountPage(t: test.TestContext, { saveError, scan = { running: false }, saveGate }: { saveError?: string; scan?: { running: boolean }; saveGate?: Promise<void> } = {}) {
-  let mapping = { id: "animaniacs-match", revision: 7, health: "healthy", members: [tmdb, tvdb] };
+  let mapping = { id: "animaniacs-match", revision: 7, members: [tmdb, tvdb] };
   const posts: Record<string, unknown>[] = [];
   const { browser, container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
     if (String(input) === "/api/plex/scan") return Response.json({ scan: { status: scan.running ? "running" : "completed" } });

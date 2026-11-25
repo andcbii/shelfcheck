@@ -149,6 +149,15 @@ export type ProviderAuth = {
   recover(rejectedToken: string): Promise<void>;
 };
 
+/**
+ * How one request is paced. `spacing: "none"` skips the provider's ordinary
+ * start spacing: the request neither waits its turn behind spaced requests nor
+ * delays them. Cooldowns, Retry-After, unavailability, timeouts, retries and
+ * metrics still apply. The caller bounds how many such requests are in flight.
+ * Only Plex requests may use it.
+ */
+export type ProviderRequestPolicy = { spacing?: "none" };
+
 export type ProviderClientOptions = {
   clock?: ProviderClock;
   fetch?: typeof fetch;
@@ -368,9 +377,10 @@ export class ProviderClient {
   /**
    * One JSON request. With `auth`, each attempt sends the current credential,
    * and a 401 gets one recovery and replay, separate from transient retries.
+   * `policy` narrows how the request is paced; see `ProviderRequestPolicy`.
    */
-  async json<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<T> {
-    return (await this.request<T>(url, init, provider, auth)).value;
+  async json<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth, policy?: ProviderRequestPolicy): Promise<T> {
+    return (await this.request<T>(url, init, provider, auth, policy)).value;
   }
 
   /**
@@ -394,7 +404,9 @@ export class ProviderClient {
     return items;
   }
 
-  private async request<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth): Promise<{ value: T; headers: Headers }> {
+  private async request<T>(url: string, init: RequestInit, provider: ProviderName, auth?: ProviderAuth, policy?: ProviderRequestPolicy): Promise<{ value: T; headers: Headers }> {
+    // Only Plex has unspaced requests (its episode inventory); every other provider keeps its spacing.
+    if (policy?.spacing === "none" && provider !== "Plex") throw new Error(`${provider} requests are always spaced; only Plex requests may skip spacing.`);
     let recovered = false;
     const requested = requestIdentity(url,provider);
     const parsedUrl = new URL(url);
@@ -413,7 +425,8 @@ export class ProviderClient {
         }
         this.assertAvailable(provider, state);
       }
-      const { waitMs: queueWaitMs } = await this.gate.wait(provider, () => this.spacing(provider), () => this.assertAvailable(provider, state));
+      const available = () => this.assertAvailable(provider, state);
+      const { waitMs: queueWaitMs } = policy?.spacing === "none" ? await this.gate.waitUnspaced(provider, available) : await this.gate.wait(provider, () => this.spacing(provider), available);
       // Nothing is awaited from here to the send, so this check and the newest token hold at dispatch.
       this.assertAvailable(provider, state);
       const credential = auth?.credential();

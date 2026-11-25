@@ -10,7 +10,7 @@ import { mountDom } from "./dom-environment";
 const tmdb = {provider:"TMDB",id:100,showId:10,show:"Animaniacs",title:"Combined",season:3,episode:18,url:"https://www.themoviedb.org/tv/10/season/3/episode/18"};
 const tvdb = {provider:"TVDB",id:200,showId:20,show:"Animaniacs",title:"Part 1",season:3,episode:18,url:"https://thetvdb.com/dereferrer/episode/200"};
 const saved = [
-  {id:"first",revision:1,health:"needs-review",healthMessage:"A provider episode record was not found.",members:[tmdb,tvdb]},
+  {id:"first",revision:1,members:[tmdb,tvdb]},
   {id:"second",revision:1,members:[{...tmdb,id:101,title:"Other"},{...tvdb,id:201,title:"Other"}]},
 ];
 
@@ -49,20 +49,19 @@ test("the Manual Matches page says Manual Match through its list, selection, edi
     return Promise.reject("offline");
   }, saved);
   ui.sayNoMapping("List");
-  const health = ui.container.querySelector<HTMLSelectElement>('[aria-label="Health"]');
-  assert.ok(health, "The health filter is labelled Health");
-  assert.equal(health.options[0].textContent, "All Manual Matches");
+  assert.equal(ui.container.querySelector('[aria-label="Health"]'), null, "No health filter");
 
   const tick = ui.container.querySelector<HTMLInputElement>('article input[type="checkbox"]');
   assert.equal(tick?.getAttribute("aria-label"), "Select Manual Match first");
   await act(async()=>tick!.click());
-  assert.ok(ui.button("Select all 2 matching Manual Matches"));
+  assert.ok(ui.button("Select all 2 Manual Matches"));
   ui.sayNoMapping("Selection");
 
-  await ui.click("Select all 2 matching Manual Matches");
+  await ui.click("Select all 2 Manual Matches");
   await ui.click("Delete 2 selected matches");
   await ui.click("Delete 2 matches");
   assert.match(ui.container.textContent || "", /Deleted 1 Manual Match\. 1 selected Manual Match was already removed\./);
+  assert.doesNotMatch(ui.container.textContent || "", /verification|Plex search/i, "Manual Matches have no verification, and a scan is a Plex scan run");
   ui.sayNoMapping("Bulk delete");
 
   const deleteButton = ui.container.querySelector<HTMLButtonElement>("article .manual-match-delete")!;

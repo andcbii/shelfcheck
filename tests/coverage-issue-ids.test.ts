@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   COMPARISON_PENDING_ISSUE, INITIAL_COMPARISON_INPUTS_ISSUE, SCAN_FAILURE_ISSUE, TRAKT_AUTHENTICATION_ISSUE, TVDB_AUTHENTICATION_ISSUE,
-  comparisonFailureIssueId, comparisonInputsIssueId, inventoryDetailsIssueId, memberVerificationIssueId, plexInventoryIssueId,
+  comparisonFailureIssueId, comparisonInputsIssueId, inventoryDetailsIssueId, plexInventoryIssueId,
   catalogueIssueIds, catalogueRecordIssueId, episodeCheckIssueId, episodeCheckPrefix, episodeCheckShowPrefix, episodeCheckTvdbEpisodePrefix,
   lookupFailureIssueId, titleRecoveryIssueId, providerVerificationIssueId,
 } from "../lib/coverage-issue-ids";
@@ -30,11 +30,6 @@ test("show-scoped Coverage Issue IDs keep their saved text, including rating key
   assert.equal(comparisonInputsIssueId("tvdb:81189"), "comparison-inputs:tvdb:81189");
   assert.equal(comparisonFailureIssueId("4412"), "comparison-failure:4412");
   assert.equal(comparisonFailureIssueId("tvdb:81189"), "comparison-failure:tvdb:81189");
-});
-
-test("a Manual Match member's verification ID names the match, provider and member episode", () => {
-  assert.equal(memberVerificationIssueId("match-7", { provider: "TVDB", id: 349232 }), "member-verification:match-7:TVDB:349232");
-  assert.equal(memberVerificationIssueId("a1b2:c3", { provider: "TMDB", id: 62085 }), "member-verification:a1b2:c3:TMDB:62085");
 });
 
 test("a show's catalogue refresh and fallback refresh IDs name the provider and the show", () => {

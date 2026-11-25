@@ -1,5 +1,105 @@
 # Changelog
 
+## 2.7.2 - 2026-11-24
+
+### Added
+
+- The Trakt and Plex pages show a progress box while a scan runs: the shows
+  being checked right now, each with its step in plain words ("Getting the
+  episode list from TVDB"), over a progress bar. During a rate-limit pause
+  its heading reads "Waiting" and a notice names the provider, the time the
+  scan resumes and a countdown, for example "Paused: TVDB rate limit.
+  Resumes at 21:14."
+
+- On the Plex page the box also shows how far the scan's preparation has
+  got, before and alongside the comparison counter: "Reading Plex library
+  N/M", counting every Plex record read or failed out of the whole library
+  (also for a single-show scan), and "Preparing TMDB and TVDB episode lists
+  N/M", counting shows whose lists were downloaded, reused or failed. Both
+  lines show together while both run. The scan button reads "Preparing
+  scan…" until the comparisons start, and "Removing unused Manual Match
+  members…" shows while a scan finishes. A scan with no shows to compare
+  says so once its library is read.
+
+- The Trakt page shows each show's poster: the Trakt poster, or the matching
+  Plex show's artwork when Trakt has none or it fails to load, and otherwise
+  the show's initials.
+
+### Changed
+
+- Manual Matches no longer have a health. A Plex scan no longer rechecks
+  every Manual Match member at TMDB and TVDB before comparing, which took
+  about 55 seconds of every full scan before the first show. Every saved
+  Manual Match can grant coverage, so a provider outage can no longer stop a
+  match covering and show owned episodes as missing. The Manual Matches
+  report and the Matching Episodes editor no longer show Healthy, Pending or
+  Needs review badges, the health filter or health summaries; selection,
+  paging and delete work over every saved Manual Match. Scan Issues no
+  longer lists member-verification entries. Saving or editing a Manual Match
+  still looks every episode up at its provider and shows the preview, so a
+  match still starts from real provider records.
+
+- A Manual Match now covers one way. When you own every TMDB episode in a
+  match, it covers the match's missing TVDB episodes. Owning its TVDB
+  episodes never covers a TMDB episode, however complete the TVDB side: TMDB
+  is the library's official order, so a TMDB episode counts as collected
+  only by its own season and episode numbers or its own TMDB identity. A
+  TMDB episode you hold only through the TVDB episodes of a Manual Match now
+  shows as missing. Report Missing, the complete-set rule, direct
+  ownership, ignored-show evidence and the Incomplete combined episode work
+  as before, in scans and cached rechecks alike.
+
+- After a Plex scan saves its report, it removes gone members from their
+  Manual Matches. A member is a candidate only when its own provider show
+  was downloaded fresh and complete in that scan, the show's comparison
+  completed with a fresh result, and the downloaded list lacks the episode.
+  A reused, saved, failed, incomplete or fallback catalogue never makes a
+  candidate. The scan then looks each candidate up at its provider and
+  removes it only when the provider confirms the episode gone: a 404, a TVDB
+  episode now in another series, or a TMDB episode number that now names
+  another episode. Any other answer keeps the member, and a later scan can
+  try again. The removals are saved together as one Manual Match change,
+  each removal is written to the Plex scan log (there is no Scan Issues
+  entry), a Manual Match left without a TMDB or TVDB episode is deleted, and
+  the other members keep their Report Missing flags. The affected shows are
+  then rechecked from saved data before the scan reports completion. A scan
+  that fails, is interrupted or is stopped before its report is saved
+  removes nothing, and a cached recheck never removes members.
+
+  A provider that deletes an episode and re-adds it under a new ID loses
+  that member at the next fresh download; the re-added episode shows as
+  missing until you edit the match to add it.
+
+- The first start after upgrading (migration 8) removes each Manual Match's
+  saved health and health message, every member-verification Scan Issues
+  entry (and only the links to them from other entries), and the health
+  saved in the last Plex report, and clears the Plex Resume point, whose
+  shows were compared while Pending and Needs review matches covered
+  nothing. The log says when it changed anything. Downloaded catalogues and
+  the last Plex report are kept, so nothing is downloaded again and no scan
+  starts by itself. Manual Matches that were Pending or Needs review cover
+  from the next Plex scan, which is an ordinary scan.
+
+- Plex scans prepare faster. The Plex library is read 8 requests at a time
+  with no gap between them; Plex rate limits, Retry-After and outages are
+  still honoured, and other Plex requests keep their spacing. The TMDB and
+  TVDB change lists are fetched while the library is read, and each show's
+  TMDB and TVDB episode lists start downloading as soon as its Plex data is
+  in. Owned and missing episodes are still decided only once the whole
+  library is read, so results are the same as before given the same
+  provider answers. Comparisons still run 3 shows at a time, and TMDB, TVDB
+  and Trakt pacing is unchanged.
+
+- The Plex page keeps showing its last completed report, shows and
+  incomplete coverage groups alike, under the progress box while a scan
+  runs. A completed scan replaces it in full; a failed scan keeps it. A
+  first-ever scan shows only the progress box.
+
+- While a scan of the other kind runs, the Trakt or Plex page's scan button
+  reads "Another scan is in progress" and is shown locked, with the line
+  naming the running scan under it, so a Trakt scan and a Plex scan never
+  run together.
+
 ## 2.7.1 - 2026-11-23
 
 ### Changed

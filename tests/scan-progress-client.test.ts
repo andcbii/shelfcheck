@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 import { active, mountPage, mountPaused, paused, pending, running, SHOWS, START } from "./scan-progress-harness";
+import { PLEX_SCAN_PREPARING_BUTTON_LABEL, SCAN_NO_SHOWS_TO_COMPARE_WORDING } from "../lib/scan-run-activity";
 
 // The progress box under each report heading shows the shows the Scan run is
 // checking and their step, from the page's status answers. Every server answer
@@ -154,6 +155,85 @@ test("a Plex scan between shows, past getting ready, does not say it is getting 
   const page = await mountPage(t, "plex", { statuses: [running({ currentPhase: "processing" })] });
   assert.ok(page.box());
   assert.equal(page.box()?.querySelector(".scan-progress-solo"), null);
+});
+
+// A Plex scan's preparation: library records read and shows' episode lists
+// prepared, each as "N/M", in place of "Getting ready…" and alongside the shows.
+
+const preparation = (inventory: [number, number], catalogues: [number, number]) => ({
+  inventory: { settled: inventory[0], total: inventory[1] },
+  catalogues: { settled: catalogues[0], total: catalogues[1] },
+});
+const preparationLines = (page: { box(): Element | null }) => Array.from(page.box()?.querySelectorAll(".scan-progress-preparation li") || []).map((line) => line.textContent);
+
+test("a preparing Plex scan shows both preparation lines, then the counter once comparisons begin, until preparation finishes", async (t) => {
+  const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: preparation([210, 666], [140, 653]), activeShows: active(["Bluey", "tmdb-show-and-seasons"]) })] });
+  assert.deepEqual(preparationLines(page), ["Reading Plex library 210/666", "Preparing TMDB and TVDB episode lists 140/653"]);
+  assert.equal(page.box()?.querySelector(".scan-progress-solo"), null, "not getting ready any more");
+  assert.deepEqual(page.lines(), [["Bluey", "Getting the episode list from TMDB"]], "a show prepared early keeps its line");
+  assert.match(page.container.querySelector("button.primary")?.textContent || "", new RegExp(`^${PLEX_SCAN_PREPARING_BUTTON_LABEL}`), "no comparison counter before comparisons begin");
+
+  page.nextStatuses(running({ processed: 0, total: 653, preparation: preparation([666, 666], [300, 653]) }));
+  await page.advance();
+  assert.deepEqual(preparationLines(page), ["Preparing TMDB and TVDB episode lists 300/653"], "the library line goes once the whole library is read");
+  assert.match(page.container.querySelector("button.primary")?.textContent || "", /^Checking 0 of 653/, "the counter starts alongside the preparation line");
+
+  page.nextStatuses(running({ processed: 12, total: 653, preparation: preparation([666, 666], [653, 653]), activeShows: active(["Bluey", "episode-crosswalk"]) }));
+  await page.advance();
+  assert.deepEqual(preparationLines(page), [], "the preparation line goes once preparation finishes");
+  assert.deepEqual(page.lines(), [["Bluey", "Matching episode numbers between providers"]]);
+});
+
+test("a Plex scan with no shows to compare says so once its library is read, until it completes", async (t) => {
+  await t.test("an empty library", async (t) => {
+    const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: preparation([0, 0], [0, 0]) })] });
+    assert.deepEqual(preparationLines(page), []);
+    assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, SCAN_NO_SHOWS_TO_COMPARE_WORDING, "the box is not left empty");
+  });
+  await t.test("every show ignored", async (t) => {
+    const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: preparation([2, 5], [0, 0]) })] });
+    assert.deepEqual(preparationLines(page), ["Reading Plex library 2/5"]);
+    assert.equal(page.box()?.querySelector(".scan-progress-solo"), null, "the library line says what it is doing");
+    page.nextStatuses(running({ processed: 0, total: 0, currentPhase: "processing", preparation: preparation([5, 5], [0, 0]) }));
+    await page.advance();
+    assert.deepEqual(preparationLines(page), []);
+    assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, SCAN_NO_SHOWS_TO_COMPARE_WORDING);
+  });
+});
+
+test("malformed Plex preparation progress is ignored", async (t) => {
+  const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, currentPhase: "initializing", preparation: { inventory: { settled: "x", total: 3 }, catalogues: null } })] });
+  assert.deepEqual(preparationLines(page), []);
+  assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, "Getting ready…");
+});
+
+test("a rate-limit pause during Plex preparation shows the pause notice, with the preparation lines kept and dimmed", async (t) => {
+  const view = await mountPaused(t, "plex", paused("TMDB", undefined, { processed: 0, total: 0, activeShows: [], preparation: preparation([666, 666], [140, 653]) }));
+  assert.equal(view.notes(), "Paused: TMDB rate limit. Waiting for it to clear.");
+  assert.equal(view.heading(), "Waiting");
+  assert.equal(view.box()?.getAttribute("data-paused"), "true", "the box is marked paused, which dims its preparation lines");
+  assert.deepEqual(preparationLines(view), ["Preparing TMDB and TVDB episode lists 140/653"]);
+});
+
+test("the Plex preparation lines go away when the scan completes or fails", async (t) => {
+  await t.test("completes", async (t) => {
+    const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, preparation: preparation([3, 666], [0, 653]) })] });
+    assert.equal(preparationLines(page).length, 2);
+    page.nextStatuses({ status: "completed", processed: 653, total: 653 });
+    await page.advance();
+    assert.equal(page.box(), null);
+  });
+  await t.test("fails", async (t) => {
+    const page = await mountPage(t, "plex", { statuses: [running({ processed: 0, total: 0, preparation: preparation([3, 666], [0, 653]) })] });
+    page.nextStatuses({ status: "error", processed: 0, total: 0, error: "Plex is unreachable." });
+    await page.advance();
+    assert.equal(page.box(), null);
+  });
+});
+
+test("a Plex scan removing unused Manual Match members after its report says so", async (t) => {
+  const page = await mountPage(t, "plex", { statuses: [running({ processed: 653, total: 653, currentPhase: "manual-match-removal" })] });
+  assert.equal(page.box()?.querySelector(".scan-progress-solo")?.textContent, "Removing unused Manual Match members…");
 });
 
 test("the Plex box goes away when the scan completes or fails", async (t) => {

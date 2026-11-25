@@ -27,8 +27,6 @@ export type CoverageMapping = {
   revision: number;
   members: CoverageMember[];
   createdAt: string;
-  health?: "healthy" | "pending" | "needs-review";
-  healthMessage?: string;
   evidence?: CoverageEvidence[];
 };
 
@@ -47,7 +45,6 @@ export type CoverageOutcome = {
 export type MemberStatus = "reported-missing" | "incomplete" | "direct" | "automatic" | "manual" | "missing" | "alternative";
 export type CoverageGroup = {
   mappingId: string;
-  health?: CoverageMapping["health"];
   members: (CoverageMember & { status: MemberStatus; missingParts?: CoverageIdentity[] })[];
   missing: (CoverageOutcome & { showKey: string })[];
 };

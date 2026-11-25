@@ -27,7 +27,7 @@ test("Esc in a Delete confirmation over Matching Episodes closes only the confir
   const { container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
     if (String(input) === "/api/plex/scan") return Response.json({ scan: { status: "completed" } });
     if (init?.method === "DELETE") deletes.push(input);
-    return Response.json({ mappings: [{ id: "murder-pals", revision: 1, health: "healthy", createdAt: "now", members: [member("TMDB", 4245050), member("TVDB", 9623972)] }], revision: 1, pending: 0 });
+    return Response.json({ mappings: [{ id: "murder-pals", revision: 1, createdAt: "now", members: [member("TMDB", 4245050), member("TVDB", 9623972)] }], revision: 1, pending: 0 });
   } });
   let dismissed = 0;
   await act(async () => root.render(createElement(ManualCoverageManager, { initialUrls: ["tvdb:9623972"], onClose() { dismissed++; }, onChanged() {} })));

@@ -5,8 +5,9 @@ import { scanRuns, type ScanRunMode, type ScanRunOwner } from "@/lib/scan-run";
 import { seriesNotFoundHistory } from "@/lib/series-not-found-history";
 import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexInventory, saveDeferredTmdbChanges, savePendingTvdbChanges, savePendingSafeguards, saveProviderVerification, saveCompletedFullScan, clearPlexInputs, sharedTmdbCrosswalks, type PlexGeneratedInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
 import { signInToTvdb, type TvdbSignIn } from "@/lib/tvdb-auth";
-import { recheckCoverageHealth } from "@/lib/manual-coverage-health";
-import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, saveCoverageEvidence, type CarriedMember, type CoverageHealthReceipt } from "@/lib/manual-coverage";
+import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, removeManualMatchMembers, saveCoverageEvidence, type CarriedMember, type ManualMatchMemberRemoval } from "@/lib/manual-coverage";
+import { manualMatchRemovalCandidates } from "@/lib/manual-match-removal-candidates";
+import { confirmRemovalCandidates } from "@/lib/manual-match-removal-confirmation";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -26,17 +27,19 @@ import { withTitleRecovery, type TitleRecoveryState } from "@/lib/tvdb-title-rec
 import { normaliseTmdbRecords, normaliseTvdbRecords, type MalformedCatalogueRecord, type NormalisedCatalogue } from "@/lib/catalogue-records";
 import { ignoredPlexKeys } from "@/lib/ignored-shows";
 import { parsePlexPreferences } from "@/lib/preferences";
-import { PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
-import { runTrackedWorkerPool, runWorkerPool, type ActiveScanWork } from "@/lib/scan-concurrency";
-import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup } from "@/lib/plex-inventory";
-import { clearCatalogueUse, observeCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
+import { LIBRARY_INVENTORY_REQUESTS, PLEX_PREPARATION_WORKERS, PLEX_PREPARED_SHOWS_AHEAD, PLEX_SCAN_WORKERS, type ProviderName } from "@/lib/provider-policy";
+import { PreparationQueue, runTrackedWorkerPool, runWorkerPool, settleBeforeFailing, type ActiveScanWork } from "@/lib/scan-concurrency";
+import type { ScanPreparationProgress } from "@/lib/scan-run-activity";
+import { groupPlexShows, hasPlexEpisodeCoordinate, idsFromGuids, plexEpisodeFingerprint, plexFingerprint, showProviderIds, type PlexMetadata, type PlexShowGroup, type ShowProviderIds } from "@/lib/plex-inventory";
+import { clearCatalogueUse, observeCatalogueCandidates, previewCatalogueCandidates, readShowCatalogueSelection, recordCatalogueCandidateNames, recordCatalogueUse, type CatalogueUse, type ProviderCatalogueSelection, type ShowCatalogueSelection } from "@/lib/catalogue-selection-store";
 import { PROVIDER_ID_FIELD, PROVIDER_NAME, PROVIDERS, type CatalogueProvider } from "@/lib/catalogue-selection";
 import { catalogueIssueIds, comparisonFailureIssueId, comparisonInputsIssueId, INITIAL_COMPARISON_INPUTS_ISSUE, inventoryDetailsIssueId, lookupFailureIssueId, plexInventoryIssueId, providerVerificationIssueId, SCAN_FAILURE_ISSUE, TVDB_AUTHENTICATION_ISSUE, type CoverageIssueId } from "@/lib/coverage-issue-ids";
-import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePayloads, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderLookupStatus, type ProviderRequest, type ShowMatchStatus } from "@/lib/comparison-catalogue-resolver";
-import { downloadCatalogueSource, type DownloadCataloguePayloads } from "@/lib/download-catalogue-source";
-import { droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation } from "@/lib/refresh-obligation";
+import { ProgressPersistenceError, resolveComparisonCatalogues, type CataloguePayloads, type ComparedCatalogue, type ComparisonCatalogueResolution, type ComparisonCatalogueSource, type PriorSelection, type ProviderLookupStatus, type ProviderRequest, type ShowMatchStatus } from "@/lib/comparison-catalogue-resolver";
+import { downloadCatalogueSource, type DownloadCataloguePayloads, type DownloadedEpisodes, type TmdbCatalogue, type TvdbCatalogue } from "@/lib/download-catalogue-source";
+import { episodeIdEnumeration } from "@/lib/episode-id-universe";
+import { copySavedObligation, droppedByRemoval, effectivePatch, patchSavedObligation, PREFERRED_REQUIRED, recordRequestedCandidate, savedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
 import { savedCatalogueSource } from "@/lib/saved-catalogue-source";
-import { ProviderResponseError, type ProviderAuth } from "@/lib/provider-client";
+import { ProviderResponseError, type ProviderAuth, type ProviderRequestPolicy } from "@/lib/provider-client";
 import { scanProviderClient } from "@/lib/scan-provider-client";
 import { checkpointIsUsable, checkpointWithoutRatingKey, plexReportCacheIsUsable, PLEX_CACHE_VERSION, pruneEpisodeIdentityCache, targetedScanCarryOver, type PlexScanCacheEntry } from "@/lib/plex-scan-cache";
 import { isEpisodeCoordinate, isProviderId, lookupKey, lookupProvider, lookupUrl, providerLookup, TMDB_API, TVDB_API, type ProviderLookup } from "@/lib/provider-lookup";
@@ -47,7 +50,7 @@ import { CrosswalkResponseError, crosswalkLookup, liveComparisonEvidence, SavedR
 import { savedComparisonEvidence } from "@/lib/saved-comparison-evidence";
 import { equivalentTmdbShowIds, ownedTmdbEpisodeMatch, tmdbShowLinksToTvdb } from "@/lib/tmdb-show-equivalence";
 
-export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; heartbeatAt?: string };
+export type PlexScanStatus = { status: "idle" | "running" | "completed" | "error"; processed: number; total: number; startedAt?: string; finishedAt?: string; error?: string; rateLimitPaused?: boolean; rateLimitProvider?: ProviderName; currentShow?: string; currentPhase?: string; activeShows?: ActiveScanWork[]; preparation?: ScanPreparationProgress; heartbeatAt?: string };
 export type PlexProviderShowMatch = { id: number; name?: string; year?: number; slug?: string };
 export type PlexProviderMatches = { tmdb: PlexProviderShowMatch[]; tvdb: PlexProviderShowMatch[] };
 export type PlexShow = { ratingKey: string; plexGuid?: string; plexGuids?: string[]; plexRatingKeys?: string[]; title: string; year?: number; thumb?: string; tmdbId?: number; tvdbId?: number; tvdbSlug?: string; plexEpisodes: number };
@@ -86,6 +89,9 @@ export function readPlexPreferences() {
   return parsePlexPreferences(plexSavedState.options.read());
 }
 
+/** The phase of a Plex scan applying its Manual Match removals after its report is saved (ADR-0008). */
+const MANUAL_MATCH_REMOVAL_PHASE = "manual-match-removal";
+
 /**
  * The Plex scan mode's adapter to the scan run lifecycle: its status and
  * Resume point stores, log event prefix and Interrupted scan wording. The
@@ -97,8 +103,10 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
   failureMessage: "The Plex scan failed.",
   vetoedError: "Manual Matches changed while this scan was running. Start a new Plex scan to include them.",
   status: plexSavedState.status,
-  interruptedError: (status) => `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
-  onInterrupted: (status) => setCoverageIssue({id:SCAN_FAILURE_ISSUE,operation:"scan",scope:"library",cause:status.error!,action:"Start a new Plex scan to resume verification."}),
+  interruptedError: (status) => status.currentPhase === MANUAL_MATCH_REMOVAL_PHASE
+    ? "The previous Plex scan saved its report but was interrupted while applying its Manual Match removals. Removals already applied stay; the shows they affect stay pending until a cached recheck or the next Plex scan compares them."
+    : `The previous Plex scan was interrupted during ${status.currentPhase || "processing"}${status.currentShow ? ` (${status.currentShow})` : ""}. Start a new scan to resume from its checkpoint.`,
+  onInterrupted: (status) => setCoverageIssue({id:SCAN_FAILURE_ISSUE,operation:"scan",scope:"library",cause:status.error!,action:status.currentPhase === MANUAL_MATCH_REMOVAL_PHASE ? "Start a new Plex scan to compare the shows the removals affect." : "Start a new Plex scan to resume verification."}),
   resumePoint: {
     ...plexSavedState.resumePoint,
     resumeDetails: (checkpoint) => ({ savedAt: checkpoint.savedAt, shows: checkpoint.shows.length, cacheEntries: Object.keys(checkpoint.scanCache).length }),
@@ -112,8 +120,8 @@ const plexScanMode: ScanRunMode<PlexScanStatus, PlexCheckpoint> = {
  * lookups: sent with the scan run's credentials, never answered from or saved as a comparison relationship.
  * A comparison's own lookups go through its evidence source instead.
  */
-async function plexJson(path: string, url: string, token: string): Promise<PlexContainer> {
-  const body = await scanProviderClient.json<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex");
+async function plexJson(path: string, url: string, token: string, policy?: ProviderRequestPolicy): Promise<PlexContainer> {
+  const body = await scanProviderClient.json<PlexContainer>(`${url}${path}`, { headers: { Accept: "application/json", "X-Plex-Token": token, "X-Plex-Client-Identifier": "shelfcheck" } }, "Plex", undefined, policy);
   const pathname = path.split("?")[0];
   const field = pathname === "/library/sections" ? "Directory" : "Metadata";
   const collection = /^\/library\/(?:sections(?:\/[^/]+\/all)?|metadata\/[^/]+\/allLeaves)$/.test(pathname);
@@ -163,17 +171,21 @@ async function requestTmdbShowForTvdb(tvdbId: number, token: string): Promise<Tm
   return (await tmdbJson<{ tv_results?: TmdbShow[] }>(providerLookup.tmdbSeriesByTvdbSeries(tvdbId), token)).tv_results?.[0];
 }
 
-async function tmdbEpisodes(show: TmdbShow, token: string): Promise<NormalisedCatalogue> {
+async function tmdbEpisodes(show: TmdbShow, token: string): Promise<DownloadedEpisodes> {
   if (!Number.isFinite(show.id) || !Array.isArray(show.seasons)) throw new Error("TMDB returned an incomplete show catalogue.");
   const seasons = show.seasons;
   const responses = await Promise.all(seasons.map(async (season) => {
     const response = await tmdbJson<{ episodes?: unknown[] }>(`/tv/${show.id}/season/${season.season_number}`, token);
     if (!Array.isArray(response.episodes)) throw new ProviderResponseError("TMDB",{provider:"TMDB",kind:`show ${show.id} season`,id:season.season_number});
-    return { season: season.season_number, episodes: response.episodes };
+    return { season: season.season_number, episodes: response.episodes, truncated: typeof season.episode_count === "number" && response.episodes.length < season.episode_count };
   }));
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
-  for (const response of responses) normaliseTmdbRecords(show, response.season, response.episodes, catalogue);
-  return usableCatalogue("TMDB", show.id, catalogue);
+  const enumeration = episodeIdEnumeration("TMDB", show.id);
+  for (const response of responses) { enumeration.add(response.episodes); normaliseTmdbRecords(show, response.season, response.episodes, catalogue); }
+  // A season returning fewer records than the show record counts for it may hide a member's
+  // episode: the download is compared as usual but proposes no removals (ADR-0008).
+  const truncated = responses.some(response => response.truncated);
+  return { ...usableCatalogue("TMDB", show.id, catalogue), episodeIds: truncated ? undefined : enumeration.complete() };
 }
 
 /** A failed request or interpretation within one episode's crosswalk, with the typed lookup it concerns (absent when unknown). */
@@ -203,8 +215,14 @@ async function findEpisodeViaTrakt(evidence: ComparisonEvidence, tvdbEpisodeId: 
   return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds, validationFailures };
 }
 
-async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<NormalisedCatalogue & { slug?: string; name?: string }> {
+/**
+ * A TVDB series' catalogue: its default order's episode pages. An episode the list leaves out is only
+ * a removal candidate (ADR-0008): another season order can still hold it, so the scan asks TVDB for
+ * the episode itself before removing its member.
+ */
+async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<DownloadedEpisodes & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
+  const enumeration = episodeIdEnumeration("TVDB", seriesId);
   const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string } }>(`${TVDB_API}/series/${seriesId}`, token);
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
@@ -213,12 +231,13 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
     if (!Array.isArray(body.data?.episodes)) throw new ProviderResponseError("TVDB",{provider:"TVDB",kind:"series episode catalogue",id:seriesId});
     // Specials (season 0) are kept so Report Missing can be evaluated on them; the
     // comparator still ignores unflagged specials, as before.
+    enumeration.add(body.data.episodes);
     normaliseTvdbRecords(seriesId, series?.data?.name || showTitle, page, body.data.episodes, catalogue);
     if (!body.links?.next) break;
     page += 1;
     if (page >= 100) throw new Error("TVDB episode catalogue exceeded the safe pagination limit.");
   }
-  return { ...usableCatalogue("TVDB", seriesId, catalogue), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
+  return { ...usableCatalogue("TVDB", seriesId, catalogue), episodeIds: enumeration.complete(), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
 }
 
 /**
@@ -349,6 +368,98 @@ function fulfilOverdueSafeguards(inputs: PlexGeneratedInputs, utcDate: string) {
   if (overdue.length) savePendingSafeguards(inputs.pendingSafeguards);
 }
 
+/** A provider's freshness for a scan, once its verified changes are retained. */
+type CatalogueFreshness = {
+  /**
+   * The verified changes: TMDB's change list with verification recovery, or TVDB's updates. Null when they
+   * could not be read. A targeted scan reads none.
+   */
+  changes: Set<number> | null;
+  /** The series whose saved catalogues this scan treats as changed: verified and retained changes (TMDB's deferred, TVDB's pending). */
+  catalogueChanges: Set<number>;
+};
+
+/** TMDB's freshness, once its safeguard is retained too. */
+type TmdbFreshness = CatalogueFreshness;
+
+type TvdbFreshness = CatalogueFreshness & {
+  /** The changes relationship reuse may trust: the catalogue changes, or null while the updates could not be read. */
+  verifiedChanges: Set<number> | null;
+};
+
+/**
+ * A scan's provider freshness, checked while the Plex inventory downloads. Each provider is ready
+ * once its change list is read (or has failed, raising its verification issue) and its changes are
+ * retained, so a catalogue decision for that provider can wait on that provider alone. `settled`
+ * resolves once both have settled, fulfilled or not: a run drains it before it ends.
+ */
+type ProviderFreshness = { tmdb: Promise<TmdbFreshness>; tvdb: Promise<TvdbFreshness>; settled: Promise<void> };
+
+type ProviderFreshnessContext = {
+  inputs: PlexGeneratedInputs;
+  config: { tmdbToken: string };
+  /** The run's one TVDB sign-in. */
+  tvdbSignIn: TvdbSignIn;
+  /** The scan's fixed start; its UTC date is the scan's date. */
+  startedAt: string;
+  /** A single-show scan neither reads the change lists nor consults the verification positions. */
+  targeted: boolean;
+  /** Whether this full scan needs today's TMDB change list as a safeguard. */
+  safeguardDue: boolean;
+  candidates: PlexShowGroup[];
+  logger: Pick<ScanLogger, "warn">;
+};
+
+/** Start checking each provider's freshness from its own verification position. */
+function startProviderFreshness({inputs, config, tvdbSignIn, startedAt, targeted, safeguardDue, candidates, logger}: ProviderFreshnessContext): ProviderFreshness {
+  const utcDate = startedAt.slice(0, 10);
+  const {tmdb: tmdbPosition, tvdb: tvdbPosition} = inputs.verification;
+  const tmdb = (async (): Promise<TmdbFreshness> => {
+    // TMDB verification recovery: catalogues its change feed cannot cover are treated as changed.
+    const plan = targeted ? {recover: []} : tmdbVerificationPlan(tmdbPosition, Object.values(inputs.tmdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [{id: catalogue.show.id, downloadedAt: catalogue.downloadedAt}] : []), startedAt);
+    const recovery = new Set(plan.recover);
+    const changes = targeted ? null : await (plan.feedFrom ? tmdbChangedShows(plan.feedFrom, config.tmdbToken, startedAt) : Promise.resolve(new Set<number>())).then(changes => changes && new Set([...changes, ...recovery])).catch((error) => {
+      setProviderVerificationIssue("TMDB", error);
+      logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    });
+    // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
+    retainVerifiedChanges(inputs, changes ?? recovery, null);
+    if (changes !== null) {
+      resolveCoverageIssue(providerVerificationIssueId("TMDB"));
+      fulfilOverdueSafeguards(inputs, utcDate);
+    }
+    // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
+    const safeguardChanges = safeguardDue
+      ? tmdbPosition?.slice(0, 10) === utcDate ? changes
+        : await tmdbChangedShows(startedAt, config.tmdbToken, startedAt).catch(error => {
+          setProviderVerificationIssue("TMDB", error);
+          return null;
+        })
+      : null;
+    if (safeguardDue) retainSafeguard(inputs, utcDate, safeguardChanges, candidates);
+    return {changes, catalogueChanges: new Set([...(changes || []), ...Object.keys(inputs.deferredTmdbChanges).map(Number)])};
+  })();
+  const tvdb = (async (): Promise<TvdbFreshness> => {
+    // Without TVDB history, verification starts at each saved catalogue's own successful download.
+    const feedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
+    const changes = targeted ? null : await (!feedFrom ? Promise.resolve(new Set<number>()) : withTvdbSignIn(tvdbSignIn, token => tvdbChangedShows(feedFrom, token))).catch((error) => {
+      setProviderVerificationIssue("TVDB", error, tvdbSignIn.outcome === "failed" && error === tvdbSignIn.error ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
+      logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
+      return null;
+    });
+    retainVerifiedChanges(inputs, null, changes);
+    if (changes !== null) resolveCoverageIssue(providerVerificationIssueId("TVDB"));
+    // Retained TVDB changes stay due even while the feed itself is unavailable.
+    const catalogueChanges = new Set([...(changes || []), ...Object.keys(inputs.pendingTvdbChanges).map(Number)]);
+    return {changes, catalogueChanges, verifiedChanges: changes === null ? null : catalogueChanges};
+  })();
+  // Each provider's failure is observed when it is awaited; until then it must not surface as unhandled.
+  tmdb.catch(() => {});
+  tvdb.catch(() => {});
+  return {tmdb, tvdb, settled: Promise.allSettled([tmdb, tvdb]).then(() => {})};
+}
+
 type LoadedComparison = {
   group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[];
   tmdbId?: number; tvdbId?: number; tmdbShow: TmdbShow | null; tvdbResolved: boolean; tvdbSlug?: string;
@@ -363,6 +474,47 @@ type LoadedComparison = {
   /** The comparison's provider relationships, live or saved: its only way to look up evidence. */
   evidence: ComparisonEvidence;
 };
+/** The show a preparation is for, with its timings so far. */
+type PreparingShow = { group: PlexShowGroup; primary: PlexShowGroup["records"][number]; ratingKey: string; showStarted: number; phaseTimings: Record<string, number> };
+/** What a show's Plex metadata reports as its catalogue candidates; `complete` when every record returned usable metadata. */
+type CandidateObservation = { ids: ShowProviderIds; complete: boolean };
+/** A show's own Plex items, as its comparison reads them. */
+type PreparedLocalInventory = { metadata: PlexMetadata[]; episodes: Set<string>; tmdbEpisodeIds: Set<number>; tvdbEpisodeIds: Set<number>; imdbEpisodeIds: Set<string> };
+/** A show's comparison catalogues, chosen by the existing preparation path, and what its comparison records with them. */
+type PreparedCatalogues = {
+  tmdbId?: number; tvdbId?: number; tvdbSource: LookupSourceStep[]; tvdbCandidates: number[];
+  warning?: string; providerEpisodes: ProviderEpisode[]; malformedRecords: MalformedCatalogueRecord[];
+  titleRecovery: { state: TitleRecoveryState; carried: boolean };
+  tmdbShow: LoadedComparison["tmdbShow"]; tvdbResolved: boolean; tvdbSlug?: string;
+  /** The show's refresh obligations as the preparation leaves them; saved by its comparison. */
+  refresh: SavedRefreshObligations;
+  catalogueUse: Partial<Record<CatalogueProvider, CatalogueUse>>;
+  unavailableCatalogueCauses: CoverageIssueId[];
+  outcome: ComparisonCatalogueResolution<DownloadCataloguePayloads>["outcome"];
+  cacheable: boolean;
+  scanStatus: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">;
+  tmdbCatalogue?: ComparedCatalogue<TmdbCatalogue>; tvdbCatalogue?: ComparedCatalogue<TvdbCatalogue>;
+};
+/** What a show's comparison saves of its preparation: its catalogue observation and its comparison inputs. */
+type PreparedComparisonInputs = { group: PlexShowGroup; details: PlexMetadata[]; localMetadata: PlexMetadata[]; observation: CandidateObservation; preferredIds: { tmdbId?: number; tvdbId?: number }; refresh: SavedRefreshObligations };
+/**
+ * A show's preparation, consumed once by its comparison: `unloaded` when its Plex metadata could not be
+ * read, `loaded` when the library inventory was already known incomplete, so no catalogue was prepared.
+ */
+type PreparedShow = { show: PreparingShow } & (
+  | { kind: "unloaded"; error: unknown }
+  | { kind: "loaded" }
+  | {
+    kind: "prepared"; details: PlexMetadata[];
+    /** Saved by the show's comparison, with what its candidate removals drop. */
+    observation: CandidateObservation;
+    /** The Plex-preferred IDs a new show's first saved comparison names. */
+    preferredIds: { tmdbId?: number; tvdbId?: number };
+    cachedTvdbEpisodeImdbIds: Record<string, string[]>;
+    local: PreparedLocalInventory;
+    catalogues: PreparedCatalogues;
+  }
+);
 /** Ordinary automatic ownership excludes ignored shows; manual evidence keeps all items. */
 function libraryInventoryIndex(groups: PlexShowGroup[], items: Record<string, PlexMetadata[]>, ignored: Set<string>) {
   const libraryTmdbEpisodeIds = new Set<number>();
@@ -418,7 +570,7 @@ export function mappedMembersMissingFromCatalogue(catalogueEpisodes: ProviderEpi
 async function compareLoadedPlexShow(input: LoadedComparison) {
   const {group,details,localMetadata,tmdbId,tvdbId,tmdbShow,tvdbResolved,tvdbSlug,tmdbEpisodeAliases,libraryTmdbEpisodeIds,libraryTvdbEpisodeIds,libraryImdbEpisodeIds,mappings,manualInventory,autoCompoundEpisodes,logger,setHeartbeat,evidence}=input;
   const providerEpisodes=[...input.providerEpisodes,...mappedMembersMissingFromCatalogue(input.providerEpisodes,mappings,{tmdbId:tmdbShow ? tmdbShow.id : undefined,tvdbId:tvdbResolved ? tvdbId : undefined},input.malformedRecords)];
-  // One shared rule (ADR-0007), built from the health-rechecked Manual Matches and the
+  // One shared rule (ADR-0007), built from the run's Manual Matches and the
   // supplemented comparison list: it leaves covered episodes out of automatic work here
   // and decides them in the comparison, so the two cannot disagree.
   const manualMatchCoverage=manualMatchCoverageRule({mappings,directInventory:manualInventory});
@@ -633,8 +785,8 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
  * scan-failure Coverage Issue.
  */
 function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
-  let coverageRevision = coverageState().revision;
-  let mappings = listCoverageMappings();
+  const coverageRevision = coverageState().revision;
+  const mappings = listCoverageMappings();
   const settings = readPlexPreferences();
   const autoCompoundEpisodes = settings.autoCompoundEpisodes !== false;
   let finishIgnoreTracking: (() => void) | undefined;
@@ -651,6 +803,24 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const coveredByFullScan = () => scanInputs?.inventory?.complete
     ? coveredCarriedMembers(scanInputs, carriedMembers().filter(entry => entry.revision <= coverageRevision), uncompared, scanInputs.inventory.groups.map(group => group.identity).filter(key => !scanIgnored.has(key)))
     : [];
+  /** Work the run launches outside its awaited flow, and the flow itself: a failing run ends only once each has settled, so none writes after it. */
+  const drains: (() => Promise<unknown>)[] = [];
+  /**
+   * A fatal failure of work launched outside the run's awaited flow, such as a show's preparation that cannot
+   * save its progress or read the database. It fails the run at once; the flow stops at its next checkpoint,
+   * and the run still ends only once every drain has settled.
+   */
+  const fatal = Promise.withResolvers<never>();
+  let fatalFailure: { error: unknown } | undefined;
+  const failRun = (error: unknown) => {
+    if (fatalFailure) return;
+    fatalFailure = { error };
+    fatal.reject(error);
+  };
+  /** The run's flow stops here once launched work has failed fatally. */
+  const throwIfRunFailed = () => {
+    if (fatalFailure) throw fatalFailure.error;
+  };
   return scanRuns.run(owner, plexScanMode, {
     fullRun: !targetRatingKey,
     createLogger: () => createScanLogger(settings.diagnosticsEnabled !== false, "shelfcheck-plex"),
@@ -673,7 +843,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       failureDetails: () => ({ providerMetrics: scanProviderClient.metrics() }),
       ended: () => finishIgnoreTracking?.(),
     },
-  }, async (run) => {
+  }, (run) => settleBeforeFailing(drains, () => {
+  const flow = (async () => {
   const { startedAt, logger, activeWork } = run;
   let processed = 0;
   const setHeartbeat = (key: string, show: string, phase: string) => activeWork.update(key, show, phase);
@@ -691,19 +862,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const candidates = targetRatingKey ? shows.filter((show) => show.identity === targetRatingKey) : shows;
   logger.info("plex.library.refreshed", { libraries: showSections.length, plexRecords: physicalShows.length, shows: shows.length, ignored: allShows.length - shows.length, mergedRecords: physicalShows.length - allShows.length });
   // The run's one TVDB sign-in, after Plex answered. Its issue is recorded or cleared before
-  // anything uses the result: the Manual Match recheck, freshness, catalogues and title recovery.
+  // anything uses the result: freshness, catalogues and title recovery.
   const tvdbSignIn = await signInToTvdb(scanProviderClient, config.tvdbApiKey, config.tvdbPin);
   if (tvdbSignIn.outcome === "authenticated") tvdbLoginDiagnostics.resolve();
   else tvdbLoginDiagnostics.raiseFailure(tvdbSignIn.error);
-  // A single-show scan's baseline: the report and coverage revision just before health preparation.
-  const baseline = targetRatingKey ? {revision: coverageState().revision, report: getPlexReport()} : undefined;
-  // Health changes move the coverage revision, so the recheck ends before this run snapshots it.
-  let healthReceipts: CoverageHealthReceipt[] = [];
-  if (mappings.length) {
-    healthReceipts = await recheckCoverageHealth(scanProviderClient, {tmdbToken: config.tmdbToken, tvdbSignIn});
-    coverageRevision = coverageState().revision;
-    mappings = listCoverageMappings();
-  }
   // The run's Trakt login: read once, and refreshed now if it is about to expire. Logged out, there is no Trakt login to fix.
   const traktAuth = await TraktRunCredentials.open().then(async credentials=>{if (credentials) await credentials.ready(); else traktLoginDiagnostics.resolve();return credentials;}).catch((error) => {
     traktLoginDiagnostics.raiseFailure(error);
@@ -719,54 +881,9 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // Scans 5, 10, ... require today's TMDB change list; an earlier unfinished one stays due today.
   const safeguardDue = !targetRatingKey && (upcomingFullScan.count % 5 === 0 || Boolean(inputs.pendingSafeguards[utcDate]));
   const prior = getPlexReport();
-  // Loaded after coverage preparation and the revision snapshot, so the revision check is current.
+  // Saved at another coverage revision, a Resume point holds results of other Manual Matches.
   const { usable: checkpoint } = run.resumePoint.load((saved) => (saved.coverageRevision || 0) === coverageRevision && checkpointIsUsable(saved, autoCompoundEpisodes));
   const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
-  // A single-show scan whose own health preparation alone moved the revision rebuilds every carried row instead of carrying it.
-  const rebuildFrom = !cacheUsable && baseline ? ownHealthChangeBaseline(baseline, healthReceipts, coverageRevision, autoCompoundEpisodes) : undefined;
-  let tmdbChanges: Set<number> | null = null;
-  let tvdbChanges: Set<number> | null = null;
-  // Each provider verifies from its own position; targeted scans never consult or advance them.
-  const {tmdb: tmdbPosition, tvdb: tvdbPosition} = inputs.verification;
-  // TMDB verification recovery: catalogues its change feed cannot cover are treated as changed.
-  const tmdbPlan = targetRatingKey ? {recover: []} : tmdbVerificationPlan(tmdbPosition, Object.values(inputs.tmdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [{id: catalogue.show.id, downloadedAt: catalogue.downloadedAt}] : []), startedAt);
-  const tmdbRecovery = new Set(tmdbPlan.recover);
-  if (!targetRatingKey) {
-    tmdbChanges = await (tmdbPlan.feedFrom ? tmdbChangedShows(tmdbPlan.feedFrom, config.tmdbToken, startedAt) : Promise.resolve(new Set<number>())).then(changes => changes && new Set([...changes, ...tmdbRecovery])).catch((error) => {
-      setProviderVerificationIssue("TMDB", error);
-      logger.warn("plex.cache.tmdb-changes-unavailable", { error: error instanceof Error ? error.message : String(error) });
-      return null;
-    });
-  }
-  // Without TVDB history, verification starts at each saved catalogue's own successful download.
-  const tvdbFeedFrom = tvdbVerificationFrom(tvdbPosition, Object.values(inputs.tvdb).flatMap(catalogue => usableProviderCatalogue(catalogue) ? [catalogue.downloadedAt] : []), startedAt);
-  if (!targetRatingKey) {
-    tvdbChanges = await (!tvdbFeedFrom ? Promise.resolve(new Set<number>()) : withTvdbSignIn(tvdbSignIn, token => tvdbChangedShows(tvdbFeedFrom, token))).catch((error) => {
-      setProviderVerificationIssue("TVDB", error, tvdbSignIn.outcome === "failed" && error === tvdbSignIn.error ? [TVDB_AUTHENTICATION_ISSUE] : undefined);
-      logger.warn("plex.cache.tvdb-updates-unavailable", { error: error instanceof Error ? error.message : String(error) });
-      return null;
-    });
-  }
-  // Recovery work is retained even when the feed fails, so it stays due until each refresh succeeds.
-  retainVerifiedChanges(inputs, tmdbChanges ?? tmdbRecovery, tvdbChanges);
-  if (tmdbChanges !== null) {
-    resolveCoverageIssue(providerVerificationIssueId("TMDB"));
-    fulfilOverdueSafeguards(inputs, utcDate);
-  }
-  if (tvdbChanges !== null) resolveCoverageIssue(providerVerificationIssueId("TVDB"));
-  // A multi-day feed may contain older changes: only today's list overrides same-day reuse.
-  const safeguardChanges = safeguardDue
-    ? tmdbPosition?.slice(0, 10) === utcDate ? tmdbChanges
-      : await tmdbChangedShows(startedAt, config.tmdbToken, startedAt).catch(error => {
-        setProviderVerificationIssue("TMDB", error);
-        return null;
-      })
-    : null;
-  if (safeguardDue) retainSafeguard(inputs, utcDate, safeguardChanges, candidates);
-  const tmdbCatalogueChanges = new Set([...(tmdbChanges || []), ...Object.keys(inputs.deferredTmdbChanges).map(Number)]);
-  // Retained TVDB changes stay due even while the feed itself is unavailable.
-  const tvdbCatalogueChanges = new Set([...(tvdbChanges || []), ...Object.keys(inputs.pendingTvdbChanges).map(Number)]);
-  const tvdbVerifiedChanges = tvdbChanges === null ? null : tvdbCatalogueChanges;
   // One coordinator per scan run: its comparisons share in-flight crosswalk requests and what this scan requested.
   const liveEvidence: LiveEvidenceScan = {
     transport: liveLookupTransport({tmdbToken: config.tmdbToken, tvdbSignIn, traktAuth}),
@@ -776,7 +893,9 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   };
   const results: PlexShowResult[] = [];
   const scanCache: Record<string, PlexCacheEntry> = {};
-  if (targetRatingKey && !rebuildFrom) {
+  // Manual Match members successfully compared shows propose for removal; confirmed and applied only after the report is saved.
+  const removalCandidates: ManualMatchMemberRemoval[] = [];
+  if (targetRatingKey) {
     const carried = targetedScanCarryOver({ cacheUsable, shows: prior?.shows || [], cache: prior?.scanCache || {}, currentIdentities: new Set(shows.map((show) => show.identity)), targetRatingKey });
     results.push(...carried.shows);
     Object.assign(scanCache, carried.cache);
@@ -784,169 +903,126 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const queue: PlexShowGroup[] = [];
   const localResponsesByRatingKey = new Map<string, PlexContainer>();
   const inventoryFailureCauses: CoverageIssueId[] = [];
-  run.progress(processed, candidates.length);
-  await runWorkerPool(allShows, PLEX_SCAN_WORKERS, async (group) => {
-    const responses = await Promise.allSettled(group.records.map(async (record) => ({
-      ratingKey: record.ratingKey,
-      response: await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken),
-    })));
-    for (const [index,result] of responses.entries()) {
-      // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
-      const issueId = plexInventoryIssueId(group.identity, group.records[index].ratingKey);
-      if (result.status === "fulfilled") {
-        const { ratingKey, response } = result.value;
-        if (ratingKey) localResponsesByRatingKey.set(ratingKey, response);
-        resolveCoverageIssue(issueId);
-      } else {
-        inventoryFailureCauses.push(issueId);
-        setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
-        logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
-      }
-    }
-  });
   const manualInventory: CoverageEvidence[] = [];
-  for (const group of allShows) for (const record of group.records) {
-    for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
-      const ids = idsFromGuids(item.Guid);
-      manualInventory.push({
-        ratingKey: item.ratingKey || "", showKey: group.identity,
-        identities: [
-          ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
-          ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
-        ],
-      });
-    }
-  }
-  if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
-  inputs.inventory = {capturedAt: startedAt, complete: allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || ""))), groups: allShows, items: Object.fromEntries([...localResponsesByRatingKey].map(([key,value]) => [key,value.MediaContainer?.Metadata || []])), evidence: manualInventory};
-  savePlexInventory(inputs.inventory);
-  // Writes of the offline rebuilds below, applied only with the report they belong to.
-  const stagedEffects = new SavedComparisonEffects(true);
-  // Shows this run's health change requires it to compare again that kept only a last-good result.
-  const notRecompared: string[] = [];
-  if (rebuildFrom) {
-    const current = new Set(shows.map(show => show.identity));
-    const context = inputs.inventory.complete ? savedComparisonContext(inputs, settings, ignoredKeys) : undefined;
-    // One recheck time for every 60-day usability decision.
-    const now = new Date().toISOString();
-    for (const row of rebuildFrom.shows) {
-      const key = row.ratingKey, saved = inputs.comparisons[key];
-      if (key === targetRatingKey || !current.has(key)) continue;
-      try {
-        if (!context || !saved?.complete) throw new PendingSavedComparison("Saved comparison inputs or the library inventory are missing or incomplete.");
-        const compared = await recheckSavedShow(key, saved, context, now, row, stagedEffects);
-        results.push(compared.result);
-        // A cache entry records Plex fingerprints and identities, which no health change affects.
-        if (rebuildFrom.scanCache?.[key]) scanCache[key] = rebuildFrom.scanCache[key];
-      } catch (error) {
-        // Saved inputs cannot rebuild it: compare it live with the target.
-        logger.info("plex.show.rebuild-live", { ratingKey: key, reason: coverageIssueCause(error) });
-        candidates.push(shows.find(show => show.identity === key)!);
-      }
-    }
-  }
-  // Catalogue reuse does not certify ownership. Rebuild every comparison against this inventory.
-  queue.push(...candidates);
-  logger.info("plex.scan.plan", { total: candidates.length, reused: processed, refreshing: queue.length, tmdbChanged: tmdbChanges?.size, tvdbChanged: tvdbChanges?.size, cacheUsable, targetRatingKey });
-  run.progress(processed, candidates.length);
-  const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(allShows, inputs.inventory.items, ignoredKeys);
-  logger.info("plex.library.episode-identities", { tmdb: libraryTmdbEpisodeIds.size, tvdb: libraryTvdbEpisodeIds.size, imdb: libraryImdbEpisodeIds.size });
-  // Initialization is over: between active shows the heartbeat now shows "processing".
-  run.setPhase(undefined);
-  run.resumePoint.startIntervals();
-  // The Resume point holds only completed shows whose cache entry is usable.
-  run.resumePoint.provideSnapshot((savedAt) => ({
-    point: { shows: results.filter((show) => Boolean(scanCache[show.ratingKey])), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision },
-    details: { shows: results.length, cacheEntries: Object.keys(scanCache).length },
-  }));
-  await runTrackedWorkerPool(queue, PLEX_SCAN_WORKERS, activeWork, (group) => ({ key: group.identity, show: group.records[0]?.title || "Unknown show" }), async (group) => {
+  // Provider freshness is checked while the Plex inventory downloads; each provider is ready once its changes are retained.
+  const freshness = startProviderFreshness({inputs, config, tvdbSignIn, startedAt, targeted: Boolean(targetRatingKey), safeguardDue, candidates, logger});
+  drains.push(() => freshness.settled);
+  freshness.tmdb.catch(failRun);
+  freshness.tvdb.catch(failRun);
+  /** The library inventory once every record has settled: the one record of whether it is complete. Undefined while it downloads. */
+  let libraryInventory: PlexGeneratedInputs["inventory"] = undefined;
+  /** Whether every Plex record of the show has its episode inventory. */
+  const recordsIn = (group: PlexShowGroup) => group.records.every((record) => localResponsesByRatingKey.has(record.ratingKey || ""));
+  /** Each show's saved comparison as it stood before this scan saved the show's prepared obligations, once it has. */
+  const comparisonsBeforeScan = new Map<string, SavedPlexComparison | undefined>();
+  /**
+   * Save a show's catalogue observation, with what its candidate removals drop in the same transaction, and
+   * its comparison inputs with the obligations as prepared: the saved comparison's, or a new show's first.
+   * Only a show this scan compares saves them. Saving again is harmless: observing the same candidates
+   * again removes none.
+   */
+  const savePreparedComparison = (ratingKey: string, {group, details, localMetadata, observation, preferredIds, refresh}: PreparedComparisonInputs) => {
+    if (!comparisonsBeforeScan.has(ratingKey)) comparisonsBeforeScan.set(ratingKey, inputs.comparisons[ratingKey]);
+    const saved = comparisonsBeforeScan.get(ratingKey);
+    let removalSaved = false;
+    const save = () => {
+      inputs.comparisons[ratingKey] = saved ? {...saved,refresh} : {group, details, localMetadata, ...preferredIds, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
+      savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
+    };
+    observeCatalogueCandidates(ratingKey, observation.ids, observation.complete, () => { save(); removalSaved = true; });
+    if (!removalSaved) save();
+  };
+  /** A failing run's launched preparations stop at their next checkpoint instead of starting more provider work. */
+  const stopIfRunFailing = () => {
+    if (preparation.isDraining()) throw new Error("The scan run ended before this show was prepared.");
+  };
+  /**
+   * A show's preparation: its Plex metadata, then its catalogue selection and comparison catalogues
+   * through the existing preparation path, with title recovery and catalogue-load diagnostics. Each
+   * provider's catalogue choice waits for that provider's freshness alone; the metadata waits for none.
+   * It decides nothing about ownership and saves nothing a later scan's choices depend on beyond the
+   * catalogues it downloads, so it may run while the rest of the library downloads; the show's comparison
+   * consumes it once, after the whole library is in, and saves its observation and obligations. Every
+   * comparison catalogue a scan uses is produced here.
+   */
+  const prepareShow = async (group: PlexShowGroup): Promise<PreparedShow> => {
     const primary = group.records[0];
     const ratingKey = group.identity;
-    /** Keep the show's last-good result; `scanStatus` replaces its provider status with this scan's, which is never republished. */
-    const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
-      uncompared.add(ratingKey);
-      const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
-      if (rebuildFrom) {
-        // Every show this run compares must be compared again after its health change: neither a last-good
-        // result from before it nor a placeholder enters a newer report or Resume point.
-        notRecompared.push(previous?.title || primary.title || "Unknown show");
-        processed += 1;
-        run.progress(processed, candidates.length);
-        return;
-      }
-      results.push({...(previous || {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[]}),...scanStatus,warning:message});
-      if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];
-      processed += 1;
-      run.progress(processed, candidates.length);
-    };
-    const priorCacheEntry = checkpoint?.scanCache[ratingKey] || prior?.scanCache?.[ratingKey];
-    let cachedTvdbEpisodeImdbIds = { ...(inputs.comparisons[ratingKey]?.tvdbEpisodeImdbIds || priorCacheEntry?.tvdbEpisodeImdbIds || {}) };
-    const showStarted = Date.now();
-    const phaseTimings: Record<string, number> = {};
-    logger.info("plex.show.start", { ratingKey, title: primary.title || "Unknown show", plexRecords: group.records.length });
-    setHeartbeat(ratingKey, primary.title || "Unknown show", "plex-inventory");
+    const title = primary.title || "Unknown show";
+    const show: PreparingShow = { group, primary, ratingKey, showStarted: Date.now(), phaseTimings: {} };
+    const { phaseTimings } = show;
+    logger.info("plex.show.start", { ratingKey, title, plexRecords: group.records.length });
+    setHeartbeat(ratingKey, title, "plex-inventory");
     let phaseStarted = Date.now();
     let details: PlexMetadata[];
-    let localResponses: PlexContainer[];
-    let metadataLoaded = false;
     let metadataComplete = false;
     try {
       const metadata = await Promise.all(group.records.map(async (record) => (await plexJson(`/library/metadata/${record.ratingKey}?includeGuids=1`, config.plexUrl, config.plexToken)).MediaContainer?.Metadata?.[0]));
       details = metadata.map((detail, index) => detail || group.records[index]);
       // A record without usable metadata falls back to its library listing, which cannot establish removed series IDs.
       metadataComplete = metadata.every(detail => Array.isArray(detail?.Guid));
-      metadataLoaded = true;
       resolveCoverageIssue(inventoryDetailsIssueId(ratingKey));
-      if (!inputs.inventory?.complete) throw new Error("The library inventory is incomplete; coverage cannot be verified against unavailable items.");
-      localResponses = group.records.map(record=>localResponsesByRatingKey.get(record.ratingKey || "")!);
     } catch (error) {
-      const message = `Plex inventory could not be loaded: ${error instanceof Error ? error.message : String(error)} This show will be checked again next scan.`;
-      const causedBy = [...inventoryFailureCauses,...(!metadataLoaded ? [inventoryDetailsIssueId(ratingKey)] : [])];
-      setCoverageIssue({id:comparisonInputsIssueId(ratingKey),operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...(causedBy.length ? {causedBy} : {}),cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
-      if (!metadataLoaded) setCoverageIssue({id:inventoryDetailsIssueId(ratingKey),operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"show metadata"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
-      retainComparison(message);
-      return;
+      setCoverageIssue({id:inventoryDetailsIssueId(ratingKey),operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...providerLookupContext(error,{source:[],requested:{provider:"Plex",kind:"show metadata"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
+      return {kind: "unloaded", show, error};
     }
-    // A specific requirement is dropped only when this complete observation removes its catalogue from the
-    // reported candidates, saved in the observation's own transaction; on hold otherwise, it is kept.
-    const plexSelection = observeCatalogueCandidates(ratingKey, showProviderIds(details.flatMap((detail) => detail.Guid || [])), metadataComplete, selections => {
-      const saved = inputs.comparisons[ratingKey];
-      if (!saved) return;
-      const refresh = {...saved.refresh};
-      for (const provider of PROVIDERS) patchSavedObligation(refresh, provider, {remove: {specificIds: droppedByRemoval(saved.refresh, provider, selections[provider].removed, selections[provider].candidates)}});
-      savePlexComparison(ratingKey, {...saved, refresh});
-      inputs.comparisons[ratingKey] = {...saved, refresh};
-    });
+    phaseTimings.plexInventoryMs = Date.now() - phaseStarted;
+    stopIfRunFailing();
+    // No catalogue is prepared once the library inventory is known incomplete, as no show can be compared.
+    if (libraryInventory?.complete === false) return {kind: "loaded", show};
+    const priorCacheEntry = checkpoint?.scanCache[ratingKey] || prior?.scanCache?.[ratingKey];
+    const cachedTvdbEpisodeImdbIds = { ...(inputs.comparisons[ratingKey]?.tvdbEpisodeImdbIds || priorCacheEntry?.tvdbEpisodeImdbIds || {}) };
+    // The catalogue candidates this observation chooses. They are saved, with what their removal drops, only once the show is compared.
+    const observation: CandidateObservation = {ids: showProviderIds(details.flatMap((detail) => detail.Guid || [])), complete: metadataComplete};
+    const plexSelection = previewCatalogueCandidates(ratingKey, observation.ids, observation.complete);
     let tmdbId = plexSelection.tmdb.preferredId, tvdbId = plexSelection.tvdb.preferredId;
+    const preferredIds = {tmdbId, tvdbId};
     const tmdbSource: LookupSourceStep[] = tmdbId ? [{provider:"Plex",kind:"TMDB show",id:tmdbId}] : tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
     let tvdbSource: LookupSourceStep[] = tvdbId ? [{provider:"Plex",kind:"TVDB series",id:tvdbId}] : [];
-    const localMetadata = localResponses.flatMap((local) => local.MediaContainer?.Metadata || []);
+    const localMetadata = group.records.flatMap((record) => localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []);
     const {localEpisodes,localProviderEpisodes,localTmdbEpisodeIds}=localComparisonInventory(localMetadata);
-    const localTvdbEpisodeIds = new Set(localProviderEpisodes.flatMap((episode) => episode.tvdbEpisodeId ? [episode.tvdbEpisodeId] : []));
-    const localImdbEpisodeIds = new Set(localProviderEpisodes.flatMap((episode) => episode.imdbEpisodeId ? [episode.imdbEpisodeId] : []));
-    phaseTimings.plexInventoryMs = Date.now() - phaseStarted;
+    const local: PreparedLocalInventory = {
+      metadata: localMetadata, episodes: localEpisodes, tmdbEpisodeIds: localTmdbEpisodeIds,
+      tvdbEpisodeIds: new Set(localProviderEpisodes.flatMap((episode) => episode.tvdbEpisodeId ? [episode.tvdbEpisodeId] : [])),
+      imdbEpisodeIds: new Set(localProviderEpisodes.flatMap((episode) => episode.imdbEpisodeId ? [episode.imdbEpisodeId] : [])),
+    };
     let warning: string | undefined;
     const providerEpisodes: ProviderEpisode[] = [];
     // Individual catalogue records that could not be used, from whichever catalogue was compared.
     const malformedRecords: MalformedCatalogueRecord[] = [];
     // English title fallback outcome for the compared TVDB catalogue; `carried` when not attempted this scan.
     let titleRecovery: {state: TitleRecoveryState; carried: boolean} = {state: {}, carried: false};
-    let tmdbShow: TmdbShow | null = null;
     let tvdbResolved = false;
-    let tvdbCatalogueReused = false;
-    let tmdbSeriesMatches: TmdbShow[] = [];
-    let tvdbSeriesMatches: TvdbShow[] = [];
     let tvdbSlug: string | undefined;
     const savedComparison = inputs.comparisons[ratingKey];
-    const refresh = {...savedComparison?.refresh};
-    inputs.comparisons[ratingKey] = savedComparison ? {...savedComparison,refresh} : {group, details, localMetadata, tmdbId, tvdbId, relationships:{}, tmdbAliases:[], tvdbAliases:[], complete:false, refresh};
-    savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
-    let tmdbCatalogueReused = false;
+    /**
+     * The show's refresh obligations as its preparation leaves them. Each provider's part is read once that
+     * provider's freshness is retained, which can add to it, less what this observation's candidate removals
+     * drop. They are saved only once the whole library is in, when the show will be compared.
+     */
+    const refresh: SavedRefreshObligations = {};
+    const obligationsRead = new Set<CatalogueProvider>();
+    const readObligation = (provider: CatalogueProvider) => {
+      if (obligationsRead.has(provider)) return;
+      obligationsRead.add(provider);
+      const saved = inputs.comparisons[ratingKey]?.refresh;
+      copySavedObligation(refresh, saved, provider);
+      // A specific requirement is dropped only when this complete observation removes its catalogue from the reported candidates.
+      const {removed, candidates} = plexSelection[provider];
+      if (removed.length) patchSavedObligation(refresh, provider, {remove: {specificIds: droppedByRemoval(saved, provider, removed, candidates)}});
+    };
+    /** Each provider's catalogue changes, known once that provider's catalogue choice starts. */
+    const catalogueChanges: Partial<Record<CatalogueProvider, ReadonlySet<number>>> = {};
     const unavailableCatalogueCauses: CoverageIssueId[] = [];
     const tmdbCandidates = plexSelection.tmdb.candidates, tvdbCandidates = plexSelection.tvdb.candidates;
     const catalogueUse: Partial<Record<"tmdb" | "tvdb", CatalogueUse>> = {};
     const catalogueSource = downloadCatalogueSource({
-      inputs, now: startedAt, targeted: !!targetRatingKey, tmdbChanges: tmdbCatalogueChanges, tvdbChanges: tvdbCatalogueChanges, tvdbAuthenticationError: tvdbSignIn.outcome === "failed" ? tvdbSignIn.error : undefined,
+      inputs, now: startedAt, targeted: !!targetRatingKey, tvdbAuthenticationError: tvdbSignIn.outcome === "failed" ? tvdbSignIn.error : undefined,
+      catalogueChanges: provider => {
+        const changes = catalogueChanges[provider];
+        if (!changes) throw new Error(`${PROVIDER_NAME[provider]} catalogue changes were read before its freshness was known.`);
+        return changes;
+      },
       requests: {
         tmdbShow: id => requestTmdbShow(id, config.tmdbToken),
         tmdbShowForTvdb: tvdbId => requestTmdbShowForTvdb(tvdbId, config.tmdbToken),
@@ -961,11 +1037,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       seriesNotFound: seriesNotFoundHistory(),
     });
     // The comparison catalogue module chooses both providers' catalogues through the download source,
-    // and the scan applies what follows. Each provider's obligation patch is saved before the other
-    // provider's work starts.
+    // and the scan applies what follows.
     // Each provider attempt reports its provider's phase first, TMDB's association request included.
     const phase: Record<CatalogueProvider, string> = {tmdb:"tmdb-show-and-seasons", tvdb:"tvdb-series-and-episodes"};
-    const reportPhase = (provider: CatalogueProvider) => setHeartbeat(ratingKey, primary.title || "Unknown show", phase[provider]);
+    const reportPhase = (provider: CatalogueProvider) => setHeartbeat(ratingKey, title, phase[provider]);
     const source: ComparisonCatalogueSource<DownloadCataloguePayloads> = {
       ...catalogueSource,
       loadCatalogue(provider, id, settings) {
@@ -977,21 +1052,32 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         return catalogueSource.tmdbSeriesForTvdb(tvdbId, settings);
       },
     };
-    phaseStarted = Date.now();
     const resolution = await resolveComparisonCatalogues<DownloadCataloguePayloads>({
       context: {kind:"live-scan"}, show: {ratingKey, title: primary.title}, resolvedAt: startedAt,
       ...(savedComparison ? {previousComparison: {tmdbId: savedComparison.tmdbId, tvdbId: savedComparison.tvdbId, complete: !!savedComparison.complete}} : {}),
-      tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: savedObligation(refresh, "tmdb"), lookupSource: tmdbSource},
-      tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: savedObligation(refresh, "tvdb"), lookupSource: tvdbSource},
-      }, {source, onProviderResolved: async progress => {
-      // The provider-scoped patch changes only its own parts of the saved obligation.
-      patchSavedObligation(refresh, progress.provider, progress.obligation);
-      savePlexComparison(ratingKey, inputs.comparisons[ratingKey]);
-      phaseTimings[`${progress.provider}Ms`] = Date.now() - phaseStarted;
+      tmdb: {candidates: tmdbCandidates, preferredId: plexSelection.tmdb.preferredId, refreshObligation: {}, lookupSource: tmdbSource},
+      tvdb: {candidates: tvdbCandidates, preferredId: plexSelection.tvdb.preferredId, refreshObligation: {}, lookupSource: tvdbSource},
+      }, {source, refreshObligation: async provider => {
+      // This provider's freshness decisions and their retention come before its catalogue choice, as they did before its comparison.
+      catalogueChanges[provider] = (await freshness[provider]).catalogueChanges;
+      stopIfRunFailing();
+      readObligation(provider);
       phaseStarted = Date.now();
+      return savedObligation(refresh, provider);
+    }, onProviderResolved: async progress => {
+      // The provider-scoped patch changes only its own parts of the obligations.
+      patchSavedObligation(refresh, progress.provider, progress.obligation);
+      phaseTimings[`${progress.provider}Ms`] = Date.now() - phaseStarted;
       // A reused TVDB catalogue asks again for an English title only when the TMDB episodes chosen make it title-dependent.
       if (progress.provider === "tmdb") catalogueSource.compareTitlesWith(progress.catalogue?.catalogue.episodes ?? []);
-  }}).catch(error => {
+      if (!libraryInventory?.complete) return;
+      // The whole library is in, so the show will be compared: its progress is saved before the other provider's work
+      // starts, so an interruption loses none. That provider's freshness is known by then, or its work would wait for it.
+      await Promise.all([freshness.tmdb, freshness.tvdb]);
+      stopIfRunFailing();
+      for (const provider of PROVIDERS) readObligation(provider);
+      savePreparedComparison(ratingKey, {group, details, localMetadata, observation, preferredIds, refresh});
+    }}).catch(error => {
       // Saved progress that cannot be written fails the show with the save's own error, not as a provider failure.
       throw error instanceof ProgressPersistenceError ? error.cause : error;
     });
@@ -1013,7 +1099,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
      */
     const cacheable = !PROVIDERS.some(provider => resolution[provider].singleCatalogue && resolution[provider].catalogue?.origin === "saved");
     // A single-catalogue TVDB series that could not be loaded logs the show's warnings.
-    if (tvdb.warning && tvdb.singleCatalogue) logger.warn("plex.show.provider-error", { ratingKey, title: primary.title || "Unknown show", error: warning });
+    if (tvdb.warning && tvdb.singleCatalogue) logger.warn("plex.show.provider-error", { ratingKey, title, error: warning });
     tmdbId = tmdb.identity; tvdbId = tvdb.identity;
     tvdbSource = tvdb.lookupSource;
     unavailableCatalogueCauses.push(...resolution.unavailableCauses);
@@ -1022,9 +1108,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     const tvdbCatalogue = tvdb.catalogue && resolutionOrder[0] === "tvdb"
       ? await catalogueSource.prepareTitlesNeeded(tvdb.catalogue, [...(tmdbCatalogue?.catalogue.episodes ?? []), ...tvdb.catalogue.catalogue.episodes])
       : tvdb.catalogue;
-    tmdbShow = tmdbCatalogue?.catalogue.show ?? null;
-    tmdbCatalogueReused = tmdbCatalogue?.origin === "reused";
-    tvdbCatalogueReused = tvdbCatalogue?.origin === "reused";
+    const tmdbShow = tmdbCatalogue?.catalogue.show ?? null;
     if (tvdbCatalogue) {
       tvdbResolved = true;
       tvdbSlug = tvdbCatalogue.catalogue.slug;
@@ -1034,6 +1118,171 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     providerEpisodes.push(...(tmdbCatalogue?.catalogue.episodes ?? []), ...(tvdbCatalogue?.catalogue.episodes ?? []));
     const chosen: Record<CatalogueProvider, {catalogue: {malformed: MalformedCatalogueRecord[]}} | undefined> = {tmdb: tmdbCatalogue, tvdb: tvdbCatalogue};
     for (const provider of resolutionOrder) malformedRecords.push(...(chosen[provider]?.catalogue.malformed ?? []));
+    // This scan's provider status, recorded with whatever result the show ends with.
+    const scanStatus = {providerResolution: providerResolutionOf(resolution), ...(tmdbId ? {tmdbId} : {}), ...(tvdbId ? {tvdbId} : {})};
+    return {
+      kind: "prepared", show, details, observation, preferredIds, cachedTvdbEpisodeImdbIds, local,
+      catalogues: {
+        tmdbId, tvdbId, tvdbSource, tvdbCandidates, warning, providerEpisodes, malformedRecords, titleRecovery, tmdbShow, tvdbResolved, tvdbSlug,
+        refresh, catalogueUse, unavailableCatalogueCauses, outcome: resolution.outcome, cacheable, scanStatus, tmdbCatalogue, tvdbCatalogue,
+      },
+    };
+  };
+  /**
+   * The run's preparation progress, reported as each item settles: every physical record of the library,
+   * ignored shows' included (a single-show scan reads the whole library too), and every show it compares.
+   */
+  const preparationProgress: ScanPreparationProgress = {
+    inventory: { settled: 0, total: allShows.reduce((records, group) => records + group.records.length, 0) },
+    catalogues: { settled: 0, total: candidates.length },
+  };
+  /** Reports a snapshot of the preparation progress, so later settlements never change a reported status. */
+  const reportPreparation = () => run.reportPreparation({ inventory: { ...preparationProgress.inventory }, catalogues: { ...preparationProgress.catalogues } });
+  const settle = (step: keyof ScanPreparationProgress) => {
+    const progress = preparationProgress[step];
+    progress.settled = Math.min(progress.total, progress.settled + 1);
+    reportPreparation();
+  };
+  /**
+   * The run's progress events. A show's preparation settles once, downloaded (any catalogue downloaded
+   * this run), reused (only saved catalogues the freshness policy reused) or failed (none usable, or the
+   * preparation itself failed).
+   */
+  const preparationEvents = {
+    preparationSettled: (group: PlexShowGroup, outcome: "downloaded" | "reused" | "failed") => {
+      logger.info("plex.show.prepared", { ratingKey: group.identity, outcome });
+      settle("catalogues");
+    },
+  };
+  const preparationOutcome = (result: PromiseSettledResult<PreparedShow>) => {
+    if (result.status === "rejected" || result.value.kind !== "prepared") return "failed";
+    const {tmdbCatalogue, tvdbCatalogue} = result.value.catalogues;
+    const origins = [tmdbCatalogue?.origin, tvdbCatalogue?.origin];
+    return origins.includes("downloaded") ? "downloaded" : origins.includes("reused") ? "reused" : "failed";
+  };
+  const preparation = new PreparationQueue<PlexShowGroup, PreparedShow>({
+    concurrency: PLEX_PREPARATION_WORKERS,
+    ahead: PLEX_PREPARED_SHOWS_AHEAD,
+    prepare: async (group) => {
+      try {
+        return await prepareShow(group);
+      } catch (error) {
+        // Every failure a preparation does not isolate itself is fatal, as it was in the comparison.
+        if (!preparation.isDraining()) failRun(error);
+        throw error;
+      } finally {
+        // Prepared early, the show leaves the active list until its comparison takes it.
+        if (!preparation.isTaken(group)) activeWork.remove(group.identity);
+      }
+    },
+    settled: (group, result) => preparationEvents.preparationSettled(group, preparationOutcome(result)),
+  });
+  drains.push(() => preparation.drain());
+  reportPreparation();
+  // One job per physical record, merged and ignored shows included, each holding its slot across retries.
+  const inventoryJobs = allShows.flatMap((group) => group.records.map((record) => ({ group, record })));
+  const inventoryResults = new Array<PromiseSettledResult<PlexContainer>>(inventoryJobs.length);
+  /**
+   * A show to compare is offered for preparation once all its records are in, whatever the order the
+   * library downloads in. A show with a failed record is not offered: its comparison takes it after the
+   * whole library is in.
+   */
+  const toCompare = new Set(candidates);
+  await runWorkerPool(inventoryJobs, LIBRARY_INVENTORY_REQUESTS, async ({ group, record }, index) => {
+    throwIfRunFailed();
+    const result: PromiseSettledResult<PlexContainer> = await plexJson(`/library/metadata/${record.ratingKey}/allLeaves?includeGuids=1`, config.plexUrl, config.plexToken, { spacing: "none" })
+      .then((value) => ({ status: "fulfilled", value }), (reason: unknown) => ({ status: "rejected", reason }));
+    inventoryResults[index] = result;
+    settle("inventory");
+    if (result.status === "fulfilled" && record.ratingKey) localResponsesByRatingKey.set(record.ratingKey, result.value);
+    // Once every record of a show to compare is in, its catalogues are prepared while the rest of the library downloads.
+    if (toCompare.has(group) && recordsIn(group)) preparation.offer(group);
+  });
+  throwIfRunFailed();
+  for (const [index, { group, record }] of inventoryJobs.entries()) {
+    const result = inventoryResults[index];
+    // A record Plex lists without a rating key keeps the ID earlier versions saved for it, which reads "undefined".
+    const issueId = plexInventoryIssueId(group.identity, record.ratingKey);
+    if (result.status === "fulfilled") resolveCoverageIssue(issueId);
+    else {
+      inventoryFailureCauses.push(issueId);
+      setCoverageIssue({id:issueId,operation:"inventory",provider:"Plex",scope:"show",show:{ratingKey:group.identity,title:group.records[0]?.title},...providerLookupContext(result.reason,{source:[],requested:{provider:"Plex",kind:"show episode inventory"},impact:"This show’s library inventory and episode coverage could not be verified. Available last-good results were retained."})});
+      logger.warn("plex.library.inventory-prefetch-failed", { ratingKey: group.identity, title: group.records[0]?.title, error: coverageIssueCause(result.reason) });
+    }
+  }
+  for (const group of allShows) for (const record of group.records) {
+    for (const item of localResponsesByRatingKey.get(record.ratingKey || "")?.MediaContainer?.Metadata || []) {
+      const ids = idsFromGuids(item.Guid);
+      manualInventory.push({
+        ratingKey: item.ratingKey || "", showKey: group.identity,
+        identities: [
+          ...(ids.tmdbId ? [{ provider: "TMDB" as const, id: ids.tmdbId }] : []),
+          ...(ids.tvdbId ? [{ provider: "TVDB" as const, id: ids.tvdbId }] : []),
+        ],
+      });
+    }
+  }
+  if (coverageState().revision === coverageRevision) saveCoverageEvidence(manualInventory);
+  libraryInventory = {capturedAt: startedAt, complete: allShows.every(recordsIn), groups: allShows, items: Object.fromEntries([...localResponsesByRatingKey].map(([key,value]) => [key,value.MediaContainer?.Metadata || []])), evidence: manualInventory};
+  inputs.inventory = libraryInventory;
+  savePlexInventory(libraryInventory);
+  await freshness.settled;
+  throwIfRunFailed();
+  const [{changes: tmdbChanges, catalogueChanges: tmdbCatalogueChanges}, {changes: tvdbChanges, verifiedChanges: tvdbVerifiedChanges}] = await Promise.all([freshness.tmdb, freshness.tvdb]);
+  // Catalogue reuse does not certify ownership. Rebuild every comparison against this inventory.
+  queue.push(...candidates);
+  logger.info("plex.scan.plan", { total: candidates.length, reused: processed, refreshing: queue.length, tmdbChanged: tmdbChanges?.size, tvdbChanged: tvdbChanges?.size, cacheUsable, targetRatingKey });
+  /** The comparison counter starts once the first show's comparison can begin: the whole library is in and its preparation is ready. */
+  let comparing = false;
+  const beginComparisons = () => {
+    if (comparing) return;
+    comparing = true;
+    run.progress(processed, candidates.length);
+  };
+  const {libraryTmdbEpisodeIds, libraryTvdbEpisodeIds, libraryImdbEpisodeIds} = libraryInventoryIndex(allShows, libraryInventory.items, ignoredKeys);
+  logger.info("plex.library.episode-identities", { tmdb: libraryTmdbEpisodeIds.size, tvdb: libraryTvdbEpisodeIds.size, imdb: libraryImdbEpisodeIds.size });
+  // Initialization is over: between active shows the heartbeat now shows "processing".
+  run.setPhase(undefined);
+  run.resumePoint.startIntervals();
+  // The Resume point holds only completed shows whose cache entry is usable.
+  run.resumePoint.provideSnapshot((savedAt) => ({
+    point: { shows: results.filter((show) => Boolean(scanCache[show.ratingKey])), scanCache, cacheVersion: CACHE_VERSION, savedAt, autoCompoundEpisodes, coverageRevision },
+    details: { shows: results.length, cacheEntries: Object.keys(scanCache).length },
+  }));
+  await runTrackedWorkerPool(queue, PLEX_SCAN_WORKERS, activeWork, (group) => ({ key: group.identity, show: group.records[0]?.title || "Unknown show" }), async (group) => {
+    // The show's preparation, started early once its records were in, or now; consumed once.
+    throwIfRunFailed();
+    const prepared = await preparation.take(group);
+    beginComparisons();
+    const {primary, ratingKey, showStarted, phaseTimings} = prepared.show;
+    /** Keep the show's last-good result; `scanStatus` replaces its provider status with this scan's, which is never republished. */
+    const retainComparison = (message: string, scanStatus?: Pick<PlexShowResult, "providerResolution" | "tmdbId" | "tvdbId">) => {
+      uncompared.add(ratingKey);
+      const previous = prior?.shows.find(show=>show.ratingKey===ratingKey);
+      results.push({...(previous || {ratingKey,title:primary.title || "Unknown show",plexEpisodes:0,missing:[]}),...scanStatus,warning:message});
+      if (prior?.scanCache?.[ratingKey]) scanCache[ratingKey] = prior.scanCache[ratingKey];
+      processed += 1;
+      run.progress(processed, candidates.length);
+    };
+    if (prepared.kind !== "prepared" || !libraryInventory?.complete) {
+      const metadataLoaded = prepared.kind !== "unloaded";
+      const error = prepared.kind === "unloaded" ? prepared.error : new Error("The library inventory is incomplete; coverage cannot be verified against unavailable items.");
+      const message = `Plex inventory could not be loaded: ${error instanceof Error ? error.message : String(error)} This show will be checked again next scan.`;
+      const causedBy = [...inventoryFailureCauses,...(!metadataLoaded ? [inventoryDetailsIssueId(ratingKey)] : [])];
+      setCoverageIssue({id:comparisonInputsIssueId(ratingKey),operation:"comparison",provider:"Plex",scope:"show",show:{ratingKey,title:primary.title},...(causedBy.length ? {causedBy} : {}),cause:message,action:"Run a Plex scan with a complete accessible library inventory."});
+      retainComparison(message);
+      return;
+    }
+    const {details, observation, preferredIds, local: {metadata: localMetadata, episodes: localEpisodes, tmdbEpisodeIds: localTmdbEpisodeIds, tvdbEpisodeIds: localTvdbEpisodeIds, imdbEpisodeIds: localImdbEpisodeIds}} = prepared;
+    const {tmdbId, tvdbId, tvdbSource, tvdbCandidates, warning, providerEpisodes, malformedRecords, titleRecovery, tmdbShow, tvdbResolved, tvdbSlug, refresh, catalogueUse, unavailableCatalogueCauses, outcome, cacheable, scanStatus} = prepared.catalogues;
+    let {cachedTvdbEpisodeImdbIds} = prepared;
+    const tmdbCatalogueReused = prepared.catalogues.tmdbCatalogue?.origin === "reused";
+    const tvdbCatalogueReused = prepared.catalogues.tvdbCatalogue?.origin === "reused";
+    // The show is compared: its observation and prepared obligations are saved, if its preparation has not already.
+    savePreparedComparison(ratingKey, {group, details, localMetadata, observation, preferredIds, refresh});
+    const savedComparison = comparisonsBeforeScan.get(ratingKey);
+    let tmdbSeriesMatches: TmdbShow[] = [];
+    let tvdbSeriesMatches: TvdbShow[] = [];
     /**
      * Publish the catalogues in use once a comparison completes. Kept last-good results keep the
      * uses they compared, so the new preference reads as pending; only a provider with no usable
@@ -1047,15 +1296,12 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         else clearCatalogueUse(ratingKey, provider);
       }
     };
-    // This scan's provider status, recorded with whatever result the show ends with.
-    const scanStatus = {providerResolution: providerResolutionOf(resolution), ...(tmdbId ? {tmdbId} : {}), ...(tvdbId ? {tvdbId} : {})};
     // Compared with whatever catalogues are usable: only an Unmatched show, or one whose series cannot be resolved yet, is not compared.
-    if (resolution.outcome !== "comparable") {
-      const reason = resolution.outcome === "unmatched" ? "no provider has a usable catalogue for this show" : "a provider's series could not be resolved yet";
+    if (outcome !== "comparable") {
+      const reason = outcome === "unmatched" ? "no provider has a usable catalogue for this show" : "a provider's series could not be resolved yet";
       const cause = `Episode comparison could not be checked because ${reason}. ${savedComparison?.complete ? "Last-good comparison results were retained." : "No previous comparison results are available."}`;
-      const action = resolution.outcome === "unmatched" ? "Check each provider's reported lookup failure, fix the show's Plex match if an ID is wrong or missing, then run a Plex scan." : "Run a Plex scan to resolve the provider's series.";
+      const action = outcome === "unmatched" ? "Check each provider's reported lookup failure, fix the show's Plex match if an ID is wrong or missing, then run a Plex scan." : "Run a Plex scan to resolve the provider's series.";
       setCoverageIssue({id:comparisonInputsIssueId(ratingKey),operation:"comparison",scope:"show",show:{ratingKey,title:primary.title,tmdbId,tvdbId},...(unavailableCatalogueCauses.length ? {causedBy:unavailableCatalogueCauses} : {}),cause,action});
-      if (savedComparison) { inputs.comparisons[ratingKey] = {...savedComparison,refresh}; savePlexComparison(ratingKey,inputs.comparisons[ratingKey]); }
       publishCatalogueUse(false);
       retainComparison(warning || cause, scanStatus);
       return;
@@ -1104,6 +1350,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
       retainComparison(cause, scanStatus);
       return;
     }
+    // Only a comparison that completed with a fresh result may propose removals, from its own fresh
+    // complete downloads: a show compared with a saved copy for one provider keeps its last-good
+    // saved comparison, so it proposes none.
+    if (cacheable) removalCandidates.push(...manualMatchRemovalCandidates(mappings, [prepared.catalogues.tmdbCatalogue, prepared.catalogues.tvdbCatalogue]));
     const fingerprint = plexFingerprint(group);
     const episodeFingerprint = plexEpisodeFingerprint(localMetadata);
     cachedTvdbEpisodeImdbIds = pruneEpisodeIdentityCache(cachedTvdbEpisodeImdbIds, providerEpisodes.filter((episode) => episode.source === "TVDB").flatMap((episode) => episode.providerEpisodeId ? [episode.providerEpisodeId] : []));
@@ -1113,18 +1363,56 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     run.progress(processed, candidates.length);
     run.resumePoint.checkpoint();
   });
-  if (notRecompared.length) throw new Error(`This scan's Manual Match recheck changed a match's health, but ${notRecompared.sort().join(", ")} could not be compared again, so the earlier Plex results were kept. Scan Issues shows why; scan again once it is fixed.`);
+  // Every show was taken and compared; nothing launched is left to settle.
+  await preparation.drain();
   const finishedAt = new Date().toISOString();
   const coverageGroups=coverageGroupsForResults(results,manualInventory);
   const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
-  // A coverage-revision veto commits nothing and ends the run with an error status.
-  run.complete({
+  /**
+   * After the report is saved, still owning the scan run lock: ask each candidate's provider whether
+   * its episode is really gone, apply every confirmed removal as one Manual Match change, log what
+   * committed, then compare the affected shows again from saved inputs. A candidate the provider
+   * does not confirm gone is kept; a failed change rolls back and removes nothing; a failed recheck
+   * keeps the committed removals, whose members stay carried and pending until a later recheck or
+   * scan compares them.
+   */
+  const finalize = async () => {
+    if (!removalCandidates.length) return;
+    const confirmations = await confirmRemovalCandidates(removalCandidates, mappings, member => member.provider === "TVDB"
+      ? withTvdbSignIn(tvdbSignIn, token => tvdbJson(lookupUrl(providerLookup.tvdbEpisodeExtended(member.id)), token))
+      : tmdbJson(providerLookup.tmdbEpisodeByShowSeasonEpisode(member.showId, member.season, member.episode), config.tmdbToken));
+    for (const confirmation of confirmations) {
+      const { proposal, member } = confirmation;
+      const details = { mappingId: proposal.mappingId, provider: proposal.member.provider, showId: member?.showId, show: member?.show, episodeId: proposal.member.id, season: member?.season, episode: member?.episode, reason: confirmation.reason };
+      if (confirmation.gone) logger.info("plex.manual-match.removal-confirmed", details);
+      else logger.info("plex.manual-match.removal-kept", confirmation.error === undefined ? details : { ...details, error: coverageIssueCause(confirmation.error) });
+    }
+    const confirmed = confirmations.flatMap(confirmation => confirmation.gone ? [confirmation.proposal] : []);
+    if (!confirmed.length) return;
+    let removal: ReturnType<typeof removeManualMatchMembers>;
+    try {
+      removal = removeManualMatchMembers(confirmed, owner);
+    } catch (error) {
+      logger.warn("plex.manual-match.removal-failed", { proposals: confirmed.length, error: coverageIssueCause(error) });
+      return;
+    }
+    for (const { mappingId, member, matchDeleted } of removal.removed)
+      logger.info("plex.manual-match.member-removed", { mappingId, provider: member.provider, showId: member.showId, show: member.show, episodeId: member.id, season: member.season, episode: member.episode, matchDeleted });
+    if (!removal.removed.length) return;
+    try {
+      await requestCoverageRecheck({members: removal.affectedMembers});
+    } catch (error) {
+      logger.warn("plex.manual-match.recheck-failed", { revision: removal.revision, affectedMembers: removal.affectedMembers.length, error: coverageIssueCause(error) });
+    }
+  };
+  // A coverage-revision veto commits nothing, finalizes nothing and ends the run with an error status.
+  await run.completeAfter({
+    phase: MANUAL_MATCH_REMOVAL_PHASE,
+    finalize,
     commit: () => {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
-      stagedEffects.commit();
       if (targetRatingKey) plexSavedState.report.write(report); else plexSavedState.commitReport(report);
-      const inventoryComplete = !mappings.length || allShows.every(group => group.records.every(record => localResponsesByRatingKey.has(record.ratingKey || "")));
-      if (inventoryComplete) resolveCoverageIssue(INITIAL_COMPARISON_INPUTS_ISSUE);
+      if (!mappings.length || libraryInventory!.complete) resolveCoverageIssue(INITIAL_COMPARISON_INPUTS_ISSUE);
       if (!targetRatingKey) {
         // Verified changes and recovery work were retained before processing, so isolated failures cannot hold a position back.
         saveProviderVerification({
@@ -1133,7 +1421,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
           ...(tvdbChanges !== null ? {tvdb: startedAt} : {}),
         });
         // Isolated download, comparison, and verification issues do not prevent a Completed full scan from counting.
-        if (inputs.inventory?.complete) saveCompletedFullScan(startedAt, upcomingFullScan);
+        if (libraryInventory!.complete) saveCompletedFullScan(startedAt, upcomingFullScan);
       }
     },
     processed,
@@ -1141,7 +1429,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     finishedAt,
     details: { finishedAt, shows: candidates.length, reused: candidates.length - queue.length, refreshed: queue.length, missing: results.reduce((sum, show) => sum + show.missing.length, 0), targetRatingKey, providerMetrics: scanProviderClient.metrics(), elapsedMs: Date.parse(finishedAt) - Date.parse(startedAt) },
   });
-  });
+  })();
+  drains.push(() => flow);
+  return Promise.race([flow, fatal.promise]);
+  }));
 }
 
 /** The Plex scan status, with an Interrupted scan reconciled once by the scan run lifecycle. */
@@ -1205,24 +1496,12 @@ function coverageGroupsForResults(results: PlexShowResult[], manualInventory: Co
     const outcomes=results.flatMap(show=>(show.coverageOutcomes || []).filter(outcome=>mapping.members.some(member=>member.provider===outcome.provider && member.id===outcome.id)).map(outcome=>({...outcome,showKey:show.ratingKey})));
     const missing=outcomes.filter(outcome=>outcome.status==="missing");
     if (!missing.length) return [];
-    return [{mappingId:mapping.id,health:mapping.health,missing,members:mapping.members.map(member=>{
+    return [{mappingId:mapping.id,missing,members:mapping.members.map(member=>{
       const direct=manualInventory.some(item=>item.identities.some(identity=>identity.provider===member.provider && identity.id===member.id));
       const matched=outcomes.filter(outcome=>outcome.provider===member.provider && outcome.id===member.id);
       return {...member,...memberStatus({member,members:mapping.members,direct,matched})};
     })}];
   });
-}
-/**
- * The report a single-show scan rebuilds every carried row of, when only its own health
- * preparation moved the coverage revision: the baseline report, reusable at the baseline revision,
- * and one committed health update receipt for each revision from there to `revision`. Undefined
- * otherwise, including when another change moved the revision during health preparation.
- */
-function ownHealthChangeBaseline(baseline: {revision: number; report: PlexReport | null}, receipts: CoverageHealthReceipt[], revision: number, autoCompoundEpisodes: boolean) {
-  const {report} = baseline;
-  if (!receipts.length || !report || (report.coverageRevision || 0) !== baseline.revision || !plexReportCacheIsUsable(report, CACHE_VERSION, autoCompoundEpisodes)) return undefined;
-  const ours = receipts.every((receipt, index) => receipt.revision === baseline.revision + index + 1) && revision === baseline.revision + receipts.length;
-  return ours ? report : undefined;
 }
 /** Whether a Manual Match member belongs to a saved show comparison, by provider show or catalogue episode. */
 function memberInComparison(inputs: PlexGeneratedInputs, input: SavedPlexComparison, member: CoverageMember) {
@@ -1387,38 +1666,23 @@ async function resolveSavedComparison(identity: string, saved: SavedPlexComparis
 }
 
 /**
- * The writes a saved comparison makes besides its result: saved comparison inputs, catalogue uses
- * and Scan Issues. Applied at once unless `staged` collects them, for a scan to apply only when it
- * commits the report the comparison belongs to.
- */
-class SavedComparisonEffects {
-  private readonly pending: (() => void)[] | undefined;
-  constructor(staged: boolean) { this.pending = staged ? [] : undefined; }
-  apply(effect: () => void) { if (this.pending) this.pending.push(effect); else effect(); }
-  /** Applies every staged write in order. */
-  commit() { for (const effect of this.pending?.splice(0) || []) effect(); }
-}
-const IMMEDIATE_EFFECTS = new SavedComparisonEffects(false);
-
-/**
  * Compare one show in a cached recheck from the saved inputs `resolveSavedComparison` selects, then publish the
  * catalogues it compared with the saved comparison and the catalogue uses, so reports and notices
  * never describe another catalogue. No request is made and no time or obligation is consumed.
- * Its writes go through `effects`, so a scan can stage them until it commits.
  */
-async function recheckSavedShow(identity: string, saved: SavedPlexComparison, context: SavedComparisonContext, now: string, previous: PlexShowResult | undefined, effects = IMMEDIATE_EFFECTS) {
+async function recheckSavedShow(identity: string, saved: SavedPlexComparison, context: SavedComparisonContext, now: string, previous: PlexShowResult | undefined) {
   const selection=readShowCatalogueSelection(identity);
   // The recheck keeps each provider's status from the last scan: it never changes a show's match status by itself.
   const {input,resolution}=await resolveSavedComparison(identity,saved,context.inputs,selection,now,previous?.providerResolution?.providers);
-  const compared=await compareSavedShow(identity,input,context,{tmdb:!!resolution.tmdb.catalogue,tvdb:!!resolution.tvdb.catalogue},effects);
+  const compared=await compareSavedShow(identity,input,context,{tmdb:!!resolution.tmdb.catalogue,tvdb:!!resolution.tvdb.catalogue});
   if (previous?.providerResolution?.providers) compared.result={...compared.result,providerResolution:providerResolutionOf(resolution)};
-  if (input.tmdbId !== saved.tmdbId || input.tvdbId !== saved.tvdbId) effects.apply(() =>
-    savePlexComparison(identity,{...readPlexInputs().comparisons[identity] || input,tmdbId:input.tmdbId,tvdbId:input.tvdbId,tmdbAliases:compared.tmdbSeriesMatches.map(show=>show.id),tvdbAliases:compared.tvdbSeriesMatches.map(show=>show.id)}));
+  if (input.tmdbId !== saved.tmdbId || input.tvdbId !== saved.tvdbId)
+    savePlexComparison(identity,{...readPlexInputs().comparisons[identity] || input,tmdbId:input.tmdbId,tvdbId:input.tvdbId,tmdbAliases:compared.tmdbSeriesMatches.map(show=>show.id),tvdbAliases:compared.tvdbSeriesMatches.map(show=>show.id)});
   // Catalogue issue actions (all preserved) and obligation changes (none) are not applied by a recheck.
   for (const provider of PROVIDERS) {
     const proposal=resolution[provider].use, current=selection?.[provider].current;
-    if (proposal.action === "clear") effects.apply(() => clearCatalogueUse(identity,provider));
-    else if (proposal.action === "set" && !sameCatalogueUse(current,proposal.use)) { const use=proposal.use; effects.apply(() => recordCatalogueUse(identity,provider,use)); }
+    if (proposal.action === "clear") clearCatalogueUse(identity,provider);
+    else if (proposal.action === "set" && !sameCatalogueUse(current,proposal.use)) recordCatalogueUse(identity,provider,proposal.use);
   }
   return compared;
 }
@@ -1434,7 +1698,7 @@ function sameCatalogueUse(current: CatalogueUse | undefined, use: CatalogueUse) 
  * summary is saved by each scan). Throws when another show-level relationship is missing; episode
  * issues and resolved comparison issues are reconciled.
  */
-async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs,settings,index,mappings}: SavedComparisonContext, compares: Record<CatalogueProvider, boolean> = {tmdb:true,tvdb:true}, effects = IMMEDIATE_EFFECTS) {
+async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs,settings,index,mappings}: SavedComparisonContext, compares: Record<CatalogueProvider, boolean> = {tmdb:true,tvdb:true}) {
   // A provider the last scan had no catalogue for is not compared, even if a saved copy appeared since.
   const tmdb=input.tmdbId && compares.tmdb ? inputs.tmdb[String(input.tmdbId)] : undefined,tvdb=input.tvdbId && compares.tvdb ? inputs.tvdb[String(input.tvdbId)] : undefined;
   const evidence=savedComparisonEvidence({ratingKey:key,comparison:input,tmdbCatalogues:inputs.tmdb,compares,shared:id=>sharedTmdbCrosswalks.read(id),failures:lookupFailureRecord(key)});
@@ -1449,15 +1713,13 @@ async function compareSavedShow(key: string, input: SavedPlexComparison, {inputs
   // The recheck saves only the answers it recovered after this show's own failed lookup; its other
   // replay changes stay in memory, so a later shared recovery remains adoptable by the next cached recheck.
   const recovered=evidence.changes().recovered;
-  effects.apply(() => saveRecoveredTmdbCrosswalks(recovered,{
+  saveRecoveredTmdbCrosswalks(recovered,{
     save:copies=>savePlexComparison(key,{...input,relationships:{...input.relationships,...copies}}),
     resolveFailedRequest:resolveCoverageIssue,
-  }));
-  const episodeFailures=withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true);
-  effects.apply(() => {
-    reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},episodeFailures,{malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],unnecessaryLookupCauses:compared.unnecessaryLookupCauses});
-    resolveCoverageIssue(comparisonInputsIssueId(key));
-    resolveCoverageIssue(comparisonFailureIssueId(key));
   });
+  const episodeFailures=withTitleRecovery(key,compared.episodeFailures,tvdb?.titleRecovery || {},tvdb?.episodes || [],true);
+  reconcileEpisodeCheckIssues({ratingKey:key,title:input.group.records[0]?.title,tmdbId:input.tmdbId,tvdbId:input.tvdbId},episodeFailures,{malformedRecords:[...(tmdb?.malformed || []),...(tvdb?.malformed || [])],unnecessaryLookupCauses:compared.unnecessaryLookupCauses});
+  resolveCoverageIssue(comparisonInputsIssueId(key));
+  resolveCoverageIssue(comparisonFailureIssueId(key));
   return compared;
 }

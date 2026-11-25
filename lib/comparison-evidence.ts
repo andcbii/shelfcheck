@@ -17,7 +17,7 @@ import { isRecord, responseRecordList } from "@/lib/value-guards";
  * Failures are thrown: the typed errors below, or the provider's own request error. An empty answer is
  * a success.
  */
-export type TmdbShow = { id: number; name?: string; first_air_date?: string | null; seasons?: { season_number: number }[]; external_ids?: { tvdb_id?: number | null } };
+export type TmdbShow = { id: number; name?: string; first_air_date?: string | null; seasons?: { season_number: number; episode_count?: number }[]; external_ids?: { tvdb_id?: number | null } };
 export type TvdbShow = { id: number; name?: string; slug?: string; year?: string };
 export type TraktIds = { trakt?: number | null; tmdb?: number | null; tvdb?: number | null };
 export type TraktEpisodeSearchResult = { type?: string; episode?: { season?: number; number?: number; ids?: TraktIds }; show?: { ids?: TraktIds } };

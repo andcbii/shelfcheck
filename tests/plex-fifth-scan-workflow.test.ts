@@ -24,7 +24,7 @@ async function fixture(t: test.TestContext) {
   await config.writePlexProviders({plexUrl:"http://plex",plexToken:"test",tmdbToken:"test",tvdbApiKey:"test"});
   ignoreResults.savedScanState("plex").options.patch({diagnosticsEnabled:false});
   t.mock.timers.enable({apis:["Date"],now:new Date("2026-11-11T12:00:00Z")});
-  const state = {feedFailure:false,downloadFailure:false,inventoryFailure:false, ownsTvdb:false, advanceClock:0, today:[10,999], older:[] as number[],
+  const state = {feedFailure:false,downloadFailure:false,inventoryFailure:false, ownsTvdb:false, ownsTmdb:false, advanceClock:0, today:[10,999], older:[] as number[],
     tvdbFeedFailure:false, failedTvdb:new Set<number>(), failedTmdb:new Set<number>(), failedInventory:new Set<string>(), failedFind:new Set<number>(),
     // Changes the feed returns only when its requested interval includes their UTC date.
     dated:[] as {id:number;date:string}[],
@@ -42,7 +42,7 @@ async function fixture(t: test.TestContext) {
       if(u.pathname === "/library/sections" && state.inventoryFailure) return Response.json({},{status:401});
       if(u.pathname === "/library/sections") return Response.json({MediaContainer:{Directory:[{key:"1",type:"show"}]}});
       if(u.pathname.includes("allLeaves") && state.failedInventory.has(u.pathname.split("/")[3])) return Response.json({},{status:404});
-      if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:state.ownsTvdb && u.pathname.includes("/10/") ? [{ratingKey:"owned",parentIndex:2,index:1,Guid:[{id:"tvdb://200"}]}] : []}});
+      if(u.pathname.includes("allLeaves")) return Response.json({MediaContainer:{Metadata:state.ownsTvdb && u.pathname.includes("/10/") ? [{ratingKey:"owned",parentIndex:2,index:1,Guid:[{id:"tvdb://200"}]}] : state.ownsTmdb && u.pathname.includes("/10/") ? [{ratingKey:"owned",parentIndex:1,index:1,Guid:[{id:"tmdb://100"}]}] : []}});
       return Response.json({MediaContainer:{Metadata:u.pathname.includes("/metadata/") ? [shows.find(s=>u.pathname.includes(`/metadata/${s.ratingKey}`))] : shows}});
     }
     if(u.pathname === "/v4/login") return Response.json({data:{token:"test"}});
@@ -173,7 +173,9 @@ test("explicit catalogue clearing preserves today's completed full-scan count", 
 
 test("Manual Match cached rechecks do not count and affected refreshes combine with the independent fifth-scan policy", async t => {
   const f = await fixture(t);
-  f.state.ownsTvdb = true;
+  // Show 10 owns TMDB 100; its TVDB 200 (season 2) is missing until the Manual Match covers it, one way (ADR-0008).
+  f.state.ownsTmdb = true;
+  f.state.tvdbRecords = [{id:200,seasonNumber:2,number:1,name:"Pilot part",aired:"2020-01-01"}];
   f.state.today = [30];
   const initial = await f.run();
   assert.equal(initial.report.shows.find((s:{title:string})=>s.title === "Show 10").missing.length,1);

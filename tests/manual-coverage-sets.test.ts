@@ -13,7 +13,9 @@ const ignoreResults = await import("../lib/ignore-results");
 const config = await import("../lib/server-config");
 const scan = await import("../app/api/plex/scan/route");
 hook.deregister();
-test("complete-set Manual Matches cover equivalent owned content in both directions without ownership corrections", async (t) => {
+// One way (ADR-0008): owned TMDB content covers equivalent TVDB episodes; owned TVDB content
+// never covers a TMDB episode, which is matched only by its numbers or identity.
+test("complete-set Manual Matches cover TVDB episodes from owned TMDB content, never the reverse, without ownership corrections", async (t) => {
   const dir = mkdtempSync(path.join(tmpdir(), "coverage-"));
   const previous = process.env.SHELFCHECK_DATA_DIR;
   process.env.SHELFCHECK_DATA_DIR = dir;
@@ -126,11 +128,12 @@ test("complete-set Manual Matches cover equivalent owned content in both directi
   ambiguous=false;
   parts=[11551379,11551380];
   const complete = await rescan();
-  assert.deepEqual(complete.report.shows[0].missing,[]);
-  assert.deepEqual(complete.report.coverageGroups,[]);
+  assert.deepEqual(complete.report.shows[0].missing.map((e:{tmdbEpisodeId:number})=>e.tmdbEpisodeId),[6741845],"owning every TVDB part never covers the TMDB episode");
+  assert.equal(complete.report.shows[0].manualCoverage,undefined);
+  assert.deepEqual(complete.report.coverageGroups[0].members.map((m: {id:number,status:string}) => [m.id,m.status]), [[6741845,"missing"],[11551379,"direct"],[11551380,"direct"]]);
   assert.ok((await state()).mappings.some((m:{id:string})=>m.id===mapping.id),"complete mappings remain in the manager");
-  // Reverse direction: a single combined item covers both parts, including when
-  // the same Plex item also carries a split identity.
+  // TVDB-ordered target: a single owned TMDB combined item covers both TVDB parts, including
+  // when the same Plex item also carries a split identity.
   show.Guid=[{id:"tvdb://20"}]; source.Guid=[{id:"tmdb://10"}];
   parts=[6741845]; sourceProvider="tmdb";
   await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
@@ -175,19 +178,20 @@ test("complete-set Manual Matches cover equivalent owned content in both directi
   assert.equal((await rescan()).report.shows[0].missing.length,2,"many-to-many needs every directly held member");
   parts=[6741845,101];
   assert.deepEqual((await rescan()).report.shows[0].missing,[]);
-  // Both TVDB parts cover both TMDB records in the other direction.
+  // In a TMDB-ordered target, owned TVDB parts never cover the TMDB records.
   show.Guid=[{id:"tmdb://10"}]; source.Guid=[{id:"tvdb://20"}]; expandedTarget=true;
   parts=[11551379]; sourceProvider="tvdb";
   await scan.DELETE(new Request("http://localhost/api/plex/scan",{method:"DELETE"}));
   assert.equal((await rescan()).report.shows[0].missing.length,2);
-  parts=[11551379,11551380]; assert.deepEqual((await rescan()).report.shows[0].missing,[]);
+  const tmdbMissing=async()=>(await rescan()).report.shows[0].missing.map((e:{tmdbEpisodeId:number})=>e.tmdbEpisodeId);
+  parts=[11551379,11551380]; assert.deepEqual(await tmdbMissing(),[6741845,101],"both TVDB parts owned still cover neither TMDB record");
   const manyToOne=await resolve(["tmdb:6741845 show:10 season:1 episode:1","tmdb:101 show:10 season:1 episode:2","tvdb:11551379"]);
   const manySave=await api.POST(request({action:"save",id:mapping.id,revision:mapping.revision,preview:manyToOne.preview}));
   assert.equal(manySave.status,200); mapping.revision=(await manySave.json()).mapping.revision; await wait();
-  parts=[11551379]; assert.deepEqual((await rescan()).report.shows[0].missing,[]);
-  // A held part that also reports a combined identity still completes its one-member side.
+  parts=[11551379]; assert.deepEqual(await tmdbMissing(),[6741845,101],"the complete TVDB side covers neither TMDB record");
+  // A held part that also reports a TMDB identity grants no Manual Match coverage either.
   ambiguous=true;
-  assert.deepEqual((await rescan()).report.shows[0].missing,[],"a mixed-identity item retains the complete TVDB side");
+  assert.deepEqual(await tmdbMissing(),[6741845,101],"a mixed-identity item in an ignored show covers no TMDB record");
   // Mapping saves during an active scan are rejected without changing saved state.
   const blocked=new Promise<void>(resolve=>{unblock=resolve;});
   const started=new Promise<void>(resolve=>{entered=resolve;}); blockSeason=true;

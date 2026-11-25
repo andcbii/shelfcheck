@@ -73,6 +73,24 @@ export function plexEpisodeFingerprint(episodes: PlexMetadata[]): string | undef
   return episodes.map((episode) => `${episode.ratingKey}:${episode.updatedAt}`).sort().join("|");
 }
 
+/** A usable show year: a four-digit calendar year. Zero, a malformed value or none is no year. */
+export function usableShowYear(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1000 && value <= 9999 ? value : undefined;
+}
+
+/**
+ * The one Plex year of a show group, whatever order Plex listed its records in: the usable year of
+ * its record with the lowest rating key, or none when no record has one. The Plex page, the Plex
+ * report headers and Manual Matches all read this value, so duplicate records under one Plex GUID
+ * never show different years in different places.
+ */
+export function plexGroupYear(records: PlexMetadata[]): number | undefined {
+  const byRatingKey = (left: string, right: string) => left.length - right.length || (left < right ? -1 : left > right ? 1 : 0);
+  return records
+    .flatMap(record => { const year = usableShowYear(record.year); return year === undefined ? [] : [{ ratingKey: record.ratingKey || "", year }]; })
+    .sort((left, right) => byRatingKey(left.ratingKey, right.ratingKey))[0]?.year;
+}
+
 export function hasPlexEpisodeCoordinate(episode: PlexMetadata): episode is PlexMetadata & { parentIndex: number; index: number } {
   return Number.isFinite(episode.parentIndex) && Number.isFinite(episode.index);
 }

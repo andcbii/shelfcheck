@@ -131,6 +131,23 @@ export function saveProviderVerification(positions: ProviderVerificationPosition
 export function saveCompletedFullScan(startedAt: string, completedFullScans: DailyFullScanCount) {
   writePlexGeneratedInputs("completed-full-scan", {startedAt, completedFullScans} satisfies CompletedFullScanRow);
 }
+/**
+ * One Plex show group as the latest completed full scan published it for Show years: its identity,
+ * the TMDB and TVDB shows it holds, and its last known usable Plex year.
+ */
+export type PlexShowYear = { identity: string; year?: number; tmdb: number[]; tvdb: number[] };
+const PLEX_SHOW_YEARS = "plex-show-years";
+const isIdList = (value: unknown): value is number[] => Array.isArray(value) && value.every(id => Number.isSafeInteger(id));
+/** The published Plex years; a row that is not readable is skipped. */
+export function readPlexShowYears(): PlexShowYear[] {
+  const rows = readPlexGeneratedInputs<{shows?: unknown}>(PLEX_SHOW_YEARS)?.shows;
+  return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<PlexShowYear> | null) => row && typeof row.identity === "string" && isIdList(row.tmdb) && isIdList(row.tvdb)
+    ? [{identity: row.identity, ...(Number.isInteger(row.year) ? {year: row.year} : {}), tmdb: row.tmdb, tvdb: row.tvdb}] : []);
+}
+/** Replaces the published Plex years; only a completed full scan's report save calls it. */
+export function savePlexShowYears(shows: PlexShowYear[]) {
+  writePlexGeneratedInputs(PLEX_SHOW_YEARS, {shows});
+}
 /** Snapshot writer for local rechecks. Full scans write only their changed rows. */
 export function savePlexInputs(inputs: PlexGeneratedInputs) {
   for (const [id,catalogue] of Object.entries(inputs.tmdb)) savePlexCatalogue("tmdb", Number(id), catalogue);
@@ -160,10 +177,11 @@ export const sharedTmdbCrosswalks: SharedCrosswalkStore = {
   save: saveSharedTmdbCrosswalk,
 };
 /**
- * Scan accounting, provider verification positions and pending safeguards survive a full catalogue
- * Clear cache; everything else goes, shared crosswalk evidence included (ADR-0004).
+ * Scan accounting, provider verification positions, pending safeguards and published Plex show
+ * years survive a full catalogue Clear cache; everything else goes, shared crosswalk evidence
+ * included (ADR-0004).
  */
-const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards"] as const;
+const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards", PLEX_SHOW_YEARS] as const;
 /** Clears one show's saved comparison (adding the every-attempted requirement), or all generated inputs except `keptByFullClear`; returns the cleared show's relationship keys. */
 export function clearPlexInputs(ratingKey?: string): string[] {
   if (!ratingKey) { deletePlexGeneratedInputsExcept(keptByFullClear); return []; }

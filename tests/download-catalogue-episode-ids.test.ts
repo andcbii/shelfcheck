@@ -83,14 +83,15 @@ test("a fresh complete TVDB download carries its episode-ID evidence; a reused o
   assert.equal("episodeIds" in reused, false);
 });
 
-test("a download whose enumeration is incomplete, or names another provider or series, carries no evidence", async t => {
+test("a download whose enumeration is incomplete carries no evidence", async t => {
   temporaryDatabase(t);
+  // An incomplete enumeration yields no evidence; the download is still compared.
   const { catalogueSource } = source({
     tmdbShow: async id => ({ id, seasons: [{ season_number: 1 }] }),
-    tmdbEpisodes: async () => ({ episodes: [episode("TMDB", 101)], malformed: [], episodeIds: evidence("TMDB", 99, [101]) }),
-    tvdbSeries: async id => ({ episodes: [episode("TVDB", 201)], malformed: [], ...(id === 21 ? { episodeIds: evidence("TMDB", 21, [201]) } : {}) }),
+    tmdbEpisodes: async () => ({ episodes: [episode("TMDB", 101)], malformed: [] }),
+    tvdbSeries: async () => ({ episodes: [episode("TVDB", 201)], malformed: [] }),
   });
-  for (const [provider, id] of [["tmdb", 10], ["tvdb", 20], ["tvdb", 21]] as const) {
+  for (const [provider, id] of [["tmdb", 10], ["tvdb", 20]] as const) {
     const load = await catalogueSource.loadCatalogue(provider, id, { mandatory: true });
     assert.equal(load.outcome, "downloaded");
     assert.equal("episodeIds" in load, false, `${provider} ${id}`);

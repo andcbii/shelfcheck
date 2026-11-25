@@ -393,9 +393,13 @@ class FailedLoad {
   constructor(readonly failure: Failure) {}
 }
 const failureOf = (error: unknown): Failure => error instanceof FailedLoad ? error.failure : { outcome: "failed", error };
-const comparedFrom = <T>(load: SavedCatalogue<T> & { episodeIds?: EpisodeIdUniverse }, origin: ComparedCatalogue<T>["origin"]): ComparedCatalogue<T> =>
+/**
+ * What the comparison runs against, from a load or saved copy of `provider`. The one place episode-ID
+ * evidence is admitted: only a download's, and only evidence of this provider's series it reports.
+ */
+const comparedFrom = <T>(provider: CatalogueProvider, load: SavedCatalogue<T> & { episodeIds?: EpisodeIdUniverse }, origin: ComparedCatalogue<T>["origin"]): ComparedCatalogue<T> =>
   ({ id: load.id, origin, downloadedAt: load.downloadedAt, catalogue: load.catalogue, ...(load.associatedTvdbId !== undefined ? { associatedTvdbId: load.associatedTvdbId } : {}),
-    ...(origin === "downloaded" && load.episodeIds?.showId === load.id ? { episodeIds: load.episodeIds } : {}) });
+    ...(origin === "downloaded" && load.episodeIds?.provider === PROVIDER_NAME[provider] && load.episodeIds.showId === load.id ? { episodeIds: load.episodeIds } : {}) });
 /** A fallback catalogue is compared in place of the preferred series, so it carries no episode-ID evidence. */
 const withoutEpisodeIds = <T>(catalogue: ComparedCatalogue<T>): ComparedCatalogue<T> => {
   const compared = { ...catalogue };
@@ -430,7 +434,7 @@ async function singleIdCatalogue<P extends CataloguePayloads, K extends Catalogu
   const providerRequest = request[provider];
   const load = await loadSingleCatalogue(source, provider, id, providerRequest.refreshObligation);
   if (load.outcome !== "failed" && load.outcome !== "empty-show") return {
-    identity: load.id, lookupSource: load.lookupSource ?? providerRequest.lookupSource, catalogue: comparedFrom(load, load.outcome),
+    identity: load.id, lookupSource: load.lookupSource ?? providerRequest.lookupSource, catalogue: comparedFrom(provider, load, load.outcome),
     use: { action: "set", use: singleIdUse(load.id, load.downloadedAt) },
     obligation: loadedObligation(providerRequest, id, load), issues: resolvedIssues(provider, request),
   };
@@ -546,7 +550,7 @@ async function deriveTvdb<P extends CataloguePayloads>(resolving: Resolving<P>):
   const load = request.context.kind === "cached-recheck" ? readSaved(source, "tvdb", tvdbId, request.resolvedAt) : await loadSingleCatalogue(source, "tvdb", tvdbId, request.tvdb.refreshObligation);
   if (!load) return missingFromSaved(resolving, "tvdb", tvdbId, lookupSource);
   if (load.outcome !== "failed" && load.outcome !== "empty-show")
-    return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, tvdbId, load), issues: loadedIssues("tvdb", request) };
+    return { identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom("tvdb", load, load.outcome), use: derivedUse(load.downloadedAt), obligation: loadedObligation(request.tvdb, tvdbId, load), issues: loadedIssues("tvdb", request) };
   // A derived series whose load fails is kept as a single Plex ID's is.
   const { failure, kept } = failedSingleLoad(source, "tvdb", tvdbId, load, request.resolvedAt);
   return singleCatalogueFailure("tvdb", request, identities, failure, { kind: "series", id: tvdbId }, { lookupSource, use: derivedUse(kept.saved?.downloadedAt), ...kept });
@@ -597,7 +601,7 @@ async function deriveTmdb<P extends CataloguePayloads>(resolving: Resolving<P>, 
   if (load.outcome === "empty-show")
     return singleCatalogueFailure("tmdb", request, { tmdb: association.id, tvdb: tvdbId }, emptySeriesFailure("tmdb", association.id), { kind: "show", id: association.id }, { lookupSource, saved: undefined, use: { action: "set", use: { usingId: association.id, state: "derived", derivedFrom: tvdbId } }, downloadedAt: source.savedRecordDownloadedAt("tmdb", association.id), gone: goneRecord(source, "tmdb", association.id, request.resolvedAt) });
   if (load.outcome !== "failed") return {
-    identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom(load, load.outcome),
+    identity: load.id, lookupSource: load.lookupSource ?? lookupSource, catalogue: comparedFrom("tmdb", load, load.outcome),
     use: { action: "set", use: { usingId: load.id, state: "derived", derivedFrom: tvdbId, usingDownloadedAt: load.downloadedAt } },
     obligation: loadedObligation(request.tmdb, association.id, load),
     issues: loadedIssues("tmdb", request),
@@ -666,7 +670,7 @@ function singleCatalogueFailure<T>(provider: CatalogueProvider, request: Compari
   const warning = failureWarning(failure, PROVIDER_TERMS[provider].lookupFailed);
   const obligation = failedObligation(request[provider]);
   const provenance = failure.lookupSource || lookupSource;
-  if (saved) return { identity: saved.id, lookupSource: provenance, catalogue: comparedFrom(saved, "saved"), use, obligation, issues, warning };
+  if (saved) return { identity: saved.id, lookupSource: provenance, catalogue: comparedFrom(provider, saved, "saved"), use, obligation, issues, warning };
   return { ...(seriesId !== undefined ? { identity: seriesId } : {}), lookupSource: provenance, use, obligation, issues, unavailableCause: refreshId, warning, ...(gone ? { gone: true as const } : {}) };
 }
 
@@ -692,11 +696,11 @@ async function chooseAmongCandidates<P extends CataloguePayloads, K extends Cata
       if (load.outcome === "failed") throw new FailedLoad(load);
       if (load.outcome === "empty-show") throw new FailedLoad(emptySeriesFailure(provider, id));
       if (id === preferredId) preferredProvenance = load.lookupSource;
-      return { value: comparedFrom(load, load.outcome), downloadedAt: load.downloadedAt };
+      return { value: comparedFrom(provider, load, load.outcome), downloadedAt: load.downloadedAt };
     },
     saved: id => {
       const saved = source.savedCatalogue(provider, id);
-      return saved && { value: comparedFrom(saved, "saved"), downloadedAt: saved.downloadedAt };
+      return saved && { value: comparedFrom(provider, saved, "saved"), downloadedAt: saved.downloadedAt };
     },
     gone: id => goneOf(id) !== undefined,
   });
@@ -820,7 +824,7 @@ function keepCompared<P extends CataloguePayloads, K extends CatalogueProvider>(
   if (recordedFailure) return recordedFailure;
   const saved = goneRecord(source, provider, id, request.resolvedAt) ? undefined : source.savedCatalogue(provider, id);
   if (!saved) return missingFromSaved(resolving, provider, id, lookupSource);
-  return { identity: id, lookupSource, catalogue: comparedFrom(saved, "reused"), ...unchangedResolution, issues };
+  return { identity: id, lookupSource, catalogue: comparedFrom(provider, saved, "reused"), ...unchangedResolution, issues };
 }
 
 /**
@@ -875,5 +879,5 @@ function chooseAmongSavedCandidates<P extends CataloguePayloads, K extends Catal
     usingDownloadedAt: saved.downloadedAt, preferredFailedAt,
     ...(tried && recorded?.usingId === usingId ? { usingFailedAt: recorded.usingFailedAt } : {}),
   });
-  return { identity: usingId, lookupSource: providerRequest.lookupSource, catalogue: comparedFrom(saved, "reused"), use: { action: "set", use }, obligation: NO_CHANGE, issues };
+  return { identity: usingId, lookupSource: providerRequest.lookupSource, catalogue: comparedFrom(provider, saved, "reused"), use: { action: "set", use }, obligation: NO_CHANGE, issues };
 }

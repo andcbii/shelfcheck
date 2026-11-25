@@ -14,8 +14,6 @@ export type EpisodeIdUniverse = {
   /** The provider's own show ID whose episodes were enumerated. */
   showId: number;
   ids: ReadonlySet<number>;
-  complete: true;
-  origin: "fresh-download";
 };
 
 const episodeId = (record: unknown) => isRecord(record) && typeof record.id === "number" && Number.isSafeInteger(record.id) && record.id > 0 ? record.id : undefined;
@@ -41,7 +39,7 @@ export function episodeIdEnumeration(provider: CoverageProvider, showId: number)
     /** The evidence once every season or page has been added; undefined when the enumeration is not complete. */
     complete(): EpisodeIdUniverse | undefined {
       if (!readable || !ids.size) return undefined;
-      return { provider, showId, ids: new Set(ids), complete: true, origin: "fresh-download" };
+      return { provider, showId, ids: new Set(ids) };
     },
   };
 }

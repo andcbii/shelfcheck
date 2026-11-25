@@ -1493,6 +1493,15 @@ test("a fresh complete download keeps its episode-ID evidence for the series it 
   assert.deepEqual(loaded.tvdb.catalogue?.episodeIds, fixtureEpisodeIds("tvdb", 1));
 });
 
+test("a download's evidence of another provider or another series is never kept: evidence belongs to the series compared", async () => {
+  const { source } = inMemoryCatalogueSource({ now: NOW, episodeIdsOf: (provider, id) => provider === "tmdb" ? fixtureEpisodeIds("tvdb", id) : fixtureEpisodeIds("tvdb", id + 1) });
+  const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11 }, { candidates: [1], preferredId: 1 }), { source });
+  assert.equal(resolved.tmdb.catalogue?.origin, "downloaded");
+  assert.equal(resolved.tmdb.catalogue && "episodeIds" in resolved.tmdb.catalogue, false, "TVDB evidence for a TMDB catalogue");
+  assert.equal(resolved.tvdb.catalogue?.origin, "downloaded");
+  assert.equal(resolved.tvdb.catalogue && "episodeIds" in resolved.tvdb.catalogue, false, "evidence of another TVDB series");
+});
+
 test("reused and saved catalogues carry no episode-ID evidence", async () => {
   const reused = inMemoryCatalogueSource({ now: NOW, episodeIds: true, saved: { tmdb: { 11: before(DAY) }, tvdb: { 1: before(DAY) } } });
   const resolved = await resolveComparisonCatalogues(request({ candidates: [11], preferredId: 11 }, { candidates: [1], preferredId: 1 }), { source: reused.source });

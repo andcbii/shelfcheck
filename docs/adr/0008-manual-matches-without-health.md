@@ -1,13 +1,13 @@
 ---
 status: accepted
-supersedes: the Manual Match health parts of ADR-0001 and ADR-0007, and ADR-0001's coverage of TMDB episodes from owned TVDB members
+amends: ADR-0001, ADR-0007
 ---
 
 # Manual Matches have no health
 
 ADR-0001 gave each Manual Match a health, rechecked on every Plex scan: each member's episode was requested from its provider, and only a **Healthy** match could grant coverage. **Pending** (a member could not be checked) and **Needs review** (TVDB answered that a member's episode is gone) matches granted nothing, and ADR-0007 kept that gate when it moved the Manual Match ahead of automatic matching. In practice the recheck cost every scan about 55 s before its first comparison (272 TVDB and 125 TMDB episode requests, held to TVDB's 200 ms spacing), and it did harm: a provider outage made Pending matches stop covering, so owned episodes showed as missing. The user decides which episodes are equivalent; a provider's opinion of a member adds nothing he uses.
 
-So a Manual Match has no health. A scan makes no request for any Manual Match member, every saved Manual Match is eligible to grant coverage, and member-verification Coverage Issues no longer exist. Apart from its direction (see One-way coverage below), everything else about granting coverage is unchanged: the complete-set rule, direct ownership, ignored-show evidence, no transitive coverage, Report Missing precedence (ADR-0007) and the derived Incomplete combined episode. Saving or editing a Manual Match still resolves every episode at its provider and reviews the preview, so a match still starts from real provider records.
+So a Manual Match has no health, superseding the Manual Match health parts of ADR-0001 and ADR-0007. A scan makes no request for any Manual Match member, every saved Manual Match is eligible to grant coverage, and member-verification Coverage Issues no longer exist. Apart from its direction (see One-way coverage below), everything else about granting coverage is unchanged: the complete-set rule, direct ownership, ignored-show evidence, no transitive coverage, Report Missing precedence (ADR-0007) and the derived Incomplete combined episode. Saving or editing a Manual Match still resolves every episode at its provider and reviews the preview, so a match still starts from real provider records.
 
 ## Consequences
 

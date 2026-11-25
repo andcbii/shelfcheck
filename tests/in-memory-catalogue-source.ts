@@ -1,12 +1,17 @@
 import { reuseProviderCatalogue } from "../lib/plex-catalogue-policy";
 import type { CatalogueLoad, CatalogueLoadSettings, ComparisonCatalogueSource, SeriesAssociation } from "../lib/comparison-catalogue-resolver";
 import type { CatalogueProvider } from "../lib/catalogue-selection";
+import type { EpisodeIdUniverse } from "../lib/episode-id-universe";
 
 /** The catalogue payload this source hands back: which series, as downloaded when. */
 export type FixtureCatalogue = { provider: CatalogueProvider; id: number; downloadedAt: string };
 export type FixturePayloads = { tmdb: FixtureCatalogue; tvdb: FixtureCatalogue };
 export type CatalogueRequest = { provider: CatalogueProvider; id: number } & CatalogueLoadSettings;
 type Failure = Omit<Extract<CatalogueLoad<FixtureCatalogue>, { outcome: "failed" }>, "outcome">;
+
+/** The episode-ID evidence a fixture download carries: one episode, ID 1000 plus the series ID. */
+export const fixtureEpisodeIds = (provider: CatalogueProvider, showId: number): EpisodeIdUniverse =>
+  ({ provider: provider === "tmdb" ? "TMDB" : "TVDB", showId, ids: new Set([1000 + showId]), complete: true, origin: "fresh-download" });
 
 /**
  * An in-memory catalogue source for direct resolver tests. Reuse versus download is decided by the
@@ -41,6 +46,8 @@ export function inMemoryCatalogueSource(options: {
   seriesNotFoundDays?: Partial<Record<CatalogueProvider, Record<number, number>>>;
   /** Requested series the provider answers as another series: requested ID to the ID its saved copy and downloads report. */
   reports?: Partial<Record<CatalogueProvider, Record<number, number>>>;
+  /** Each successful download also carries its run-bound episode-ID evidence, for the series it reports. */
+  episodeIds?: boolean;
 }) {
   const saved: Record<CatalogueProvider, Map<number, string>> = {
     tmdb: new Map(Object.entries(options.saved?.tmdb || {}).map(([id, at]) => [Number(id), at])),
@@ -66,7 +73,7 @@ export function inMemoryCatalogueSource(options: {
       if (options.noSeries?.[provider]?.includes(id)) return { outcome: "empty-show" };
       const at = options.downloadAt || options.now;
       saved[provider].set(id, at);
-      return { outcome: "downloaded", id: reported(provider, id), catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id) };
+      return { outcome: "downloaded", id: reported(provider, id), catalogue: catalogue(provider, id, at), downloadedAt: at, ...association(provider, id), ...(options.episodeIds ? { episodeIds: fixtureEpisodeIds(provider, reported(provider, id)) } : {}) };
     },
     savedCatalogue(provider, id) {
       const downloadedAt = saved[provider].get(id);

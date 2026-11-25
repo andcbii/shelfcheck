@@ -94,6 +94,10 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   // Only the report has a fixed show order and show filters; the Plex page keeps the saved order.
   const filtering = report && filteringShows(showPicks);
   const listedMappings = report ? orderManualMatches(filtering ? filterByShows(scopedMappings, showPicks) : scopedMappings) : scopedMappings;
+  // Only listed Manual Matches stay ticked: one a refresh removes or the filters hide drops out
+  // of the selection, so it is not ticked if it is listed again.
+  const listedSelection = selected.filter(id => listedMappings.some(mapping => mapping.id === id));
+  if (listedSelection.length !== selected.length) setSelected(listedSelection);
   // A filter change clears ticked matches and any pending bulk delete, so nothing hidden can be deleted.
   function changeShowPicks(picks: ShowPicks) {
     setShowPicks(picks);
@@ -116,7 +120,6 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   function acceptMappings(next: CoverageMapping[]) {
     setMappings(next);
     setPage(current => Math.min(current, Math.max(1, Math.ceil(next.length / pageSize))));
-    setSelected(current => current.filter(id => next.some(mapping => mapping.id === id)));
     setConfirmation(null);
   }
   // Loads a saved Manual Match into the draft. Opening the form is separate, so a
@@ -282,9 +285,11 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
         else if (!episodeScope) setEditing(null);
         onChanged(result.revision);
         if (report) {
-          // The popup closes, and the saved card's own note confirms the save.
+          // The popup closes, and the saved card's own note confirms the save. A save the show
+          // filters hide has no card to show, so the filters stay as they are and a message says so.
           closeForm();
           setSavedNote(result.mapping ? { id: result.mapping.id } : null);
+          if (result.mapping && filtering && !filterByShows([result.mapping], showPicks).length) setMessage("Saved. Hidden by the current filters.");
         } else setMessage(result.pending ? "Saved. Some coverage checks need attention. See Scan Issues for details." : "Saved. Affected cached Plex comparisons have been rechecked.");
         await load();
       }

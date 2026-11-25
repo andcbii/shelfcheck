@@ -130,3 +130,33 @@ test("A hidden selection never survives to a later delete", async t => {
   await report.click("Delete match", report.dialog()!);
   assert.deepEqual(report.deletes, [["lost-02"]]);
 });
+
+test("Saving a match the filters hide keeps the filters and says so; a visible save shows the Saved note", async t => {
+  const report = await mountReport(t, [match("who-a", [who], [tvdbWho]), match("who-b", [{ ...who, episode: 2 }], [{ ...tvdbWho, episode: 2 }]), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Doctor Who (2005)");
+  await report.tick("who-a", "who-b");
+  const save = async (id: string, members: Member[]) => {
+    report.server.resolveAs = members;
+    await report.click(/^Edit/, report.card(id));
+    await report.click("Resolve and review", report.dialog()!);
+    await report.click("Save Manual Match", report.dialog()!);
+    assert.equal(report.dialogName(), null);
+  };
+  await save("who-b", [member("TMDB", { ...who, episode: 3 }), member("TVDB", { ...tvdbWho, episode: 3 })]);
+  assert.equal(report.card("who-b").querySelector(".manual-match-saved")?.textContent, "Saved");
+  assert.doesNotMatch(report.container.textContent!, /Hidden by the current filters/);
+  // Moving who-a to Archer hides it under the Doctor Who filter.
+  await save("who-a", [member("TMDB", archer), member("TVDB", tvdbArcher)]);
+  assert.deepEqual(report.picked("TMDB shows"), ["Doctor Who (2005)"]);
+  assert.deepEqual(report.cards(), ["who-b"]);
+  assert.ok([...report.container.querySelectorAll('[role="status"]')].some(status => status.textContent === "Saved. Hidden by the current filters."));
+  assert.match(report.bulkBar()!, /^1 selected/);
+  // No stale selection remains: when who-a is listed again after a later refresh, it is not ticked.
+  report.server.mappings = report.server.mappings.map(mapping => mapping.id === "who-a" ? { ...mapping, members: [member("TMDB", { ...who, episode: 4 }), member("TVDB", { ...tvdbWho, episode: 4 })] } : mapping);
+  await save("who-b", [member("TMDB", { ...who, episode: 3 }), member("TVDB", { ...tvdbWho, episode: 3 })]);
+  assert.deepEqual(report.cards(), ["who-b", "who-a"]);
+  assert.deepEqual(report.ticked(), ["who-b"]);
+  await report.click("Delete 1 selected match");
+  await report.click("Delete match", report.dialog()!);
+  assert.deepEqual(report.deletes, [["who-b"]]);
+});

@@ -127,8 +127,9 @@ export async function runTrackedWorkerPool<T>(
  * Prepares items ahead of their consumer. Offered items are prepared in offer order by at most
  * `concurrency` early preparations at a time, and offering stops starting them while `ahead` early
  * preparations are prepared or running but not yet taken. `take` consumes an item's preparation once:
- * the one already started, or one started at once for an item not offered or still waiting.
- * `settled` is called once per launched preparation, fulfilled or rejected.
+ * the one already started, or one started at once for an item not offered or still waiting. Once draining has
+ * begun nothing new starts: `take` of an item never launched rejects. `settled` is called once per launched
+ * preparation, fulfilled or rejected.
  */
 export class PreparationQueue<T, R> {
   private readonly waiting: T[] = [];
@@ -154,7 +155,7 @@ export class PreparationQueue<T, R> {
   }
 
   /** Whether the queue is draining: launched preparations should stop at their next checkpoint. */
-  get draining() { return this.closed; }
+  isDraining() { return this.closed; }
 
   /** Whether the item's preparation has been taken. */
   isTaken(item: T) { return this.taken.has(item); }
@@ -171,6 +172,7 @@ export class PreparationQueue<T, R> {
       if (launched.early) { this.earlyUntaken -= 1; this.pump(); }
       return launched.promise;
     }
+    if (this.closed) return Promise.reject(new Error("The preparation queue is draining; no new preparation starts."));
     return this.launch(item, false);
   }
 

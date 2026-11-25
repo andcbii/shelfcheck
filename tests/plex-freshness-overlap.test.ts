@@ -52,6 +52,8 @@ async function library(t: TestContext) {
   await config.writePlexProviders({ plexUrl: "http://plex", plexToken: "test", tmdbToken: "test", tvdbApiKey: "test" });
   ignoreResults.savedScanState("plex").options.patch({ diagnosticsEnabled: false });
   const events: string[] = [];
+  /** Every request's path, in the order it entered. */
+  const paths: string[] = [];
   const holds: Partial<Record<Watched, Hold>> = {};
   const late: Watched[] = [];
   let tvdbChanged: number[] = [];
@@ -82,6 +84,7 @@ async function library(t: TestContext) {
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     const request = kind(u);
+    paths.push(u.pathname);
     if (request) events.push(`enter ${request}`);
     const hold = request && holds[request];
     if (hold && !(await hold())) late.push(request);
@@ -96,8 +99,10 @@ async function library(t: TestContext) {
   };
   assert.equal((await fullScan()).status, "completed", "the first full scan saves catalogues and positions");
   events.length = 0;
+  paths.length = 0;
   return {
     events, late, fullScan,
+    entered: (pathname: string) => paths.includes(pathname),
     count: (event: string) => events.filter((entry) => entry === event).length,
     /** Arm holds for the next scan. Each hold waits at most 3 seconds for its condition. */
     arm(next: Partial<Record<Watched, () => boolean>>) {
@@ -134,6 +139,26 @@ for (const feed of ["tmdb-changes", "tvdb-updates"] as const) {
     assert.ok(f.events.indexOf(`answer ${feed}`) > f.events.lastIndexOf("answer allLeaves"), "the held feed is answered after the inventory");
   });
 }
+
+test("with both change lists held, each show's Plex metadata is requested", async (t) => {
+  const f = await library(t);
+  // A show's Plex metadata needs no freshness decision, so it is requested while both change lists are held.
+  const metadataIn = () => f.entered("/library/metadata/1") && f.entered("/library/metadata/2");
+  f.arm({ "tmdb-changes": metadataIn, "tvdb-updates": metadataIn });
+  const status = await f.fullScan();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.deepEqual(f.late, [], "both shows' metadata was requested while the change lists were held");
+});
+
+test("with the TVDB updates held, a show without a saved TMDB catalogue downloads it", async (t) => {
+  const f = await library(t);
+  // TMDB's catalogue choice waits for TMDB's freshness alone.
+  f.database().exec("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key = 'tmdb:10'");
+  f.arm({ "tvdb-updates": () => f.entered("/3/tv/10/season/1") });
+  const status = await f.fullScan();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.deepEqual(f.late, [], "Show 1's TMDB catalogue was requested while the TVDB updates were held");
+});
 
 test("a fatal inventory failure waits for the held TVDB updates and their retention before the run ends", async (t) => {
   const f = await library(t);

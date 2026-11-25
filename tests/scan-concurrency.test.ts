@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ActiveScanTracker, ProviderStartGate, runTrackedWorkerPool, runWorkerPool } from "../lib/scan-concurrency";
+import { ActiveScanTracker, PreparationQueue, ProviderStartGate, runTrackedWorkerPool, runWorkerPool } from "../lib/scan-concurrency";
 
 test("worker pool respects concurrency and completes every item", async () => {
   let active = 0;
@@ -78,4 +78,15 @@ test("tracked scan orchestration publishes active work and always clears complet
   ), /scan failed/);
   assert.ok(snapshots.some((snapshot) => snapshot.join(",") === "a,b"));
   assert.deepEqual(tracker.snapshot(), []);
+});
+
+test("a preparation queue launches no new preparation once draining has begun", async () => {
+  const prepared: string[] = [];
+  const queue = new PreparationQueue<string, string>({ concurrency: 1, ahead: 2, prepare: async (item) => { prepared.push(item); return item; } });
+  queue.offer("early");
+  await queue.drain();
+  assert.equal(await queue.take("early"), "early", "a preparation launched before draining is still consumed");
+  await assert.rejects(queue.take("late"), /drain/i);
+  queue.offer("offered");
+  assert.deepEqual(prepared, ["early"]);
 });

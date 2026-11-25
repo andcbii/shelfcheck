@@ -30,9 +30,10 @@ async function within(milliseconds: number, condition: () => boolean) {
  * - Show B is one show of two Plex records (2 and 3, the same Plex GUID) listing S1E1 (TMDB 1101).
  *   Record 2 holds B's S1E1; record 3 holds an item Plex identifies as TMDB 1002, Show A's S1E2.
  * So Show A owns S1E2 only once record 3, the library's last record, is in.
- * Every request is recorded as it enters; `hold(url)` may delay its answer.
+ * `fillers` adds that many shows after them (rating keys 4 on), each one record Plex reports no ID or episode for.
+ * Every request is recorded as it enters; `hold(url)` may delay its answer, or replace it with its own response.
  */
-async function library(t: TestContext, hold: (url: URL) => Promise<void> = async () => {}) {
+async function library(t: TestContext, hold: (url: URL) => Promise<void | Response> = async () => {}, fillers = 0) {
   const dir = mkdtempSync(path.join(tmpdir(), "plex-early-preparation-"));
   const previous = { data: process.env.SHELFCHECK_DATA_DIR, config: process.env.SHELFCHECK_CONFIG_DIR };
   process.env.SHELFCHECK_DATA_DIR = dir;
@@ -52,6 +53,7 @@ async function library(t: TestContext, hold: (url: URL) => Promise<void> = async
     { ratingKey: "1", title: "Show A", Guid: [{ id: "tmdb://10" }] },
     { ratingKey: "2", guid: "plex://show/b", title: "Show B", Guid: [{ id: "tmdb://11" }] },
     { ratingKey: "3", guid: "plex://show/b", title: "Show B", Guid: [{ id: "tmdb://11" }] },
+    ...Array.from({ length: fillers }, (_, index) => ({ ratingKey: String(index + 4), title: `Filler ${index + 4}`, Guid: [] })),
   ];
   const leaves: Record<string, unknown[]> = {
     1: [{ ratingKey: "101", parentIndex: 1, index: 1, Guid: [{ id: "tmdb://1001" }] }],
@@ -65,7 +67,8 @@ async function library(t: TestContext, hold: (url: URL) => Promise<void> = async
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
-    await hold(u);
+    const replaced = await hold(u);
+    if (replaced) return replaced;
     let body: unknown;
     if (u.hostname === "plex") {
       const key = u.pathname.split("/")[3];
@@ -100,8 +103,6 @@ async function fullScan() {
   return plex.getPlexScanStatus();
 }
 
-const missingOf = (ratingKey: string) => plex.getPlexReport()?.shows.find((show) => show.ratingKey === ratingKey)?.missing.map((episode) => `S${episode.season}E${episode.episode} ${episode.tmdbEpisodeId}`);
-
 test("a show's catalogues download while a later record downloads, and its result waits for the whole library", async (t) => {
   const seen: { catalogueRequested: boolean; processed?: number; resumePoint?: unknown; report?: unknown; completed?: number } = { catalogueRequested: false };
   const f = await library(t, async (u) => {
@@ -121,8 +122,15 @@ test("a show's catalogues download while a later record downloads, and its resul
   assert.equal(seen.report, null, "no report is saved before the whole library is in");
   assert.equal(seen.completed, 0, "no show completes before the whole library is in");
   // The expected report: Show B's record 3 holds TMDB 1002, so Show A misses nothing; Show B has its only episode.
-  assert.deepEqual(missingOf("ratingKey:1"), []);
-  assert.deepEqual(missingOf("plex://show/b"), []);
+  // The expected report, from the library alone: Show B's record 3 holds TMDB 1002, so Show A misses nothing; Show B has
+  // its only episode. Neither show has a TVDB ID from Plex or TMDB, so each is partially matched.
+  const tmdbOnly = { tmdb: true, tvdb: false, status: "partially-matched", providers: { tmdb: { state: "working" }, tvdb: { state: "total-failure", catalogue: "none", cause: "No TVDB series ID from Plex or TMDB" } } };
+  const report = plex.getPlexReport();
+  assert.deepEqual(report?.shows, [
+    { ratingKey: "ratingKey:1", plexRatingKeys: ["1"], title: "Show A", tmdbId: 10, plexEpisodes: 1, providerResolution: tmdbOnly, providerMatches: { tmdb: [{ id: 10, name: "Show A" }], tvdb: [] }, coverageOutcomes: [], missing: [] },
+    { ratingKey: "plex://show/b", plexGuid: "plex://show/b", plexGuids: ["plex://show/b"], plexRatingKeys: ["2", "3"], title: "Show B", tmdbId: 11, plexEpisodes: 2, providerResolution: tmdbOnly, providerMatches: { tmdb: [{ id: 11, name: "Show B" }], tvdb: [] }, coverageOutcomes: [], missing: [] },
+  ]);
+  assert.deepEqual(report?.coverageGroups, []);
   assert.equal(f.requests.filter((pathname) => pathname === "/3/tv/10/season/1").length, 1, "Show A's prepared catalogue is used once, not downloaded again");
   assert.equal(f.requests.filter((pathname) => pathname === "/3/tv/11/season/1").length, 1);
 });
@@ -166,4 +174,74 @@ test("each show's preparation settles once per scan, downloaded and then reused"
   // Each scan run starts its own log.
   assert.deepEqual(prepared().sort(), ['ratingKey="plex://show/b" outcome="reused"', 'ratingKey="ratingKey:1" outcome="reused"'], "the same day's second scan reuses both catalogues");
   assert.equal(f.logEvents("plex.show.complete").length, 2);
+});
+
+/** What a scan saved that later scans read: each show's comparison inputs and catalogue candidates, and the report's shows. */
+function savedState(database: DatabaseSync) {
+  return {
+    comparisons: database.prepare("SELECT cache_key, payload FROM shelfcheck_plex_generated_inputs WHERE cache_key LIKE 'comparison:%' ORDER BY cache_key").all(),
+    candidates: database.prepare("SELECT identity, provider, series_id FROM shelfcheck_catalogue_candidates ORDER BY identity, provider, series_id").all(),
+    shows: plex.getPlexReport()?.shows,
+  };
+}
+
+test("with an incomplete library inventory, a show prepared before the failure saves what one prepared after it does", async (t) => {
+  const recordFails = () => Response.json({ errors: ["gone"] }, { status: 404 });
+  const outcomes: Record<"before" | "after", { state: ReturnType<typeof savedState>; catalogueRequested: boolean; status: string }> = {} as never;
+  await t.test("Show A prepared before Show B's last record fails", async (t) => {
+    const f = await library(t, async (u) => {
+      if (u.pathname !== "/library/metadata/3/allLeaves") return;
+      await within(5_000, () => f.entered("/3/tv/10/season/1"));
+      return recordFails();
+    });
+    const status = await fullScan();
+    outcomes.before = { state: savedState(f.database()), catalogueRequested: f.entered("/3/tv/10/season/1"), status: status.status };
+  });
+  await t.test("Show A prepared after Show B's last record fails", async (t) => {
+    const f = await library(t, async (u) => {
+      if (u.pathname === "/library/metadata/3/allLeaves") return recordFails();
+      // Show A's metadata is answered once the incomplete inventory is saved.
+      if (u.pathname === "/library/metadata/1") await within(5_000, () => Boolean(f.database().prepare("SELECT 1 FROM shelfcheck_plex_generated_inputs WHERE cache_key = 'inventory'").get()));
+    });
+    const status = await fullScan();
+    outcomes.after = { state: savedState(f.database()), catalogueRequested: f.entered("/3/tv/10/season/1"), status: status.status };
+  });
+  assert.equal(outcomes.before.catalogueRequested, true, "Show A's catalogue was prepared before the failure");
+  assert.equal(outcomes.after.catalogueRequested, false, "Show A's catalogue was not prepared after the failure");
+  assert.equal(outcomes.before.status, "completed");
+  assert.equal(outcomes.after.status, "completed");
+  assert.deepEqual(outcomes.before.state, outcomes.after.state);
+  // Neither scan compared a show, so neither saved a comparison or a candidate.
+  assert.deepEqual(outcomes.before.state.comparisons, []);
+  assert.deepEqual(outcomes.before.state.candidates, []);
+});
+
+test("a show is prepared once its own records are in, while an earlier show's record is held", async (t) => {
+  let prepared = false;
+  const f = await library(t, async (u) => {
+    // Show A's only record stays unanswered until Show B's TMDB episodes have been requested (or 5 seconds pass).
+    if (u.pathname === "/library/metadata/1/allLeaves") prepared = await within(5_000, () => f.entered("/3/tv/11/season/1"));
+  });
+  const status = await fullScan();
+  assert.equal(status.status, "completed", status.error || "");
+  assert.equal(prepared, true, "Show B's catalogue was requested while Show A's record was held");
+  assert.deepEqual(plex.getPlexReport()?.shows.map((show) => [show.title, show.missing]), [["Show A", []], ["Show B", []]]);
+});
+
+test("a fatal preparation failure fails the run without waiting for the rest of the library", async (t) => {
+  let held = 0;
+  const f = await library(t, async (u) => {
+    // Every record but Show A's is held until Show A's preparation has failed (or 5 seconds pass).
+    if (!u.pathname.endsWith("/allLeaves") || u.pathname === "/library/metadata/1/allLeaves") return;
+    held += 1;
+    await within(5_000, () => f.logEvents("plex.show.prepared").some((line) => line.includes('ratingKey="ratingKey:1" outcome="failed"')));
+  }, 8);
+  plex.getPlexReport();
+  // Show A's preparation cannot read its catalogue overrides: a database failure, fatal to the run.
+  f.database().exec("DROP TABLE shelfcheck_catalogue_overrides");
+  const status = await fullScan();
+  assert.equal(status.status, "error");
+  assert.match(status.error || "", /no such table/);
+  assert.equal(held, 8, "the 8 requests in flight with Show A's were held, so its preparation failed while the library downloaded");
+  assert.deepEqual(["10", "11"].filter((key) => f.entered(`/library/metadata/${key}/allLeaves`)), [], "no record starts downloading once the run is failing");
 });

@@ -3,7 +3,8 @@ import { localCalendarDate, type CalendarDate } from "./results-view";
 export type TraktShow = {
   title: string;
   year: number;
-  ids: { trakt: number; slug: string; tmdb?: number };
+  /** Trakt's IDs as saved; older reports may lack tvdb and plex, and Trakt sends null for unknown ones. */
+  ids: { trakt: number; slug: string; tmdb?: number; tvdb?: number | null; plex?: { guid?: string | null; slug?: string | null } | null };
   status?: string;
   images?: { poster?: string[] };
   collection?: { aired: number; completed: number };

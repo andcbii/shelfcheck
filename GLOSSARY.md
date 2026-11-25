@@ -167,7 +167,7 @@ A Manual Match whose TMDB and TVDB sides each list two or more episodes, so neit
 _Avoid_: Partial selection, guessed correspondence
 
 **Show year**:
-The year shown with a show's name on Plex pages and Manual Matches: the year Plex gives the show in the latest completed full scan, kept until a later scan gives one. A provider show that no Plex show holds, or that Plex shows with different years hold, takes its provider's own year. The Trakt page and provider-candidate lists show their source's own year instead.
+The year shown with a show's name on Plex pages and Manual Matches: the year Plex gives the show in the latest completed full scan, kept until a later scan gives one. A provider show that no Plex show holds, or that Plex shows with different years hold, takes its provider's own year. The Trakt page and provider-candidate lists show their source's own year instead. Clear cache keeps both saved Plex years and provider years.
 _Avoid_: Release year, premiere year
 
 **Air date**:

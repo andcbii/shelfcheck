@@ -8,6 +8,7 @@ import { PROVIDERS } from "@/lib/catalogue-selection";
 import { EVERY_ATTEMPTED_REQUIRED, patchSavedObligation, type SavedRefreshObligations } from "@/lib/refresh-obligation";
 import type { SharedCrosswalkStore } from "@/lib/tmdb-crosswalk-coordinator";
 import type { SharedCrosswalkRecord } from "@/lib/tmdb-crosswalk-policy";
+import { usableShowYear } from "@/lib/usable-show-year";
 import { readPlexGeneratedInputs, listPlexGeneratedInputs, writePlexGeneratedInputs, deletePlexGeneratedInputsExcept } from "@/lib/sqlite";
 
 export type TmdbCatalogueShow = { id: number; name?: string; first_air_date?: string | null; seasons?: {season_number:number}[]; external_ids?: {tvdb_id?:number|null} };
@@ -142,11 +143,27 @@ const isIdList = (value: unknown): value is number[] => Array.isArray(value) && 
 export function readPlexShowYears(): PlexShowYear[] {
   const rows = readPlexGeneratedInputs<{shows?: unknown}>(PLEX_SHOW_YEARS)?.shows;
   return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<PlexShowYear> | null) => row && typeof row.identity === "string" && isIdList(row.tmdb) && isIdList(row.tvdb)
-    ? [{identity: row.identity, ...(Number.isInteger(row.year) ? {year: row.year} : {}), tmdb: row.tmdb, tvdb: row.tvdb}] : []);
+    ? [{identity: row.identity, ...(usableShowYear(row.year) === undefined ? {} : {year: row.year}), tmdb: row.tmdb, tvdb: row.tvdb}] : []);
 }
 /** Replaces the published Plex years; only a completed full scan's report save calls it. */
 export function savePlexShowYears(shows: PlexShowYear[]) {
   writePlexGeneratedInputs(PLEX_SHOW_YEARS, {shows});
+}
+/**
+ * One provider show's own year for Show years (TMDB first air year or TVDB series year), as the
+ * newest fresh successful provider answer gave it, with the time that answer was received.
+ */
+export type ProviderShowYear = { provider: CoverageProvider; showId: number; year: number; observedAt: number };
+const PROVIDER_SHOW_YEARS = "provider-show-years";
+/** The saved provider years; a row that is not readable is skipped. */
+export function readProviderShowYears(): ProviderShowYear[] {
+  const rows = readPlexGeneratedInputs<{shows?: unknown}>(PROVIDER_SHOW_YEARS)?.shows;
+  return (Array.isArray(rows) ? rows : []).flatMap((row: Partial<ProviderShowYear> | null) => row && (row.provider === "TMDB" || row.provider === "TVDB") && Number.isSafeInteger(row.showId) && usableShowYear(row.year) !== undefined && Number.isFinite(row.observedAt)
+    ? [{provider: row.provider, showId: row.showId!, year: row.year!, observedAt: row.observedAt!}] : []);
+}
+/** Replaces the saved provider years. */
+export function saveProviderShowYears(shows: ProviderShowYear[]) {
+  writePlexGeneratedInputs(PROVIDER_SHOW_YEARS, {shows});
 }
 /** Snapshot writer for local rechecks. Full scans write only their changed rows. */
 export function savePlexInputs(inputs: PlexGeneratedInputs) {
@@ -177,11 +194,11 @@ export const sharedTmdbCrosswalks: SharedCrosswalkStore = {
   save: saveSharedTmdbCrosswalk,
 };
 /**
- * Scan accounting, provider verification positions, pending safeguards and published Plex show
- * years survive a full catalogue Clear cache; everything else goes, shared crosswalk evidence
+ * Scan accounting, provider verification positions, pending safeguards, published Plex show years
+ * and saved provider years survive a full catalogue Clear cache; everything else goes, shared crosswalk evidence
  * included (ADR-0004).
  */
-const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards", PLEX_SHOW_YEARS] as const;
+const keptByFullClear = ["full-scan", "completed-full-scan", "provider-verification", "pending-safeguards", PLEX_SHOW_YEARS, PROVIDER_SHOW_YEARS] as const;
 /** Clears one show's saved comparison (adding the every-attempted requirement), or all generated inputs except `keptByFullClear`; returns the cleared show's relationship keys. */
 export function clearPlexInputs(ratingKey?: string): string[] {
   if (!ratingKey) { deletePlexGeneratedInputsExcept(keptByFullClear); return []; }

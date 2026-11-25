@@ -13,7 +13,7 @@ import "server-only";
 
 import { readPlexProviders } from "@/lib/server-config";
 import { inDatabaseTransaction } from "@/lib/sqlite";
-import { publishPlexShowYears } from "@/lib/show-year";
+import { fullScanProviderYears, publishPlexShowYears, showDetailsYear } from "@/lib/show-year";
 import { createScanLogger, type ScanLogger } from "@/lib/scan-log";
 import { savedScanState, trackScanIgnores } from "@/lib/ignore-results";
 import { TraktRunCredentials } from "@/lib/trakt-auth";
@@ -221,12 +221,12 @@ async function findEpisodeViaTrakt(evidence: ComparisonEvidence, tvdbEpisodeId: 
 /**
  * A TVDB series' catalogue: its default order's episode pages. An episode the list leaves out is only
  * a removal candidate (ADR-0008): another season order can still hold it, so the scan asks TVDB for
- * the episode itself before removing its member.
+ * the episode itself before removing its member. `requestSeries` sends the series record's request.
  */
-async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<DownloadedEpisodes & { slug?: string; name?: string }> {
+async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string, requestSeries: <T>(send: () => Promise<T>) => Promise<T> = send => send()): Promise<DownloadedEpisodes & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
   const enumeration = episodeIdEnumeration("TVDB", seriesId);
-  const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string } }>(`${TVDB_API}/series/${seriesId}`, token);
+  const series = cachedSlug ? null : await requestSeries(() => tvdbJson<{ data?: { slug?: string; name?: string } }>(`${TVDB_API}/series/${seriesId}`, token));
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
   while (page < 100) {
@@ -775,8 +775,8 @@ async function compareLoadedPlexShow(input: LoadedComparison) {
         const linkedTvdbSummaries = await Promise.allSettled(missingTvdbSummaries.map((id) => evidence.tvdbSeriesSummary(id)));
         tvdbSeriesMatches.push(...linkedTvdbSummaries.flatMap((result) => result.status === "fulfilled" && result.value ? [result.value] : []));
         const providerMatches: PlexProviderMatches = {
-          tmdb: tmdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, ...(show.first_air_date ? { year: Number(show.first_air_date.slice(0, 4)) } : {}) })),
-          tvdb: tvdbSeriesMatches.map((show) => ({ id: show.id, name: show.name, slug: show.slug, ...(show.year && Number.isFinite(Number(show.year)) ? { year: Number(show.year) } : {}), ...(unresolvedTvdbIds.has(show.id) ? { unresolved: true as const } : {}) })),
+          tmdb: tmdbSeriesMatches.map((show) => { const year = showDetailsYear("TMDB", show); return { id: show.id, name: show.name, ...(year === undefined ? {} : { year }) }; }),
+          tvdb: tvdbSeriesMatches.map((show) => { const year = showDetailsYear("TVDB", show); return { id: show.id, name: show.name, slug: show.slug, ...(year === undefined ? {} : { year }), ...(unresolvedTvdbIds.has(show.id) ? { unresolved: true as const } : {}) }; }),
         };
         const result: PlexShowResult = { ratingKey, plexGuid: group.plexGuid, ...(plexGuids.length ? { plexGuids } : {}), plexRatingKeys: group.records.flatMap((record) => record.ratingKey ? [record.ratingKey] : []), title: primary.title || "Unknown show", year: plexGroupYear(group.records), thumb: details.find((detail) => detail.thumb)?.thumb || primary.thumb, tmdbId, tvdbId, tvdbSlug, plexEpisodes: localEpisodes.size, providerResolution: { tmdb: Boolean(tmdbShow), tvdb: tvdbResolved }, providerMatches, coverageOutcomes, missing, ...(autoMatches.length ? { autoMatches } : {}), ...(compoundCoverage.length ? { compoundCoverage } : {}), ...(manualCoverage.length ? { manualCoverage } : {}), ...(warning ? { warning } : {}) };
   return {result,tmdbSeriesMatches,tvdbSeriesMatches,episodeFailures,unnecessaryLookupCauses};
@@ -888,9 +888,12 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   // Saved at another coverage revision, a Resume point holds results of other Manual Matches.
   const { usable: checkpoint } = run.resumePoint.load((saved) => (saved.coverageRevision || 0) === coverageRevision && checkpointIsUsable(saved, autoCompoundEpisodes));
   const cacheUsable = (prior?.coverageRevision || 0) === coverageRevision && plexReportCacheIsUsable(prior, CACHE_VERSION, autoCompoundEpisodes);
+  // The provider years of this run's fresh show-details answers, recorded only by a completed full scan.
+  const providerYears = fullScanProviderYears(mappings);
   // One coordinator per scan run: its comparisons share in-flight crosswalk requests and what this scan requested.
+  const liveTransport = liveLookupTransport({tmdbToken: config.tmdbToken, tvdbSignIn, traktAuth});
   const liveEvidence: LiveEvidenceScan = {
-    transport: liveLookupTransport({tmdbToken: config.tmdbToken, tvdbSignIn, traktAuth}),
+    transport: providerYears.watch(liveTransport),
     crosswalks: tmdbCrosswalkScanRun({store: sharedTmdbCrosswalks, now: () => new Date().toISOString(), startedAt}),
     traktLogin: Boolean(traktAuth),
     traktLoginDiagnostics,
@@ -1028,10 +1031,10 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
         return changes;
       },
       requests: {
-        tmdbShow: id => requestTmdbShow(id, config.tmdbToken),
+        tmdbShow: id => providerYears.request({provider: "TMDB", showId: id}, () => requestTmdbShow(id, config.tmdbToken)),
         tmdbShowForTvdb: tvdbId => requestTmdbShowForTvdb(tvdbId, config.tmdbToken),
         tmdbEpisodes: show => tmdbEpisodes(show, config.tmdbToken),
-        tvdbSeries: (id, showTitle) => withTvdbSignIn(tvdbSignIn, token => tvdbSeries(id, token, undefined, showTitle)),
+        tvdbSeries: (id, showTitle) => withTvdbSignIn(tvdbSignIn, token => tvdbSeries(id, token, undefined, showTitle, send => providerYears.request({provider: "TVDB", showId: id}, send, answer => (answer as { data?: unknown } | undefined)?.data))),
         tvdbEnglishTitle: tvdbEpisodeId => withTvdbSignIn(tvdbSignIn, token => scanProviderClient.json(`${TVDB_API}/episodes/${tvdbEpisodeId}/translations/eng`, { headers: { Authorization: `Bearer ${token}` } }, "TVDB")),
       },
       show: { ratingKey, title: primary.title },
@@ -1369,6 +1372,8 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   });
   // Every show was taken and compared; nothing launched is left to settle.
   await preparation.drain();
+  // A full scan that will count as completed looks up the year of each Manual Match show it did not visit; a failure keeps the saved year.
+  if (!targetRatingKey && libraryInventory!.complete) await providerYears.lookUpUnvisited(results, liveTransport, (show, error) => logger.warn("plex.show-year.lookup-failed", { ...show, error: coverageIssueCause(error) }));
   const finishedAt = new Date().toISOString();
   const coverageGroups=coverageGroupsForResults(results,manualInventory);
   const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
@@ -1416,11 +1421,22 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     commit: () => {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
       if (targetRatingKey) plexSavedState.report.write(report);
-      else inDatabaseTransaction(() => {
+      else {
         plexSavedState.commitReport(report);
-        // A completed full scan publishes its Plex years with its report, as saved (less ignored shows); nothing else does.
-        if (libraryInventory!.complete) publishPlexShowYears(plexSavedState.report.read()?.shows || []);
-      });
+        // Once its report is saved, a completed full scan publishes the Plex years of its whole library, ignored
+        // shows included, and records the provider years of its fresh show-details answers; nothing else does.
+        // Show years are display values: a failure here keeps the saved years and never fails the saved report.
+        if (libraryInventory!.complete) {
+          try {
+            inDatabaseTransaction(() => {
+              publishPlexShowYears(results, allShows);
+              providerYears.record();
+            });
+          } catch (error) {
+            logger.warn("plex.show-year.save-failed", { error: coverageIssueCause(error) });
+          }
+        }
+      }
       if (!mappings.length || libraryInventory!.complete) resolveCoverageIssue(INITIAL_COMPARISON_INPUTS_ISSUE);
       if (!targetRatingKey) {
         // Verified changes and recovery work were retained before processing, so isolated failures cannot hold a position back.

@@ -4,6 +4,7 @@ import { requestCoverageRecheck, type CoverageImpact } from "@/lib/plex-scan";
 import { assertCoverageMutationAllowed, clearReportMissingFlags, coverageState, deleteCoverageMapping, deleteCoverageMappings, listCoverageMappings, saveCoverageMapping, type ManualMatchEdit } from "@/lib/manual-coverage";
 import type { CoverageMapping, CoverageMember } from "@/lib/manual-coverage-model";
 import { readPlexInputs, type SavedPlexComparison } from "@/lib/plex-catalogues";
+import { recordProviderYears, type ProviderYearObservation } from "@/lib/show-year";
 
 /**
  * Manual Match changes: each command runs the whole sequence (refusal while a
@@ -41,10 +42,23 @@ export async function saveManualMatch({ edit, preview, reportMissing }: ManualMa
   const reviewed = reviewedCoverageMembers(preview);
   // Revalidate the exact reviewed canonical identities. Coordinates can locate a
   // different TMDB record since preview, but must never replace that identity.
-  await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
+  const { showYears } = await resolveCoverageUrls(reviewed.map(member => member.provider === "TVDB" ? `tvdb:${member.id}` : `tmdb:${member.id} show:${member.showId} season:${member.season} episode:${member.episode}`));
   const { mapping, affectedMembers } = saveCoverageMapping(reviewed, edit, reportMissing);
+  saveProviderYears(showYears);
   await recheckAfterCommit({ members: affectedMembers });
   return { manualMatch: mapping, created: !edit };
+}
+
+/**
+ * Save the provider years the save's own show lookups gave, after the Manual Match commits. A
+ * display value only: it moves no coverage revision, and a failure never fails the saved match.
+ */
+function saveProviderYears(showYears: ProviderYearObservation[]): void {
+  try {
+    recordProviderYears(showYears);
+  } catch (error) {
+    console.error("Shelfcheck saved the Manual Match but could not save its provider show years.", error);
+  }
 }
 
 /**

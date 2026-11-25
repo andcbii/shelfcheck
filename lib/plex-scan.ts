@@ -7,6 +7,7 @@ import { usableProviderCatalogue, readPlexInputs, savePlexComparison, savePlexIn
 import { signInToTvdb, type TvdbSignIn } from "@/lib/tvdb-auth";
 import { coverageState, beginCoverageRecheck, carriedMembers, completeCoverageComparison,listCoverageMappings, removeManualMatchMembers, saveCoverageEvidence, type CarriedMember, type ManualMatchMemberRemoval } from "@/lib/manual-coverage";
 import { manualMatchRemovalCandidates } from "@/lib/manual-match-removal-candidates";
+import { confirmRemovalCandidates } from "@/lib/manual-match-removal-confirmation";
 import { memberStatus, type CoverageMember, type CoverageEvidence, type CoverageIdentity, type CoverageOutcome, type CoverageGroup } from "@/lib/manual-coverage-model";
 import "server-only";
 
@@ -176,12 +177,15 @@ async function tmdbEpisodes(show: TmdbShow, token: string): Promise<DownloadedEp
   const responses = await Promise.all(seasons.map(async (season) => {
     const response = await tmdbJson<{ episodes?: unknown[] }>(`/tv/${show.id}/season/${season.season_number}`, token);
     if (!Array.isArray(response.episodes)) throw new ProviderResponseError("TMDB",{provider:"TMDB",kind:`show ${show.id} season`,id:season.season_number});
-    return { season: season.season_number, episodes: response.episodes };
+    return { season: season.season_number, episodes: response.episodes, truncated: typeof season.episode_count === "number" && response.episodes.length < season.episode_count };
   }));
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
   const enumeration = episodeIdEnumeration("TMDB", show.id);
   for (const response of responses) { enumeration.add(response.episodes); normaliseTmdbRecords(show, response.season, response.episodes, catalogue); }
-  return { ...usableCatalogue("TMDB", show.id, catalogue), episodeIds: enumeration.complete() };
+  // A season returning fewer records than the show record counts for it may hide a member's
+  // episode: the download is compared as usual but proposes no removals (ADR-0008).
+  const truncated = responses.some(response => response.truncated);
+  return { ...usableCatalogue("TMDB", show.id, catalogue), episodeIds: truncated ? undefined : enumeration.complete() };
 }
 
 /** A failed request or interpretation within one episode's crosswalk, with the typed lookup it concerns (absent when unknown). */
@@ -211,19 +215,15 @@ async function findEpisodeViaTrakt(evidence: ComparisonEvidence, tvdbEpisodeId: 
   return { validated: validatedIds.length > 0, owned: validatedIds.some((id) => localTmdbEpisodeIds.has(id)), ownedTmdbId: validatedIds.find((id) => localTmdbEpisodeIds.has(id)), validationFailed: validations.length - validatedIds.length, traktTmdbIds: completeMappings.map((result) => result.episode!.ids!.tmdb as number), validatedTmdbIds: validatedIds, validationFailures };
 }
 
-/** TVDB's season type ID for Aired Order (type "official"), TVDB's primary episode order. */
-const TVDB_AIRED_ORDER = 1;
-
 /**
- * A TVDB series' catalogue: its default order's episode pages. The download proves an episode gone
- * (ADR-0008) only when that default order is Aired Order: another default order (DVD, absolute,
- * alternate) need not list every episode the series has, and a series record that names none
- * proves nothing.
+ * A TVDB series' catalogue: its default order's episode pages. An episode the list leaves out is only
+ * a removal candidate (ADR-0008): another season order can still hold it, so the scan asks TVDB for
+ * the episode itself before removing its member.
  */
 async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, showTitle?: string): Promise<DownloadedEpisodes & { slug?: string; name?: string }> {
   const catalogue: NormalisedCatalogue = { episodes: [], malformed: [] };
   const enumeration = episodeIdEnumeration("TVDB", seriesId);
-  const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string; defaultSeasonType?: unknown } }>(`${TVDB_API}/series/${seriesId}`, token);
+  const series = cachedSlug ? null : await tvdbJson<{ data?: { slug?: string; name?: string } }>(`${TVDB_API}/series/${seriesId}`, token);
   if (!cachedSlug && !series?.data) throw new Error("TVDB returned an incomplete series catalogue.");
   let page = 0;
   while (page < 100) {
@@ -237,8 +237,7 @@ async function tvdbSeries(seriesId: number, token: string, cachedSlug?: string, 
     page += 1;
     if (page >= 100) throw new Error("TVDB episode catalogue exceeded the safe pagination limit.");
   }
-  const airedOrder = series?.data?.defaultSeasonType === TVDB_AIRED_ORDER;
-  return { ...usableCatalogue("TVDB", seriesId, catalogue), episodeIds: airedOrder ? enumeration.complete() : undefined, slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
+  return { ...usableCatalogue("TVDB", seriesId, catalogue), episodeIds: enumeration.complete(), slug: cachedSlug || series?.data?.slug, name: series?.data?.name };
 }
 
 /**
@@ -894,7 +893,7 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   };
   const results: PlexShowResult[] = [];
   const scanCache: Record<string, PlexCacheEntry> = {};
-  // Manual Match members successfully compared shows prove gone; applied only after the report is saved.
+  // Manual Match members successfully compared shows propose for removal; confirmed and applied only after the report is saved.
   const removalCandidates: ManualMatchMemberRemoval[] = [];
   if (targetRatingKey) {
     const carried = targetedScanCarryOver({ cacheUsable, shows: prior?.shows || [], cache: prior?.scanCache || {}, currentIdentities: new Set(shows.map((show) => show.identity)), targetRatingKey });
@@ -1370,18 +1369,31 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
   const coverageGroups=coverageGroupsForResults(results,manualInventory);
   const report: PlexReport = { coverageGroups, shows: results.sort((a, b) => a.title.localeCompare(b.title)), lastScan: targetRatingKey ? prior?.lastScan || finishedAt : finishedAt, startedAt: targetRatingKey ? prior?.startedAt || startedAt : startedAt, finishedAt: targetRatingKey ? prior?.finishedAt || finishedAt : finishedAt, scanCache, cacheVersion: CACHE_VERSION, autoCompoundEpisodes, coverageRevision };
   /**
-   * After the report is saved, still owning the scan run lock: apply every removal as one Manual
-   * Match change, log what committed, then compare the affected shows again from saved inputs. A
-   * failed change rolls back and removes nothing; a failed recheck keeps the committed removals,
-   * whose members stay carried and pending until a later recheck or scan compares them.
+   * After the report is saved, still owning the scan run lock: ask each candidate's provider whether
+   * its episode is really gone, apply every confirmed removal as one Manual Match change, log what
+   * committed, then compare the affected shows again from saved inputs. A candidate the provider
+   * does not confirm gone is kept; a failed change rolls back and removes nothing; a failed recheck
+   * keeps the committed removals, whose members stay carried and pending until a later recheck or
+   * scan compares them.
    */
   const finalize = async () => {
     if (!removalCandidates.length) return;
+    const confirmations = await confirmRemovalCandidates(removalCandidates, mappings, member => member.provider === "TVDB"
+      ? withTvdbSignIn(tvdbSignIn, token => tvdbJson(lookupUrl(providerLookup.tvdbEpisodeExtended(member.id)), token))
+      : tmdbJson(providerLookup.tmdbEpisodeByShowSeasonEpisode(member.showId, member.season, member.episode), config.tmdbToken));
+    for (const confirmation of confirmations) {
+      const { proposal, member } = confirmation;
+      const details = { mappingId: proposal.mappingId, provider: proposal.member.provider, showId: member?.showId, show: member?.show, episodeId: proposal.member.id, season: member?.season, episode: member?.episode, reason: confirmation.reason };
+      if (confirmation.gone) logger.info("plex.manual-match.removal-confirmed", details);
+      else logger.info("plex.manual-match.removal-kept", confirmation.error === undefined ? details : { ...details, error: coverageIssueCause(confirmation.error) });
+    }
+    const confirmed = confirmations.flatMap(confirmation => confirmation.gone ? [confirmation.proposal] : []);
+    if (!confirmed.length) return;
     let removal: ReturnType<typeof removeManualMatchMembers>;
     try {
-      removal = removeManualMatchMembers(removalCandidates, owner);
+      removal = removeManualMatchMembers(confirmed, owner);
     } catch (error) {
-      logger.warn("plex.manual-match.removal-failed", { proposals: removalCandidates.length, error: coverageIssueCause(error) });
+      logger.warn("plex.manual-match.removal-failed", { proposals: confirmed.length, error: coverageIssueCause(error) });
       return;
     }
     for (const { mappingId, member, matchDeleted } of removal.removed)

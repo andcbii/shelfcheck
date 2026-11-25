@@ -4,6 +4,7 @@ import { readPlexShowYears, readProviderShowYears, savePlexShowYears, saveProvid
 import { inDatabaseTransaction } from "@/lib/sqlite";
 import { usableShowYear } from "@/lib/plex-inventory";
 import type { PlexShowResult } from "@/lib/plex-scan";
+import { providerLookup, type ProviderLookup } from "@/lib/provider-lookup";
 
 /**
  * Show year (GLOSSARY.md): the year shown with a provider show's name on Manual Matches. It is a
@@ -13,7 +14,8 @@ import type { PlexShowResult } from "@/lib/plex-scan";
  * Plex years come from a snapshot that only a completed full scan publishes, when it saves its
  * report: one row per Plex show group, with the provider shows the group holds and its last known
  * Plex year. Provider years are saved per provider show from fresh successful provider answers
- * (a Manual Match save's show lookups). Reads resolve years from these two stores alone and make
+ * (a Manual Match save's show lookups, and a completed full scan's show details and its lookups of
+ * Manual Match shows it did not otherwise visit). Reads resolve years from these two stores alone and make
  * no network request.
  */
 
@@ -73,6 +75,78 @@ function plexYear(snapshot: PlexShowYear[], { provider, showId }: ProviderShow):
 export type ProviderYearObservation = ProviderShow & { year: unknown; observedAt: number };
 
 const providerShowKey = ({ provider, showId }: ProviderShow) => `${provider}:${showId}`;
+
+/**
+ * The raw year a provider's show details give: TMDB show details' `first_air_date` ("2005-03-26"),
+ * or a TVDB series record's `year` ("2005"). Anything else gives none.
+ */
+export function showDetailsYear(provider: CoverageProvider, details: unknown): number | undefined {
+  const value = details && typeof details === "object" ? (details as Record<string, unknown>)[provider === "TMDB" ? "first_air_date" : "year"] : undefined;
+  const match = typeof value === "string" ? value.match(provider === "TMDB" ? /^(\d{4})-\d{2}-\d{2}$/ : /^(\d{4})$/) : null;
+  return match ? Number(match[1]) : undefined;
+}
+
+/** The provider show a show-details lookup asks about, if it is one. */
+function showDetailsLookupShow(lookup: ProviderLookup): ProviderShow | undefined {
+  switch (lookup.kind) {
+    case "tmdb-series-summary":
+    case "tmdb-series-summary-with-external-ids": return { provider: "TMDB", showId: lookup.tmdbShowId };
+    case "tvdb-series-summary": return { provider: "TVDB", showId: lookup.tvdbSeriesId };
+    default: return undefined;
+  }
+}
+
+/**
+ * A full scan's provider years for the provider shows its Manual Matches hold. The scan passes its
+ * show-details requests through `watch` (typed lookups) or `request` (a show's details by other
+ * means) as it sends them: each fresh successful answer is noted with the time it arrived. Saved
+ * or reused answers never reach it, so they never write a year. Before saving its report, the scan
+ * looks up once each Manual Match provider show it did not visit (`lookUpUnvisited`); a failed
+ * lookup only keeps the saved year. `record` saves what was noted; call it only where a
+ * completed full scan saves its report, in the same transaction.
+ */
+export function fullScanProviderYears(mappings: CoverageMapping[]) {
+  const wanted = new Map(mappings.flatMap(mapping => mapping.members.map(({ provider, showId }) => [providerShowKey({ provider, showId }), { provider, showId }] as const)));
+  const requested = new Set<string>();
+  const observed = new Map<string, ProviderYearObservation>();
+  /** Send one show-details request for `show`; `details` reads the show details from its answer. */
+  async function request<T>(show: ProviderShow, send: () => Promise<T>, details: (answer: T) => unknown = answer => answer): Promise<T> {
+    const key = providerShowKey(show);
+    requested.add(key);
+    const answer = await send();
+    if (wanted.has(key)) observed.set(key, { ...show, year: showDetailsYear(show.provider, details(answer)), observedAt: Date.now() });
+    return answer;
+  }
+  /** A typed lookup transport whose show-details answers are noted. */
+  function watch<T>(transport: (lookup: ProviderLookup) => Promise<T>) {
+    return (lookup: ProviderLookup): Promise<T> => {
+      const show = showDetailsLookupShow(lookup);
+      // A TVDB series answer holds its record under `data`.
+      return show ? request(show, () => transport(lookup), answer => show.provider === "TVDB" && answer && typeof answer === "object" ? (answer as { data?: unknown }).data : answer) : transport(lookup);
+    };
+  }
+  return {
+    request,
+    watch,
+    /**
+     * Look up once each Manual Match provider show the scan did not visit: no Plex show in its
+     * results holds it and it sent no show-details request for it. A failure goes to `failed` and
+     * keeps the saved year.
+     */
+    async lookUpUnvisited(results: PlexShowResult[], transport: (lookup: ProviderLookup) => Promise<unknown>, failed: (show: ProviderShow, error: unknown) => void) {
+      const visited = new Set(requested);
+      for (const result of results) {
+        const held = heldProviderShows(result);
+        for (const showId of held.tmdb) visited.add(providerShowKey({ provider: "TMDB", showId }));
+        for (const showId of held.tvdb) visited.add(providerShowKey({ provider: "TVDB", showId }));
+      }
+      const watched = watch(transport);
+      const unvisited = [...wanted].flatMap(([key, show]) => visited.has(key) ? [] : [show]);
+      await Promise.all(unvisited.map(show => watched(show.provider === "TMDB" ? providerLookup.tmdbSeriesSummary(show.showId) : providerLookup.tvdbSeriesSummary(show.showId)).catch((error: unknown) => failed(show, error))));
+    },
+    record: () => recordProviderYears([...observed.values()]),
+  };
+}
 
 /**
  * Save provider years from fresh successful provider answers. Only a usable year (an integer from

@@ -23,8 +23,8 @@ type PlexRecord = { ratingKey: string; title: string; year?: unknown; guid?: str
 type Mapping = { id: string; revision: unknown };
 type Global = typeof globalThis & { __shelfcheckDatabase?: DatabaseSync; __shelfcheckScanRun?: { owner?: unknown } };
 
-/** Every provider show's one episode: S01E01, numbered from its show ID so IDs never collide. */
-const episodeId = (showId: number) => showId * 100 + 1;
+/** A provider show's S01E`number` (S01E01 unless given), numbered from its show ID so IDs never collide. */
+const episodeId = (showId: number, number = 1) => showId * 100 + number;
 
 async function fixture(t: test.TestContext) {
   const dir = mkdtempSync(path.join(tmpdir(), "show-year-"));
@@ -84,15 +84,15 @@ async function fixture(t: test.TestContext) {
     if (match) return Response.json({ id: Number(match[1]), name: `TMDB ${match[1]}`, first_air_date: summaryYear(`TMDB ${match[1]}`, "1999-01-01"), seasons: [{ season_number: 1 }] });
     match = u.pathname.match(/^\/3\/tv\/(\d+)\/season\/1$/);
     if (match) return Response.json({ episodes: [{ id: episodeId(Number(match[1])), season_number: 1, episode_number: 1, name: "Pilot", air_date: "2020-01-01" }] });
-    match = u.pathname.match(/^\/3\/tv\/(\d+)\/season\/1\/episode\/1$/);
-    if (match) return Response.json({ id: episodeId(Number(match[1])), season_number: 1, episode_number: 1, name: "Pilot" });
+    match = u.pathname.match(/^\/3\/tv\/(\d+)\/season\/1\/episode\/(\d+)$/);
+    if (match) return Response.json({ id: episodeId(Number(match[1]), Number(match[2])), season_number: 1, episode_number: Number(match[2]), name: "Pilot" });
     match = u.pathname.match(/^\/v4\/series\/(\d+)$/);
     if (match && state.failedTvdbSummaries.has(Number(match[1]))) return Response.json({}, { status: 404 });
     if (match) return Response.json({ data: { id: Number(match[1]), name: `TVDB ${match[1]}`, slug: `tvdb-${match[1]}`, year: summaryYear(`TVDB ${match[1]}`, "1999") } });
     match = u.pathname.match(/^\/v4\/series\/(\d+)\/episodes\/default$/);
     if (match) return Response.json({ data: { episodes: [{ id: episodeId(Number(match[1])), seasonNumber: 1, number: 1, name: "Pilot", aired: "2020-01-01" }] } });
     match = u.pathname.match(/^\/v4\/episodes\/(\d+)\/extended$/);
-    if (match) return Response.json({ data: { id: Number(match[1]), seriesId: Math.floor(Number(match[1]) / 100), seasonNumber: 1, number: 1, name: "Pilot" } });
+    if (match) return Response.json({ data: { id: Number(match[1]), seriesId: Math.floor(Number(match[1]) / 100), seasonNumber: 1, number: Number(match[1]) % 100, name: "Pilot" } });
     throw new Error("Unexpected HTTP: " + u);
   });
   const settled = async () => {
@@ -105,9 +105,9 @@ async function fixture(t: test.TestContext) {
     return settled();
   };
   const post = (body: unknown) => coverage.POST(new Request("http://localhost/api/plex/manual-coverage", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
-  /** Resolve a Manual Match of the S01E01 of TMDB show `tmdb` and of TVDB show `tvdb`; returns its preview. */
-  const resolve = async (tmdb: number, tvdb: number) => {
-    const resolved = await post({ action: "resolve", urls: [`tmdb:${episodeId(tmdb)} show:${tmdb} season:1 episode:1`, `tvdb:${episodeId(tvdb)}`] });
+  /** Resolve a Manual Match of the S01E`episode` (S01E01 unless given) of TMDB show `tmdb` and of TVDB show `tvdb`; returns its preview. */
+  const resolve = async (tmdb: number, tvdb: number, episode = 1) => {
+    const resolved = await post({ action: "resolve", urls: [`tmdb:${episodeId(tmdb, episode)} show:${tmdb} season:1 episode:${episode}`, `tvdb:${episodeId(tvdb, episode)}`] });
     assert.equal(resolved.status, 200, JSON.stringify(await resolved.clone().json()));
     return (await resolved.json()).preview as string;
   };
@@ -117,9 +117,9 @@ async function fixture(t: test.TestContext) {
     await settled();
     return saved;
   };
-  /** Resolve, then save, a Manual Match of the S01E01 of TMDB show `tmdb` and of TVDB show `tvdb`. */
-  const save = async (tmdb: number, tvdb: number, edit?: Mapping) => {
-    const saved = await submit(await resolve(tmdb, tvdb), edit);
+  /** Resolve, then save, a Manual Match of the S01E`episode` (S01E01 unless given) of TMDB show `tmdb` and of TVDB show `tvdb`. */
+  const save = async (tmdb: number, tvdb: number, edit?: Mapping, episode = 1) => {
+    const saved = await submit(await resolve(tmdb, tvdb, episode), edit);
     assert.equal(saved.status, edit ? 200 : 201, JSON.stringify(await saved.clone().json()));
     return (await saved.json()).mapping as Mapping;
   };
@@ -128,7 +128,7 @@ async function fixture(t: test.TestContext) {
     const body = await (await coverage.GET(new Request("http://localhost/api/plex/manual-coverage"))).json();
     return Object.fromEntries(body.mappings.flatMap((mapping: { members: { provider: string; showId: number; showYear?: number }[] }) => mapping.members.map(member => [`${member.provider} ${member.showId}`, member.showYear])));
   };
-  return { state, requests, run, resolve, submit, save, years, restart, settled };
+  return { state, requests, run, post, resolve, submit, save, years, restart, settled };
 }
 
 test("a Manual Match show held by one Plex show reads the year of the latest completed full scan", async t => {
@@ -350,4 +350,121 @@ test("a save keeps the saved provider year when a show answer has no usable year
 
   mapping = await f.save(57243, 78804, mapping);
   assert.deepEqual(await f.years(), { "TMDB 57243": 2006, "TVDB 78804": 2007 }, "a fresh successful answer corrects the saved year");
+});
+
+test("a completed full scan looks up each Manual Match show Plex does not hold once; only a fresh year corrects the saved one, moving no coverage", async t => {
+  const f = await fixture(t);
+  f.state.libraries = [[{ ratingKey: "1", title: "Torchwood", year: 2006, guid: "plex://show/torchwood", ids: ["tmdb://1000", "tvdb://2000"] }]];
+  // TMDB 10 and TVDB 20 each appear in two Manual Matches.
+  await f.save(10, 20);
+  await f.save(10, 21, undefined, 2);
+  await f.save(11, 20, undefined, 2);
+  assert.deepEqual(await f.years(), { "TMDB 10": 1999, "TVDB 20": 1999, "TVDB 21": 1999, "TMDB 11": 1999 }, "provider years from the saves");
+  assert.equal((await f.run()).scan.status, "completed");
+
+  // A year-only change: the shows' years change and nothing else does.
+  f.state.summaryYears.set("TMDB 10", "1990-01-01");
+  f.state.summaryYears.set("TVDB 20", "1991");
+  f.state.summaryYears.set("TMDB 11", undefined);
+  f.state.failures.set("/v4/series/21", 404);
+  const before = (await (await scan.GET()).json()).coverage;
+  f.requests.length = 0;
+  const result = await f.run();
+  assert.equal(result.scan.status, "completed", "a failed year lookup does not fail the scan");
+  const lookups = (pathname: string) => f.requests.filter(u => u.pathname === pathname).length;
+  assert.deepEqual([lookups("/3/tv/10"), lookups("/v4/series/20"), lookups("/3/tv/11"), lookups("/v4/series/21")], [1, 1, 1, 1], "one lookup per show per scan");
+  assert.deepEqual(await f.years(), { "TMDB 10": 1990, "TVDB 20": 1991, "TVDB 21": 1999, "TMDB 11": 1999 }, "fresh years correct the saved ones; a missing year or a failed lookup keeps it");
+  await new Promise(r => setTimeout(r, 50));
+  const after = await (await scan.GET()).json();
+  assert.deepEqual(after.coverage, before, "a year-only correction moves no coverage revision and leaves nothing pending");
+  assert.deepEqual(after.scan, result.scan, "and starts no cached recheck");
+});
+
+test("a completed full scan corrects provider years from show details it fetches and never from answers it reuses", async t => {
+  const f = await fixture(t);
+  // One Plex show with no year holds TMDB 10, its selected TVDB 20 and a second TVDB candidate 23, so all three read their provider year.
+  f.state.libraries = [[{ ratingKey: "1", title: "Doctor Who", year: 0, guid: "plex://show/who", ids: ["tmdb://10", "tvdb://20", "tvdb://23"] }]];
+  const setYears = (tmdb10: string, tvdb20: string, tvdb23: string) => {
+    f.state.summaryYears.set("TMDB 10", tmdb10);
+    f.state.summaryYears.set("TVDB 20", tvdb20);
+    f.state.summaryYears.set("TVDB 23", tvdb23);
+  };
+  setYears("1980-06-01", "1981", "1982");
+  await f.save(10, 20);
+  const mapping = await f.save(10, 23, undefined, 2);
+  // The first full scan downloads the show's catalogues and fetches its series details itself.
+  setYears("1985-01-01", "1986", "1987");
+  f.requests.length = 0;
+  const result = await f.run();
+  assert.equal(result.scan.status, "completed");
+  assert.equal(result.report.shows[0].tvdbId, 20, "the fixture selects TVDB 20");
+  assert.deepEqual(await f.years(), { "TMDB 10": 1985, "TVDB 20": 1986, "TVDB 23": 1987 }, "the scan's own show details correct the saved years");
+  const requested = () => f.requests.filter(u => /^\/(3\/tv|v4\/series)\/\d+$/.test(u.pathname)).map(u => u.pathname + u.search).sort();
+  assert.deepEqual(requested(), ["/3/tv/10?append_to_response=external_ids", "/v4/series/20", "/v4/series/20", "/v4/series/23"], "the scan's own show-details requests (catalogues, then evidence), and no separate year lookup");
+
+  // A later save gives TVDB 23 a newer year. The next scan downloads the show's catalogues again,
+  // but answers TVDB 23 from the older answer it saved, which writes nothing; it looks up no show it holds.
+  t.mock.timers.tick(60_000);
+  setYears("1990-01-01", "1991", "1992");
+  await f.save(10, 23, mapping, 2);
+  assert.deepEqual(await f.years(), { "TMDB 10": 1990, "TVDB 20": 1986, "TVDB 23": 1992 });
+  t.mock.timers.tick(60_000);
+  setYears("1995-01-01", "1995", "1995");
+  f.requests.length = 0;
+  assert.equal((await f.run()).scan.status, "completed");
+  assert.deepEqual(requested(), ["/3/tv/10?append_to_response=external_ids", "/v4/series/20"], "the scan's catalogue downloads only: TVDB 23's saved answer is reused");
+  assert.deepEqual(await f.years(), { "TMDB 10": 1995, "TVDB 20": 1995, "TVDB 23": 1992 }, "fresh catalogue answers correct the years; a reused answer keeps the newer saved year");
+});
+
+test("targeted scans, cached rechecks and full scans that fail before their report save write no provider year", async t => {
+  const f = await fixture(t);
+  // A Plex show with no year holds TMDB 10 and TVDB 20; no Plex show holds TMDB 11 or TVDB 21.
+  f.state.libraries = [[{ ratingKey: "1", title: "Doctor Who", year: 0, guid: "plex://show/who", ids: ["tmdb://10", "tvdb://20"] }]];
+  await f.save(10, 20);
+  const unowned = await f.save(11, 21);
+  assert.equal((await f.run()).scan.status, "completed");
+  const saved = { "TMDB 10": 1999, "TVDB 20": 1999, "TMDB 11": 1999, "TVDB 21": 1999 };
+  assert.deepEqual(await f.years(), saved);
+
+  for (const show of ["TMDB 10", "TMDB 11"]) f.state.summaryYears.set(show, "2001-01-01");
+  for (const show of ["TVDB 20", "TVDB 21"]) f.state.summaryYears.set(show, "2001");
+  const unownedLookups = () => f.requests.filter(u => u.pathname === "/3/tv/11" || u.pathname === "/v4/series/21").length;
+  f.requests.length = 0;
+  assert.equal((await f.run("plex://show/who")).scan.status, "completed");
+  assert.deepEqual(await f.years(), saved, "a targeted single-show scan writes no provider year");
+  const showDetails = () => f.requests.filter(u => /^\/(3\/tv|v4\/series)\/\d+$/.test(u.pathname)).map(u => u.pathname).sort();
+  assert.deepEqual(showDetails(), ["/3/tv/10", "/v4/series/20", "/v4/series/20"], "it fetched the Plex show's details afresh, and looked up no Manual Match show");
+
+  // A Report Missing-only edit runs a cached recheck and makes no provider lookup.
+  const flagged = await f.post({ action: "save", id: unowned.id, revision: unowned.revision, reportMissing: [{ provider: "TMDB", id: episodeId(11) }] });
+  assert.equal(flagged.status, 200, JSON.stringify(await flagged.clone().json()));
+  await f.settled();
+  assert.deepEqual(await f.years(), saved, "a cached recheck writes no provider year");
+
+  const db = (globalThis as Global).__shelfcheckDatabase!;
+  db.exec("CREATE TRIGGER fail_report BEFORE UPDATE OF report ON shelfcheck_scan_state BEGIN SELECT RAISE(ABORT, 'report store unavailable'); END;");
+  f.requests.length = 0;
+  assert.equal((await f.run()).scan.status, "error");
+  db.exec("DROP TRIGGER fail_report;");
+  assert.ok(unownedLookups() > 0, "the failed scan looked up the shows Plex does not hold");
+  assert.deepEqual(await f.years(), saved, "a full scan that fails at its report save writes no provider year");
+
+  f.requests.length = 0;
+  assert.equal((await f.run()).scan.status, "completed");
+  assert.deepEqual(showDetails(), ["/3/tv/11", "/v4/series/21"], "the completed full scan reuses the Plex show's answers and looks up the others");
+  assert.deepEqual(await f.years(), { "TMDB 10": 1999, "TVDB 20": 1999, "TMDB 11": 2001, "TVDB 21": 2001 }, "a completed full scan writes the years of its fresh answers");
+});
+
+test("Manual Matches saved before provider years existed gain them from the next completed full scan", async t => {
+  const f = await fixture(t);
+  // A Plex show with no year holds TMDB 12 and TVDB 22; no Plex show holds TMDB 10 or TVDB 20.
+  f.state.libraries = [[{ ratingKey: "1", title: "Doctor Who", year: 0, guid: "plex://show/who", ids: ["tmdb://12", "tvdb://22"] }]];
+  await f.save(10, 20);
+  await f.save(12, 22);
+  // A database from before provider years were saved: the matches exist, with no provider year.
+  (globalThis as Global).__shelfcheckDatabase!.prepare("DELETE FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").run("provider-show-years");
+  assert.deepEqual(await f.years(), { "TMDB 10": undefined, "TVDB 20": undefined, "TMDB 12": undefined, "TVDB 22": undefined }, "name only");
+  assert.equal((await f.run()).scan.status, "completed");
+  f.restart();
+  assert.deepEqual(await f.years(), { "TMDB 10": 1999, "TVDB 20": 1999, "TMDB 12": 1999, "TVDB 22": 1999 });
 });

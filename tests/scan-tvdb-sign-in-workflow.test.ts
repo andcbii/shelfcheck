@@ -90,6 +90,8 @@ async function fixture(t: TestContext, { matches = true, shows = [{ ratingKey: "
     const tvdbShow = series && f.shows.find(show => show.tvdbId === Number(series[1]));
     if (tvdbShow && !series![2]) return Response.json({ data: { id: tvdbShow.tvdbId, name: tvdbShow.title, slug: `show-${tvdbShow.tvdbId}` } });
     if (tvdbShow) return Response.json({ data: { episodes: (tvdbShow.tvdbEpisodes || []).map((id, index) => ({ id, seasonNumber: 1, number: index + 1, name: `Episode ${id}`, aired: "2020-01-01" })) } });
+    // A completed full scan looks up the Show year of each Manual Match show no Plex show holds.
+    if (series && !series[2]) return Response.json({ data: { id: Number(series[1]), name: `TVDB ${series[1]}`, year: "1999" } });
     const found = url.pathname.match(/^\/3\/find\/(\d+)$/);
     const foundShow = found && f.shows.find(show => show.tvdbId === Number(found[1]));
     if (foundShow) return Response.json({ tv_results: [{ id: foundShow.tmdbId, name: foundShow.title }], tv_episode_results: [] });

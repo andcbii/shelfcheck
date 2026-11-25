@@ -4,6 +4,7 @@ import PlexPage from "../app/plex/page";
 import TraktPage from "../app/trakt/page";
 import { mountDom } from "./dom-environment";
 import { installWindowClock } from "./window-clock";
+import type { ActiveScanRun } from "../lib/scan-run-activity";
 
 // Mounts the real Trakt or Plex page with every server answer faked and a test
 // clock (Date and the page's window timers) that moves only when a test moves
@@ -19,7 +20,7 @@ export const active = (...shows: [show: string, phase: string][]) => shows.map((
 
 type Server = {
   /** What GET /api/scan-runs answers: the Scan run that owns the lock, if any. */
-  activity: { kind: "trakt" | "plex"; startedAt: string } | null;
+  activity: ActiveScanRun | null;
   /** The page's own status answers, in order; the last one repeats. */
   statuses: Reply[];
   statusRequests: number;

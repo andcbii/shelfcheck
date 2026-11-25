@@ -449,7 +449,8 @@ for (const { page: kind, other, own, idleLabel, lockLine } of PAGES) {
   });
 
   test(`a ${kind} page following its own kind's run from another tab shows progress, not "${ANOTHER_SCAN}"`, async (t) => {
-    const page = await mountPage(t, kind, { activity: own, stateScan: RUNNING_SCAN, statuses: [RUNNING_SCAN] });
+    // The page itself has no saved running status: only the observation reveals its own kind's run.
+    const page = await mountPage(t, kind, { activity: own, statuses: [RUNNING_SCAN] });
     assert.match(page.scanButtonText(), /^Checking 1 of 4/);
     assert.equal(look(page.scanButton()).locked, false);
     assert.ok(page.progressBox(), "its own run's progress box shows");
@@ -468,7 +469,10 @@ for (const { page: kind, other, own, idleLabel, lockLine } of PAGES) {
   });
 
   test(`a ${kind} start refused because the other kind just began shows "${ANOTHER_SCAN}" and the lock line`, async (t) => {
-    const page = await mountPage(t, kind, { start: () => { page.server.activity = other; return Response.json({ error: lockLine, activeScanRun: { ...other, status: { status: "running", processed: 1, total: 5 } } }, { status: 409 }); } });
+    const page = await mountPage(t, kind, { start: () => Response.json({ error: lockLine, activeScanRun: { ...other, status: { status: "running", processed: 1, total: 5 } } }, { status: 409 }) });
+    // The observation the 409 triggers stays pending, so only the 409's owner can lock the page.
+    const refreshed = deferred();
+    page.server.activity = () => refreshed.promise;
     await page.click(idleLabel);
     assert.equal(page.server.starts.length, 1);
     assert.deepEqual(look(page.scanButton()), { text: ANOTHER_SCAN, locked: true, disabled: true });

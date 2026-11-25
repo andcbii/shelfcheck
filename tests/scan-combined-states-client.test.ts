@@ -10,6 +10,7 @@ import { mountPage, paused, running, START } from "./scan-progress-harness";
 const TRAKT_RUN = { kind: "trakt", startedAt: START.toISOString() } as const;
 const PLEX_RUN = { kind: "plex", startedAt: START.toISOString() } as const;
 const RESUME_AT = new Date(START.getTime() + 90_000).toISOString();
+const ANOTHER_SCAN = "Another scan is in progress";
 const completed = { status: "completed", processed: 312, total: 312 };
 
 // One show with its own Trakt poster, one that falls back to its Plex artwork.
@@ -77,7 +78,7 @@ test("a Trakt page locked by a Plex scan run shows no progress box of its own, a
   const page = await mountPage(t, "trakt", { activity: PLEX_RUN, traktReport: TRAKT_REPORT, artwork: ARTWORK });
   const parts = pageParts(page.container);
   assert.equal(page.box(), null);
-  assert.equal(parts.button(), "Another scan is in progress");
+  assert.equal(parts.button(), ANOTHER_SCAN);
   assert.ok(parts.lockedLook());
   assert.equal(parts.lockLine(), "A Plex scan is running. You can start a Trakt scan when it finishes.");
   assert.equal(parts.radar(), "MISSING");
@@ -116,7 +117,7 @@ test("a Plex page locked by a Trakt scan run shows no progress box of its own, a
   const page = await mountPage(t, "plex", { activity: TRAKT_RUN, plexReport: REPORT_A });
   const parts = pageParts(page.container);
   assert.equal(page.box(), null);
-  assert.equal(parts.button(), "Another scan is in progress");
+  assert.equal(parts.button(), ANOTHER_SCAN);
   assert.ok(parts.lockedLook());
   assert.equal(parts.lockLine(), "A Trakt scan is running. You can start a Plex scan when it finishes.");
   assert.deepEqual(parts.shows(), ["Andor"]);

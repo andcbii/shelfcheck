@@ -32,7 +32,7 @@ test("cached Manual Match edits reconcile old and new shows without HTTP, preser
   const catalogueBlocked=new Promise<void>(resolve=>{releaseCatalogue=resolve;});
   // Plex shows 10, 11 and 12 are TVDB series 20, 21 and 22; each has one combined episode, ID series × 10.
   const counts=()=>[20,21,22].map(id=>requests.filter(url=>new URL(url).pathname===`/v4/series/${id}/episodes/default`).length);
-  const showOf=(result:{report:{shows:{tvdbId:number}[]}},plexKey:number)=>result.report.shows.find(show=>show.tvdbId===plexKey+10) as {missing:{tvdbEpisodeId:number}[]};
+  const showOf=(result:{report:{shows:{tvdbId:number;missing:{tvdbEpisodeId:number}[]}[]}},plexKey:number)=>result.report.shows.find(show=>show.tvdbId===plexKey+10)!;
   t.mock.method(globalThis,"fetch",async(input:string|URL|Request)=>{
     const u=new URL(String(input));requests.push(String(u));
     if(blockSave && u.pathname.match(/\/v4\/episodes\/\d+\/extended$/)){blockSave=false;enterSave();await saveBlocked;}

@@ -69,6 +69,25 @@ test("a member gone from its show's fresh complete download deletes the whole Ma
   assert.deepEqual(h.missing(result), {});
 });
 
+test("the removal's cached recheck keeps the Plex year the full scan published on the Plex page", async t => {
+  const h = await harness(t, library, owned);
+  h.state.plexYears.set("target", 1995).set("other", 1993);
+  await h.rerun();
+  const match = await saved(h, [pinky, animaniacs, pinkyTvdb]);
+  await h.rerun();
+  // Plex no longer gives either year, so the full scan keeps the last known ones, and TVDB deletes Animaniacs S05E24.
+  h.state.plexYears.clear();
+  h.state.gone.add(animaniacs.id);
+  h.state.tvdbChanged = [21];
+  const result = await h.rerun();
+  assert.deepEqual((await h.mappings()).find(mapping => mapping.id === match.id)?.members.map(key), [key(pinky), key(pinkyTvdb)], "the gone member was removed");
+  assert.equal(removals().length, 1, "the removal ran its cached recheck");
+  assert.deepEqual(Object.fromEntries(result.report.shows.map(show => [show.ratingKey, show.year])), { "ratingKey:target": 1995, "ratingKey:other": 1993 }, "the rechecked report shows the published years");
+  const [after] = await h.mappings();
+  const years = after.members.map(member => (member as { showYear?: number }).showYear);
+  assert.deepEqual(years, [1995, 1995], "Manual Matches read the same year");
+});
+
 test("a reused list removes nothing; a fresh one removes only the gone member and keeps the others' Report Missing flags", async t => {
   const animaniacs2: Episode = { provider: "TVDB", id: 5525, season: 5, episode: 25, name: "Animaniacs S05E25", show: "other" };
   const h = await harness(t, [...library, animaniacs2], owned);

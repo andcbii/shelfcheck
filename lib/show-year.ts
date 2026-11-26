@@ -74,10 +74,14 @@ export function fullScanPlexShowYears(compared: PlexShowResult[], library: PlexS
 }
 
 /**
- * Give each show of a completed full scan's report the Plex year it publishes, so the Plex page,
- * the report headers and Manual Matches read one value. Call it before the report is saved.
+ * Give each show of a Plex report the published Plex year of its group, so the Plex page, the
+ * report headers and Manual Matches read one value. Call it before any Plex report is saved: a
+ * completed full scan passes the years it is about to publish; every other report write (a
+ * targeted scan, a full scan that is not a completed one, a cached recheck, a cache clear) uses
+ * the saved snapshot and publishes nothing. A show whose group the snapshot does not cover keeps
+ * its own year.
  */
-export function withPublishedPlexYears(shows: PlexShowResult[], published: PlexShowYear[]): void {
+export function withPublishedPlexYears(shows: PlexShowResult[], published: PlexShowYear[] = readPlexShowYears()): void {
   const years = new Map(published.map(row => [row.identity, row.year]));
   for (const show of shows) {
     if (!years.has(show.ratingKey)) continue;

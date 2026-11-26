@@ -168,7 +168,7 @@ test("only a completed full scan publishes a new Plex year, at its report save, 
   who.year = 2010;
   const targeted = await f.run("plex://show/who");
   assert.equal(targeted.scan.status, "completed");
-  assert.equal(targeted.report.shows.find((show: { ratingKey: string }) => show.ratingKey === "plex://show/who").year, 2010, "the targeted scan saw year B");
+  assert.equal(targeted.report.shows.find((show: { ratingKey: string }) => show.ratingKey === "plex://show/who").year, 2005, "the targeted scan's report shows the published year A, not year B");
   assert.deepEqual(await f.years(), A, "a targeted single-show scan publishes nothing");
 
   await f.save(1000, 2000); // A Manual Match save runs a cached recheck.
@@ -235,6 +235,34 @@ test("a full scan holding the Plex show without a usable year keeps its last kno
   f.state.libraries = [[who, other]];
   await f.run();
   assert.equal((await f.years())["TMDB 57243"], 1999, "a returning show does not revive the year of its removed identity");
+});
+
+test("cached rechecks and targeted scans rewrite the report with the published Plex year and publish nothing", async t => {
+  const f = await fixture(t);
+  const who: PlexRecord = { ratingKey: "1", title: "Doctor Who", year: 2005, guid: "plex://show/who", ids: ["tmdb://10", "tvdb://20"] };
+  f.state.libraries = [[who]];
+  const mapping = await f.save(10, 20);
+  await f.run();
+  who.year = undefined;
+  assert.equal((await f.run()).report.shows[0].year, 2005, "the full scan keeps the last known year");
+  const published = { "TMDB 10": 2005, "TVDB 20": 2005 };
+  const reportYear = async () => (await (await scan.GET()).json()).report.shows[0].year;
+
+  // Editing the Manual Match runs a cached recheck that rewrites the saved report.
+  const edited = await f.save(10, 20, mapping);
+  assert.notEqual(edited.revision, mapping.revision, "the edit saved a new revision");
+  assert.equal(await reportYear(), 2005, "the cached recheck keeps the published year on the Plex page");
+  assert.deepEqual(await f.years(), published);
+
+  // A targeted scan of the show also rewrites the report from Plex records with no year.
+  assert.equal((await f.run("plex://show/who")).scan.status, "completed");
+  assert.equal(await reportYear(), 2005, "the targeted scan keeps the published year on the Plex page");
+  // Plex now gives a new year: only the next completed full scan publishes it.
+  who.year = 2010;
+  assert.equal((await f.run("plex://show/who")).report.shows[0].year, 2005, "a targeted scan shows the published year, not a new one");
+  assert.deepEqual(await f.years(), published, "a targeted scan publishes nothing");
+  assert.equal((await f.run()).report.shows[0].year, 2010);
+  assert.deepEqual(await f.years(), { "TMDB 10": 2010, "TVDB 20": 2010 });
 });
 
 test("a completed full scan publishes the Plex inventory's new year even when it keeps a show's last-good comparison", async t => {

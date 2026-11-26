@@ -1,5 +1,6 @@
 import { distinctSortedIds } from "@/lib/catalogue-selection";
 import { isProviderId } from "@/lib/provider-lookup";
+import { usableShowYear } from "@/lib/usable-show-year";
 export type PlexMetadata = { ratingKey?: string; key?: string; guid?: string; title?: string; year?: number; thumb?: string; updatedAt?: number; duration?: number; type?: string; parentIndex?: number; index?: number; Guid?: { id?: string }[] };
 export type PlexShowGroup = { identity: string; plexGuid?: string; records: PlexMetadata[] };
 
@@ -71,6 +72,19 @@ export function plexFingerprint(group: PlexShowGroup): string | undefined {
 export function plexEpisodeFingerprint(episodes: PlexMetadata[]): string | undefined {
   if (episodes.some((episode) => !episode.ratingKey || !Number.isFinite(episode.updatedAt))) return undefined;
   return episodes.map((episode) => `${episode.ratingKey}:${episode.updatedAt}`).sort().join("|");
+}
+
+/**
+ * The one Plex year of a show group, whatever order Plex listed its records in: the usable year of
+ * its record with the lowest rating key, or none when no record has one. The Plex page, the Plex
+ * report headers and Manual Matches all read this value, so duplicate records under one Plex GUID
+ * never show different years in different places.
+ */
+export function plexGroupYear(records: PlexMetadata[]): number | undefined {
+  const byRatingKey = (left: string, right: string) => left.length - right.length || (left < right ? -1 : left > right ? 1 : 0);
+  return records
+    .flatMap(record => { const year = usableShowYear(record.year); return year === undefined ? [] : [{ ratingKey: record.ratingKey || "", year }]; })
+    .sort((left, right) => byRatingKey(left.ratingKey, right.ratingKey))[0]?.year;
 }
 
 export function hasPlexEpisodeCoordinate(episode: PlexMetadata): episode is PlexMetadata & { parentIndex: number; index: number } {

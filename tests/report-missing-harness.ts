@@ -24,7 +24,7 @@ export type Identity = { provider: Provider; id: number };
 export type Episode = Identity & { season: number; episode: number; name: string | null; show?: "other"; airDate?: string; runtime?: number };
 type Missing = { tmdbEpisodeId?: number; tvdbEpisodeId?: number; sources: Provider[]; reportedMissing?: Provider[]; incomplete?: Partial<Record<Provider, Identity[]>> };
 type Group = { mappingId: string; members: (Identity & { status: string; missingParts?: Identity[] })[] };
-type Result = { report: { shows: { ratingKey: string; missing: Missing[] }[]; coverageGroups?: Group[] } };
+type Result = { report: { shows: { ratingKey: string; year?: number; missing: Missing[] }[]; coverageGroups?: Group[] } };
 
 export const key = (member: Identity) => `${member.provider}:${member.id}`;
 export const flag = (member: Identity) => ({ provider: member.provider, id: member.id });
@@ -64,12 +64,14 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
   // `raw`: per-pathname successful (HTTP 200) response bodies sent as-is, e.g. one that is not JSON.
   // `hold`: per-pathname gates; a matching request is recorded at once but answered only when its gate settles.
   // `respond`: answers a request first when it returns a response, e.g. by its Authorization header.
-  const state = { gone, unlisted, onRequest: undefined as ((pathname: string) => void) | undefined, respond: undefined as ((url: URL, init?: RequestInit) => Response | undefined) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
+  // `plexYears`: the year Plex gives a show, by its Plex rating key ("target", "other"); none when absent.
+  const state = { plexYears: new Map<string, unknown>(), gone, unlisted, onRequest: undefined as ((pathname: string) => void) | undefined, respond: undefined as ((url: URL, init?: RequestInit) => Response | undefined) | undefined, raw: new Map<string, string>(), hold: new Map<string, Promise<unknown>>(), secondLibrary: false, tvdbChanged: [] as number[], tmdbRecords: {} as Record<number, unknown[]>, tvdbRecords: [] as unknown[], bodies: new Map<string, unknown>(), statuses: new Map<string, number>(), imdb: new Map<number, string>(), english: new Map<number, string | null>() };
   const requests: string[] = [];
   const show = { ratingKey: "target", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const copy = { ratingKey: "copy", title: "Target", Guid: [{ id: "tmdb://10" }, { id: "tvdb://20" }] };
   const otherShow = { ratingKey: "other", title: "Other", Guid: [{ id: "tmdb://11" }, { id: "tvdb://21" }] };
-  const library = () => [show, ...(hasOther ? [otherShow] : [])];
+  const dated = <T extends { ratingKey: string }>(record: T) => state.plexYears.has(record.ratingKey) ? { ...record, year: state.plexYears.get(record.ratingKey) } : record;
+  const library = () => [show, ...(hasOther ? [otherShow] : [])].map(dated);
   t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
     const u = new URL(String(input));
     requests.push(u.pathname);
@@ -89,7 +91,7 @@ export async function harness(t: test.TestContext, catalogue: Episode[], owned: 
         // Another library also reports owning the first owned episode.
         ? [{ ratingKey: "copy-1", updatedAt: 1, parentIndex: 7, index: 7, Guid: [guid(owned[0])] }]
         : owned.filter(episode => Boolean(episode.show) === u.pathname.includes("/other/")).map(episode => ({ ratingKey: `file-${episode.id}`, updatedAt: 1, parentIndex: episode.season, index: episode.episode, ...(episode.runtime && episode.name ? { title: episode.name, duration: episode.runtime * 60_000 } : {}), Guid: [guid(episode), ...(state.imdb.has(episode.id) ? [{ id: `imdb://${state.imdb.get(episode.id)}` }] : [])] })) } };
-      else body = { MediaContainer: { Metadata: [u.pathname.includes("/copy") ? copy : u.pathname.includes("/other") ? otherShow : show] } };
+      else body = { MediaContainer: { Metadata: [dated(u.pathname.includes("/copy") ? copy : u.pathname.includes("/other") ? otherShow : show)] } };
     }
     else if (u.pathname === "/v4/login") body = { data: { token: "test" } };
     else if ((match = u.pathname.match(/^\/3\/tv\/(1[01])$/))) {

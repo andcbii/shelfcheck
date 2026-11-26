@@ -87,6 +87,16 @@ const CACHE_VERSION = PLEX_CACHE_VERSION;
  */
 export const plexSavedState = savedScanState<PlexReport, PlexCheckpoint, PlexScanStatus, Record<string, unknown>>("plex");
 
+/**
+ * Save a Plex report that is not a completed full scan's. Its shows take the published Plex years,
+ * so a targeted scan or a cached recheck never shows a year other than the one the latest completed
+ * full scan published, and it publishes nothing.
+ */
+function writePlexReport(report: PlexReport): void {
+  withPublishedPlexYears(report.shows);
+  plexSavedState.report.write(report);
+}
+
 /** The saved Plex Settings and Ignore Preferences, parsed. */
 export function readPlexPreferences() {
   return parsePlexPreferences(plexSavedState.options.read());
@@ -1420,17 +1430,16 @@ function runPlexScan(owner: ScanRunOwner, targetRatingKey?: string) {
     finalize,
     commit: () => {
       // A full scan saves its report and clears the Resume point in one write; a single-show scan keeps the point for the lifecycle to prune.
-      if (targetRatingKey) plexSavedState.report.write(report);
+      if (targetRatingKey) writePlexReport(report);
       else {
         // A completed full scan's report shows the Plex years it publishes, so every consumer reads one value.
+        // Any other full scan's report shows the published years, like a targeted scan's.
         let plexYears: PlexShowYear[] | undefined;
-        if (libraryInventory!.complete) {
-          try {
-            plexYears = fullScanPlexShowYears(results, allShows);
-            withPublishedPlexYears(report.shows, plexYears);
-          } catch (error) {
-            logger.warn("plex.show-year.read-failed", { error: coverageIssueCause(error) });
-          }
+        try {
+          if (libraryInventory!.complete) plexYears = fullScanPlexShowYears(results, allShows);
+          withPublishedPlexYears(report.shows, plexYears);
+        } catch (error) {
+          logger.warn("plex.show-year.read-failed", { error: coverageIssueCause(error) });
         }
         plexSavedState.commitReport(report);
         // Once its report is saved, a completed full scan publishes the Plex years of its whole library, ignored
@@ -1490,7 +1499,7 @@ export function clearPlexScanCache(ratingKey?: string): { cleared: number } {
     if (report?.scanCache) {
       const remainingCache = { ...report.scanCache };
       delete remainingCache[ratingKey];
-      plexSavedState.report.write({ ...report, scanCache: remainingCache });
+      writePlexReport({ ...report, scanCache: remainingCache });
     }
     const checkpoint = plexSavedState.resumePoint.read();
     const hadCheckpointCache = Boolean(checkpoint?.scanCache?.[ratingKey]);
@@ -1582,7 +1591,7 @@ async function recheckCatalogueSelection(identity: string, provider: CataloguePr
     const compared=await recheckSavedShow(identity,saved,savedComparisonContext(inputs,settings,ignored),new Date().toISOString(),prior.shows.find(show=>show.ratingKey === identity));
     const results=prior.shows.map(show=>show.ratingKey === identity ? compared.result : show);
     if (!results.some(show=>show.ratingKey === identity)) results.push(compared.result);
-    plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:coverageState().revision});
+    writePlexReport({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:coverageState().revision});
   } catch (error) {
     pending(error instanceof PendingSavedComparison ? error.message : `The new catalogue selection could not be compared from saved inputs: ${coverageIssueCause(error)} Last-good results were kept.`);
   }
@@ -1626,7 +1635,7 @@ async function recheckCoverage(impact: CoverageImpact) {
   if (!prior || !inputs.inventory?.complete) {
     const keys=targets.size ? [...targets] : [undefined];
     for (const key of keys) setCoverageIssue({id:key ? comparisonInputsIssueId(key) : INITIAL_COMPARISON_INPUTS_ISSUE,operation:"comparison",scope:key ? "show" : "library",...(key ? {show:{ratingKey:key}} : {}),cause:!prior ? "Saved Plex report is missing; no prior comparison is available." : "Saved Plex library inventory is missing or incomplete.",action:"Run an explicit full Plex scan to capture complete library and provider inputs."});
-    if (prior) plexSavedState.report.write({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
+    if (prior) writePlexReport({...prior,coverageGroups:coverageGroupsForResults(prior.shows,inputs.inventory?.evidence || []),coverageRevision:revision});
     // Nothing was compared, so every carried member stays carried.
     completeCoverageComparison(revision);
     return;
@@ -1654,7 +1663,7 @@ async function recheckCoverage(impact: CoverageImpact) {
     }
   }
   resolveCoverageIssue(INITIAL_COMPARISON_INPUTS_ISSUE);
-  plexSavedState.report.write({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
+  writePlexReport({...prior,shows:results,coverageGroups:coverageGroupsForResults(results,inputs.inventory.evidence),coverageRevision:revision});
   const current=[...inputs.inventory.groups.map(group=>group.identity),...results.map(show=>show.ratingKey)].filter(key=>!ignored.has(key));
   completeCoverageComparison(revision,coveredCarriedMembers(inputs,carried,uncompared,current));
 }

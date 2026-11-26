@@ -70,7 +70,7 @@ for (const provider of ["TMDB", "TVDB"] as const) test(`a cached recheck answers
   assert.deepEqual(showOf(rechecked).providerMatches, matches);
   assert.deepEqual(missingKeys(rechecked), missingKeys(scanned));
   if (provider === "TMDB") assert.ok(!matches.tmdb.some(match => match.id === 10), "TMDB series 10 is not a series match");
-  else assert.deepEqual(matches.tvdb, [{ id: 20 }], "TVDB series 20 has only its Plex ID, no summary");
+  else assert.deepEqual(matches.tvdb, [{ id: 20, unresolved: true }], "TVDB series 20 has only its Plex ID, no summary");
 });
 
 test("a saved TVDB series summary answers ahead of the failed-provider placeholder", async t => {

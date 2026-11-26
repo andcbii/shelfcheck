@@ -161,6 +161,11 @@ export function rawSavedScanState(mode: ScanMode, db: DatabaseSync = database())
   };
 }
 
+/** Run `work` inside the transaction already open on the open database, or in a new one when none is. */
+export function inDatabaseTransaction<T>(work: () => T): T {
+  return rawSavedScanState("plex").inTransaction(work);
+}
+
 export function readPlexGeneratedInputs<T>(key: string): T | null {
   const row = database().prepare("SELECT payload FROM shelfcheck_plex_generated_inputs WHERE cache_key=?").get(key) as {payload:string}|undefined;
   return parseStoredJson<T|null>(row?.payload, null);

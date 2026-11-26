@@ -10,6 +10,8 @@ export type CoverageMember = {
   url: string;
   /** Saved Report Missing flag: a local exception that keeps this episode missing. */
   reportMissing?: boolean;
+  /** The Show year of this member's provider show, added when a Manual Match is read; never saved. */
+  showYear?: number;
 };
 export type CoverageIdentity = { provider: CoverageProvider; id: number };
 /** A Manual Match member's identity with its saved Report Missing flag. */

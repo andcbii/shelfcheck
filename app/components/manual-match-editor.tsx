@@ -69,6 +69,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const [confirmation, setConfirmation] = useState<string[] | null>(null);
   // The report's show filters. Page state only: kept while this editor stays mounted.
   const [showPicks, setShowPicks] = useState<ShowPicks>(noShowPicks);
+  // The latest picks, for a refresh that lands after the filters changed while it was pending.
+  const latestPicks = useRef<ShowPicks>(noShowPicks);
   // Report Missing selections are a draft until the Manual Match is saved.
   const [draftFlags, setDraftFlags] = useState<string[]>([]);
   // The Manual Match the popup just saved, whose card briefly says so.
@@ -100,6 +102,7 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   const listedMappings = report ? filterByShows(orderManualMatches(scopedMappings), prunedPicks) : scopedMappings;
   // A filter change clears ticked matches and any pending bulk delete, so nothing hidden can be deleted.
   function changeShowPicks(picks: ShowPicks, saved = scopedMappings) {
+    latestPicks.current = picks;
     setShowPicks(picks);
     changeSelection([]);
     setPage(current => clampPage(current, filterByShows(saved, picks).length, pageSize));
@@ -118,11 +121,13 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
   }
   // A refresh that removes a picked show's last Manual Match drops that pick, a filter change.
   // Otherwise only listed Manual Matches stay ticked: one the refresh removes or the filters now
-  // hide drops out of the selection, so it is not ticked if it is listed again.
+  // hide drops out of the selection, so it is not ticked if it is listed again. Both are judged
+  // against the picks when the refresh lands, not when its request began.
   function acceptMappings(next: CoverageMapping[]) {
     setMappings(next);
-    const picks = pruneShowPicks(next, showPicks);
-    if (picks !== showPicks) return changeShowPicks(picks, next);
+    const current = latestPicks.current;
+    const picks = pruneShowPicks(next, current);
+    if (picks !== current) return changeShowPicks(picks, next);
     const listed = filterByShows(next, picks);
     setSelected(current => current.filter(id => listed.some(mapping => mapping.id === id)));
     setPage(current => clampPage(current, listed.length, pageSize));
@@ -296,8 +301,8 @@ export function ManualMatchEditor({ initialUrls, initialMappingId, onChanged, re
           closeForm();
           setSavedNote(result.mapping ? { id: result.mapping.id } : null);
           const latest = await load();
-          // Judged against the refreshed picks: moving a picked show's last match away drops that pick.
-          const picks = latest && pruneShowPicks(latest, showPicks);
+          // Judged against the picks after the refresh, which also dropped any pick whose show's last match moved away.
+          const picks = latest && latestPicks.current;
           if (result.mapping && picks && !filterByShows([result.mapping], picks).length) setMessage("Saved. Hidden by the current filters.");
           return;
         }

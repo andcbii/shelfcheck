@@ -23,6 +23,9 @@ const lostMatches = (count: number) => Array.from({ length: count }, (_, index) 
 async function mountReport(t: test.TestContext, initial: SavedMatch[]) {
   const server = { mappings: initial, revision: 1, resolveAs: [] as CoverageMember[] };
   const deletes: string[][] = [];
+  // While held, Manual Coverage GETs wait to be released and then answer with the saved state at that time.
+  let held: (() => void)[] | null = null;
+  const savedState = () => Response.json({ mappings: server.mappings, revision: server.revision, pending: 0 });
   const { browser, container, root } = mountDom(t, { fetch: async (input: unknown, init?: RequestInit) => {
     if (String(input) === "/api/plex/scan") return Response.json({ scan: { status: "completed" } });
     if (init?.method === "DELETE") {
@@ -38,8 +41,14 @@ async function mountReport(t: test.TestContext, initial: SavedMatch[]) {
       server.mappings = server.mappings.map(mapping => mapping.id === saved.id ? saved : mapping);
       return Response.json({ mapping: saved, revision: ++server.revision, pending: 0 });
     }
-    return Response.json({ mappings: server.mappings, revision: server.revision, pending: 0 });
+    if (held) { const queue = held; return new Promise<Response>(resolve => queue.push(() => resolve(savedState()))); }
+    return savedState();
   } });
+  /** Holds later Manual Coverage GETs; the returned function answers them. */
+  const holdRefresh = () => {
+    const queue: (() => void)[] = held = [];
+    return async () => { held = null; await act(async () => queue.forEach(answer => answer())); };
+  };
   await act(async () => root.render(createElement(ManualMatchEditor, { initialUrls: [], onChanged() {}, report: true })));
   const combobox = (name: string) => showFilterCombobox(container, name);
   const options = (name: string) => [...container.querySelectorAll<HTMLElement>(`#${combobox(name).getAttribute("aria-controls")} [role="option"]`)];
@@ -68,7 +77,7 @@ async function mountReport(t: test.TestContext, initial: SavedMatch[]) {
   const dialog = () => container.querySelector<HTMLElement>('[role="dialog"]');
   const dialogName = () => dialog()?.getAttribute("aria-label") ?? null;
   const heading = () => reportHeading(container);
-  return { browser, container, root, server, deletes, pick, picked, button, click, card, tick, cards, ticked, bulkBar, dialog, dialogName, heading };
+  return { browser, container, root, server, deletes, holdRefresh, pick, picked, button, click, card, tick, cards, ticked, bulkBar, dialog, dialogName, heading };
 }
 
 test("Changing either show filter clears ticked matches and a pending bulk delete confirmation", async t => {
@@ -208,4 +217,37 @@ test("The show filters reset when the report is left or reloaded", async t => {
   await act(async () => report.root.render(createElement(ManualMatchEditor, { key: "reloaded", initialUrls: [], onChanged() {}, report: true })));
   assert.deepEqual(report.picked("TMDB shows"), []);
   assert.equal(report.heading(), "Manual Matches (2)");
+});
+
+test("A refresh that lands after the filters changed keeps the newer picks",async t => {
+  const report = await mountReport(t, [match("who", [who], [tvdbWho]), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Doctor Who (2005)");
+  const release = report.holdRefresh();
+  await deleteOne(report, "who");
+  // The refresh is still pending while the picks change from Doctor Who to Archer.
+  await report.pick("TMDB shows", "Archer (2009)");
+  await report.click("Remove Doctor Who (2005)");
+  assert.deepEqual(report.picked("TMDB shows"), ["Archer (2009)"]);
+  await release();
+  assert.deepEqual(report.deletes, [["who"]]);
+  assert.deepEqual(report.picked("TMDB shows"), ["Archer (2009)"]);
+  assert.equal(report.heading(), "Manual Matches (1 of 1)");
+  assert.deepEqual(report.cards(), ["archer"]);
+});
+
+test("A save whose refresh lands after the filters changed is judged hidden against the newer picks", async t => {
+  const report = await mountReport(t, [match("who", [who], [tvdbWho]), match("archer", [archer], [tvdbArcher])]);
+  await report.pick("TMDB shows", "Doctor Who (2005)");
+  report.server.resolveAs = [member("TMDB", { ...who, episode: 3 }), member("TVDB", { ...tvdbWho, episode: 3 })];
+  await report.click(/^Edit/, report.card("who"));
+  await report.click("Resolve and review", report.dialog()!);
+  const release = report.holdRefresh();
+  await report.click("Save Manual Match", report.dialog()!);
+  // Saved under the Doctor Who pick, but Archer is picked instead before the refresh lands.
+  await report.pick("TMDB shows", "Archer (2009)");
+  await report.click("Remove Doctor Who (2005)");
+  await release();
+  assert.deepEqual(report.picked("TMDB shows"), ["Archer (2009)"]);
+  assert.deepEqual(report.cards(), ["archer"]);
+  assert.ok([...report.container.querySelectorAll('[role="status"]')].some(status => status.textContent === "Saved. Hidden by the current filters."));
 });

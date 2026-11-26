@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.7.3 - 2026-11-25
+
+### Added
+
+- Manual Match cards show each provider show as "Show Name (Year)" in the
+  same font, followed by its show ID, so same-named shows such as Doctor Who
+  (1963) and Doctor Who (2005) can be told apart. The year is the Show year:
+  the year Plex gives the show in the latest completed full Plex scan, the
+  same year the Plex page shows. A show not in Plex, or held by Plex shows
+  with different years, uses its TMDB or TVDB year; with neither, the name
+  shows alone.
+
+- The Manual Matches report has two show filters, TMDB shows and TVDB
+  shows: type part of a name and pick one or more shows. Picks in one filter
+  mean any of them; picks in both filters must both match. While a filter is
+  on, the heading reads "Manual Matches (5 of 120)"; when nothing matches,
+  the page says so and offers Clear filters.
+
+### Changed
+
+- The Manual Matches report always lists cards in show order: TMDB show
+  name, Show year (no year last), show ID, then season and episode. There is
+  no sort control.
+
+- Changing a show filter unticks matches, and Select all and bulk delete
+  cover only the matches you can see. Saving a match the filters hide keeps
+  the filters and says "Saved. Hidden by the current filters." Filters reset
+  when you leave or reload the page.
+
+- Only a completed full Plex scan changes Show years. Single-show scans,
+  rechecks and Clear cache keep them, and the Plex page now keeps the full
+  scan's year after a single-show scan. A completed full scan makes one
+  extra show lookup (at most 3 at a time) for each Manual Match show it
+  doesn't otherwise visit.
+
+### Upgrade notes
+
+- From 2.7.2, nothing migrates. Until the first completed full Plex scan,
+  existing Manual Matches show names without years, except matches you save,
+  which pick up their TMDB or TVDB year when saved.
+
+- From 2.7.1, the first start also makes the 2.7.2 database upgrade, which
+  takes no new automatic backup, and 2.7.1 refuses the upgraded database. To
+  keep a way back, stop Shelfcheck and copy `shelfcheck.db` before starting
+  2.7.3; to roll back, stop Shelfcheck and restore that copy before starting
+  2.7.1.
+
+
 ## 2.7.2 - 2026-11-24
 
 ### Added

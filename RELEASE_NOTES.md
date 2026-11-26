@@ -1,77 +1,56 @@
-# Shelfcheck 2.7.2
+# Shelfcheck 2.7.3
 
-Shelfcheck 2.7.2 makes Plex scans start comparing sooner, shows live
-progress on the Trakt and Plex pages, and lets every Manual Match cover its
-episodes without a health check. The first start removes the saved Manual
-Match health and clears the Plex Resume point; your catalogues and last
-Plex report are kept, so nothing is downloaded again and the next Plex scan
-is an ordinary scan.
+Shelfcheck 2.7.3 makes the 01 Manual Matches report easier to search and
+read: every show carries its year, cards are in show order, and two show
+filters narrow the report to the matches you want. Upgrading from 2.7.2
+changes no saved data; years fill in after the first completed full Plex
+scan.
 
-## Faster Plex scans
+## Show years on Manual Matches
 
-- The Plex library is read 8 requests at a time with no gap between them.
-  Plex rate limits and outages are still honoured.
-- The TMDB and TVDB change lists are fetched while the library is read, and
-  each show's TMDB and TVDB episode lists start downloading as soon as its
-  Plex data is in.
-- A scan no longer spends about 55 seconds rechecking every Manual Match at
-  TMDB and TVDB before its first show.
-- Results are the same as before: owned and missing episodes are still
-  decided only once the whole library is read.
+- Each show on a Manual Match card reads "Show Name (Year)", followed by its
+  show ID, so Doctor Who (1963) and Doctor Who (2005) are easy to tell apart.
+- The year is the one Plex gives the show in the latest completed full Plex
+  scan, the same year the Plex page shows. A show not in Plex, or held by
+  Plex shows with different years, uses its TMDB or TVDB year.
+- Only a completed full scan changes years. Single-show scans, rechecks and
+  Clear cache keep them, and the Plex page now keeps the full scan's year
+  after a single-show scan too.
 
-## Scan progress
+## Sorting and filtering the Manual Matches report
 
-- The Trakt and Plex pages show a progress box with the shows being checked
-  right now and what each is waiting for. During a rate-limit pause it
-  names the provider, the time the scan resumes and a countdown.
-- On the Plex page the box shows "Reading Plex library N/M" and "Preparing
-  TMDB and TVDB episode lists N/M" before and alongside the comparison
-  counter. The scan button reads "Preparing scan…" until comparisons start,
-  and "Removing unused Manual Match members…" shows while a scan finishes.
-- The Plex page keeps your last report on screen during a scan. A completed
-  scan replaces it; a failed scan keeps it.
-- The Trakt page shows show posters, from Trakt or else from the matching
-  Plex show.
-- While a scan of the other kind runs, the scan button reads "Another scan
-  is in progress", so a Trakt scan and a Plex scan never run together.
+- Cards are always in show order: TMDB show name, year (no year last), show
+  ID, then season and episode.
+- Two new filters, TMDB shows and TVDB shows: type part of a name and pick
+  one or more shows. Picks in one filter mean any of them; picks in both
+  filters must both match.
+- While a filter is on, the heading reads "Manual Matches (5 of 120)". If
+  nothing matches, the page says so and offers Clear filters.
+- Changing a filter unticks matches, and Select all and bulk delete only
+  cover the matches you can see.
+- Saving a match the filters hide keeps your filters and says "Saved. Hidden
+  by the current filters." Filters reset when you leave or reload the page.
 
-## Manual Matches
+## Unchanged
 
-- Manual Matches no longer have a health. The Healthy, Pending and Needs
-  review badges, the health filter and the member-verification Scan Issues
-  entries are gone. Every saved Manual Match can grant coverage, so a
-  provider outage no longer makes owned episodes show as missing.
-- Matches cover one way. Owning every TMDB episode of a match covers its
-  missing TVDB episodes. Owning TVDB episodes never covers a TMDB episode,
-  so a TMDB episode you hold only through a match's TVDB episodes now shows
-  as missing.
-- After a Plex scan saves its report, it removes a Manual Match member when
-  a fresh, complete download of that member's own show no longer lists the
-  episode and the provider confirms it deleted it. Each removal is written
-  to the Plex scan log, a match left with an empty side is deleted, and the
-  affected shows are rechecked from saved data. Other members keep their
-  Report Missing flags.
-- Unchanged on purpose: saving or editing a Manual Match still checks every
-  episode at its provider, a reused or failed download never removes a
-  member, and rechecks after your own changes never remove anything.
-
-## First start after upgrading
-
-- Shelfcheck removes each Manual Match's saved health and every
-  member-verification Scan Issues entry, and clears the Plex Resume point.
-  The log says when it changed anything.
-- Kept: Manual Matches and their Report Missing flags, downloaded
-  catalogues, the last Plex report and every other setting and result.
-  Nothing is downloaded and no scan starts by itself.
-- Manual Matches that were Pending or Needs review cover from the next Plex
-  scan.
+- The Trakt page keeps Trakt's year.
+- Candidate shows on the Provider Matches and Multiple Provider IDs reports
+  keep their provider years.
+- The Plex page's Saved Manual Matches list keeps its order and has no
+  filters.
 
 ## Upgrading
 
-Use `andcbii/shelfcheck:2.7.2` or `andcbii/shelfcheck:latest` and retain your
+Use `andcbii/shelfcheck:2.7.3` or `andcbii/shelfcheck:latest` and retain your
 existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
 
-2.7.2 upgrades the database layout, and 2.7.1 refuses a database 2.7.2 has
-upgraded. Upgrading from 2.7.1 takes no new automatic backup, so to keep a
-way back, stop Shelfcheck and copy `shelfcheck.db` before starting 2.7.2. To
-roll back, stop Shelfcheck and restore that copy before starting 2.7.1.
+From 2.7.2, nothing migrates. Until the first completed full Plex scan,
+existing Manual Matches show names without years, except matches you save,
+which pick up their TMDB or TVDB year when saved. Saved matches, Report
+Missing flags and coverage are untouched.
+
+From 2.7.1, the first start also makes the 2.7.2 database upgrade (see the
+2.7.2 notes), and 2.7.1 refuses a database it has upgraded. That upgrade
+takes no new automatic backup, so to keep a way back, stop Shelfcheck and
+copy `shelfcheck.db` before starting 2.7.3. To roll back, stop Shelfcheck and
+restore that copy before starting 2.7.1.

@@ -2,8 +2,9 @@
 
 Shelfcheck 2.7.3 makes the 01 Manual Matches report easier to search and
 read: every show carries its year, cards are in show order, and two show
-filters narrow the report to the matches you want. Nothing migrates; years
-fill in after the first completed full Plex scan.
+filters narrow the report to the matches you want. Upgrading from 2.7.2
+changes no saved data; years fill in after the first completed full Plex
+scan.
 
 ## Show years on Manual Matches
 
@@ -40,7 +41,16 @@ fill in after the first completed full Plex scan.
 
 ## Upgrading
 
-Nothing migrates. Until the first completed full Plex scan, existing Manual
-Matches show names without years, except matches you save, which pick up
-their TMDB or TVDB year when saved. Saved matches, Report Missing flags and
-coverage are untouched.
+Use `andcbii/shelfcheck:2.7.3` or `andcbii/shelfcheck:latest` and retain your
+existing `/config` and `/data` mounts. Images support Linux amd64 and arm64.
+
+From 2.7.2, nothing migrates. Until the first completed full Plex scan,
+existing Manual Matches show names without years, except matches you save,
+which pick up their TMDB or TVDB year when saved. Saved matches, Report
+Missing flags and coverage are untouched.
+
+From 2.7.1, the first start also makes the 2.7.2 database upgrade (see the
+2.7.2 notes), and 2.7.1 refuses a database it has upgraded. That upgrade
+takes no new automatic backup, so to keep a way back, stop Shelfcheck and
+copy `shelfcheck.db` before starting 2.7.3. To roll back, stop Shelfcheck and
+restore that copy before starting 2.7.1.

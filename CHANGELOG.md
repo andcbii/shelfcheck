@@ -37,9 +37,15 @@
 
 ### Upgrade notes
 
-- Nothing migrates. Until the first completed full Plex scan, existing
-  Manual Matches show names without years, except matches you save, which
-  pick up their TMDB or TVDB year when saved.
+- From 2.7.2, nothing migrates. Until the first completed full Plex scan,
+  existing Manual Matches show names without years, except matches you save,
+  which pick up their TMDB or TVDB year when saved.
+
+- From 2.7.1, the first start also makes the 2.7.2 database upgrade, which
+  takes no new automatic backup, and 2.7.1 refuses the upgraded database. To
+  keep a way back, stop Shelfcheck and copy `shelfcheck.db` before starting
+  2.7.3; to roll back, stop Shelfcheck and restore that copy before starting
+  2.7.1.
 
 
 ## 2.7.2 - 2026-11-24
